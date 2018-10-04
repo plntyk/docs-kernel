@@ -1,0 +1,302 @@
+From bc3153114e407d78bb585d7fcdd87fa69d1c97f5 Mon Sep 17 00:00:00 2001
+From: "chengshun.wang" <chengshun.wang@amlogic.com>
+Date: Mon, 10 Mar 2014 17:15:26 +0800
+Subject: [PATCH 3712/5965] PD# 87387:touch sound would be recorded by camera,
+ reduce delay time
+
+---
+ sound/soc/aml/m8/aml_m8.c       | 44 +++++++++++++-----------
+ sound/soc/aml/m8/aml_m8.h       |  1 +
+ sound/soc/codecs/aml_m8_codec.c | 59 +++++++++++++++++++++++++++++----
+ sound/soc/codecs/rt5616.c       | 41 +++++++++++++++++++++++
+ 4 files changed, 120 insertions(+), 25 deletions(-)
+
+diff --git a/sound/soc/aml/m8/aml_m8.c b/sound/soc/aml/m8/aml_m8.c
+index c04a69b94d5f..e62f59881788 100755
+--- a/sound/soc/aml/m8/aml_m8.c
++++ b/sound/soc/aml/m8/aml_m8.c
+@@ -127,8 +127,8 @@ static int aml_audio_hp_detect(struct aml_audio_private_data *p_aml_audio)
+ {
+    int loop_num = 0;
+    int ret;
+-
+-    mutex_lock(&p_aml_audio->lock);
++   p_aml_audio->hp_det_status = false;
++   // mutex_lock(&p_aml_audio->lock);
+ 
+     while(loop_num < 3){
+         ret = hp_det_adc_value(p_aml_audio);
+@@ -146,7 +146,7 @@ static int aml_audio_hp_detect(struct aml_audio_private_data *p_aml_audio)
+         }
+     }
+  
+-    mutex_unlock(&p_aml_audio->lock);
++   // mutex_unlock(&p_aml_audio->lock);
+ 
+     return ret; 
+ }
+@@ -210,15 +210,18 @@ static void aml_asoc_work_func(struct work_struct *work)
+         }
+         
+     }
++    p_aml_audio->hp_det_status = true;
+ }
+ 
+ 
+ static void aml_asoc_timer_func(unsigned long data)
+ {
+     struct aml_audio_private_data *p_aml_audio = (struct aml_audio_private_data *)data;
+-    unsigned long delay = msecs_to_jiffies(200);
++    unsigned long delay = msecs_to_jiffies(150);
+ 
+-    schedule_work(&p_aml_audio->work);
++    if(p_aml_audio->hp_det_status){
++        schedule_work(&p_aml_audio->work);
++    }
+     mod_timer(&p_aml_audio->timer, jiffies + delay);
+ }
+ #endif
+@@ -450,6 +453,7 @@ static int speaker_events(struct snd_soc_dapm_widget *w,
+ 	switch (event) {
+ 	case SND_SOC_DAPM_POST_PMU:
+ 		amlogic_set_value(p_audio->gpio_mute, 1, "mute_spk");
++        msleep(50);
+ 		break;
+ 	case SND_SOC_DAPM_PRE_PMD:
+ 		amlogic_set_value(p_audio->gpio_mute, 0, "mute_spk");
+@@ -506,6 +510,21 @@ static int aml_asoc_init(struct snd_soc_pcm_runtime *rtd)
+                 ARRAY_SIZE(aml_m8_controls));
+     if (ret)
+        return ret;
++#if HP_DET
++
++    p_aml_audio->sdev.name = "h2w";//for report headphone to android
++    ret = switch_dev_register(&p_aml_audio->sdev);
++    if (ret < 0){
++        printk(KERN_ERR "ASoC: register hp switch dev failed\n");
++        return ret;
++    }
++
++    p_aml_audio->mic_sdev.name = "mic_dev";//for micphone detect
++    ret = switch_dev_register(&p_aml_audio->mic_sdev);
++    if (ret < 0){
++        printk(KERN_ERR "ASoC: register mic switch dev failed\n");
++        return ret;
++    }
+ 
+     /* Add specific widgets */
+     snd_soc_dapm_new_controls(dapm, aml_asoc_dapm_widgets,
+@@ -520,7 +539,7 @@ static int aml_asoc_init(struct snd_soc_pcm_runtime *rtd)
+         }
+     }
+ 
+-#if HP_DET
++    p_aml_audio->hp_det_status = true;
+     p_aml_audio->mic_det = of_property_read_bool(card->dev->of_node,"mic_det");
+ 
+     printk("entern %s : mic_det=%d \n",__func__,p_aml_audio->mic_det);
+@@ -705,19 +724,6 @@ static int aml_m8_audio_probe(struct platform_device *pdev)
+ 
+     aml_m8_pinmux_init(card);
+ 
+-    p_aml_audio->sdev.name = "h2w";//for report headphone to android
+-    ret = switch_dev_register(&p_aml_audio->sdev);
+-    if (ret < 0){
+-        printk(KERN_ERR "ASoC: register hp switch dev failed\n");
+-        goto err;
+-    }
+-
+-    p_aml_audio->mic_sdev.name = "mic_dev";//for micphone detect
+-    ret = switch_dev_register(&p_aml_audio->mic_sdev);
+-    if (ret < 0){
+-        printk(KERN_ERR "ASoC: register mic switch dev failed\n");
+-        goto err;
+-    }
+ 
+     return 0;
+ #endif
+diff --git a/sound/soc/aml/m8/aml_m8.h b/sound/soc/aml/m8/aml_m8.h
+index 83ff28753d50..592419554c71 100755
+--- a/sound/soc/aml/m8/aml_m8.h
++++ b/sound/soc/aml/m8/aml_m8.h
+@@ -14,6 +14,7 @@ struct aml_audio_private_data {
+ 	bool mute_inv;
+ 	struct pinctrl *pin_ctl;
+     int hp_last_state;
++    bool hp_det_status;
+     unsigned int hp_val_h;
+     unsigned int hp_val_l;
+     unsigned int mic_val;
+diff --git a/sound/soc/codecs/aml_m8_codec.c b/sound/soc/codecs/aml_m8_codec.c
+index fe85931ab696..13ac9dfe50ee 100755
+--- a/sound/soc/codecs/aml_m8_codec.c
++++ b/sound/soc/codecs/aml_m8_codec.c
+@@ -179,6 +179,31 @@ static int aml_m8_codec_hw_params(struct snd_pcm_substream *substream,
+ 	return 0;
+ }
+ 
++static int aml_m8_codec_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++    printk(KERN_DEBUG "enter:%s, mute=%d, stream=%d \n",__func__,mute,stream);
++    struct snd_soc_codec *codec = dai->codec;
++	u16 mute_reg = snd_soc_read(codec, AMLM8_MUTE_2) & 0xfc;
++    u16 mic_mute_reg = snd_soc_read(codec, AMLM8_MUTE_0) & 0xfc;
++
++    if(stream == SNDRV_PCM_STREAM_PLAYBACK){
++    	if (mute){
++    		//snd_soc_write(codec, AMLM8_MUTE_2, mute_reg | 0x3);
++    	}else{
++    		snd_soc_write(codec, AMLM8_MUTE_2, mute_reg);
++    	}
++    }
++    if(stream == SNDRV_PCM_STREAM_CAPTURE){
++        if (mute){
++            snd_soc_write(codec, AMLM8_MUTE_0,mic_mute_reg | 0x3);
++        }else{
++            msleep(200);
++            snd_soc_write(codec, AMLM8_MUTE_0,mic_mute_reg);
++        }
++            
++    }
++	return 0;
++}
+ static int aml_m8_codec_mute(struct snd_soc_dai *dai, int mute)
+ {
+ 	struct snd_soc_codec *codec = dai->codec;
+@@ -249,6 +274,7 @@ static int aml_m8_codec_set_dai_clkdiv(struct snd_soc_dai *codec_dai,
+ static struct snd_soc_dai_ops aml_m8_codec_dai_ops = {
+  	.hw_params	= aml_m8_codec_hw_params,
+ 	.digital_mute = aml_m8_codec_mute,
++	.mute_stream = aml_m8_codec_mute_stream,
+ 	.set_sysclk	= aml_m8_codec_set_dai_sysclk,
+ 	.set_clkdiv = aml_m8_codec_set_dai_clkdiv,
+     .set_pll = aml_m8_codec_set_dai_pll,
+@@ -287,7 +313,8 @@ static int aml_m8_set_bias_level(struct snd_soc_codec *codec,
+         case SND_SOC_BIAS_STANDBY:
+ 	    // WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL9, 1,14, 1);			
+             adac_wr_reg(89,0x0101);
+-            adac_wr_reg(24,adac_rd_reg(24) | 0x3); // power on the DAC
++            snd_soc_write(codec,AMLM8_PD_3,snd_soc_read(codec,AMLM8_PD_3) | 0xf3);         
++            //adac_wr_reg(24,adac_rd_reg(24) | 0x3); // power on the DAC
+             break;
+ 
+         default:
+@@ -300,7 +327,7 @@ static int aml_m8_set_bias_level(struct snd_soc_codec *codec,
+         case SND_SOC_BIAS_PREPARE:
+ 	   //  WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL9, 1,14, 1);
+             adac_wr_reg(89,0x0000); 
+-            adac_wr_reg(24,adac_rd_reg(24) & 0xfc); //power down the DAC
++           // adac_wr_reg(24,adac_rd_reg(24) & 0xfc); //power down the DAC
+ 	    // WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL9, 0,14, 1);
+             break;
+ 
+@@ -587,6 +614,15 @@ void aml_m8_codec_reset(struct snd_soc_codec* codec)
+ 	start_codec(codec);
+     snd_soc_write(codec,0x7b,0x03);  // record left frame output the playback left and right channels. 
+ }
++static int pd3_env(struct snd_soc_dapm_widget *w,
++    struct snd_kcontrol *kcontrol, int event)
++{
++    struct snd_soc_codec *codec = w->codec;
++    unsigned int mask = 1<<w->shift;
++    printk(KERN_INFO "Amlogic <> %s: name %s , event(%d)\n",__func__, w->name, event);
++    snd_soc_update_bits(codec, AMLM8_PD_3, mask, mask);
++    return 0;
++}
+ static const char *left_linein_texts[] = {
+ 	"Left Input 1 Differential", "Left Input 1 Single Ended",
+ 	"Left Input 2 Differential", "Left Input 2 Single Ended",
+@@ -694,16 +730,27 @@ static const struct snd_soc_dapm_widget aml_m8_dapm_widgets[] = {
+ 	SND_SOC_DAPM_PGA("Left IN PGA", AMLM8_PD_1, 2, 0, NULL, 0),
+ 	SND_SOC_DAPM_PGA("Right IN PGA", AMLM8_PD_1, 3, 0, NULL, 0),
+ 
+-	SND_SOC_DAPM_DAC("Left DAC", "Playback", AMLM8_PD_3, 0, 0),
+-	SND_SOC_DAPM_DAC("Right DAC", "Playback", AMLM8_PD_3, 1, 0),
+-	SND_SOC_DAPM_PGA("Left HP OUT PGA", AMLM8_PD_3, 4, 0, NULL, 0),
+-	SND_SOC_DAPM_PGA("Right HP OUT PGA", AMLM8_PD_3, 5, 0, NULL, 0),
++	//SND_SOC_DAPM_DAC("Left DAC", "Playback", AMLM8_PD_3, 0, 0),
++	//SND_SOC_DAPM_DAC("Right DAC", "Playback", AMLM8_PD_3, 1, 0),
++	//SND_SOC_DAPM_PGA("Left HP OUT PGA", AMLM8_PD_3, 4, 0, NULL, 0),
++	//SND_SOC_DAPM_PGA("Right HP OUT PGA", AMLM8_PD_3, 5, 0, NULL, 0),
+ 	SND_SOC_DAPM_MIXER("Left Output Mixer", AMLM8_PD_3, 6, 0,
+ 		&amlm8_left_ld1_mixer[0],
+ 		ARRAY_SIZE(amlm8_left_ld1_mixer)),
+ 	SND_SOC_DAPM_MIXER("Right Output Mixer", AMLM8_PD_3, 7, 0,
+ 		&amlm8_right_ld1_mixer[0],
+ 		ARRAY_SIZE(amlm8_right_ld1_mixer)),
++    SND_SOC_DAPM_DAC_E("Left DAC", "Playback", SND_SOC_NOPM, 0, 0, pd3_env,
++        SND_SOC_DAPM_PRE_PMD|SND_SOC_DAPM_PRE_PMU|SND_SOC_DAPM_POST_PMD),
++         
++    SND_SOC_DAPM_DAC_E("Right DAC", "Playback", SND_SOC_NOPM, 1, 0, pd3_env,
++        SND_SOC_DAPM_PRE_PMD|SND_SOC_DAPM_PRE_PMU|SND_SOC_DAPM_POST_PMD),
++
++    SND_SOC_DAPM_PGA_E("Left HP OUT PGA", SND_SOC_NOPM, 4, 0, NULL, 0, pd3_env, 
++        SND_SOC_DAPM_PRE_PMD|SND_SOC_DAPM_PRE_PMU),
++        
++    SND_SOC_DAPM_PGA_E("Right HP OUT PGA", SND_SOC_NOPM, 5, 0, NULL, 0, pd3_env, 
++        SND_SOC_DAPM_PRE_PMD|SND_SOC_DAPM_PRE_PMU),
+ 	SND_SOC_DAPM_MIXER("Mono Output Mixer", AMLM8_PD_4, 2, 0,
+ 		&amlm8_mono_ld2_mixer[0],
+ 		ARRAY_SIZE(amlm8_mono_ld2_mixer)),
+diff --git a/sound/soc/codecs/rt5616.c b/sound/soc/codecs/rt5616.c
+index d380f1589d3f..85df8dce6496 100755
+--- a/sound/soc/codecs/rt5616.c
++++ b/sound/soc/codecs/rt5616.c
+@@ -1158,6 +1158,46 @@ static const struct snd_soc_dapm_route rt5616_dapm_routes[] = {
+ 
+ };
+ 
++static int rt5616_codec_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++    int ret;
++    unsigned int reg_value;
++    struct snd_soc_codec *codec = dai->codec;
++    
++    printk(KERN_DEBUG "enter:%s, stream=%d, mute=%d \n",__func__,stream,mute);
++    if(stream == SNDRV_PCM_STREAM_PLAYBACK){
++        if(mute){
++            msleep(20);
++            snd_soc_update_bits(codec, RT5616_LOUT_CTRL1,
++                RT5616_L_MUTE | RT5616_R_MUTE,
++                RT5616_L_MUTE | RT5616_R_MUTE);
++            snd_soc_update_bits(codec, RT5616_HP_VOL,
++                RT5616_L_MUTE | RT5616_R_MUTE,
++                RT5616_L_MUTE | RT5616_R_MUTE);
++        }else{
++            msleep(50);
++            snd_soc_update_bits(codec, RT5616_LOUT_CTRL1,
++                RT5616_L_MUTE | RT5616_R_MUTE, 0);
++            snd_soc_update_bits(codec, RT5616_HP_VOL,
++                RT5616_L_MUTE | RT5616_R_MUTE, 0);
++        }
++    }
++
++    if(stream == SNDRV_PCM_STREAM_CAPTURE){
++        if (mute){
++            snd_soc_update_bits(codec,RT5616_ADC_DIG_VOL, 
++                RT5616_L_MUTE | RT5616_R_MUTE,
++                RT5616_L_MUTE | RT5616_R_MUTE);       
++        }else{
++            msleep(200);
++            snd_soc_update_bits(codec,RT5616_ADC_DIG_VOL, 
++                RT5616_L_MUTE | RT5616_R_MUTE,0);
++        }
++            
++    }
++    
++    return 0;
++}
+ static int rt5616_codec_digital_mute(struct snd_soc_dai *dai, int mute)
+ {
+    // int ret;
+@@ -1650,6 +1690,7 @@ struct snd_soc_dai_ops rt5616_aif_dai_ops = {
+     .set_sysclk = rt5616_set_dai_sysclk,
+     .set_pll = rt5616_set_dai_pll,
+     .digital_mute = rt5616_codec_digital_mute,
++    .mute_stream = rt5616_codec_mute_stream,
+ };
+ 
+ struct snd_soc_dai_driver rt5616_dai[] = {
+-- 
+2.19.0
+

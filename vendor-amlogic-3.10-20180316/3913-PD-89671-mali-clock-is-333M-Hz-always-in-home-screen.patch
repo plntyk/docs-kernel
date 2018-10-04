@@ -1,0 +1,84 @@
+From 1e12c427a4f1028ef96bd8f626b6e9b013126e0b Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Thu, 17 Apr 2014 10:52:03 +0800
+Subject: [PATCH 3913/5965] PD#89671:mali clock is 333M Hz always in home
+ screen
+
+---
+ arch/arm/configs/meson6_defconfig    | 2 ++
+ arch/arm/mach-meson6/clock.c         | 6 ++++--
+ drivers/amlogic/cpufreq/m6-cpufreq.c | 9 ++++++---
+ 3 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/configs/meson6_defconfig b/arch/arm/configs/meson6_defconfig
+index d7bed303968f..f2756c8b7fc1 100755
+--- a/arch/arm/configs/meson6_defconfig
++++ b/arch/arm/configs/meson6_defconfig
+@@ -376,4 +376,6 @@ CONFIG_AML_DVFS=y
+ CONFIG_MESON_CS_DCDC_REGULATOR=y
+ CONFIG_AML_PMU_ALGORITHM_SUPPORT=m
+ CONFIG_AM_HDMI_ONLY=y
++CONFIG_PM_RUNTIME=y
++
+ 
+diff --git a/arch/arm/mach-meson6/clock.c b/arch/arm/mach-meson6/clock.c
+index 0e31f6fff5c9..495c3dc7213d 100755
+--- a/arch/arm/mach-meson6/clock.c
++++ b/arch/arm/mach-meson6/clock.c
+@@ -1646,7 +1646,8 @@ static int clk_enable_mali(struct clk *clk)
+ 	}
+ #endif
+ 
+-	spin_lock_irqsave(&clockfw_lock, flags);
++	while(!spin_trylock_irqsave(&clockfw_lock, flags))
++		udelay(2);
+ 
+ 	cpu = clk_get_rate_a9(clk->priv);
+ 	_clk_set_rate_gpu(NULL, 0, cpu);
+@@ -1669,7 +1670,8 @@ static int clk_disable_mali(struct clk *clk)
+ 	unsigned long flags;
+ 	unsigned long mali_flags;
+ 
+-	spin_lock_irqsave(&clockfw_lock, flags);
++	while(!spin_trylock_irqsave(&clockfw_lock, flags))
++		udelay(2);
+ #ifdef CONFIG_CPU_FREQ_DEBUG
+ 	printk(KERN_INFO "%s() GPU=%luMHz CPU=%luMhz\n", __FUNCTION__, clk_get_rate_gpu(NULL) / 1000000, clk_get_rate_a9(clk->priv) / 1000000);
+ #endif /* CONFIG_CPU_FREQ_DEBUG */
+diff --git a/drivers/amlogic/cpufreq/m6-cpufreq.c b/drivers/amlogic/cpufreq/m6-cpufreq.c
+index 88e30c592f2b..30515daf35ce 100755
+--- a/drivers/amlogic/cpufreq/m6-cpufreq.c
++++ b/drivers/amlogic/cpufreq/m6-cpufreq.c
+@@ -48,8 +48,8 @@ static void adjust_jiffies(unsigned int freqOld, unsigned int freqNew);
+ 
+ static struct cpufreq_frequency_table meson_freq_table[]=
+ {
+-    //	0	, CPUFREQ_ENTRY_INVALID    , 
+-    //	1	, CPUFREQ_ENTRY_INVALID    , 
++    //	0	, CPUFREQ_ENTRY_INVALID    ,
++    //	1	, CPUFREQ_ENTRY_INVALID    ,
+     {0	, 96000    },
+     {1	, 192000   },
+     {2	, 312000   },
+@@ -453,6 +453,8 @@ static void adjust_jiffies(unsigned int freqOld, unsigned int freqNew)
+ int meson_cpufreq_boost(unsigned int freq)
+ {
+     int ret = 0;
++	struct cpufreq_policy * policy = NULL;
++
+     if (!early_suspend_flag) {
+         // only allow freq boost when not in early suspend
+         //check last_cpu_rate. inaccurate but no lock
+@@ -461,7 +463,8 @@ int meson_cpufreq_boost(unsigned int freq)
+         if ((clk_get_rate(cpufreq.armclk) / 1000) < freq) {
+             mutex_lock(&meson_cpufreq_mutex);
+             if ((clk_get_rate(cpufreq.armclk) / 1000) < freq) {
+-                ret = meson_cpufreq_target_locked(NULL,
++				policy = cpufreq_cpu_get(0);
++                ret = meson_cpufreq_target_locked(policy,
+                         freq,
+                         CPUFREQ_RELATION_H);
+             }
+-- 
+2.19.0
+

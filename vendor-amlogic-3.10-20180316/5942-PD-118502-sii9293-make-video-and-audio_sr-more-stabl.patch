@@ -1,0 +1,242 @@
+From 18e067214736abe43a1a7d5803cf3ab97c00d112 Mon Sep 17 00:00:00 2001
+From: Jets Yan <jets.yan@amlogic.com>
+Date: Sun, 12 Jun 2016 11:07:45 +0800
+Subject: [PATCH 5942/5965] PD#118502: sii9293: make video and audio_sr more
+ stable
+
+Change-Id: I1804504d49fd84e285364e845fcce2db202e835d
+---
+ .../sii9293/component/rx/si_rx_audio.c        | 45 ++++++++++
+ .../component/rx/si_rx_video_mode_detection.c |  3 +-
+ .../linux_driver/application/mhl_linuxdrv.h   |  6 ++
+ .../application/mhl_linuxdrv_main.c           | 84 ++++++++++++++++++-
+ .../application/sii5293_interface.c           |  3 +-
+ 5 files changed, 138 insertions(+), 3 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_audio.c
+
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_audio.c b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_audio.c
+old mode 100755
+new mode 100644
+index 9b56ed20e3be..408458b80e23
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_audio.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_audio.c
+@@ -232,6 +232,51 @@ static uint32_t get_tclk_10kHz(void)
+ 	return tmds_clk_10kHz;
+ }
+ 
++/* calculate fs */
++unsigned int get_measured_audio_fs(void)
++{
++	// non-DSD mode
++	uint8_t fs_code_per_channel = AUDIO_CHST4__FS_UNKNOWN;
++	uint32_t cts = get_cts();
++	uint32_t n = get_n();
++
++	uint32_t tmds_clk_10kHz = get_tclk_10kHz();
++	// Note: tmds_clk_10kHz information may be not available
++	// if audio detection occurs before video detection;
++	// in this case tmds_clk_10kHz is 0
++
++	uint16_t fs_frequency_per_channel = 0;
++
++	if (tmds_clk_10kHz && cts)
++	{
++		uint8_t i;
++
++		// Calculate audio Fs in 100Hz units
++		uint16_t fs_calculated_100Hz = (tmds_clk_10kHz*n/cts)*100 /128;
++		// Note: the order of operations is optimized for the maximum precision.
++		// Overflow should not occur during the operations.
++		// tmds_clk_10kHz - assume maximum value 30,000 (15bit) for 300 MHz
++		// n - assume maximum value 192kHz*128/300=81000 (17bit)
++		// tmds_clk_10kHz*n should fit into 32 bits
++		// Maximum fs_calculated_100Hz is 192000/100=1920 fits into 16bit
++
++		// Find closest standard audio Fs.
++		for (i = 0; i < AUDIO_FS_LIST_LENGTH; i++)
++		{
++			if ((fs_calculated_100Hz <= ( audio_fs_list[i].max_Fs))
++				&& (fs_calculated_100Hz > ( audio_fs_list[i].min_Fs) ))
++			{
++				// search if calculated Fs close to the Fs in the table
++				break;
++			}
++		}
++		fs_code_per_channel = audio_fs_list[i].code_value;
++		fs_frequency_per_channel = audio_fs_list[i].ref_Fs;
++	}
++
++	return fs_code_per_channel;
++}
++
+ //-------------------------------------------------------------------------------------------------
+ static void set_mclk(void)
+ {
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+index fa1a0dfde453..b5dfab8961cc 100644
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+@@ -658,7 +658,8 @@ void VMD_VideoStableNotify(uint8_t vid_idx )
+         }
+     }
+     sysfs_notify(&devinfo->device->kobj, NULL, "input_video_mode");
+-    send_sii5293_uevent(devinfo->device, DEVICE_EVENT, DEV_INPUT_VIDEO_MODE_EVENT, str);
++    //send_sii5293_uevent(devinfo->device, DEVICE_EVENT, DEV_INPUT_VIDEO_MODE_EVENT, str);
++    queue_delayed_work(devinfo->wq, &devinfo->work_stable_video, HZ*3);
+ }
+ #endif
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+index 4232f19fea16..3886181c6b80 100644
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+@@ -60,6 +60,7 @@ extern "C" {
+ /* Device events */
+ #define DEV_CONNECTION_CHANGE_EVENT "connection_change"
+ #define DEV_INPUT_VIDEO_MODE_EVENT "input_video_stable"
++#define DEV_INPUT_AUDIO_STABLE_EVENT "input_audio_stable"
+ 
+ /* MHL events */
+ #define MHL_CONNECTED_EVENT	"connected"
+@@ -149,6 +150,11 @@ struct device_info {
+ 	uint8_t my_rap_input_device;
+ 	uint8_t my_rcp_input_device;
+ 	uint8_t my_ucp_input_device;
++
++	struct workqueue_struct *wq;
++	struct delayed_work work_stable_video;
++	struct delayed_work work_stable_audio;
++
+ };
+ 
+ typedef struct
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+index dada4141ef02..ac7d64f26ea5 100644
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+@@ -2126,7 +2126,6 @@ void sii5293_output_mode_trigger(unsigned int flag)
+ 	unsigned int mode = 0xff;
+ 
+ 	sii9293_info.signal_status = flag;
+-	//printk("[%s] set signal_status = %d\n", __FUNCTION__, sii9293_info.signal_status);
+ 
+ 	if( (sii9293_info.user_cmd==0) || (sii9293_info.user_cmd==0x4) || (sii9293_info.user_cmd==0xff) )
+ 		return ;
+@@ -2896,6 +2895,87 @@ static struct platform_driver sii5293_driver =
+ /*
+ * modelue init interface 
+ */
++static void sii9293_stable_audio_handler(struct work_struct *work)
++{
++	int audio_sr = 1;
++	char *audio_sr_array[] =
++	{
++		"44.1 kHz",			// 0x0
++		"Not indicated",	// 0x1
++		"48 kHz",			// 0x2
++		"32 kHz",			// 0x3
++		"22.05 kHz",		// 0x4
++		"reserved",			// 0x5
++		"24 kHz",			// 0x6
++		"reserved",			// 0x7
++		"88.2 kHz",			// 0x8
++		"768 kHz (192*4)",	// 0x9
++		"96 kHz",			// 0xa
++		"reserved",			// 0xb
++		"176.4 kHz",		// 0xc
++		"reserved",			// 0xd
++		"192 kHz",			// 0xe
++		"reserved"			// 0xf
++	};
++
++	pr_info("[%s] invoked!\n", __func__);
++
++	audio_sr = sii_get_audio_sampling_freq()&0xf;
++
++	send_sii5293_uevent(devinfo->device, DEVICE_EVENT, DEV_INPUT_AUDIO_STABLE_EVENT, audio_sr_array[audio_sr]);
++
++	return;
++}
++
++static void sii9293_stable_video_handler(struct work_struct *work)
++{
++	unsigned int mode = 0xff;
++	char hdmi_mode_str[16], mode_str[16] ;
++	unsigned char value;
++
++	pr_info("[%s] invoked!\n", __func__);
++
++	value = SiiRegRead(RX_A__AUDP_STAT)&RX_M__AUDP_STAT__HDMI_MODE_ENABLED;
++
++	memset(hdmi_mode_str, 0x00, 16);
++	memset(mode_str, 0x00, 16);
++
++	strcpy(hdmi_mode_str,(value==0)?"DVI:":"HDMI:");
++
++	mode = sii5293_get_output_mode();
++	strcpy(mode_str, sii_get_mode_name(mode));
++
++	if (strcmp(mode_str, "invalid") != 0)
++		strcat(hdmi_mode_str, mode_str);
++	else
++		strcpy(hdmi_mode_str, mode_str);
++
++	send_sii5293_uevent(devinfo->device, DEVICE_EVENT, DEV_INPUT_VIDEO_MODE_EVENT, hdmi_mode_str);
++	queue_delayed_work(devinfo->wq, &devinfo->work_stable_audio, HZ*2);
++
++	return;
++}
++
++static void sii9293_workqueue_init(void)
++{
++	if (devinfo == NULL)
++	{
++		pr_info("[%s] invalid device!\n", __func__);
++		return;
++	}
++
++	devinfo->wq = alloc_workqueue("sii9293", WQ_HIGHPRI | WQ_CPU_INTENSIVE, 0);
++	INIT_DELAYED_WORK(&devinfo->work_stable_video, sii9293_stable_video_handler);
++	PREPARE_DELAYED_WORK(&devinfo->work_stable_video,
++			sii9293_stable_video_handler);
++	INIT_DELAYED_WORK(&devinfo->work_stable_audio, sii9293_stable_audio_handler);
++	PREPARE_DELAYED_WORK(&devinfo->work_stable_audio,
++			sii9293_stable_audio_handler);
++
++	pr_info("[%s] workqueue init ok!\n", __func__);
++	return;
++}
++
+ static int __init SiiMhlInit(void)
+ {
+     int32_t	ret = -1;
+@@ -2997,6 +3077,8 @@ static int __init SiiMhlInit(void)
+ 	register_early_suspend(&sii9293_early_suspend_handler);
+ #endif
+ 
++	sii9293_workqueue_init();
++
+     ret = StartMhlTxDevice();
+     if(ret == 0) {
+         printk(KERN_NOTICE"sii5293 mhldrv initialized successfully !\n");
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+index 855463b401bb..42031c4ce2d5 100644
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+@@ -36,11 +36,12 @@ int sii_get_pwr5v_status(void)
+ // 0xa for 96 kHz
+ // 0xc for 176.4 kHz
+ // 0xe for 192 kHz
++extern unsigned int get_measured_audio_fs(void);
+ int sii_get_audio_sampling_freq(void)
+ {
+ 	unsigned char freq;
+ 
+-	freq = SiiRegRead(RX_A__CHST4)&RX_A__CHST4__BIT_AUD_FS;
++	freq = (unsigned char)get_measured_audio_fs();
+ 
+ 	return freq;
+ }
+-- 
+2.19.0
+

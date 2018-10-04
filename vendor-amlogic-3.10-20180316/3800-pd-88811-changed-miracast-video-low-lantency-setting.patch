@@ -1,0 +1,321 @@
+From bf1c502c963bbf214131ca49c5217962d66334c6 Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Mon, 17 Mar 2014 10:50:20 +0800
+Subject: [PATCH 3800/5965] pd#88811 changed miracast video low lantency
+ settings for more smooth.          fixed miracast sometime latency is too
+ high bug
+
+---
+ drivers/amlogic/amports/ampotrs_priv.h |  3 ++
+ drivers/amlogic/amports/amstream.c     |  7 ++-
+ drivers/amlogic/amports/esparser.c     |  3 +-
+ drivers/amlogic/amports/ptsserv.c      | 22 +++++++++-
+ drivers/amlogic/amports/streambuf.h    |  1 +
+ drivers/amlogic/amports/tsdemux.c      |  2 +
+ drivers/amlogic/amports/vh264.c        |  6 ++-
+ drivers/amlogic/amports/video.c        | 61 +++++++++++++++-----------
+ include/linux/amlogic/amports/vframe.h |  1 +
+ 9 files changed, 75 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/amlogic/amports/ampotrs_priv.h b/drivers/amlogic/amports/ampotrs_priv.h
+index cb0e664e1034..65612c062c47 100755
+--- a/drivers/amlogic/amports/ampotrs_priv.h
++++ b/drivers/amlogic/amports/ampotrs_priv.h
+@@ -2,5 +2,8 @@
+ #define AMPORTS_PRIV_HEAD_HH
+ #include "streambuf.h"
+ stream_buf_t *get_buf_by_type(u32  type);
++int calculation_stream_ext_delayed_ms(u8 type);
++
++
+ #endif
+ 
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index aaf16ff6671d..fce1d82cc26c 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1718,9 +1718,14 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+ 			int calc_delayms=0;
+ 			u32 bitrate=0,avg_bitrate=0;
+ 			calc_delayms=calculation_stream_delayed_ms(p->type,&bitrate,&avg_bitrate);
+-			if(calc_delayms>0){
++			if(calc_delayms>=0){
+ 		    	pbuf += sprintf(pbuf, "\tbuf current delay:%dms\n",calc_delayms);
+ 		    	pbuf += sprintf(pbuf, "\tbuf bitrate latest:%dbps,avg:%dbps\n",bitrate,avg_bitrate);
++		    	pbuf += sprintf(pbuf, "\tbuf time after last pts:%d ms\n",
++                      calculation_stream_ext_delayed_ms(p->type));
++				pbuf += sprintf(pbuf, "\tbuf time after last write data :%d ms\n",
++					  (int)(jiffies_64 - p->last_write_jiffies64)*1000/HZ);
++
+ 			}
+ 		}
+     }
+diff --git a/drivers/amlogic/amports/esparser.c b/drivers/amlogic/amports/esparser.c
+index f011ade18b3b..a05fd51d2adf 100755
+--- a/drivers/amlogic/amports/esparser.c
++++ b/drivers/amlogic/amports/esparser.c
+@@ -120,7 +120,7 @@ static ssize_t _esparser_write(const char __user *buf,
+     } else {
+         parser_type = PARSER_SUBPIC;
+     }
+-
++	
+     wp = buf_rp(type);
+ 
+     if (r > 0) {
+@@ -576,6 +576,7 @@ ssize_t esparser_write(struct file *file,
+ 	        }
+ 	}
+     }
++	stbuf->last_write_jiffies64=jiffies_64;
+     len = min(len, count);
+     mutex_lock(&esparser_mutex);
+ 	r = _esparser_write(buf, len, stbuf->type,0);
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 53b886350868..7b718d5dca2a 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -5,6 +5,7 @@
+ #include <linux/amlogic/amports/ptsserv.h>
+ #include <linux/amlogic/amports/timestamp.h>
+ #include <linux/amlogic/amports/tsync.h>
++#include "ampotrs_priv.h"
+ 
+ #include <mach/am_regs.h>
+ 
+@@ -61,6 +62,7 @@ typedef struct pts_table_s {
+     u32 last_checkin_pts;
+     u32 last_checkout_pts;
+     u32 last_checkout_offset;
++       u32 last_checkin_jiffies;
+     u32 last_bitrate;
+     u32 last_avg_bitrate;
+ #endif
+@@ -191,13 +193,15 @@ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ 	else 
+ 		outtime=timestamp_pcrscr_get();
+     timestampe_delayed=(pTable->last_checkin_pts-outtime)/90;
+-	///printk("get delay =%d ms\n",timestampe_delayed);
+ 	if((timestampe_delayed<0 ||timestampe_delayed>5*1000) && pTable->last_avg_bitrate>0){
+ 		int diff=pTable->last_checkin_offset-pTable->last_checkout_offset;
++		int diff2=stbuf_level(get_buf_by_type(type));
++		if((diff-diff2)> (pTable->last_avg_bitrate/8/10) || (diff-diff2*10))
++			diff =diff2;
+ 		int delay_ms=diff*1000/(1+pTable->last_avg_bitrate/8);
+ 		if(timestampe_delayed< 0 ||abs(timestampe_delayed-delay_ms)>3*1000){
+ 			timestampe_delayed=delay_ms;
+-			///printk("..recalculated %d ms delay\n",timestampe_delayed);
++			printk("..recalculated %d ms delay,diff=%d\n",timestampe_delayed,diff);
+ 		}
+ 	}
+ 	if(latestbitrate)
+@@ -207,6 +211,19 @@ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ 	return timestampe_delayed;
+ }
+ EXPORT_SYMBOL(calculation_stream_delayed_ms);
++int calculation_stream_ext_delayed_ms(u8 type)
++{
++       pts_table_t *pTable;
++       int extdelay_ms;
++       if (type >= PTS_TYPE_MAX) {
++        return 0;
++    }
++       pTable = &pts_table[type];
++       extdelay_ms=jiffies-pTable->last_checkin_jiffies;
++       if(extdelay_ms<0)
++               extdelay_ms=0;
++       return extdelay_ms*1000/HZ;
++}
+ 
+ #endif
+ 
+@@ -284,6 +301,7 @@ static int pts_checkin_offset_inline(u8 type, u32 offset, u32 val,u64 uS64)
+ 			}
+ 			pTable->last_checkin_offset = offset;
+ 			pTable->last_checkin_pts    = val;
++			pTable->last_checkin_jiffies = jiffies;
+ 			
+ 		}
+ 	}
+diff --git a/drivers/amlogic/amports/streambuf.h b/drivers/amlogic/amports/streambuf.h
+index b346554fba3b..48494fba7dee 100755
+--- a/drivers/amlogic/amports/streambuf.h
++++ b/drivers/amlogic/amports/streambuf.h
+@@ -53,6 +53,7 @@ typedef struct stream_buf_s {
+ 	u32	buf_wp;
+ 	u32	buf_rp;
+     u32 max_buffer_delay_ms;
++    u64 last_write_jiffies64;
+ } stream_buf_t;
+ 
+ typedef struct stream_port_s {
+diff --git a/drivers/amlogic/amports/tsdemux.c b/drivers/amlogic/amports/tsdemux.c
+index 7797ec9c9490..dda6062737c3 100755
+--- a/drivers/amlogic/amports/tsdemux.c
++++ b/drivers/amlogic/amports/tsdemux.c
+@@ -684,6 +684,8 @@ ssize_t tsdemux_write(struct file *file,
+ 	        }
+         }
+     }
++	vbuf->last_write_jiffies64=jiffies_64;
++	abuf->last_write_jiffies64=jiffies_64;
+ 	write_size=limited_delay_check(file,vbuf,abuf,buf,count);
+     if (write_size > 0) {
+         return _tsdemux_write(buf, write_size);
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index e39bb96aa045..2bf260156429 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -1053,7 +1053,7 @@ static void vh264_isr(void)
+ 
+                 p_last_vf = vf;
+                 last_ptr = fill_ptr;
+-
++                vf->ready_jiffies64=jiffies_64;
+                 INCPTR(fill_ptr);
+                 vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
+             } else {
+@@ -1076,7 +1076,7 @@ static void vh264_isr(void)
+                 vf->pts_us64= (pts_valid) ? pts_us64 : 0;
+                 vf->canvas0Addr = vf->canvas1Addr = spec2canvas(&buffer_spec[buffer_index]);
+                 vfbuf_use[buffer_index]++;
+-
++                vf->ready_jiffies64=jiffies_64;
+                 INCPTR(fill_ptr);
+ 
+                 vf = &vfpool[fill_ptr];
+@@ -1107,6 +1107,7 @@ static void vh264_isr(void)
+ 
+                 p_last_vf = vf;
+                 last_ptr = fill_ptr;
++                vf->ready_jiffies64=jiffies_64;
+ 
+                 INCPTR(fill_ptr);
+                 vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
+@@ -1735,6 +1736,7 @@ static void stream_switching_do(struct work_struct *work)
+         }
+ 
+         vfpool_idx[fill_ptr] = -1;
++        vf_curr->ready_jiffies64=jiffies_64;		
+         INCPTR(fill_ptr);
+ 
+         spin_unlock_irqrestore(&lock, flags);
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index a379224c79c5..7f4d518fb80b 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -581,6 +581,7 @@ static u32 vsync_pts_inc_upint = 0;
+ static u32 vsync_pts_inc_adj = 0;
+ static u32 vsync_pts_125 = 0;
+ static u32 vsync_pts_112 = 0;
++static u32 vsync_pts_101 = 0;
+ static u32 vsync_pts_100 = 0;
+ static u32 vsync_freerun = 0;
+ 
+@@ -1809,34 +1810,33 @@ static inline bool vpts_expire(vframe_t *cur_vf, vframe_t *next_vf)
+         u32 delayed_ms, t1, t2;
+         delayed_ms = calculation_stream_delayed_ms(PTS_TYPE_VIDEO, &t1, &t2);
+         if (vf_get_states(&frame_states) == 0) {
+-            if (delayed_ms > 600) {
++			u32 pcr=timestamp_pcrscr_get();
++			u32 vpts=timestamp_vpts_get();
++			u32 diff=pcr-vpts;
++            if (delayed_ms > 200) {
+                 vsync_freerun++;
++				if(pcr<next_vf->pts || pcr<vpts+next_vf->duration)
++				{
++	                if(next_vf->pts>0){
++	                    timestamp_pcrscr_set(next_vf->pts);
++	                }else{
++	                    timestamp_pcrscr_set(vpts+next_vf->duration);
++	                }
++                }
+                 return true;
+-            }
+-            if ((delayed_ms > 300) && (frame_states.buf_avail_num >= 3)) {
++            }else if((frame_states.buf_avail_num >= 3) && diff <vsync_pts_inc<<2){
+                 vsync_pts_inc_adj = vsync_pts_inc + (vsync_pts_inc >> 2);
+                 vsync_pts_125++;
+-            } else if (delayed_ms < 250) {
+-            #if 0
+-                if (vf_get_states(&frame_states) == 0) {
+-                    if (frame_states.buf_avail_num >= 3) {
+-                        return true;
+-                    } /*else if ((frame_states.buf_avail_num < 10) && (frame_states.buf_avail_num > 3)) {
+-                        if (cur_vf) {
+-                            pts -=  (next_vf->pts - cur_vf->pts)/ 2;
+-                            printk("next frame pts 0x%x, next_vf->pts 0x%x\n", pts, next_vf->pts);
+-                        }
+-                    }*/
+-                }
+-            #endif
++            }else if((frame_states.buf_avail_num >= 2 && diff <vsync_pts_inc<<1 )){
++                vsync_pts_inc_adj = vsync_pts_inc + (vsync_pts_inc >> 3);
++                vsync_pts_112++;
++            }else if(frame_states.buf_avail_num >= 1 && diff< vsync_pts_inc-20){
++            	vsync_pts_inc_adj = vsync_pts_inc + 10;
++                vsync_pts_101++;
++            } else{
+                 vsync_pts_inc_adj = 0;
+                 vsync_pts_100++;
+-            } else {
+-                if (frame_states.buf_avail_num >= 2) {
+-                    vsync_pts_inc_adj = vsync_pts_inc + (vsync_pts_inc >> 3);
+-                    vsync_pts_112++;
+-                }
+-            }
++            }	
+         }
+     }
+ #endif
+@@ -4341,12 +4341,23 @@ static ssize_t vframe_states_show(struct class *cla, struct class_attribute* att
+ {
+     int ret = 0;
+     vframe_states_t states;
+-
++    unsigned long flags;
++	
+     if (vf_get_states(&states) == 0) {
+         ret += sprintf(buf + ret, "vframe_pool_size=%d\n", states.vf_pool_size);
+         ret += sprintf(buf + ret, "vframe buf_free_num=%d\n", states.buf_free_num);
+         ret += sprintf(buf + ret, "vframe buf_recycle_num=%d\n", states.buf_recycle_num);
+         ret += sprintf(buf + ret, "vframe buf_avail_num=%d\n", states.buf_avail_num);
++ 			
++        spin_lock_irqsave(&lock, flags);
++        {
++            vframe_t *vf;
++            vf = video_vf_peek();
++            if(vf){
++                ret += sprintf(buf + ret, "vframe ready frame delayed =%dms\n",(int)(jiffies_64-vf->ready_jiffies64)*1000/HZ);
++            }
++        }
++        spin_unlock_irqrestore(&lock, flags);
+ 
+     } else {
+         ret += sprintf(buf + ret, "vframe no states\n");
+@@ -4448,8 +4459,8 @@ static ssize_t trickmode_duration_store(struct class *cla, struct class_attribut
+ static ssize_t video_vsync_pts_inc_upint_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+     if (vsync_pts_inc_upint)
+-        return sprintf(buf, "%d, vsync_freerun %d, 1.25xInc %d, 1.12xInc %d, 1xInc %d\n",
+-            vsync_pts_inc_upint, vsync_freerun, vsync_pts_125, vsync_pts_112, vsync_pts_100);
++        return sprintf(buf, "%d, vsync_freerun %d, 1.25xInc %d, 1.12xInc %d,inc+10 %d, 1xInc %d\n",
++            vsync_pts_inc_upint, vsync_freerun, vsync_pts_125, vsync_pts_112, vsync_pts_101,vsync_pts_100);
+     else
+         return sprintf(buf, "%d\n", vsync_pts_inc_upint);
+ }
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+index 723a8741efd2..3dea854bf42b 100755
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -189,6 +189,7 @@ typedef struct vframe_s {
+         struct tvafe_vga_parm_s vga_parm;
+         /* pixel aspect ratio */
+         enum pixel_aspect_ratio_e pixel_ratio;
++        u64 ready_jiffies64;//ready from decode on  jiffies_64
+ } vframe_t;
+ 
+ #if 0
+-- 
+2.19.0
+

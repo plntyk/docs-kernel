@@ -1,0 +1,1664 @@
+From 52411f4fb01ce5bfc03fd03fee68b3b1574b021f Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Fri, 1 Nov 2013 19:52:37 +0800
+Subject: [PATCH 1626/5965] M8/suspend:enable earlysuspend.
+
+---
+ .../usb/dwc_otg/310/dwc_otg_pcd_linux.c       |   2 +
+ include/linux/wakelock_android.h              |  91 +++
+ kernel/power/Kconfig                          |  65 +-
+ kernel/power/Makefile                         |   7 +-
+ kernel/power/consoleearlysuspend.c            |  78 +++
+ kernel/power/earlysuspend.c                   | 185 +++++
+ kernel/power/fbearlysuspend.c                 | 154 +++++
+ kernel/power/main.c                           |  24 +-
+ kernel/power/power.h                          |  24 +
+ kernel/power/suspend.c                        |   4 +-
+ kernel/power/userwakelock.c                   | 219 ++++++
+ kernel/power/wakelock_android.c               | 640 ++++++++++++++++++
+ 12 files changed, 1486 insertions(+), 7 deletions(-)
+ create mode 100755 include/linux/wakelock_android.h
+ mode change 100644 => 100755 kernel/power/Kconfig
+ mode change 100644 => 100755 kernel/power/Makefile
+ create mode 100644 kernel/power/consoleearlysuspend.c
+ create mode 100755 kernel/power/earlysuspend.c
+ create mode 100755 kernel/power/fbearlysuspend.c
+ mode change 100644 => 100755 kernel/power/main.c
+ mode change 100644 => 100755 kernel/power/power.h
+ mode change 100644 => 100755 kernel/power/suspend.c
+ create mode 100755 kernel/power/userwakelock.c
+ create mode 100755 kernel/power/wakelock_android.c
+
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_pcd_linux.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_pcd_linux.c
+index 33438da11e40..f6e490ba4bb4 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_pcd_linux.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_pcd_linux.c
+@@ -1327,10 +1327,12 @@ void pcd_remove(
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+ int get_pcd_ums_state(dwc_otg_pcd_t *pcd)
+ {
++#if 0
+ 	if(gadget_wrapper &&
+ 		(pcd == gadget_wrapper->pcd) &&
+ 		gadget_wrapper->gadget.priv_data)
+ 		return *(int *)gadget_wrapper->gadget.priv_data;
++#endif
+ 	return 0;
+ }
+ #endif
+diff --git a/include/linux/wakelock_android.h b/include/linux/wakelock_android.h
+new file mode 100755
+index 000000000000..a096d24ada1d
+--- /dev/null
++++ b/include/linux/wakelock_android.h
+@@ -0,0 +1,91 @@
++/* include/linux/wakelock.h
++ *
++ * Copyright (C) 2007-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _LINUX_WAKELOCK_H
++#define _LINUX_WAKELOCK_H
++
++#include <linux/list.h>
++#include <linux/ktime.h>
++
++/* A wake_lock prevents the system from entering suspend or other low power
++ * states when active. If the type is set to WAKE_LOCK_SUSPEND, the wake_lock
++ * prevents a full system suspend. If the type is WAKE_LOCK_IDLE, low power
++ * states that cause large interrupt latencies or that disable a set of
++ * interrupts will not entered from idle until the wake_locks are released.
++ */
++
++enum {
++	WAKE_LOCK_SUSPEND, /* Prevent suspend */
++	WAKE_LOCK_IDLE,    /* Prevent low power idle */
++	WAKE_LOCK_TYPE_COUNT
++};
++
++struct wake_lock {
++#ifdef CONFIG_HAS_WAKELOCK
++	struct list_head    link;
++	int                 flags;
++	const char         *name;
++	unsigned long       expires;
++#ifdef CONFIG_WAKELOCK_STAT
++	struct {
++		int             count;
++		int             expire_count;
++		int             wakeup_count;
++		ktime_t         total_time;
++		ktime_t         prevent_suspend_time;
++		ktime_t         max_time;
++		ktime_t         last_time;
++	} stat;
++#endif
++#endif
++};
++
++#ifdef CONFIG_HAS_WAKELOCK
++
++void wake_lock_init(struct wake_lock *lock, int type, const char *name);
++void wake_lock_destroy(struct wake_lock *lock);
++void wake_lock(struct wake_lock *lock);
++void wake_lock_timeout(struct wake_lock *lock, long timeout);
++void wake_unlock(struct wake_lock *lock);
++
++/* wake_lock_active returns a non-zero value if the wake_lock is currently
++ * locked. If the wake_lock has a timeout, it does not check the timeout
++ * but if the timeout had aready been checked it will return 0.
++ */
++int wake_lock_active(struct wake_lock *lock);
++
++/* has_wake_lock returns 0 if no wake locks of the specified type are active,
++ * and non-zero if one or more wake locks are held. Specifically it returns
++ * -1 if one or more wake locks with no timeout are active or the
++ * number of jiffies until all active wake locks time out.
++ */
++long has_wake_lock(int type);
++
++#else
++
++static inline void wake_lock_init(struct wake_lock *lock, int type,
++					const char *name) {}
++static inline void wake_lock_destroy(struct wake_lock *lock) {}
++static inline void wake_lock(struct wake_lock *lock) {}
++static inline void wake_lock_timeout(struct wake_lock *lock, long timeout) {}
++static inline void wake_unlock(struct wake_lock *lock) {}
++
++static inline int wake_lock_active(struct wake_lock *lock) { return 0; }
++static inline long has_wake_lock(int type) { return 0; }
++
++#endif
++
++#endif
++
+diff --git a/kernel/power/Kconfig b/kernel/power/Kconfig
+old mode 100644
+new mode 100755
+index f8cc6c43efec..66eb1b050e83
+--- a/kernel/power/Kconfig
++++ b/kernel/power/Kconfig
+@@ -20,11 +20,70 @@ config SUSPEND_FREEZER
+ 
+ config HAS_WAKELOCK
+ 	bool
+-	default y
+-
+-config WAKELOCK
++	
++config HAS_EARLYSUSPEND
+ 	bool
++	
++config WAKELOCK
++	bool "Wake lock"
++	depends on PM && RTC_CLASS
++	default n
++	select HAS_WAKELOCK
++	---help---
++	  Enable wakelocks. When user space request a sleep state the
++	  sleep request will be delayed until no wake locks are held.
++	
++config WAKELOCK_STAT	
++	bool "Wake lock stats"	
++	depends on WAKELOCK	
++	default y	
++	---help---	  
++		Report wake lock stats in /proc/wakelocks
++		
++config USER_WAKELOCK
++	bool "Userspace wake locks"
++	depends on WAKELOCK
+ 	default y
++	---help---
++	  User-space wake lock api. Write "lockname" or "lockname timeout"
++	  to /sys/power/wake_lock lock and if needed create a wake lock.
++	  Write "lockname" to /sys/power/wake_unlock to unlock a user wake
++	  lock.
++	  
++config EARLYSUSPEND	
++	bool "Early suspend"	
++	depends on WAKELOCK	
++	default y	
++	select HAS_EARLYSUSPEND	
++	---help---	  
++		Call early suspend handlers when the user requested sleep state	  
++		changes.
++		
++choice
++	prompt "User-space screen access"
++	default FB_EARLYSUSPEND if !FRAMEBUFFER_CONSOLE
++	default CONSOLE_EARLYSUSPEND
++	depends on HAS_EARLYSUSPEND
++
++	config NO_USER_SPACE_SCREEN_ACCESS_CONTROL
++		bool "None"
++
++	config CONSOLE_EARLYSUSPEND
++		bool "Console switch on early-suspend"
++		depends on HAS_EARLYSUSPEND && VT
++		---help---
++		  Register early suspend handler to perform a console switch to
++		  when user-space should stop drawing to the screen and a switch
++		  back when it should resume.
++
++	config FB_EARLYSUSPEND
++		bool "Sysfs interface"
++		depends on HAS_EARLYSUSPEND
++		---help---
++		  Register early suspend handler that notifies and waits for
++		  user-space through sysfs when user-space should stop drawing
++		  to the screen and notifies user-space when it should resume.
++endchoice
+ 
+ config HIBERNATE_CALLBACKS
+ 	bool
+diff --git a/kernel/power/Makefile b/kernel/power/Makefile
+old mode 100644
+new mode 100755
+index 8450b85d33c0..3dac2c0a7e0d
+--- a/kernel/power/Makefile
++++ b/kernel/power/Makefile
+@@ -10,7 +10,12 @@ obj-$(CONFIG_PM_TEST_SUSPEND)	+= suspend_test.o
+ obj-$(CONFIG_HIBERNATION)	+= hibernate.o snapshot.o swap.o user.o \
+ 				   block_io.o
+ obj-$(CONFIG_PM_AUTOSLEEP)	+= autosleep.o
+-obj-$(CONFIG_PM_WAKELOCKS)	+= wakelock.o
++#obj-$(CONFIG_PM_WAKELOCKS)	+= wakelock.o
++obj-$(CONFIG_WAKELOCK)		+= wakelock_android.o
++obj-$(CONFIG_USER_WAKELOCK)	+= userwakelock.o
++obj-$(CONFIG_EARLYSUSPEND)	+= earlysuspend.o
++obj-$(CONFIG_CONSOLE_EARLYSUSPEND)	+= consoleearlysuspend.o
++obj-$(CONFIG_FB_EARLYSUSPEND)	+= fbearlysuspend.o
+ obj-$(CONFIG_SUSPEND_TIME)	+= suspend_time.o
+ 
+ obj-$(CONFIG_MAGIC_SYSRQ)	+= poweroff.o
+diff --git a/kernel/power/consoleearlysuspend.c b/kernel/power/consoleearlysuspend.c
+new file mode 100644
+index 000000000000..a3edcb267389
+--- /dev/null
++++ b/kernel/power/consoleearlysuspend.c
+@@ -0,0 +1,78 @@
++/* kernel/power/consoleearlysuspend.c
++ *
++ * Copyright (C) 2005-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/console.h>
++#include <linux/earlysuspend.h>
++#include <linux/kbd_kern.h>
++#include <linux/module.h>
++#include <linux/vt_kern.h>
++#include <linux/wait.h>
++
++#define EARLY_SUSPEND_CONSOLE	(MAX_NR_CONSOLES-1)
++
++static int orig_fgconsole;
++static void console_early_suspend(struct early_suspend *h)
++{
++	acquire_console_sem();
++	orig_fgconsole = fg_console;
++	if (vc_allocate(EARLY_SUSPEND_CONSOLE))
++		goto err;
++	if (set_console(EARLY_SUSPEND_CONSOLE))
++		goto err;
++	release_console_sem();
++
++	if (vt_waitactive(EARLY_SUSPEND_CONSOLE + 1))
++		pr_warning("console_early_suspend: Can't switch VCs.\n");
++	return;
++err:
++	pr_warning("console_early_suspend: Can't set console\n");
++	release_console_sem();
++}
++
++static void console_late_resume(struct early_suspend *h)
++{
++	int ret;
++	acquire_console_sem();
++	ret = set_console(orig_fgconsole);
++	release_console_sem();
++	if (ret) {
++		pr_warning("console_late_resume: Can't set console.\n");
++		return;
++	}
++
++	if (vt_waitactive(orig_fgconsole + 1))
++		pr_warning("console_late_resume: Can't switch VCs.\n");
++}
++
++static struct early_suspend console_early_suspend_desc = {
++	.level = EARLY_SUSPEND_LEVEL_STOP_DRAWING,
++	.suspend = console_early_suspend,
++	.resume = console_late_resume,
++};
++
++static int __init console_early_suspend_init(void)
++{
++	register_early_suspend(&console_early_suspend_desc);
++	return 0;
++}
++
++static void  __exit console_early_suspend_exit(void)
++{
++	unregister_early_suspend(&console_early_suspend_desc);
++}
++
++module_init(console_early_suspend_init);
++module_exit(console_early_suspend_exit);
++
+diff --git a/kernel/power/earlysuspend.c b/kernel/power/earlysuspend.c
+new file mode 100755
+index 000000000000..bc51e3e181d2
+--- /dev/null
++++ b/kernel/power/earlysuspend.c
+@@ -0,0 +1,185 @@
++/* kernel/power/earlysuspend.c
++ *
++ * Copyright (C) 2005-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/earlysuspend.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/rtc.h>
++#include <linux/syscalls.h> /* sys_sync */
++#include <linux/wakelock_android.h>
++#include <linux/workqueue.h>
++
++#include "power.h"
++
++enum {
++	DEBUG_USER_STATE = 1U << 0,
++	DEBUG_SUSPEND = 1U << 2,
++};
++static int debug_mask = DEBUG_USER_STATE|DEBUG_SUSPEND;
++module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
++
++static DEFINE_MUTEX(early_suspend_lock);
++static LIST_HEAD(early_suspend_handlers);
++static void early_suspend(struct work_struct *work);
++static void late_resume(struct work_struct *work);
++static DECLARE_WORK(early_suspend_work, early_suspend);
++static DECLARE_WORK(late_resume_work, late_resume);
++static DEFINE_SPINLOCK(state_lock);
++enum {
++	SUSPEND_REQUESTED = 0x1,
++	SUSPENDED = 0x2,
++	SUSPEND_REQUESTED_AND_SUSPENDED = SUSPEND_REQUESTED | SUSPENDED,
++};
++static int state;
++
++void register_early_suspend(struct early_suspend *handler)
++{
++	struct list_head *pos;
++
++	mutex_lock(&early_suspend_lock);
++	list_for_each(pos, &early_suspend_handlers) {
++		struct early_suspend *e;
++		e = list_entry(pos, struct early_suspend, link);
++		if (e->level > handler->level)
++			break;
++	}
++	list_add_tail(&handler->link, pos);
++	if ((state & SUSPENDED) && handler->suspend)
++		handler->suspend(handler);
++	mutex_unlock(&early_suspend_lock);
++}
++EXPORT_SYMBOL(register_early_suspend);
++
++void unregister_early_suspend(struct early_suspend *handler)
++{
++	mutex_lock(&early_suspend_lock);
++	list_del(&handler->link);
++	mutex_unlock(&early_suspend_lock);
++}
++EXPORT_SYMBOL(unregister_early_suspend);
++
++static void early_suspend(struct work_struct *work)
++{
++	struct early_suspend *pos;
++	unsigned long irqflags;
++	int abort = 0;
++
++	mutex_lock(&early_suspend_lock);
++	spin_lock_irqsave(&state_lock, irqflags);
++	if (state == SUSPEND_REQUESTED)
++		state |= SUSPENDED;
++	else
++		abort = 1;
++	spin_unlock_irqrestore(&state_lock, irqflags);
++
++	if (abort) {
++		if (debug_mask & DEBUG_SUSPEND)
++			pr_info("early_suspend: abort, state %d\n", state);
++		mutex_unlock(&early_suspend_lock);
++		goto abort;
++	}
++
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("early_suspend: call handlers\n");
++	list_for_each_entry(pos, &early_suspend_handlers, link) {
++		if (pos->suspend != NULL)
++		{
++			printk("%pf\n",pos->suspend);
++			pos->suspend(pos);
++		}
++	}
++	mutex_unlock(&early_suspend_lock);
++
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("early_suspend: sync\n");
++
++	sys_sync();
++abort:
++	spin_lock_irqsave(&state_lock, irqflags);
++	if (state == SUSPEND_REQUESTED_AND_SUSPENDED)
++		wake_unlock(&main_wake_lock);
++	spin_unlock_irqrestore(&state_lock, irqflags);
++}
++
++static void late_resume(struct work_struct *work)
++{
++	struct early_suspend *pos;
++	unsigned long irqflags;
++	int abort = 0;
++
++	mutex_lock(&early_suspend_lock);
++	spin_lock_irqsave(&state_lock, irqflags);
++	if (state == SUSPENDED)
++		state &= ~SUSPENDED;
++	else
++		abort = 1;
++	spin_unlock_irqrestore(&state_lock, irqflags);
++
++	if (abort) {
++		if (debug_mask & DEBUG_SUSPEND)
++			pr_info("late_resume: abort, state %d\n", state);
++		goto abort;
++	}
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("late_resume: call handlers\n");
++	list_for_each_entry_reverse(pos, &early_suspend_handlers, link)
++		if (pos->resume != NULL)
++		{
++			printk("%pf\n",pos->resume);
++			pos->resume(pos);
++		}
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("late_resume: done\n");
++abort:
++	mutex_unlock(&early_suspend_lock);
++}
++
++void request_suspend_state(suspend_state_t new_state)
++{
++	unsigned long irqflags;
++	int old_sleep;
++
++	spin_lock_irqsave(&state_lock, irqflags);
++	old_sleep = state & SUSPEND_REQUESTED;
++	if (debug_mask & DEBUG_USER_STATE) {
++		struct timespec ts;
++		struct rtc_time tm;
++		getnstimeofday(&ts);
++		rtc_time_to_tm(ts.tv_sec, &tm);
++		pr_info("request_suspend_state: %s (%d->%d) at %lld "
++			"(%d-%02d-%02d %02d:%02d:%02d.%09lu UTC)\n",
++			new_state != PM_SUSPEND_ON ? "sleep" : "wakeup",
++			requested_suspend_state, new_state,
++			ktime_to_ns(ktime_get()),
++			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
++			tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec);
++	}
++	printk("%s,%d,old_sleep=%d,new_state=%d\n",__func__,__LINE__,old_sleep,new_state);
++	if (!old_sleep && new_state != PM_SUSPEND_ON) {
++		state |= SUSPEND_REQUESTED;
++		queue_work(suspend_work_queue, &early_suspend_work);
++	} else if (old_sleep && new_state == PM_SUSPEND_ON) {
++		state &= ~SUSPEND_REQUESTED;
++		wake_lock(&main_wake_lock);
++		queue_work(suspend_work_queue, &late_resume_work);
++	}
++	requested_suspend_state = new_state;
++	spin_unlock_irqrestore(&state_lock, irqflags);
++}
++
++suspend_state_t get_suspend_state(void)
++{
++	return requested_suspend_state;
++}
+diff --git a/kernel/power/fbearlysuspend.c b/kernel/power/fbearlysuspend.c
+new file mode 100755
+index 000000000000..125d15202cbb
+--- /dev/null
++++ b/kernel/power/fbearlysuspend.c
+@@ -0,0 +1,154 @@
++/* kernel/power/fbearlysuspend.c
++ *
++ * Copyright (C) 2005-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/earlysuspend.h>
++#include <linux/module.h>
++#include <linux/wait.h>
++#include <linux/delay.h>
++
++#include "power.h"
++
++static wait_queue_head_t fb_state_wq;
++static DEFINE_SPINLOCK(fb_state_lock);
++static enum {
++	FB_STATE_STOPPED_DRAWING,
++	FB_STATE_REQUEST_STOP_DRAWING,
++	FB_STATE_DRAWING_OK,
++} fb_state;
++
++/* tell userspace to stop drawing, wait for it to stop */
++static void stop_drawing_early_suspend(struct early_suspend *h)
++{
++	int ret;
++	unsigned long irq_flags;
++
++	spin_lock_irqsave(&fb_state_lock, irq_flags);
++	fb_state = FB_STATE_REQUEST_STOP_DRAWING;
++	spin_unlock_irqrestore(&fb_state_lock, irq_flags);
++
++	wake_up_all(&fb_state_wq);
++	ret = wait_event_timeout(fb_state_wq,
++				 fb_state == FB_STATE_STOPPED_DRAWING,
++				 HZ);
++	if (unlikely(fb_state != FB_STATE_STOPPED_DRAWING))
++		pr_warning("stop_drawing_early_suspend: timeout waiting for "
++			   "userspace to stop drawing\n");
++}
++
++/* tell userspace to start drawing */
++static void start_drawing_late_resume(struct early_suspend *h)
++{
++	unsigned long irq_flags;
++
++	spin_lock_irqsave(&fb_state_lock, irq_flags);
++	fb_state = FB_STATE_DRAWING_OK;
++	spin_unlock_irqrestore(&fb_state_lock, irq_flags);
++	wake_up(&fb_state_wq);
++}
++
++static struct early_suspend stop_drawing_early_suspend_desc = {
++	.level = EARLY_SUSPEND_LEVEL_STOP_DRAWING,
++	.suspend = stop_drawing_early_suspend,
++	.resume = start_drawing_late_resume,
++};
++
++static ssize_t wait_for_fb_sleep_show(struct kobject *kobj,
++				      struct kobj_attribute *attr, char *buf)
++{
++	char *s = buf;
++	int ret;
++
++	ret = wait_event_interruptible(fb_state_wq,
++				       fb_state != FB_STATE_DRAWING_OK);
++	if (ret && fb_state == FB_STATE_DRAWING_OK)
++		return ret;
++	else
++		s += sprintf(buf, "sleeping");
++	return s - buf;
++}
++
++static ssize_t wait_for_fb_wake_show(struct kobject *kobj,
++				     struct kobj_attribute *attr, char *buf)
++{
++	char *s = buf;
++	int ret;
++	unsigned long irq_flags;
++
++	spin_lock_irqsave(&fb_state_lock, irq_flags);
++	if (fb_state == FB_STATE_REQUEST_STOP_DRAWING) {
++		fb_state = FB_STATE_STOPPED_DRAWING;
++		wake_up(&fb_state_wq);
++	}
++	spin_unlock_irqrestore(&fb_state_lock, irq_flags);
++
++	ret = wait_event_interruptible(fb_state_wq,
++				       fb_state == FB_STATE_DRAWING_OK);
++	if (ret && fb_state != FB_STATE_DRAWING_OK)
++		return ret;
++	else
++		s += sprintf(buf, "awake");
++
++	return s - buf;
++}
++
++#define power_ro_attr(_name) \
++static struct kobj_attribute _name##_attr = {	\
++	.attr	= {				\
++		.name = __stringify(_name),	\
++		.mode = 0444,			\
++	},					\
++	.show	= _name##_show,			\
++	.store	= NULL,		\
++}
++
++power_ro_attr(wait_for_fb_sleep);
++power_ro_attr(wait_for_fb_wake);
++
++static struct attribute *g[] = {
++	&wait_for_fb_sleep_attr.attr,
++	&wait_for_fb_wake_attr.attr,
++	NULL,
++};
++
++static struct attribute_group attr_group = {
++	.attrs = g,
++};
++
++static int __init android_power_init(void)
++{
++	int ret;
++
++	init_waitqueue_head(&fb_state_wq);
++	fb_state = FB_STATE_DRAWING_OK;
++
++	ret = sysfs_create_group(power_kobj, &attr_group);
++	if (ret) {
++		pr_err("android_power_init: sysfs_create_group failed\n");
++		return ret;
++	}
++
++	register_early_suspend(&stop_drawing_early_suspend_desc);
++	return 0;
++}
++
++static void  __exit android_power_exit(void)
++{
++	unregister_early_suspend(&stop_drawing_early_suspend_desc);
++	sysfs_remove_group(power_kobj, &attr_group);
++}
++
++module_init(android_power_init);
++module_exit(android_power_exit);
++
+diff --git a/kernel/power/main.c b/kernel/power/main.c
+old mode 100644
+new mode 100755
+index d77663bfedeb..51a65cf37dce
+--- a/kernel/power/main.c
++++ b/kernel/power/main.c
+@@ -313,7 +313,11 @@ static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
+ static suspend_state_t decode_state(const char *buf, size_t n)
+ {
+ #ifdef CONFIG_SUSPEND
+-	suspend_state_t state = PM_SUSPEND_MIN;
++#ifdef CONFIG_EARLYSUSPEND
++	suspend_state_t state = PM_SUSPEND_ON;
++#else
++	suspend_state_t state = PM_SUSPEND_STANDBY;
++#endif
+ 	const char * const *s;
+ #endif
+ 	char *p;
+@@ -352,7 +356,16 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
+ 
+ 	state = decode_state(buf, n);
+ 	if (state < PM_SUSPEND_MAX)
++	{
++#ifdef CONFIG_EARLYSUSPEND
++		if (state == PM_SUSPEND_ON || valid_state(state)) {
++			error = 0;
++			request_suspend_state(state);
++		}
++#else
+ 		error = pm_suspend(state);
++#endif
++	}
+ 	else if (state == PM_SUSPEND_MAX)
+ 		error = hibernate();
+ 	else
+@@ -552,7 +565,10 @@ pm_trace_dev_match_store(struct kobject *kobj, struct kobj_attribute *attr,
+ power_attr(pm_trace_dev_match);
+ 
+ #endif /* CONFIG_PM_TRACE */
+-
++#ifdef CONFIG_USER_WAKELOCK
++power_attr(wake_lock);
++power_attr(wake_unlock);
++#endif
+ #ifdef CONFIG_FREEZER
+ static ssize_t pm_freeze_timeout_show(struct kobject *kobj,
+ 				      struct kobj_attribute *attr, char *buf)
+@@ -586,6 +602,10 @@ static struct attribute * g[] = {
+ #ifdef CONFIG_PM_SLEEP
+ 	&pm_async_attr.attr,
+ 	&wakeup_count_attr.attr,
++#ifdef CONFIG_USER_WAKELOCK
++	&wake_lock_attr.attr,
++	&wake_unlock_attr.attr,
++#endif
+ #ifdef CONFIG_PM_AUTOSLEEP
+ 	&autosleep_attr.attr,
+ #endif
+diff --git a/kernel/power/power.h b/kernel/power/power.h
+old mode 100644
+new mode 100755
+index 7d4b7ffb3c1d..18e99b355163
+--- a/kernel/power/power.h
++++ b/kernel/power/power.h
+@@ -294,3 +294,27 @@ extern int pm_wake_lock(const char *buf);
+ extern int pm_wake_unlock(const char *buf);
+ 
+ #endif /* !CONFIG_PM_WAKELOCKS */
++
++#ifdef CONFIG_WAKELOCK
++/* kernel/power/wakelock.c */
++extern struct workqueue_struct *suspend_work_queue;
++extern struct wake_lock main_wake_lock;
++extern suspend_state_t requested_suspend_state;
++#endif
++
++#ifdef CONFIG_USER_WAKELOCK
++ssize_t wake_lock_show(struct kobject *kobj, struct kobj_attribute *attr,
++			char *buf);
++ssize_t wake_lock_store(struct kobject *kobj, struct kobj_attribute *attr,
++			const char *buf, size_t n);
++ssize_t wake_unlock_show(struct kobject *kobj, struct kobj_attribute *attr,
++			char *buf);
++ssize_t  wake_unlock_store(struct kobject *kobj, struct kobj_attribute *attr,
++			const char *buf, size_t n);
++#endif
++
++#ifdef CONFIG_EARLYSUSPEND
++/* kernel/power/earlysuspend.c */
++void request_suspend_state(suspend_state_t state);
++suspend_state_t get_suspend_state(void);
++#endif
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+old mode 100644
+new mode 100755
+index 454568e6c8d2..fc8a0a3b4f57
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -31,7 +31,9 @@
+ #include "power.h"
+ 
+ const char *const pm_states[PM_SUSPEND_MAX] = {
+-	[PM_SUSPEND_FREEZE]	= "freeze",
++#ifdef CONFIG_EARLYSUSPEND	
++	[PM_SUSPEND_ON]		= "on",
++#endif
+ 	[PM_SUSPEND_STANDBY]	= "standby",
+ 	[PM_SUSPEND_MEM]	= "mem",
+ };
+diff --git a/kernel/power/userwakelock.c b/kernel/power/userwakelock.c
+new file mode 100755
+index 000000000000..3c7c74e5fc88
+--- /dev/null
++++ b/kernel/power/userwakelock.c
+@@ -0,0 +1,219 @@
++/* kernel/power/userwakelock.c
++ *
++ * Copyright (C) 2005-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/ctype.h>
++#include <linux/module.h>
++#include <linux/wakelock_android.h>
++#include <linux/slab.h>
++
++#include "power.h"
++
++enum {
++	DEBUG_FAILURE	= BIT(0),
++	DEBUG_ERROR	= BIT(1),
++	DEBUG_NEW	= BIT(2),
++	DEBUG_ACCESS	= BIT(3),
++	DEBUG_LOOKUP	= BIT(4),
++};
++static int debug_mask = DEBUG_FAILURE;
++module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
++
++static DEFINE_MUTEX(tree_lock);
++
++struct user_wake_lock {
++	struct rb_node		node;
++	struct wake_lock	wake_lock;
++	char			name[0];
++};
++struct rb_root user_wake_locks;
++
++static struct user_wake_lock *lookup_wake_lock_name(
++	const char *buf, int allocate, long *timeoutptr)
++{
++	struct rb_node **p = &user_wake_locks.rb_node;
++	struct rb_node *parent = NULL;
++	struct user_wake_lock *l;
++	int diff;
++	u64 timeout;
++	int name_len;
++	const char *arg;
++
++	/* Find length of lock name and start of optional timeout string */
++	arg = buf;
++	while (*arg && !isspace(*arg))
++		arg++;
++	name_len = arg - buf;
++	if (!name_len)
++		goto bad_arg;
++	while (isspace(*arg))
++		arg++;
++
++	/* Process timeout string */
++	if (timeoutptr && *arg) {
++		timeout = simple_strtoull(arg, (char **)&arg, 0);
++		while (isspace(*arg))
++			arg++;
++		if (*arg)
++			goto bad_arg;
++		/* convert timeout from nanoseconds to jiffies > 0 */
++		timeout += (NSEC_PER_SEC / HZ) - 1;
++		do_div(timeout, (NSEC_PER_SEC / HZ));
++		if (timeout <= 0)
++			timeout = 1;
++		*timeoutptr = timeout;
++	} else if (*arg)
++		goto bad_arg;
++	else if (timeoutptr)
++		*timeoutptr = 0;
++
++	/* Lookup wake lock in rbtree */
++	while (*p) {
++		parent = *p;
++		l = rb_entry(parent, struct user_wake_lock, node);
++		diff = strncmp(buf, l->name, name_len);
++		if (!diff && l->name[name_len])
++			diff = -1;
++		if (debug_mask & DEBUG_ERROR)
++			pr_info("lookup_wake_lock_name: compare %.*s %s %d\n",
++				name_len, buf, l->name, diff);
++
++		if (diff < 0)
++			p = &(*p)->rb_left;
++		else if (diff > 0)
++			p = &(*p)->rb_right;
++		else
++			return l;
++	}
++
++	/* Allocate and add new wakelock to rbtree */
++	if (!allocate) {
++		if (debug_mask & DEBUG_ERROR)
++			pr_info("lookup_wake_lock_name: %.*s not found\n",
++				name_len, buf);
++		return ERR_PTR(-EINVAL);
++	}
++	l = kzalloc(sizeof(*l) + name_len + 1, GFP_KERNEL);
++	if (l == NULL) {
++		if (debug_mask & DEBUG_FAILURE)
++			pr_err("lookup_wake_lock_name: failed to allocate "
++				"memory for %.*s\n", name_len, buf);
++		return ERR_PTR(-ENOMEM);
++	}
++	memcpy(l->name, buf, name_len);
++	if (debug_mask & DEBUG_NEW)
++		pr_info("lookup_wake_lock_name: new wake lock %s\n", l->name);
++	wake_lock_init(&l->wake_lock, WAKE_LOCK_SUSPEND, l->name);
++	rb_link_node(&l->node, parent, p);
++	rb_insert_color(&l->node, &user_wake_locks);
++	return l;
++
++bad_arg:
++	if (debug_mask & DEBUG_ERROR)
++		pr_info("lookup_wake_lock_name: wake lock, %.*s, bad arg, %s\n",
++			name_len, buf, arg);
++	return ERR_PTR(-EINVAL);
++}
++
++ssize_t wake_lock_show(
++	struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++	char *s = buf;
++	char *end = buf + PAGE_SIZE;
++	struct rb_node *n;
++	struct user_wake_lock *l;
++
++	mutex_lock(&tree_lock);
++
++	for (n = rb_first(&user_wake_locks); n != NULL; n = rb_next(n)) {
++		l = rb_entry(n, struct user_wake_lock, node);
++		if (wake_lock_active(&l->wake_lock))
++			s += scnprintf(s, end - s, "%s ", l->name);
++	}
++	s += scnprintf(s, end - s, "\n");
++
++	mutex_unlock(&tree_lock);
++	return (s - buf);
++}
++
++ssize_t wake_lock_store(
++	struct kobject *kobj, struct kobj_attribute *attr,
++	const char *buf, size_t n)
++{
++	long timeout;
++	struct user_wake_lock *l;
++
++	mutex_lock(&tree_lock);
++	l = lookup_wake_lock_name(buf, 1, &timeout);
++	if (IS_ERR(l)) {
++		n = PTR_ERR(l);
++		goto bad_name;
++	}
++
++	if (debug_mask & DEBUG_ACCESS)
++		pr_info("wake_lock_store: %s, timeout %ld\n", l->name, timeout);
++
++	if (timeout)
++		wake_lock_timeout(&l->wake_lock, timeout);
++	else
++		wake_lock(&l->wake_lock);
++bad_name:
++	mutex_unlock(&tree_lock);
++	return n;
++}
++
++
++ssize_t wake_unlock_show(
++	struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++	char *s = buf;
++	char *end = buf + PAGE_SIZE;
++	struct rb_node *n;
++	struct user_wake_lock *l;
++
++	mutex_lock(&tree_lock);
++
++	for (n = rb_first(&user_wake_locks); n != NULL; n = rb_next(n)) {
++		l = rb_entry(n, struct user_wake_lock, node);
++		if (!wake_lock_active(&l->wake_lock))
++			s += scnprintf(s, end - s, "%s ", l->name);
++	}
++	s += scnprintf(s, end - s, "\n");
++
++	mutex_unlock(&tree_lock);
++	return (s - buf);
++}
++
++ssize_t wake_unlock_store(
++	struct kobject *kobj, struct kobj_attribute *attr,
++	const char *buf, size_t n)
++{
++	struct user_wake_lock *l;
++
++	mutex_lock(&tree_lock);
++	l = lookup_wake_lock_name(buf, 0, NULL);
++	if (IS_ERR(l)) {
++		n = PTR_ERR(l);
++		goto not_found;
++	}
++
++	if (debug_mask & DEBUG_ACCESS)
++		pr_info("wake_unlock_store: %s\n", l->name);
++
++	wake_unlock(&l->wake_lock);
++not_found:
++	mutex_unlock(&tree_lock);
++	return n;
++}
++
+diff --git a/kernel/power/wakelock_android.c b/kernel/power/wakelock_android.c
+new file mode 100755
+index 000000000000..a63e66cb0514
+--- /dev/null
++++ b/kernel/power/wakelock_android.c
+@@ -0,0 +1,640 @@
++/* kernel/power/wakelock.c
++ *
++ * Copyright (C) 2005-2008 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/rtc.h>
++#include <linux/suspend.h>
++#include <linux/syscalls.h> /* sys_sync */
++#include <linux/wakelock_android.h>
++#ifdef CONFIG_WAKELOCK_STAT
++#include <linux/proc_fs.h>
++#endif
++#include "power.h"
++
++enum {
++	DEBUG_EXIT_SUSPEND = 1U << 0,
++	DEBUG_WAKEUP = 1U << 1,
++	DEBUG_SUSPEND = 1U << 2,
++	DEBUG_EXPIRE = 1U << 3,
++	DEBUG_WAKE_LOCK = 1U << 4,
++};
++static int debug_mask = DEBUG_EXIT_SUSPEND | DEBUG_WAKEUP;
++module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
++
++#define WAKE_LOCK_TYPE_MASK              (0x0f)
++#define WAKE_LOCK_INITIALIZED            (1U << 8)
++#define WAKE_LOCK_ACTIVE                 (1U << 9)
++#define WAKE_LOCK_AUTO_EXPIRE            (1U << 10)
++#define WAKE_LOCK_PREVENTING_SUSPEND     (1U << 11)
++
++static DEFINE_SPINLOCK(list_lock);
++static LIST_HEAD(inactive_locks);
++static struct list_head active_wake_locks[WAKE_LOCK_TYPE_COUNT];
++static int current_event_num;
++struct workqueue_struct *suspend_work_queue;
++struct wake_lock main_wake_lock;
++EXPORT_SYMBOL(main_wake_lock);
++suspend_state_t requested_suspend_state = PM_SUSPEND_MEM;
++static struct wake_lock unknown_wakeup;
++static struct wake_lock suspend_backoff_lock;
++
++#define SUSPEND_BACKOFF_THRESHOLD	10
++#define SUSPEND_BACKOFF_INTERVAL	10000
++
++static unsigned suspend_short_count;
++
++#ifdef CONFIG_WAKELOCK_STAT
++static struct wake_lock deleted_wake_locks;
++static ktime_t last_sleep_time_update;
++static int wait_for_wakeup;
++
++int get_expired_time(struct wake_lock *lock, ktime_t *expire_time)
++{
++	struct timespec ts;
++	struct timespec kt;
++	struct timespec tomono;
++	struct timespec delta;
++	struct timespec sleep;
++	long timeout;
++
++	if (!(lock->flags & WAKE_LOCK_AUTO_EXPIRE))
++		return 0;
++	get_xtime_and_monotonic_and_sleep_offset(&kt, &tomono, &sleep);
++	timeout = lock->expires - jiffies;
++	if (timeout > 0)
++		return 0;
++	jiffies_to_timespec(-timeout, &delta);
++	set_normalized_timespec(&ts, kt.tv_sec + tomono.tv_sec - delta.tv_sec,
++				kt.tv_nsec + tomono.tv_nsec - delta.tv_nsec);
++	*expire_time = timespec_to_ktime(ts);
++	return 1;
++}
++
++
++static int print_lock_stat(struct seq_file *m, struct wake_lock *lock)
++{
++	int lock_count = lock->stat.count;
++	int expire_count = lock->stat.expire_count;
++	ktime_t active_time = ktime_set(0, 0);
++	ktime_t total_time = lock->stat.total_time;
++	ktime_t max_time = lock->stat.max_time;
++
++	ktime_t prevent_suspend_time = lock->stat.prevent_suspend_time;
++	if (lock->flags & WAKE_LOCK_ACTIVE) {
++		ktime_t now, add_time;
++		int expired = get_expired_time(lock, &now);
++		if (!expired)
++			now = ktime_get();
++		add_time = ktime_sub(now, lock->stat.last_time);
++		lock_count++;
++		if (!expired)
++			active_time = add_time;
++		else
++			expire_count++;
++		total_time = ktime_add(total_time, add_time);
++		if (lock->flags & WAKE_LOCK_PREVENTING_SUSPEND)
++			prevent_suspend_time = ktime_add(prevent_suspend_time,
++					ktime_sub(now, last_sleep_time_update));
++		if (add_time.tv64 > max_time.tv64)
++			max_time = add_time;
++	}
++
++	return seq_printf(m,
++		     "\"%s\"\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%lld\t%lld\n",
++		     lock->name, lock_count, expire_count,
++		     lock->stat.wakeup_count, ktime_to_ns(active_time),
++		     ktime_to_ns(total_time),
++		     ktime_to_ns(prevent_suspend_time), ktime_to_ns(max_time),
++		     ktime_to_ns(lock->stat.last_time));
++}
++
++static int wakelock_stats_show(struct seq_file *m, void *unused)
++{
++	unsigned long irqflags;
++	struct wake_lock *lock;
++	int ret;
++	int type;
++
++	spin_lock_irqsave(&list_lock, irqflags);
++
++	ret = seq_puts(m, "name\tcount\texpire_count\twake_count\tactive_since"
++			"\ttotal_time\tsleep_time\tmax_time\tlast_change\n");
++	list_for_each_entry(lock, &inactive_locks, link)
++		ret = print_lock_stat(m, lock);
++	for (type = 0; type < WAKE_LOCK_TYPE_COUNT; type++) {
++		list_for_each_entry(lock, &active_wake_locks[type], link)
++			ret = print_lock_stat(m, lock);
++	}
++	spin_unlock_irqrestore(&list_lock, irqflags);
++	return 0;
++}
++
++static void wake_unlock_stat_locked(struct wake_lock *lock, int expired)
++{
++	ktime_t duration;
++	ktime_t now;
++	if (!(lock->flags & WAKE_LOCK_ACTIVE))
++		return;
++	if (get_expired_time(lock, &now))
++		expired = 1;
++	else
++		now = ktime_get();
++	lock->stat.count++;
++	if (expired)
++		lock->stat.expire_count++;
++	duration = ktime_sub(now, lock->stat.last_time);
++	lock->stat.total_time = ktime_add(lock->stat.total_time, duration);
++	if (ktime_to_ns(duration) > ktime_to_ns(lock->stat.max_time))
++		lock->stat.max_time = duration;
++	lock->stat.last_time = ktime_get();
++	if (lock->flags & WAKE_LOCK_PREVENTING_SUSPEND) {
++		duration = ktime_sub(now, last_sleep_time_update);
++		lock->stat.prevent_suspend_time = ktime_add(
++			lock->stat.prevent_suspend_time, duration);
++		lock->flags &= ~WAKE_LOCK_PREVENTING_SUSPEND;
++	}
++}
++
++static void update_sleep_wait_stats_locked(int done)
++{
++	struct wake_lock *lock;
++	ktime_t now, etime, elapsed, add;
++	int expired;
++
++	now = ktime_get();
++	elapsed = ktime_sub(now, last_sleep_time_update);
++	list_for_each_entry(lock, &active_wake_locks[WAKE_LOCK_SUSPEND], link) {
++		expired = get_expired_time(lock, &etime);
++		if (lock->flags & WAKE_LOCK_PREVENTING_SUSPEND) {
++			if (expired)
++				add = ktime_sub(etime, last_sleep_time_update);
++			else
++				add = elapsed;
++			lock->stat.prevent_suspend_time = ktime_add(
++				lock->stat.prevent_suspend_time, add);
++		}
++		if (done || expired)
++			lock->flags &= ~WAKE_LOCK_PREVENTING_SUSPEND;
++		else
++			lock->flags |= WAKE_LOCK_PREVENTING_SUSPEND;
++	}
++	last_sleep_time_update = now;
++}
++#endif
++
++
++static void expire_wake_lock(struct wake_lock *lock)
++{
++#ifdef CONFIG_WAKELOCK_STAT
++	wake_unlock_stat_locked(lock, 1);
++#endif
++	lock->flags &= ~(WAKE_LOCK_ACTIVE | WAKE_LOCK_AUTO_EXPIRE);
++	list_del(&lock->link);
++	list_add(&lock->link, &inactive_locks);
++	if (debug_mask & (DEBUG_WAKE_LOCK | DEBUG_EXPIRE))
++		pr_info("expired wake lock %s\n", lock->name);
++}
++
++/* Caller must acquire the list_lock spinlock */
++static void print_active_locks(int type)
++{
++	struct wake_lock *lock;
++	bool print_expired = true;
++
++	BUG_ON(type >= WAKE_LOCK_TYPE_COUNT);
++	list_for_each_entry(lock, &active_wake_locks[type], link) {
++		if (lock->flags & WAKE_LOCK_AUTO_EXPIRE) {
++			long timeout = lock->expires - jiffies;
++			if (timeout > 0)
++				pr_info("active wake lock %s, time left %ld\n",
++					lock->name, timeout);
++			else if (print_expired)
++				pr_info("wake lock %s, expired\n", lock->name);
++		} else {
++			pr_info("active wake lock %s\n", lock->name);
++			if (!(debug_mask & DEBUG_EXPIRE))
++				print_expired = false;
++		}
++	}
++}
++
++static long has_wake_lock_locked(int type)
++{
++	struct wake_lock *lock, *n;
++	long max_timeout = 0;
++
++	BUG_ON(type >= WAKE_LOCK_TYPE_COUNT);
++	list_for_each_entry_safe(lock, n, &active_wake_locks[type], link) {
++		if (lock->flags & WAKE_LOCK_AUTO_EXPIRE) {
++			long timeout = lock->expires - jiffies;
++			if (timeout <= 0)
++				expire_wake_lock(lock);
++			else if (timeout > max_timeout)
++				max_timeout = timeout;
++		} else
++			return -1;
++	}
++	return max_timeout;
++}
++
++long has_wake_lock(int type)
++{
++	long ret;
++	unsigned long irqflags;
++	spin_lock_irqsave(&list_lock, irqflags);
++	ret = has_wake_lock_locked(type);
++	if (ret && (debug_mask & DEBUG_WAKEUP) && type == WAKE_LOCK_SUSPEND)
++		print_active_locks(type);
++	spin_unlock_irqrestore(&list_lock, irqflags);
++	return ret;
++}
++
++static void suspend_backoff(void)
++{
++	pr_info("suspend: too many immediate wakeups, back off\n");
++	wake_lock_timeout(&suspend_backoff_lock,
++			  msecs_to_jiffies(SUSPEND_BACKOFF_INTERVAL));
++}
++
++static void suspend(struct work_struct *work)
++{
++	int ret;
++	int entry_event_num;
++	struct timespec ts_entry, ts_exit;
++
++	if (has_wake_lock(WAKE_LOCK_SUSPEND)) {
++		if (debug_mask & DEBUG_SUSPEND)
++			pr_info("suspend: abort suspend\n");
++		return;
++	}
++
++	entry_event_num = current_event_num;
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("suspend: sys_sync...");
++	sys_sync();
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("done.\n");
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("suspend: enter suspend\n");
++	getnstimeofday(&ts_entry);
++	ret = pm_suspend(requested_suspend_state);
++	getnstimeofday(&ts_exit);
++
++	if (debug_mask & DEBUG_EXIT_SUSPEND) {
++		struct rtc_time tm;
++		rtc_time_to_tm(ts_exit.tv_sec, &tm);
++		pr_info("suspend: exit suspend, ret = %d "
++			"(%d-%02d-%02d %02d:%02d:%02d.%09lu UTC)\n", ret,
++			tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
++			tm.tm_hour, tm.tm_min, tm.tm_sec, ts_exit.tv_nsec);
++	}
++
++	if (ts_exit.tv_sec - ts_entry.tv_sec <= 1) {
++		++suspend_short_count;
++
++		if (suspend_short_count == SUSPEND_BACKOFF_THRESHOLD) {
++			suspend_backoff();
++			suspend_short_count = 0;
++		}
++	} else {
++		suspend_short_count = 0;
++	}
++
++	if (current_event_num == entry_event_num) {
++		if (debug_mask & DEBUG_SUSPEND)
++			pr_info("suspend: pm_suspend returned with no event\n");
++		
++	}
++	wake_lock_timeout(&unknown_wakeup,2* HZ);
++}
++static DECLARE_WORK(suspend_work, suspend);
++
++static void expire_wake_locks(unsigned long data)
++{
++	long has_lock;
++	unsigned long irqflags;
++	if (debug_mask & DEBUG_EXPIRE)
++		pr_info("expire_wake_locks: start\n");
++	spin_lock_irqsave(&list_lock, irqflags);
++	if (debug_mask & DEBUG_SUSPEND)
++		print_active_locks(WAKE_LOCK_SUSPEND);
++	has_lock = has_wake_lock_locked(WAKE_LOCK_SUSPEND);
++	if (debug_mask & DEBUG_EXPIRE)
++		pr_info("expire_wake_locks: done, has_lock %ld\n", has_lock);
++	if (has_lock == 0)
++		queue_work(suspend_work_queue, &suspend_work);
++	spin_unlock_irqrestore(&list_lock, irqflags);
++}
++static DEFINE_TIMER(expire_timer, expire_wake_locks, 0, 0);
++
++static int power_suspend_late(struct device *dev)
++{
++	int ret = has_wake_lock(WAKE_LOCK_SUSPEND) ? -EAGAIN : 0;
++#ifdef CONFIG_WAKELOCK_STAT
++	wait_for_wakeup = !ret;
++#endif
++	if (debug_mask & DEBUG_SUSPEND)
++		pr_info("power_suspend_late return %d\n", ret);
++	return ret;
++}
++
++static struct dev_pm_ops power_driver_pm_ops = {
++	.suspend_noirq = power_suspend_late,
++};
++
++static struct platform_driver power_driver = {
++	.driver.name = "power",
++	.driver.pm = &power_driver_pm_ops,
++};
++static struct platform_device power_device = {
++	.name = "power",
++};
++
++void wake_lock_init(struct wake_lock *lock, int type, const char *name)
++{
++	unsigned long irqflags = 0;
++
++	if (name)
++		lock->name = name;
++	BUG_ON(!lock->name);
++
++	if (debug_mask & DEBUG_WAKE_LOCK)
++		pr_info("wake_lock_init name=%s\n", lock->name);
++#ifdef CONFIG_WAKELOCK_STAT
++	lock->stat.count = 0;
++	lock->stat.expire_count = 0;
++	lock->stat.wakeup_count = 0;
++	lock->stat.total_time = ktime_set(0, 0);
++	lock->stat.prevent_suspend_time = ktime_set(0, 0);
++	lock->stat.max_time = ktime_set(0, 0);
++	lock->stat.last_time = ktime_set(0, 0);
++#endif
++	lock->flags = (type & WAKE_LOCK_TYPE_MASK) | WAKE_LOCK_INITIALIZED;
++
++	INIT_LIST_HEAD(&lock->link);
++	spin_lock_irqsave(&list_lock, irqflags);
++	list_add(&lock->link, &inactive_locks);
++	spin_unlock_irqrestore(&list_lock, irqflags);
++}
++EXPORT_SYMBOL(wake_lock_init);
++
++void wake_lock_destroy(struct wake_lock *lock)
++{
++	unsigned long irqflags;
++	if (debug_mask & DEBUG_WAKE_LOCK)
++		pr_info("wake_lock_destroy name=%s\n", lock->name);
++	spin_lock_irqsave(&list_lock, irqflags);
++	lock->flags &= ~WAKE_LOCK_INITIALIZED;
++#ifdef CONFIG_WAKELOCK_STAT
++	if (lock->stat.count) {
++		deleted_wake_locks.stat.count += lock->stat.count;
++		deleted_wake_locks.stat.expire_count += lock->stat.expire_count;
++		deleted_wake_locks.stat.total_time =
++			ktime_add(deleted_wake_locks.stat.total_time,
++				  lock->stat.total_time);
++		deleted_wake_locks.stat.prevent_suspend_time =
++			ktime_add(deleted_wake_locks.stat.prevent_suspend_time,
++				  lock->stat.prevent_suspend_time);
++		deleted_wake_locks.stat.max_time =
++			ktime_add(deleted_wake_locks.stat.max_time,
++				  lock->stat.max_time);
++	}
++#endif
++	list_del(&lock->link);
++	spin_unlock_irqrestore(&list_lock, irqflags);
++}
++EXPORT_SYMBOL(wake_lock_destroy);
++
++static void wake_lock_internal(
++	struct wake_lock *lock, long timeout, int has_timeout)
++{
++	int type;
++	unsigned long irqflags;
++	long expire_in;
++
++	spin_lock_irqsave(&list_lock, irqflags);
++	type = lock->flags & WAKE_LOCK_TYPE_MASK;
++	BUG_ON(type >= WAKE_LOCK_TYPE_COUNT);
++	BUG_ON(!(lock->flags & WAKE_LOCK_INITIALIZED));
++#ifdef CONFIG_WAKELOCK_STAT
++	if (type == WAKE_LOCK_SUSPEND && wait_for_wakeup) {
++		if (debug_mask & DEBUG_WAKEUP)
++			pr_info("wakeup wake lock: %s\n", lock->name);
++		wait_for_wakeup = 0;
++		lock->stat.wakeup_count++;
++	}
++	if ((lock->flags & WAKE_LOCK_AUTO_EXPIRE) &&
++	    (long)(lock->expires - jiffies) <= 0) {
++		wake_unlock_stat_locked(lock, 0);
++		lock->stat.last_time = ktime_get();
++	}
++#endif
++	if (!(lock->flags & WAKE_LOCK_ACTIVE)) {
++		lock->flags |= WAKE_LOCK_ACTIVE;
++#ifdef CONFIG_WAKELOCK_STAT
++		lock->stat.last_time = ktime_get();
++#endif
++	}
++	list_del(&lock->link);
++	if (has_timeout) {
++		if (debug_mask & DEBUG_WAKE_LOCK)
++			pr_info("wake_lock: %s, type %d, timeout %ld.%03lu\n",
++				lock->name, type, timeout / HZ,
++				(timeout % HZ) * MSEC_PER_SEC / HZ);
++		lock->expires = jiffies + timeout;
++		lock->flags |= WAKE_LOCK_AUTO_EXPIRE;
++		list_add_tail(&lock->link, &active_wake_locks[type]);
++	} else {
++		if (debug_mask & DEBUG_WAKE_LOCK)
++			pr_info("wake_lock: %s, type %d\n", lock->name, type);
++		lock->expires = LONG_MAX;
++		lock->flags &= ~WAKE_LOCK_AUTO_EXPIRE;
++		list_add(&lock->link, &active_wake_locks[type]);
++	}
++	if (type == WAKE_LOCK_SUSPEND) {
++		current_event_num++;
++#ifdef CONFIG_WAKELOCK_STAT
++		if (lock == &main_wake_lock)
++			update_sleep_wait_stats_locked(1);
++		else if (!wake_lock_active(&main_wake_lock))
++			update_sleep_wait_stats_locked(0);
++#endif
++		if (has_timeout)
++			expire_in = has_wake_lock_locked(type);
++		else
++			expire_in = -1;
++		if (expire_in > 0) {
++			if (debug_mask & DEBUG_EXPIRE)
++				pr_info("wake_lock: %s, start expire timer, "
++					"%ld\n", lock->name, expire_in);
++			mod_timer(&expire_timer, jiffies + expire_in);
++		} else {
++			if (del_timer(&expire_timer))
++				if (debug_mask & DEBUG_EXPIRE)
++					pr_info("wake_lock: %s, stop expire timer\n",
++						lock->name);
++			if (expire_in == 0)
++				queue_work(suspend_work_queue, &suspend_work);
++		}
++	}
++	spin_unlock_irqrestore(&list_lock, irqflags);
++}
++
++void wake_lock(struct wake_lock *lock)
++{
++	wake_lock_internal(lock, 0, 0);
++}
++EXPORT_SYMBOL(wake_lock);
++
++void wake_lock_timeout(struct wake_lock *lock, long timeout)
++{
++	wake_lock_internal(lock, timeout, 1);
++}
++EXPORT_SYMBOL(wake_lock_timeout);
++
++void wake_unlock(struct wake_lock *lock)
++{
++	int type;
++	unsigned long irqflags;
++	spin_lock_irqsave(&list_lock, irqflags);
++	type = lock->flags & WAKE_LOCK_TYPE_MASK;
++#ifdef CONFIG_WAKELOCK_STAT
++	wake_unlock_stat_locked(lock, 0);
++#endif
++	if (debug_mask & DEBUG_WAKE_LOCK)
++		pr_info("wake_unlock: %s\n", lock->name);
++	lock->flags &= ~(WAKE_LOCK_ACTIVE | WAKE_LOCK_AUTO_EXPIRE);
++	list_del(&lock->link);
++	list_add(&lock->link, &inactive_locks);
++	if (type == WAKE_LOCK_SUSPEND) {
++		long has_lock = has_wake_lock_locked(type);
++		if (has_lock > 0) {
++			if (debug_mask & DEBUG_EXPIRE)
++				pr_info("wake_unlock: %s, start expire timer, "
++					"%ld\n", lock->name, has_lock);
++			mod_timer(&expire_timer, jiffies + has_lock);
++		} else {
++			if (del_timer(&expire_timer))
++				if (debug_mask & DEBUG_EXPIRE)
++					pr_info("wake_unlock: %s, stop expire "
++						"timer\n", lock->name);
++			if (has_lock == 0)
++				queue_work(suspend_work_queue, &suspend_work);
++		}
++		if (lock == &main_wake_lock) {
++			if (debug_mask & DEBUG_SUSPEND)
++				print_active_locks(WAKE_LOCK_SUSPEND);
++#ifdef CONFIG_WAKELOCK_STAT
++			update_sleep_wait_stats_locked(0);
++#endif
++		}
++	}
++	spin_unlock_irqrestore(&list_lock, irqflags);
++}
++EXPORT_SYMBOL(wake_unlock);
++
++int wake_lock_active(struct wake_lock *lock)
++{
++	return !!(lock->flags & WAKE_LOCK_ACTIVE);
++}
++EXPORT_SYMBOL(wake_lock_active);
++
++static int wakelock_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, wakelock_stats_show, NULL);
++}
++
++static const struct file_operations wakelock_stats_fops = {
++	.owner = THIS_MODULE,
++	.open = wakelock_stats_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++static int __init wakelocks_init(void)
++{
++	int ret;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(active_wake_locks); i++)
++		INIT_LIST_HEAD(&active_wake_locks[i]);
++
++#ifdef CONFIG_WAKELOCK_STAT
++	wake_lock_init(&deleted_wake_locks, WAKE_LOCK_SUSPEND,
++			"deleted_wake_locks");
++#endif
++	wake_lock_init(&main_wake_lock, WAKE_LOCK_SUSPEND, "main");
++	wake_lock(&main_wake_lock);
++	wake_lock_init(&unknown_wakeup, WAKE_LOCK_SUSPEND, "unknown_wakeups");
++	wake_lock_init(&suspend_backoff_lock, WAKE_LOCK_SUSPEND,
++		       "suspend_backoff");
++
++	ret = platform_device_register(&power_device);
++	if (ret) {
++		pr_err("wakelocks_init: platform_device_register failed\n");
++		goto err_platform_device_register;
++	}
++	ret = platform_driver_register(&power_driver);
++	if (ret) {
++		pr_err("wakelocks_init: platform_driver_register failed\n");
++		goto err_platform_driver_register;
++	}
++
++	suspend_work_queue = create_singlethread_workqueue("suspend");
++	if (suspend_work_queue == NULL) {
++		ret = -ENOMEM;
++		goto err_suspend_work_queue;
++	}
++
++#ifdef CONFIG_WAKELOCK_STAT
++	proc_create("wakelocks", S_IRUGO, NULL, &wakelock_stats_fops);
++#endif
++
++	return 0;
++
++err_suspend_work_queue:
++	platform_driver_unregister(&power_driver);
++err_platform_driver_register:
++	platform_device_unregister(&power_device);
++err_platform_device_register:
++	wake_lock_destroy(&suspend_backoff_lock);
++	wake_lock_destroy(&unknown_wakeup);
++	wake_lock_destroy(&main_wake_lock);
++#ifdef CONFIG_WAKELOCK_STAT
++	wake_lock_destroy(&deleted_wake_locks);
++#endif
++	return ret;
++}
++
++static void  __exit wakelocks_exit(void)
++{
++#ifdef CONFIG_WAKELOCK_STAT
++	remove_proc_entry("wakelocks", NULL);
++#endif
++	destroy_workqueue(suspend_work_queue);
++	platform_driver_unregister(&power_driver);
++	platform_device_unregister(&power_device);
++	wake_lock_destroy(&suspend_backoff_lock);
++	wake_lock_destroy(&unknown_wakeup);
++	wake_lock_destroy(&main_wake_lock);
++#ifdef CONFIG_WAKELOCK_STAT
++	wake_lock_destroy(&deleted_wake_locks);
++#endif
++}
++
++core_initcall(wakelocks_init);
++module_exit(wakelocks_exit);
+-- 
+2.19.0
+

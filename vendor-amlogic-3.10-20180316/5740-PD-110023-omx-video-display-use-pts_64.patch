@@ -1,0 +1,135 @@
+From 2364adc3f2bab979320b1a7c40b5a8b6433371fe Mon Sep 17 00:00:00 2001
+From: Xu Jintao <jintao.xu@amlogic.com>
+Date: Wed, 29 Jul 2015 14:05:15 +0800
+Subject: [PATCH 5740/5965] PD#110023: omx: video display use pts_64
+
+Change-Id: I2e158d4afb04762f0f3dbed1c71df99c4b8f78b1
+Signed-off-by: Xu Jintao <jintao.xu@amlogic.com>
+---
+ drivers/amlogic/amports/vh264.c        |  1 +
+ drivers/amlogic/amports/vh264_4k2k.c   |  4 +++-
+ drivers/amlogic/ionvideo/ionvideo.c    |  4 ++++
+ drivers/amlogic/video_dev/amlvideo.c   | 17 ++++++++++-------
+ include/linux/amlogic/amports/vframe.h |  1 +
+ 5 files changed, 19 insertions(+), 8 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/ionvideo/ionvideo.c
+ mode change 100755 => 100644 include/linux/amlogic/amports/vframe.h
+
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 121a225ca896..463c9bf03328 100644
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -2218,6 +2218,7 @@ static void stream_switching_do(struct work_struct *work)
+         switching_fense_vf = *p_last_vf;
+         switching_fense_vf.duration = 1;
+         switching_fense_vf.index = -1;
++		switching_fense_vf.flag |= VFRAME_FLAG_SWITCHING_FENSE;
+         if (do_copy) {
+ #ifdef NV21
+             switching_fense_vf.canvas0Addr = 0x010100;
+diff --git a/drivers/amlogic/amports/vh264_4k2k.c b/drivers/amlogic/amports/vh264_4k2k.c
+index df75b6f23ee1..7be46c128516 100755
+--- a/drivers/amlogic/amports/vh264_4k2k.c
++++ b/drivers/amlogic/amports/vh264_4k2k.c
+@@ -718,9 +718,10 @@ static irqreturn_t vh264_4k2k_isr(int irq, void *dev_id)
+             vfbuf_use[display_buff_id]++;
+ 
+             vf->pts = 0;
++            vf->pts_us64 = 0;
+ 
+             if ((!sync_outside) || (sync_outside && (slice_type == SLICE_TYPE_I))) {
+-                pts_lookup_offset(PTS_TYPE_VIDEO, stream_offset, &vf->pts, 0);
++                pts_lookup_offset_us64(PTS_TYPE_VIDEO, stream_offset, &vf->pts, 0, &vf->pts_us64);
+             }
+ 
+ #ifdef H264_4K2K_SINGLE_CORE
+@@ -728,6 +729,7 @@ static irqreturn_t vh264_4k2k_isr(int irq, void *dev_id)
+                 // for I only mode, ignore the PTS information and only uses 10fps for each I frame decoded
+                 if (p_last_vf) {
+                     vf->pts = 0;
++                    vf->pts_us64 = 0;
+                 }
+                 frame_dur = 96000/10;
+             }
+diff --git a/drivers/amlogic/ionvideo/ionvideo.c b/drivers/amlogic/ionvideo/ionvideo.c
+old mode 100755
+new mode 100644
+index 9805e79dc7e4..de977393bd56
+--- a/drivers/amlogic/ionvideo/ionvideo.c
++++ b/drivers/amlogic/ionvideo/ionvideo.c
+@@ -165,6 +165,10 @@ static int ionvideo_fillbuff(struct ionvideo_dev *dev, struct ionvideo_buffer *b
+     if (!vf) {
+         return -EAGAIN;
+     }
++    if (vf->flag & VFRAME_FLAG_SWITCHING_FENSE) {
++        vf_put(vf, RECEIVER_NAME);
++        return -EAGAIN;
++    }
+     if (vf && dev->once_record == 1) {
+     	dev->once_record = 0;
+     	if ((vf->type & VIDTYPE_INTERLACE_BOTTOM) == 0x3) {
+diff --git a/drivers/amlogic/video_dev/amlvideo.c b/drivers/amlogic/video_dev/amlvideo.c
+index 92f2d58b0c09..b2065706935a 100755
+--- a/drivers/amlogic/video_dev/amlvideo.c
++++ b/drivers/amlogic/video_dev/amlvideo.c
+@@ -65,7 +65,7 @@
+ static vfq_t q_ready;
+ extern bool omx_secret_mode;
+ static u8 first_frame;
+-static u32 vpts_last;
++static u64 last_pts_us64 = 0;
+ 
+ 
+ #define DUR2PTS(x) ((x) - ((x) >> 4))
+@@ -574,6 +574,7 @@ static int my_wb_debug = 0;
+ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     int ret = 0;
+     int omx_ready = 0;
++    u64 pts_us64 = 0;
+     if (omx_secret_mode == true) {
+         omx_ready = vfq_level(&q_ready);
+         if (omx_ready > AMLVIDEO_POOL_SIZE-1) {
+@@ -596,18 +597,20 @@ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     if (omx_secret_mode == true) {
+         vfq_push(&q_ready, ppmgrvf);
+         p->index = 0;
+-        p->timestamp.tv_sec = 0;
+ 
+-        if (ppmgrvf->pts) {
++        if (ppmgrvf->pts_us64) {
+             first_frame = 1;
+-            p->timestamp.tv_usec = ppmgrvf->pts;
++            pts_us64 = ppmgrvf->pts_us64;
+         } else if (first_frame == 0){
+             first_frame = 1;
+-            p->timestamp.tv_usec = 0;
++            pts_us64 = 0;
+         } else {
+-            p->timestamp.tv_usec = vpts_last + (DUR2PTS(ppmgrvf->duration));
++            pts_us64 = last_pts_us64 + (DUR2PTS(ppmgrvf->duration)*100/9);
+         }
+-        vpts_last = p->timestamp.tv_usec;
++        p->timestamp.tv_sec = pts_us64 >> 32;
++        p->timestamp.tv_usec = pts_us64 & 0xFFFFFFFF;
++        last_pts_us64 = pts_us64;
++
+         trace_dqbuf(p->index, my_wf_debug, my_wb_debug, omx_ready);
+         my_wf_debug = 0;
+         my_wb_debug = 0;
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+old mode 100755
+new mode 100644
+index 8e82b6884ac6..cc963a1b1065
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -59,6 +59,7 @@
+ #define DISP_RATIO_ASPECT_RATIO_MAX     0x3ff
+ 
+ #define VFRAME_FLAG_NO_DISCONTINUE      1
++#define VFRAME_FLAG_SWITCHING_FENSE     2
+ 
+ typedef enum pixel_aspect_ratio_e {
+         PIXEL_ASPECT_RATIO_1_1,
+-- 
+2.19.0
+

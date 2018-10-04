@@ -1,0 +1,111 @@
+From 1110c39ff82eb2bf411063526cf29f09fbdc91ce Mon Sep 17 00:00:00 2001
+From: Yue Wang <yue.wang@amlogic.com>
+Date: Mon, 19 Oct 2015 15:48:18 +0800
+Subject: [PATCH 5890/5965] PD#113213: usb: fix usb3.0 compatibility
+
+Change-Id: I1f1b2c55488721fb0a597decc91bd771910e54dd
+---
+ drivers/usb/core/hub.c  | 18 +++++++++++++++---
+ drivers/usb/dwc3/core.c |  8 ++++++--
+ include/linux/usb.h     |  3 ---
+ 3 files changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index f6e768f12adf..f250c5c3ef45 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -69,6 +69,11 @@ static struct task_struct *khubd_task;
+ 
+ /* cycle leds on hubs that aren't blinking for attention */
+ static bool blinkenlights = 0;
++
++#ifdef  CONFIG_AMLOGIC_USB_3
++static int aml_flag;
++#endif
++
+ module_param (blinkenlights, bool, S_IRUGO);
+ MODULE_PARM_DESC (blinkenlights, "true to cycle leds on hubs");
+ 
+@@ -4136,7 +4141,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
+ 				if (j >= SET_ADDRESS_TRIES) {
+ 					if (udev->speed == USB_SPEED_HIGH) {
+ 						aml_enable_scrambling();
+-						udev->aml_flag++;
++						aml_flag++;
+ 					}
+ 				}
+ #endif
+@@ -4388,9 +4393,9 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
+ 			usb_phy_notify_disconnect(hcd->phy, udev->speed);
+ 		usb_disconnect(&hub->ports[port1 - 1]->child);
+ #ifdef  CONFIG_AMLOGIC_USB_3
+-		if (udev->aml_flag) {
++		if (aml_flag) {
+ 			aml_disable_scrambling();
+-			udev->aml_flag = 0;
++			aml_flag = 0;
+ 		}
+ #endif
+ 	}
+@@ -4571,6 +4576,13 @@ done:
+ 	hub_port_disable(hub, port1, 1);
+ 	if (hcd->driver->relinquish_port && !hub->hdev->parent)
+ 		hcd->driver->relinquish_port(hcd, port1);
++
++#ifdef  CONFIG_AMLOGIC_USB_3
++	if (udev->speed == USB_SPEED_HIGH) {
++		aml_enable_scrambling();
++		aml_flag++;
++	}
++#endif
+ }
+ 
+ /* Returns 1 if there was a remote wakeup and a connect status change. */
+diff --git a/drivers/usb/dwc3/core.c b/drivers/usb/dwc3/core.c
+index 58f192c8f0b2..632e5a599d7a 100644
+--- a/drivers/usb/dwc3/core.c
++++ b/drivers/usb/dwc3/core.c
+@@ -332,10 +332,12 @@ void aml_enable_scrambling(void)
+ 	reg &= ~DWC3_GCTL_DISSCRAMBLE;
+ 	dwc3_writel(g_dwc->regs, DWC3_GCTL, reg);
+ 
+-	udelay(500);
++	udelay(100);
+ 
+ 	usb_phy_init(g_dwc->usb3_phy);
+ 
++	udelay(100);
++
+ 	return;
+ }
+ EXPORT_SYMBOL_GPL(aml_enable_scrambling);
+@@ -349,9 +351,11 @@ void aml_disable_scrambling(void)
+ 		reg |= DWC3_GCTL_DISSCRAMBLE;
+ 		dwc3_writel(g_dwc->regs, DWC3_GCTL, reg);
+ 
+-		udelay(500);
++		udelay(100);
+ 
+ 		usb_phy_init(g_dwc->usb3_phy);
++
++		udelay(100);
+ 	}
+ 
+ 	return;
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+index db541e334682..696e34de5a08 100644
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -570,9 +570,6 @@ struct usb_device {
+ 	struct usb3_lpm_parameters u1_params;
+ 	struct usb3_lpm_parameters u2_params;
+ 	unsigned lpm_disable_count;
+-#ifdef  CONFIG_AMLOGIC_USB_3
+-	unsigned aml_flag;
+-#endif
+ };
+ #define	to_usb_device(d) container_of(d, struct usb_device, dev)
+ 
+-- 
+2.19.0
+

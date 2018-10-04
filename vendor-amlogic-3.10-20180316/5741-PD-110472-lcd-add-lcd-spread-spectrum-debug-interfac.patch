@@ -1,0 +1,538 @@
+From 2624d30060f87347add89a59b302dbd09ceb3af0 Mon Sep 17 00:00:00 2001
+From: Jiaming Huang <jiaming.huang@amlogic.com>
+Date: Mon, 3 Aug 2015 17:36:03 +0800
+Subject: [PATCH 5741/5965] PD#110472: lcd: add lcd spread spectrum&debug
+ interface
+
+Change-Id: I17ca75e3c4b1fb494c6822503e3b2ea5b384c3bf
+---
+ drivers/amlogic/display/lcd/aml_lcd_tv.c      | 107 +++++++++++++--
+ drivers/amlogic/display/lcd/aml_lcd_tv.h      |   4 +-
+ .../display/lcd/aml_tv_lcd_port/lcd_common.c  | 124 +++++++++++++++++-
+ .../display/lcd/aml_tv_lcd_port/lcd_common.h  |  50 +++----
+ .../display/lcd/aml_tv_lcd_port/lvds_drv.c    |  25 +++-
+ .../display/lcd/aml_tv_lcd_port/vbyone_drv.c  |  41 +++---
+ 6 files changed, 288 insertions(+), 63 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index 7f287246c5a9..1ad6b8c4c7d1 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -35,19 +35,16 @@
+ #include <linux/amlogic/display/lcd.h>
+ 
+ #include "aml_lcd_tv.h"
++#include "aml_tv_lcd_port/lcd_common.h"
+ 
+-#define PANEL_NAME		"panel"
+-
+-extern unsigned int  lvds_init(struct aml_lcd *pDev);
+-extern unsigned int vbyone_init(struct aml_lcd *pDev);
+-
+-extern void _disable_display_driver(void);
++#define PANEL_NAME		"aml_lcd_tv"
+ 
+ static DEFINE_MUTEX(lcd_vout_mutex);
+-
+ static struct notifier_block lcd_power_nb;
+-
+ static char lcd_propname[30] = "lvds_0";
++struct aml_lcd *pDev = NULL;
++static struct class *tv_lcd_class;
++#define LCD_ARG_NUM 4
+ 
+ static const char* lcd_type_table[]={
+ 	"LVDS",
+@@ -61,8 +58,6 @@ unsigned int (*init_lcd_port[])(struct aml_lcd *pDev_t) = {
+ 	vbyone_init,
+ };
+ 
+-struct aml_lcd *pDev = NULL;
+-
+ static unsigned int lcd_output_mode = 0;
+ enum {
+ 	LCD_OUTPUT_MODE_1080P = 0,
+@@ -186,6 +181,89 @@ static int get_lcd_vmode(vmode_t mode)
+ 	return i;
+ }
+ 
++static ssize_t tv_lcd_spread_show(struct class *class,
++	struct class_attribute *attr, char *buf)
++{
++	int len = 0;
++	unsigned int level;
++
++	level = get_tv_lcd_spread_spectrum();
++	len += sprintf(buf + len, "level = %d\n",level);
++
++	return len;
++}
++
++static ssize_t tv_lcd_spread_stroe(struct class *cls,
++	struct class_attribute *attr, const char *buf, size_t count)
++{
++	static unsigned int level = 0;
++	sscanf(buf, "%d", (unsigned int*)&level);
++
++	set_tv_lcd_spread_spectrum(level);
++
++	return count;
++}
++
++static const char * lcd_usage_str =
++{"Usage:\n"
++"	 echo pattern <num> > debug ; bist pattern test, 0=pattern off, 1~7=different pattern\n"
++};
++
++static ssize_t tv_lcd_debug_show(struct class *class,
++	struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%s\n",lcd_usage_str);
++}
++
++static ssize_t tv_lcd_debug_store(struct class *cls,
++	struct class_attribute *attr, const char *buf, size_t count)
++{
++	int argn;
++	char * buf_work,*p,*para;
++	char * argv[LCD_ARG_NUM];
++	char cmd;
++	unsigned int value;
++
++	buf_work = kstrdup(buf, GFP_KERNEL);
++	p = buf_work;
++
++	for (argn = 0; argn < LCD_ARG_NUM; argn++) {
++		para = strsep(&p," ");
++		if (para == NULL)
++			break;
++		argv[argn] = para;
++		//printk("argv[%d] = %s\n",argn,para);
++	}
++
++	if (argn < 1 || argn > LCD_ARG_NUM)
++		goto end;
++
++	cmd = argv[0][0];
++	switch (cmd) {
++	case 'p':
++	case 'P':
++		if (argn != 2) {
++			printk("%s",lcd_usage_str);
++			goto end;
++		}
++		value = simple_strtol(argv[1], NULL, 16);
++		lcd_test(value, pDev);
++		break;
++	default:
++		goto end;
++	}
++
++	kfree(buf_work);
++	return count;
++end:
++	printk("error command!\n");
++	kfree(buf_work);
++	return -EINVAL;
++}
++
++static CLASS_ATTR(spread, S_IWUSR | S_IRUGO, tv_lcd_spread_show, tv_lcd_spread_stroe);
++static CLASS_ATTR(debug, S_IWUSR | S_IRUGO, tv_lcd_debug_show, tv_lcd_debug_store);
++
+ static int lcd_vmode_is_mached(int index)
+ {
+ 	if ((pDev->pConf->lcd_basic.h_active == lcd_info[index].width) &&
+@@ -724,6 +802,10 @@ static int lcd_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, pDev);
+ 
++	tv_lcd_class =  class_create(THIS_MODULE, PANEL_NAME);
++	ret = class_create_file(tv_lcd_class, &class_attr_spread );
++	ret = class_create_file(tv_lcd_class, &class_attr_debug );
++
+ 	lcd_power_nb.notifier_call = lcd_power_notifier;
+ 	ret = lcd_register_client(&lcd_power_nb);
+ 	if (ret) {
+@@ -741,6 +823,11 @@ static int lcd_remove(struct platform_device *pdev)
+ 	struct aml_lcd *pDev = platform_get_drvdata(pdev);
+ 
+ 	lcd_unregister_client(&lcd_power_nb);
++
++	class_remove_file(tv_lcd_class, &class_attr_debug);
++	class_remove_file(tv_lcd_class, &class_attr_spread);
++	class_destroy(tv_lcd_class);
++
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	kfree(pDev->pConf);
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.h b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+index 5edc0ca39f9e..16e86ac442ec 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.h
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+@@ -196,12 +196,12 @@ struct aml_lcd_platdata {
+ 	Lcd_Config_t *pConf;
+ };
+ 
+-
+-
+ #define TV_LCD_INFO(format, arg...) printk(KERN_INFO "lcd info: %s: " format, \
+ 		__FUNCTION__ , ## arg)
+ #define TV_LCD_ERR(format, arg...)  printk(KERN_ERR "lcd error: %s: " format, \
+ 		__FUNCTION__ , ## arg)
+ 
++extern unsigned int  lvds_init(struct aml_lcd *pDev);
++extern unsigned int vbyone_init(struct aml_lcd *pDev);
+ 
+ #endif
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+index 7541f57cfd99..5aa30ee8dce6 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+@@ -1,7 +1,129 @@
+-
++/*
++ * drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#include <mach/register.h>
++#include <linux/of.h>
++#include <linux/delay.h>
++#include <linux/types.h>
++#include <mach/am_regs.h>
++
++#include "../aml_lcd_tv.h"
+ #include "lcd_common.h"
+ 
+ static unsigned od_table[4] = {1, 2, 4, 8};
++#define TV_LCD_ENC_TST_NUM_MAX    8
++unsigned int ss_level = 0;
++
++static char *lcd_enc_tst_str[] = {
++	"0-None",        /* 0 */
++	"1-Color Bar",   /* 1 */
++	"2-Thin Line",   /* 2 */
++	"3-Dot Grid",    /* 3 */
++	"4-Gray",        /* 4 */
++	"5-Blue",         /* 5 */
++	"6-Red",       /* 6 */
++	"7-Green",        /* 7 */
++};
++
++static unsigned int lcd_enc_tst[][6] = {
++/*tst_mode,    Y,            Cb,        Cr,     tst_en,  vfifo_en */
++	{0,       0x200,   0x200,  0x200,   0,      1},  /* 0 */
++	{1,       0x200,   0x200,  0x200,   1,      0},  /* 1 */
++	{2,       0x200,   0x200,  0x200,   1,      0},  /* 2 */
++	{3,       0x200,   0x200,  0x200,   1,      0},  /* 3 */
++	{0,       0x200,   0x200,  0x200,   1,      0},  /* 4 */
++	{0,       0x130,   0x153,  0x3fd,   1,      0},  /* 5 */
++	{0,       0x256,   0x0ae,  0x055,   1,      0},  /* 6 */
++	{0,       0x074,   0x3fd,  0x1ad,   1,      0},  /* 7 */
++};
++
++static const char *ss_level_table[] = {
++  "0-0",
++  "1-0.4%",
++  "2-0.7%",
++  "3-1.7%",
++  "4-3%",
++};
++
++static unsigned int lcd_spread[][2] = {
++/*HHI_HDMI_PLL_CNTL3, HHI_HDMI_PLL_CNTL4 */
++	{0x135c5091,       0x801da72c},  /* 0% */
++	{0x1bdc5091,       0xa0b1a72c},  /* 0.4% */
++	{0x1bd05091,       0xbcb1a72c},  /* 0.7% */
++	{0x1bc85091,       0xbcb1a72c},  /* 1.7% */
++	{0x1bc45091,       0xbcb1a72c},  /* 3% */
++};
++
++int get_tv_lcd_spread_spectrum(void)
++{
++	unsigned int num = ss_level;
++	int i ;
++
++	for (i = 0; i < sizeof (ss_level_table) / sizeof (ss_level_table[1]); i++) {
++		pr_info("spread sprectrum: %s\n",ss_level_table[i]);
++	}
++
++	pr_info("\n");
++	pr_info("current spread sprectrum %d: %s\n",
++		num, ss_level_table[num]);
++	pr_info("HHI_HDMI_PLL_CNTL3 = 0x%x\n",
++		aml_read_reg32(P_HHI_HDMI_PLL_CNTL3));
++	pr_info("HHI_HDMI_PLL_CNTL4 = 0x%x\n",
++		aml_read_reg32(P_HHI_HDMI_PLL_CNTL4));
++
++	return num;
++}
++
++void  set_tv_lcd_spread_spectrum(unsigned int num)
++{
++	if (num < sizeof (ss_level_table) / sizeof (ss_level_table[1])) {
++		ss_level = num;
++		aml_write_reg32(P_HHI_HDMI_PLL_CNTL3, lcd_spread[num][0]);
++		aml_write_reg32(P_HHI_HDMI_PLL_CNTL4, lcd_spread[num][1]);
++		pr_info("show spread sprectrum %d: %s\n",
++			num, ss_level_table[num]);
++	} else {
++		ss_level = 0;
++		aml_write_reg32(P_HHI_HDMI_PLL_CNTL3, lcd_spread[0][0]);
++		aml_write_reg32(P_HHI_HDMI_PLL_CNTL4, lcd_spread[0][1]);
++		pr_info("error: Out of range ,not to spread spectrum!! \n ");
++	}
++}
++
++void lcd_test(unsigned int num, struct aml_lcd *pDev)
++{
++	num = (num >= TV_LCD_ENC_TST_NUM_MAX) ? 0 : num;
++	if (num >= 0) {
++		aml_write_reg32(P_ENCL_TST_MDSEL, lcd_enc_tst[num][0]);
++		aml_write_reg32(P_ENCL_TST_Y, lcd_enc_tst[num][1]);
++		aml_write_reg32(P_ENCL_TST_CB, lcd_enc_tst[num][2]);
++		aml_write_reg32(P_ENCL_TST_CR, lcd_enc_tst[num][3]);
++		aml_write_reg32(P_ENCL_TST_CLRBAR_STRT,
++						pDev->pConf->lcd_basic.video_on_pixel);
++		aml_write_reg32(P_ENCL_TST_CLRBAR_WIDTH,
++						(pDev->pConf->lcd_basic.h_active / 9));
++		aml_write_reg32(P_ENCL_TST_EN, lcd_enc_tst[num][4]);
++		aml_set_reg32_bits(P_ENCL_VIDEO_MODE_ADV, lcd_enc_tst[num][5], 3, 1);
++		pr_info("show test pattern %d: %s\n",
++			num, lcd_enc_tst_str[num]);
++	} else {
++		pr_info("disable test pattern\n");
++	}
++}
+ 
+ static int check_pll(struct pll_para_s *pll, unsigned int pll_fout)
+ {
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.h b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.h
+index 8d6d43cf4e2e..12d2d6d3bd00 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.h
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.h
+@@ -1,18 +1,6 @@
+ #ifndef LCD_COMMON_H
+ #define LCD_COMMON_H
+ 
+-
+-#include <mach/register.h>
+-
+-#include <linux/of.h>
+-
+-#include <linux/delay.h>
+-#include <linux/types.h>
+-
+-#include <mach/am_regs.h>
+-
+-#include "../aml_lcd_tv.h"
+-
+ #define VPP_OUT_SATURATE            (1 << 0)
+ /*
+ #define CLK_UTIL_VID_PLL_DIV_1      0
+@@ -35,8 +23,6 @@
+ #define CRT_VID_DIV_MAX				255
+ #define CRT_VID_MAX_CLK_IN		(3000 * 1000)
+ 
+-
+-
+ /* g9tv, g9bb divider */
+ #define CLK_DIV_I2O     0
+ #define CLK_DIV_O2I     1
+@@ -74,17 +60,17 @@ enum div_sel_e {
+ // for clk parameter auto generation
+ // ********************************************* */
+ /**** clk parameters bit ***/
+-	/* pll_ctrl */
+-	#define PLL_CTRL_LOCK			31
+-	#define PLL_CTRL_EN			30
+-	#define PLL_CTRL_RST			28
+-	#define PLL_CTRL_OD2			22 /* [23:22] */
+-	#define PLL_CTRL_OD3			18 /* [19:18] */
+-	#define PLL_CTRL_OD1			16 /* [17:16] */
+-	#define PLL_CTRL_N			9 /* [13:9] */
+-	#define PLL_CTRL_M			0 /* [8:0] */
+-
+-	/* div_ctrl */
++/* pll_ctrl */
++#define PLL_CTRL_LOCK			31
++#define PLL_CTRL_EN			30
++#define PLL_CTRL_RST			28
++#define PLL_CTRL_OD2			22 /* [23:22] */
++#define PLL_CTRL_OD3			18 /* [19:18] */
++#define PLL_CTRL_OD1			16 /* [17:16] */
++#define PLL_CTRL_N			9 /* [13:9] */
++#define PLL_CTRL_M			0 /* [8:0] */
++
++/* div_ctrl */
+ #define DIV_CTRL_CLK_DIV		0 /* [7:0] */
+ 
+ /* clk_ctrl */
+@@ -92,12 +78,10 @@ enum div_sel_e {
+ 
+ #define PLL_WAIT_LOCK_CNT		500
+ 
+-
+ #define FIN_FREQ				 (24 * 1000)
+ #define OD_SEL_MAX				3
+ #define CLK_CTRL_XD 			  0  //[7:0]
+ 
+-
+ #define PLL_VCO_MIN 		(3000 * 1000)
+ #define PLL_VCO_MAX 		(6000 * 1000)
+ 
+@@ -106,20 +90,22 @@ enum div_sel_e {
+ #define CRT_VID_MAX_CLK_IN		(3000 * 1000)
+ #define ENCL_MAX_CLK_IN 		(333 * 1000)
+ 
+-
+-
+-
+-
+ void lcd_clocks_set_vid_clk_div(int div_sel);
+ int set_hpll_pll(int freq, int od1,int hdmi_pll_cntl5);
+ void lcd_set_crt_video_enc(int vIdx, int inSel, int DivN);
+ void lcd_enable_crt_video_encl(int enable, int inSel);
+ void vpp_set_matrix_ycbcr2rgb (int vd1_or_vd2_or_post, int mode);
+- void _enable_vsync_interrupt(void);
++void _enable_vsync_interrupt(void);
+ 
+ void generate_clk_parameter(Lcd_Config_t *pconf);
+ void set_vclk_lcd(Lcd_Config_t *pconf);
+ void lcd_set_clk_div(unsigned long vid_div_reg);
+ 
++void _disable_display_driver(void);
++void lcd_test(unsigned int num, struct aml_lcd *pDev);
++
++void  set_tv_lcd_spread_spectrum(unsigned int num);
++int get_tv_lcd_spread_spectrum(void);
++
+ 
+ #endif
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lvds_drv.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lvds_drv.c
+index 04a9d0af3aff..1ec0bc255a30 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lvds_drv.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lvds_drv.c
+@@ -1,4 +1,27 @@
+-
++/*
++ * drivers/amlogic/display/lcd/aml_tv_lcd_port/lvds_drv.c
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#include <mach/register.h>
++#include <linux/of.h>
++#include <linux/delay.h>
++#include <linux/types.h>
++#include <mach/am_regs.h>
++
++#include "../aml_lcd_tv.h"
+ #include "lcd_common.h"
+ 
+ static void set_tcon_lvds(Lcd_Config_t *pConf)
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+index d9e0c9a17bfa..8a944acc31cb 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+@@ -1,50 +1,57 @@
+-
++/*
++ * drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#include <mach/register.h>
++#include <linux/of.h>
++#include <linux/delay.h>
++#include <linux/types.h>
++#include <mach/am_regs.h>
++
++#include "../aml_lcd_tv.h"
+ #include "lcd_common.h"
+ 
+-
+-
+ #define VBO_ENABLE_BIT  0
+ #define VBO_EBABLE_WID  1
+-
+ #define VBO_CTL_MODE_BIT      11
+ #define VBO_CTL_MODE_WID      5
+-
+ #define VBO_CTL_MODE2_BIT     0
+ #define VBO_CTL_MODE2_WID     4
+-
+ #define VBO_VIN2ENC_HVSYNC_DLY_BIT  9
+ #define VBO_VIN2ENC_HVSYNC_DLY_WID  1
+-
+ #define  VBO_LANE_NUM_BIT      0
+ #define  VBO_LANE_NUM_WID      3
+-
+ #define  VBO_LANE_REGION_BIT   4
+ #define  VBO_LANE_REGION_WID   2
+-
+ #define  VBO_SUBLANE_NUM_BIT   8
+ #define  VBO_SUBLANE_NUM_WID   3
+-
+ #define  VBO_BYTE_MODE_BIT     11
+ #define  VBO_BYTE_MODE_WID     2
+-
+ #define  VBO_VIN_HSYNC_POL_BIT 4
+ #define  VBO_VIN_HSYNC_POL_WID 1
+-
+ #define  VBO_VIN_VSYNC_POL_BIT 5
+ #define  VBO_VIN_VSYNC_POL_WID 1
+-
+ #define  VBO_VOUT_HSYNC_POL_BIT 6
+ #define  VBO_VOUT_HSYNC_POL_WID 1
+-
+ #define  VBO_VOUT_VSYNC_POL_BIT 7
+ #define  VBO_VOUT_VSYNC_POL_WID 1
+-
+ #define  VBO_VIN_PACK_BIT      8
+ #define  VBO_VIN_PACK_WID      3
+-
+ #define  VBO_VIN_BPP_BIT      11
+ #define  VBO_VIN_BPP_WID       2
+-
+ #define  VBO_PXL_CTR0_BIT     0
+ #define  VBO_PXL_CTR0_WID     4
+ 
+-- 
+2.19.0
+

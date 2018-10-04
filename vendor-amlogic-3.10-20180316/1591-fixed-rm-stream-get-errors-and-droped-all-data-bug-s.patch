@@ -1,0 +1,127 @@
+From 09c6f45bb222f9afc7e94ae28441819643be82da Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Tue, 22 Oct 2013 17:39:29 +0800
+Subject: [PATCH 1591/5965] fixed rm stream get errors and droped all data
+ bug,send AGAIN to top level for libplayer do reset.
+
+---
+ drivers/amlogic/amports/ampotrs_priv.h |  6 +++++
+ drivers/amlogic/amports/amstream.c     |  9 +++++++
+ drivers/amlogic/amports/rmparser.c     | 33 ++++++++++++++++++++++----
+ 3 files changed, 43 insertions(+), 5 deletions(-)
+ create mode 100755 drivers/amlogic/amports/ampotrs_priv.h
+
+diff --git a/drivers/amlogic/amports/ampotrs_priv.h b/drivers/amlogic/amports/ampotrs_priv.h
+new file mode 100755
+index 000000000000..cb0e664e1034
+--- /dev/null
++++ b/drivers/amlogic/amports/ampotrs_priv.h
+@@ -0,0 +1,6 @@
++#ifndef AMPORTS_PRIV_HEAD_HH
++#define AMPORTS_PRIV_HEAD_HH
++#include "streambuf.h"
++stream_buf_t *get_buf_by_type(u32  type);
++#endif
++
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index edd4cc1f0ce8..5c5759a1865c 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -61,6 +61,7 @@
+ #include "vdec.h"
+ #include "adec.h"
+ #include "rmparser.h"
++#include "ampotrs_priv.h"
+ 
+ #include <linux/of.h>
+ 
+@@ -345,6 +346,14 @@ static stream_buf_t bufs[BUF_MAX_NUM] = {
+         .first_tstamp = INVALID_PTS
+     }
+ };
++stream_buf_t *get_buf_by_type(u32  type)
++{
++   if(type<BUF_MAX_NUM)
++       return &bufs[type];
++   else 
++       return NULL;
++}
++
+ void set_sample_rate_info(int arg)
+ {
+     audio_dec_info.sample_rate = arg;
+diff --git a/drivers/amlogic/amports/rmparser.c b/drivers/amlogic/amports/rmparser.c
+index 86a031c2a23d..97efce12da38 100755
+--- a/drivers/amlogic/amports/rmparser.c
++++ b/drivers/amlogic/amports/rmparser.c
+@@ -36,6 +36,8 @@
+ #include "streambuf.h"
+ #include "streambuf_reg.h"
+ #include "rmparser.h"
++#include "ampotrs_priv.h"
++#include <linux/delay.h>
+ 
+ #define MANAGE_PTS
+ 
+@@ -161,6 +163,12 @@ void rmparser_release(void)
+ 
+     return;
+ }
++static inline u32 buf_wp(u32 type)
++{
++    return (type == BUF_TYPE_VIDEO) ? READ_VREG(VLD_MEM_VIFIFO_WP) :
++           (type == BUF_TYPE_AUDIO) ? READ_MPEG_REG(AIU_MEM_AIFIFO_MAN_WP) :
++                                      READ_MPEG_REG(PARSER_SUB_START_PTR);
++}
+ 
+ static ssize_t _rmparser_write(const char __user *buf, size_t count)
+ {
+@@ -168,7 +176,7 @@ static ssize_t _rmparser_write(const char __user *buf, size_t count)
+     const char __user *p = buf;
+     u32 len;
+     int ret;
+-
++    u32 vwp,awp;
+     if (r > 0) {
+         len = min(r, (size_t)FETCHBUF_SIZE);
+ 
+@@ -179,7 +187,8 @@ static ssize_t _rmparser_write(const char __user *buf, size_t count)
+         fetch_done = 0;
+ 
+         wmb();
+-
++        vwp=buf_wp(BUF_TYPE_VIDEO);
++        awp=buf_wp(BUF_TYPE_AUDIO);
+         WRITE_MPEG_REG(PARSER_FETCH_ADDR, virt_to_phys((u8 *)fetchbuf));
+         
+         WRITE_MPEG_REG(PARSER_FETCH_CMD,
+@@ -203,9 +212,23 @@ static ssize_t _rmparser_write(const char __user *buf, size_t count)
+             return -ERESTARTSYS;
+         }
+ 
+-        p += len;
+-        r -= len;
+-        parse_halt = 0;
++        
++        if(vwp==buf_wp(BUF_TYPE_VIDEO) && awp==buf_wp(BUF_TYPE_AUDIO)){
++			if((parse_halt+1)%10==1)
++            printk("Video&Audio  WP not changed after write,video %x->%x,Audio:%x-->%x,parse_halt=%d\n",
++            vwp,buf_wp(BUF_TYPE_VIDEO),awp,buf_wp(BUF_TYPE_AUDIO),parse_halt);
++            parse_halt ++;/*wp not changed ,we think have bugs on parser now.*/
++            if(parse_halt > 10 && (stbuf_level(get_buf_by_type(BUF_TYPE_VIDEO))< 1000 || stbuf_level(get_buf_by_type(BUF_TYPE_AUDIO))< 100)) 
++            {/*reset while at  least one is underflow.*/
++                WRITE_MPEG_REG(PARSER_CONTROL, (ES_SEARCH | ES_PARSER_START));
++                printk("reset parse_control=%x\n",READ_MPEG_REG(PARSER_CONTROL));
++            }
++            return -EAGAIN;
++        }else{
++            parse_halt = 0;
++            p += len;
++            r -= len;
++        }
+     }   
+     return count - r;
+ }
+-- 
+2.19.0
+

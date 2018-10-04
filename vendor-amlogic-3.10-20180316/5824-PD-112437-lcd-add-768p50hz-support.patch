@@ -1,0 +1,230 @@
+From ac88dba8c3d6e9ccbe259910eaa5a6b4f94d2cfd Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Wed, 9 Sep 2015 11:10:49 +0800
+Subject: [PATCH 5824/5965] PD#112437: lcd: add 768p50hz support
+
+Change-Id: I1bbb380c705b467ebd5d28f03fe2425e95216792
+---
+ drivers/amlogic/display/lcd/aml_lcd_tv.c      | 80 +++++++++++--------
+ drivers/amlogic/display/lcd/aml_lcd_tv.h      |  2 +-
+ .../display/lcd/aml_tv_lcd_port/lcd_common.c  | 34 ++++----
+ 3 files changed, 66 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index 122f25146c74..1ed2c38c0767 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -65,6 +65,7 @@ enum {
+ 	LCD_OUTPUT_MODE_1080P = 0,
+ 	LCD_OUTPUT_MODE_1080P50HZ,
+ 	LCD_OUTPUT_MODE_768P60HZ,
++	LCD_OUTPUT_MODE_768P50HZ,
+ 	LCD_OUTPUT_MODE_4K2K60HZ420,
+ 	LCD_OUTPUT_MODE_4K2K50HZ420,
+ 	LCD_OUTPUT_MODE_4K2K60HZ,
+@@ -72,8 +73,7 @@ enum {
+ 	LCD_OUTPUT_MODE_MAX,
+ };
+ 
+-static const vinfo_t lcd_info[] =
+-{
++static const vinfo_t lcd_info[] = {
+ 	{
+ 		.name              = "1080p",
+ 		.mode              = VMODE_1080P,
+@@ -110,6 +110,18 @@ static const vinfo_t lcd_info[] =
+ 		.sync_duration_den = 1,
+ 		.viu_color_fmt = TVIN_RGB444,
+ 	},
++	{
++		.name              = "768p50hz",
++		.mode              = VMODE_768P_50HZ,
++		.width             = 1366,
++		.height            = 768,
++		.field_height      = 768,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 50,
++		.sync_duration_den = 1,
++		.viu_color_fmt = TVIN_RGB444,
++	},
+ 	{
+ 		.name              = "4k2k60hz420",
+ 		.mode              = VMODE_4K2K_60HZ_Y420,
+@@ -183,6 +195,36 @@ static int get_lcd_vmode(vmode_t mode)
+ 	return i;
+ }
+ 
++static int lcd_vmode_is_mached(int index)
++{
++	if ((pDev->pConf->lcd_basic.h_active == lcd_info[index].width) &&
++		(pDev->pConf->lcd_basic.v_active == lcd_info[index].height))
++		return 0;
++	else
++		return -1;
++}
++
++static const vinfo_t *get_valid_vinfo(char *mode)
++{
++	const vinfo_t *vinfo = NULL;
++	int i, count = ARRAY_SIZE(lcd_info);
++	int mode_name_len=0;
++	int ret;
++
++	for (i = 0; i < count; i++) {
++		if (strncmp(lcd_info[i].name, mode, strlen(lcd_info[i].name)) == 0) {
++			if ((vinfo == NULL) || (strlen(lcd_info[i].name) > mode_name_len)) {
++				ret = lcd_vmode_is_mached(i);
++				if (ret == 0) {
++					vinfo = &lcd_info[i];
++					mode_name_len = strlen(lcd_info[i].name);
++				}
++			}
++		}
++	}
++	return vinfo;
++}
++
+ static ssize_t tv_lcd_spread_show(struct class *class,
+ 	struct class_attribute *attr, char *buf)
+ {
+@@ -271,36 +313,6 @@ end:
+ static CLASS_ATTR(spread, S_IWUSR | S_IRUGO, tv_lcd_spread_show, tv_lcd_spread_stroe);
+ static CLASS_ATTR(debug, S_IWUSR | S_IRUGO, tv_lcd_debug_show, tv_lcd_debug_store);
+ 
+-static int lcd_vmode_is_mached(int index)
+-{
+-	if ((pDev->pConf->lcd_basic.h_active == lcd_info[index].width) &&
+-		(pDev->pConf->lcd_basic.v_active == lcd_info[index].height))
+-		return 0;
+-	else
+-		return -1;
+-}
+-
+-static const vinfo_t *get_valid_vinfo(char *mode)
+-{
+-	const vinfo_t *vinfo = NULL;
+-	int i, count = ARRAY_SIZE(lcd_info);
+-	int mode_name_len=0;
+-	int ret;
+-
+-	for (i = 0; i < count; i++) {
+-		if (strncmp(lcd_info[i].name, mode, strlen(lcd_info[i].name)) == 0) {
+-			if ((vinfo == NULL) || (strlen(lcd_info[i].name) > mode_name_len)) {
+-				ret = lcd_vmode_is_mached(i);
+-				if (ret == 0) {
+-					vinfo = &lcd_info[i];
+-					mode_name_len = strlen(lcd_info[i].name);
+-				}
+-			}
+-		}
+-	}
+-	return vinfo;
+-}
+-
+ #ifdef CONFIG_USE_OF
+ static inline int aml_lcd_get_property_string(struct device_node *np,
+ 	const char *propname, const char **out_string)
+@@ -708,6 +720,7 @@ static int lcd_set_current_vmode(vmode_t mode)
+ 		case VMODE_1080P:
+ 		case VMODE_1080P_50HZ:
+ 		case VMODE_768P:
++		case VMODE_768P_50HZ:
+ 		case VMODE_4K2K_60HZ_Y420:
+ 		case VMODE_4K2K_50HZ_Y420:
+ 		case VMODE_4K2K_60HZ:
+@@ -749,6 +762,7 @@ static int lcd_vmode_is_supported(vmode_t mode)
+ 	case VMODE_1080P:
+ 	case VMODE_1080P_50HZ:
+ 	case VMODE_768P:
++	case VMODE_768P_50HZ:
+ 	case VMODE_4K2K_60HZ_Y420:
+ 	case VMODE_4K2K_50HZ_Y420:
+ 	case VMODE_4K2K_60HZ:
+@@ -991,6 +1005,8 @@ int __init outputmode_setup(char *s)
+ 		lcd_output_mode = LCD_OUTPUT_MODE_4K2K50HZ;
+ 	} else  if (!strcmp(s,"768p60hz")){
+ 		lcd_output_mode = LCD_OUTPUT_MODE_768P60HZ;
++	} else  if (!strcmp(s,"768p50hz")){
++		lcd_output_mode = LCD_OUTPUT_MODE_768P50HZ;
+ 	} else {
+ 		lcd_output_mode = LCD_OUTPUT_MODE_MAX;
+ 		printk("the output mode is not support!\n");
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.h b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+index e61c496310e7..62f192005da3 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.h
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+@@ -26,7 +26,7 @@
+ 
+ #include <linux/amlogic/vout/vinfo.h>
+ 
+-#define LCD_TV_DRIVER_VERSION        "20150908"
++#define LCD_TV_DRIVER_VERSION        "20150909"
+ 
+ typedef enum {
+     OFF = 0,
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+index fffe2026e72e..43a33dfae298 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+@@ -39,24 +39,24 @@ static char *lcd_enc_tst_str[] = {
+ 	"7-Green",        /* 7 */
+ };
+ 
+-static unsigned int lcd_enc_tst[][6] = {
+-/*tst_mode,    Y,            Cb,        Cr,     tst_en,  vfifo_en */
+-	{0,       0x200,   0x200,  0x200,   0,      1},  /* 0 */
+-	{1,       0x200,   0x200,  0x200,   1,      0},  /* 1 */
+-	{2,       0x200,   0x200,  0x200,   1,      0},  /* 2 */
+-	{3,       0x200,   0x200,  0x200,   1,      0},  /* 3 */
+-	{0,       0x200,   0x200,  0x200,   1,      0},  /* 4 */
+-	{0,       0x130,   0x153,  0x3fd,   1,      0},  /* 5 */
+-	{0,       0x256,   0x0ae,  0x055,   1,      0},  /* 6 */
+-	{0,       0x074,   0x3fd,  0x1ad,   1,      0},  /* 7 */
++static unsigned int lcd_enc_tst[][7] = {
++/*tst_mode,    Y,       Cb,     Cr,     tst_en,  vfifo_en  rgbin*/
++	{0,    0x200,   0x200,  0x200,   0,      1,        3},  /* 0 */
++	{1,    0x200,   0x200,  0x200,   1,      0,        1},  /* 1 */
++	{2,    0x200,   0x200,  0x200,   1,      0,        1},  /* 2 */
++	{3,    0x200,   0x200,  0x200,   1,      0,        1},  /* 3 */
++	{0,    0x200,   0x200,  0x200,   1,      0,        1},  /* 4 */
++	{0,    0x130,   0x153,  0x3fd,   1,      0,        1},  /* 5 */
++	{0,    0x256,   0x0ae,  0x055,   1,      0,        1},  /* 6 */
++	{0,    0x074,   0x3fd,  0x1ad,   1,      0,        1},  /* 7 */
+ };
+ 
+ static const char *ss_level_table[] = {
+-  "0-0",
+-  "1-0.4%",
+-  "2-0.7%",
+-  "3-1.7%",
+-  "4-3%",
++	"0-0",
++	"1-0.4%",
++	"2-0.7%",
++	"3-1.7%",
++	"4-3%",
+ };
+ 
+ static unsigned int lcd_spread[][2] = {
+@@ -108,6 +108,7 @@ void lcd_test(unsigned int num, struct aml_lcd *pDev)
+ {
+ 	num = (num >= TV_LCD_ENC_TST_NUM_MAX) ? 0 : num;
+ 	if (num >= 0) {
++		aml_write_reg32(P_ENCL_VIDEO_RGBIN_CTRL, lcd_enc_tst[num][6]);
+ 		aml_write_reg32(P_ENCL_TST_MDSEL, lcd_enc_tst[num][0]);
+ 		aml_write_reg32(P_ENCL_TST_Y, lcd_enc_tst[num][1]);
+ 		aml_write_reg32(P_ENCL_TST_CB, lcd_enc_tst[num][2]);
+@@ -118,8 +119,7 @@ void lcd_test(unsigned int num, struct aml_lcd *pDev)
+ 						(pDev->pConf->lcd_basic.h_active / 9));
+ 		aml_write_reg32(P_ENCL_TST_EN, lcd_enc_tst[num][4]);
+ 		aml_set_reg32_bits(P_ENCL_VIDEO_MODE_ADV, lcd_enc_tst[num][5], 3, 1);
+-		pr_info("show test pattern %d: %s\n",
+-			num, lcd_enc_tst_str[num]);
++		pr_info("show test pattern: %s\n", lcd_enc_tst_str[num]);
+ 	} else {
+ 		pr_info("disable test pattern\n");
+ 	}
+-- 
+2.19.0
+

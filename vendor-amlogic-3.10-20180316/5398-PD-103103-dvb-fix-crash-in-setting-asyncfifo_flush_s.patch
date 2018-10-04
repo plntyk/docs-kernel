@@ -1,0 +1,107 @@
+From be6d1b8bb8cd73ecee249b4539365e4897eaf321 Mon Sep 17 00:00:00 2001
+From: Zhiqiang Han <zhiqiang.han@amlogic.com>
+Date: Fri, 6 Feb 2015 14:32:50 +0800
+Subject: [PATCH 5398/5965] PD #103103: dvb: fix crash in setting
+ asyncfifo_flush_size
+
+Change-Id: Ic744b0d22e5f0b4015f23ba848f7f8f9ae058c7b
+---
+ drivers/amlogic/dvb_tv/aml_dmx.c | 28 +++++++++++++++++++---------
+ 1 file changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_dmx.c b/drivers/amlogic/dvb_tv/aml_dmx.c
+index bfadcc3b4745..211434b64fcb 100755
+--- a/drivers/amlogic/dvb_tv/aml_dmx.c
++++ b/drivers/amlogic/dvb_tv/aml_dmx.c
+@@ -1115,12 +1115,13 @@ static int asyncfifo_alloc_buffer(struct aml_asyncfifo *afifo)
+ 	return 0;
+ }
+ 
+-int async_fifo_init(struct aml_asyncfifo *afifo)
++int async_fifo_init(struct aml_asyncfifo *afifo, int initirq)
+ {
+ 	int irq;
+ 
+ 	if (afifo->init)
+ 		return 0;
++
+ 	afifo->source  = AM_DMX_MAX;
+ 	afifo->pages = 0;
+ 	afifo->buf_toggle = 0;
+@@ -1132,8 +1133,12 @@ int async_fifo_init(struct aml_asyncfifo *afifo)
+ 		/*Do not return error*/
+ 		return 0;
+ 	}
++
+ 	tasklet_init(&afifo->asyncfifo_tasklet, dvr_irq_bh_handler, (unsigned long)afifo);
+-	irq = request_irq(afifo->asyncfifo_irq, dvr_irq_handler, IRQF_SHARED, "dvr irq", afifo);
++	if (initirq)
++		irq = request_irq(afifo->asyncfifo_irq, dvr_irq_handler, IRQF_SHARED, "dvr irq", afifo);
++	else
++		enable_irq(afifo->asyncfifo_irq);
+ 
+ 	/*alloc buffer*/
+ 	asyncfifo_alloc_buffer(afifo);
+@@ -1143,10 +1148,11 @@ int async_fifo_init(struct aml_asyncfifo *afifo)
+ 	return 0;
+ }
+ 
+-int async_fifo_deinit(struct aml_asyncfifo *afifo)
++int async_fifo_deinit(struct aml_asyncfifo *afifo, int freeirq)
+ {
+ 	if (! afifo->init)
+ 		return 0;
++
+ 	CLEAR_ASYNC_FIFO_REG_MASK(afifo->id, REG1, 1 << ASYNC_FIFO_FLUSH_EN);
+ 	CLEAR_ASYNC_FIFO_REG_MASK(afifo->id, REG2, 1 << ASYNC_FIFO_FILL_EN);
+ 	if (afifo->pages) {
+@@ -1161,9 +1167,12 @@ int async_fifo_deinit(struct aml_asyncfifo *afifo)
+ 	afifo->buf_len = 0;
+ 
+ 	if (afifo->asyncfifo_irq != -1) {
+-		free_irq(afifo->asyncfifo_irq, afifo);
+-		tasklet_kill(&afifo->asyncfifo_tasklet);
++		if (freeirq)
++			free_irq(afifo->asyncfifo_irq, afifo);
++		else
++			disable_irq(afifo->asyncfifo_irq);
+ 	}
++	tasklet_kill(&afifo->asyncfifo_tasklet);
+ 
+ 	afifo->init = 0;
+ 
+@@ -2614,7 +2623,7 @@ int aml_asyncfifo_hw_init(struct aml_asyncfifo *afifo)
+ 	CLK_GATE_ON(ASYNC_FIFO);
+ #endif
+ 
+-	ret = async_fifo_init(afifo);
++	ret = async_fifo_init(afifo, 1);
+ 	spin_unlock_irqrestore(&dvb->slock, flags);
+ 
+ 	return ret;
+@@ -2625,8 +2634,9 @@ int aml_asyncfifo_hw_deinit(struct aml_asyncfifo *afifo)
+ 	struct aml_dvb *dvb = afifo->dvb;
+ 	unsigned long flags;
+ 	int ret;
++
+ 	spin_lock_irqsave(&dvb->slock, flags);
+-	ret = async_fifo_deinit(afifo);
++	ret = async_fifo_deinit(afifo, 1);
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	CLK_GATE_OFF(ASYNC_FIFO);
+@@ -2645,9 +2655,9 @@ int aml_asyncfifo_hw_reset(struct aml_asyncfifo *afifo)
+ 	spin_lock_irqsave(&dvb->slock, flags);
+ 	if (afifo->init) {
+ 		src = afifo->source;
+-		async_fifo_deinit(afifo);
++		async_fifo_deinit(afifo, 0);
+ 	}
+-	ret = async_fifo_init(afifo);
++	ret = async_fifo_init(afifo, 0);
+ 	/* restore the source */
+ 	if (src != -1) {
+ 		afifo->source = src;
+-- 
+2.19.0
+

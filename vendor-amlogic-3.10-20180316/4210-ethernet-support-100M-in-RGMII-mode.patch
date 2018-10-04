@@ -1,0 +1,437 @@
+From c67afa36457ca268920f5d0708df625f5e68c29b Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Thu, 22 May 2014 15:40:29 +0800
+Subject: [PATCH 4210/5965] ethernet: support 100M in RGMII mode
+
+---
+ arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd | 18 ++++++
+ arch/arm/configs/meson8b_defconfig            |  1 +
+ drivers/amlogic/ethernet/am_mdio.c            | 11 +++-
+ drivers/amlogic/ethernet/am_net8218.c         | 49 +++++++++++----
+ drivers/amlogic/ethernet/aml.dtd              |  2 +-
+ drivers/amlogic/ethernet/phy/am_rtl8211f.c    | 59 ++++++++++---------
+ mk_m8200b.sh                                  | 21 +++++++
+ sound/soc/aml/m8/aml_audio_hw.c               | 13 ++--
+ 8 files changed, 126 insertions(+), 48 deletions(-)
+ create mode 100755 mk_m8200b.sh
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
+index 4adf16f3920a..a6a78e23c7c9 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
+@@ -1876,6 +1876,24 @@ void root_func(){
+ 			amlogic,clrmask=<2 0x380000>;
+ 			amlogic,pins = "BOOT_11","BOOT_12","BOOT_13","BOOT_18";
+ 		};
++
++	};
++/// ***************************************************************************************
++///	-	Ethernet
++//$$ MODULE="Ethernet"
++//$$ DEVICE="meson-eth"
++//$$ L2 PROP_STR = "status"
++    meson-eth{
++		compatible = "amlogic,meson-eth";
++		dev_name = "meson-eth";
++		status = "okay";
++		ethbaseaddr = <0xfe0c0000>;
++		interruptnum = <40>;
++                savepowermode = <0>;
++                phy_interface = <0>;
++                reset_pin_enable = <0>;
++                reset_pin = "GPI0H_4";
++                reset_delay = <100>;
+ 	};
+ 
+ }; /* end of / */
+diff --git a/arch/arm/configs/meson8b_defconfig b/arch/arm/configs/meson8b_defconfig
+index f3ba767b4202..0a3f49df319c 100755
+--- a/arch/arm/configs/meson8b_defconfig
++++ b/arch/arm/configs/meson8b_defconfig
+@@ -177,6 +177,7 @@ CONFIG_AML_PHY=y
+ CONFIG_AML_LAN8720=y
+ CONFIG_AML_IP101_PHY=y
+ CONFIG_AML_KSZ8091=y
++CONFIG_AML_RTL8211F=y
+ CONFIG_AM_WIFI=y
+ CONFIG_AM_WIFI_SD_MMC=y
+ CONFIG_AM_WIFI_USB=y
+diff --git a/drivers/amlogic/ethernet/am_mdio.c b/drivers/amlogic/ethernet/am_mdio.c
+index 73ec66df5d1c..ab8edb215c24 100755
+--- a/drivers/amlogic/ethernet/am_mdio.c
++++ b/drivers/amlogic/ethernet/am_mdio.c
+@@ -107,9 +107,14 @@ int aml_mdio_register(struct net_device *ndev)
+ 			}
+ 			if (phydev->phy_id  != 0) {
+ 				//priv->phydev->addr = addr;
+-				priv->phy_addr = addr;
+-				phydev->irq = PHY_POLL;
+-				irqlist[addr] = PHY_POLL;
++				if ((phydev->phy_id  == 0x001cc916)&& (addr == 0)) 
++				{
++					NULL;
++				}else{
++					priv->phy_addr = addr;
++					phydev->irq = PHY_POLL;
++					irqlist[addr] = PHY_POLL;
++				}
+ 			}
+ 			pr_info("%s: PHY ID %08x at %d IRQ %d (%s)%s\n",
+ 					ndev->name, phydev->phy_id, addr,
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index b9d94a38f002..21bae782d0bc 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -116,6 +116,7 @@ static char DEFMAC[] = "\x00\x01\x23\xcd\xee\xaf";
+ void start_test(struct net_device *dev);
+ static void write_mac_addr(struct net_device *dev, char *macaddr);
+ static int ethernet_reset(struct net_device *dev);
++static void am_net_dump_macreg(void);
+ 
+ /* --------------------------------------------------------------------------*/
+ /**
+@@ -974,14 +975,17 @@ static void aml_adjust_link(struct net_device *dev)
+ 			new_state = 1;
+ 			if (!(phydev->duplex)) {
+ 				ctrl &= ~((1 << 11)|(7<< 17)|(3<<5));
+-				ctrl |= (4 << 17);
++				if(new_maclogic != 0)
++					ctrl |= (4 << 17);
+ 				ctrl |= (3 << 5);
+ 				g_rxnum = 128;
+ 				g_txnum = 128;
+ 			}
+ 			else {
+ 				ctrl &= ~((7 << 17)|(3 << 5));
+-				ctrl |= (1 << 11)|(2 << 17);
++				ctrl |= (1 << 11);
++				if(new_maclogic != 0)
++					ctrl |= (2 << 17);
+ 				g_rxnum = 128;
+ 				g_txnum = 128;
+ 			}
+@@ -995,6 +999,8 @@ static void aml_adjust_link(struct net_device *dev)
+ 				PERIPHS_CLEAR_BITS(P_PREG_ETHERNET_ADDR0, 1);
+ 			switch (phydev->speed) {
+ 				case 1000:
++					ctrl &= ~((1 << 14)|(1 << 15));//1000m 
++					ctrl |= (1 << 13);//1000m 
+ 					break;
+ 				case 100:
+ 					ctrl |= (1 << 14);
+@@ -1058,6 +1064,7 @@ static int aml_phy_init(struct net_device *dev)
+         priv->oldlink = 0;
+         priv->speed = 0;
+         priv->oldduplex = -1;
++		printk("phy_interface = %d\n",phy_interface);
+ 		if(phy_interface == 1)
+ 			priv->phy_interface = PHY_INTERFACE_MODE_RMII;
+ 		else
+@@ -1102,6 +1109,23 @@ static int aml_phy_init(struct net_device *dev)
+ 
+         return 0;
+ }
++static void read_macreg(void)
++{
++	int reg = 0;
++	int val = 0;
++	struct am_net_private *np = netdev_priv(my_ndev);
++
++	if ((np == NULL) || (np->dev == NULL))
++		return;
++
++	for (reg = ETH_MAC_0_Configuration; reg <= ETH_MAC_54_SGMII_RGMII_Status; reg += 0x4) {
++		val = readl((void*)(np->base_addr + reg));
++	}
++
++	for (reg = ETH_DMA_0_Bus_Mode; reg <= ETH_DMA_21_Curr_Host_Re_Buffer_Addr; reg += 0x4) {
++		val = readl((void*)(np->base_addr + reg));
++	}
++}
+ 
+ /* --------------------------------------------------------------------------*/
+ /**
+@@ -1136,14 +1160,13 @@ static int ethernet_reset(struct net_device *dev)
+ 
+ 	aml_mac_init(dev);
+ 
+-	//np->first_tx = 1;
++	np->first_tx = 1;
+ 	tmp = readl((void*)(np->base_addr + ETH_DMA_6_Operation_Mode));//tx enable
+ 	tmp |= (7 << 14) | (1 << 13);
+ 	writel(tmp, (void*)(np->base_addr + ETH_DMA_6_Operation_Mode));
+ 	tmp = readl((void*)(np->base_addr + ETH_MAC_6_Flow_Control));
+ 	tmp |= (1 << 1) | (1 << 0);
+ 	writel(tmp, (void*)(np->base_addr + ETH_MAC_6_Flow_Control));
+-
+ out_err:
+ 	return res;
+ }
+@@ -1267,7 +1290,9 @@ static int start_tx(struct sk_buff *skb, struct net_device *dev)
+ 	struct _tx_desc *tx;
+ 	unsigned long flags;
+ 	dev->trans_start = jiffies;
+-
++	if (np->first_tx) {
++		read_macreg();
++	}
+ 	if (!running) {
+ 		return -1;
+ 	}
+@@ -1850,7 +1875,7 @@ static int probe_init(struct net_device *ndev)
+ 	if (g_debug > 0) {
+ 		printk("ethernet base addr is %x\n", (unsigned int)ndev->base_addr);
+ 	}
+-	if(get_cpuid() == 0x1B)
++	if(phy_interface == 1)
+ 	 	new_maclogic=1;
+ 	res = setup_net_device(ndev);
+ 	if (res != 0) {
+@@ -2692,7 +2717,7 @@ static int am_net_cali(int argc, char **argv,int gate)
+ 	int cali_time;
+ 	int ii=0;
+ 	cali_start = gate;
+-	unsigned int val;
++	unsigned int value;
+ 	if ((argc < 4) || (argv == NULL) || (argv[0] == NULL)
+ 			|| (argv[1] == NULL) || (argv[2] == NULL)|| (argv[3] == NULL)) {
+ 		printk("Invalid syntax\n");
+@@ -2703,9 +2728,9 @@ static int am_net_cali(int argc, char **argv,int gate)
+ 	cali_time = simple_strtol(argv[3], NULL, 16);
+ 	aml_write_reg32((aml_read_reg32(P_PREG_ETH_REG0)|(cali_start << 25)|(cali_rise << 26)|(cali_sel << 27)),P_PREG_ETH_REG0);
+ 	for(ii=0;ii < cali_time;ii++){
+-		if(aml_read_reg32(P_PREG_ETH_REG1)>>15 & 0x1){
+-			printk("cali back: %d\n", aml_read_reg32(P_PREG_ETH_REG1));
+-			break;
++		value = aml_read_reg32(P_PREG_ETH_REG1);
++		if((value>>15) & 0x1){
++ printk("value == %x,  cali_len == %d, cali_idx == %d,  cali_sel =%d,  cali_rise = %d\n",value,(value>>5)&0x1f,(value&0x1f),(value>>11)&0x7,(value>>14)&0x1);
+ 		}
+ 	}
+ 
+@@ -2716,12 +2741,12 @@ static ssize_t eth_cali_store(struct class *class, struct class_attribute *attr,
+ {
+ 	int argc;
+ 	char *buff, *p, *para;
+-	char *argv[4];
++	char *argv[5];
+ 	char cmd;
+ 
+ 	buff = kstrdup(buf, GFP_KERNEL);
+ 	p = buff;
+-	for (argc = 0; argc < 5; argc++) {
++	for (argc = 0; argc < 6; argc++) {
+ 		para = strsep(&p, " ");
+ 		if (para == NULL)
+ 			break;
+diff --git a/drivers/amlogic/ethernet/aml.dtd b/drivers/amlogic/ethernet/aml.dtd
+index 927a22386c51..0d6d55086df4 100755
+--- a/drivers/amlogic/ethernet/aml.dtd
++++ b/drivers/amlogic/ethernet/aml.dtd
+@@ -8,7 +8,7 @@
+ 		ethbaseaddr = <0xfe0c0000>;
+ 		interruptnum = <40>;
+ 		savepowermode = <0>;
+-		phy_interface = <1>;
++		phy_interface = <0>;
+ 		reset_pin_enable = <0>;
+ 		reset_pin = "GPIOY_15";
+ 		reset_delay = <100>;
+diff --git a/drivers/amlogic/ethernet/phy/am_rtl8211f.c b/drivers/amlogic/ethernet/phy/am_rtl8211f.c
+index 7cb7b07bda07..19acb7467094 100755
+--- a/drivers/amlogic/ethernet/phy/am_rtl8211f.c
++++ b/drivers/amlogic/ethernet/phy/am_rtl8211f.c
+@@ -8,7 +8,8 @@
+ #define RTL821x_INER		0x12
+ #define RTL821x_INER_INIT	0x6400
+ #define RTL821x_INSR		0x13
+-
++#define RTL8211F_MMD_CTRL       0x0D
++#define RTL8211F_MMD_DATA       0x0E
+ #define	RTL8211E_INER_LINK_STAT	0x10
+ 
+ MODULE_DESCRIPTION("Realtek PHY driver");
+@@ -23,20 +24,6 @@ static int rtl821x_ack_interrupt(struct phy_device *phydev)
+ 
+ 	return (err < 0) ? err : 0;
+ }
+-
+-static int rtl8211b_config_intr(struct phy_device *phydev)
+-{
+-	int err;
+-
+-	if (phydev->interrupts == PHY_INTERRUPT_ENABLED)
+-		err = phy_write(phydev, RTL821x_INER,
+-				RTL821x_INER_INIT);
+-	else
+-		err = phy_write(phydev, RTL821x_INER, 0);
+-
+-	return err;
+-}
+-
+ static int rtl8211e_config_intr(struct phy_device *phydev)
+ {
+ 	int err;
+@@ -50,18 +37,41 @@ static int rtl8211e_config_intr(struct phy_device *phydev)
+ 	return err;
+ }
+ 
+-
++static int rtl8211e_config_init(struct phy_device *phydev)
++{
++	int val;
++/* we want to disable eee */
++        phy_write(phydev, RTL8211F_MMD_CTRL, 0x7);
++
++        phy_write(phydev, RTL8211F_MMD_DATA, 0x3c);
++
++        phy_write(phydev, RTL8211F_MMD_CTRL, 0x4007);
++
++        phy_write(phydev, RTL8211F_MMD_DATA, 0x0);
++        
++/* disable 1000m adv*/
++	val = phy_read(phydev, 0x9);
++	phy_write(phydev, 0x9, val&(~(1<<9)));
++  
++	return 0;
++	/* Enable Auto Power Saving mode */
++	
++}
+ /* RTL8211F */
+ static struct phy_driver rtl8211e_driver = {
+-	.phy_id		= 0x001cc915,
++	.phy_id		= 0x001cc916,
+ 	.name		= "RTL8211F Gigabit Ethernet",
+ 	.phy_id_mask	= 0x001fffff,
+-	.features	= PHY_GBIT_FEATURES,
+-	.flags		= PHY_HAS_INTERRUPT,
++//	.features	= PHY_GBIT_FEATURES,// close 1000m speed
++//	.flags		= PHY_HAS_INTERRUPT,
++	.features	= PHY_BASIC_FEATURES | SUPPORTED_Pause |
++			  SUPPORTED_Asym_Pause,
++	.flags		= PHY_HAS_INTERRUPT | PHY_HAS_MAGICANEG,
+ 	.config_aneg	= &genphy_config_aneg,
+ 	.read_status	= &genphy_read_status,
+-	.ack_interrupt	= &rtl821x_ack_interrupt,
+-	.config_intr	= &rtl8211e_config_intr,
++	.config_init	= &rtl8211e_config_init,
++//	.ack_interrupt	= &rtl821x_ack_interrupt,
++//	.config_intr	= &rtl8211e_config_intr,
+ 	.suspend	= genphy_suspend,
+ 	.resume		= genphy_resume,
+ 	.driver		= { .owner = THIS_MODULE,},
+@@ -69,17 +79,12 @@ static struct phy_driver rtl8211e_driver = {
+ 
+ static int __init realtek_init(void)
+ {
+-	int ret;
+ 
+-	ret = phy_driver_register(&rtl8211b_driver);
+-	if (ret < 0)
+-		return -ENODEV;
+ 	return phy_driver_register(&rtl8211e_driver);
+ }
+ 
+ static void __exit realtek_exit(void)
+ {
+-	phy_driver_unregister(&rtl8211b_driver);
+ 	phy_driver_unregister(&rtl8211e_driver);
+ }
+ 
+@@ -87,7 +92,7 @@ module_init(realtek_init);
+ module_exit(realtek_exit);
+ 
+ static struct mdio_device_id __maybe_unused realtek_tbl[] = {
+-	{ 0x001cc915, 0x001fffff },
++	{ 0x001cc916, 0x001fffff },
+ 	{ }
+ };
+ 
+diff --git a/mk_m8200b.sh b/mk_m8200b.sh
+new file mode 100755
+index 000000000000..c009d0226fb3
+--- /dev/null
++++ b/mk_m8200b.sh
+@@ -0,0 +1,21 @@
++#! /bin/bash
++
++make UIMAGE_COMPRESSION=none uImage -j
++#make modules
++
++#make meson8b_skt.dtd
++#make meson8b_skt.dtb
++make meson8b_m200_1G.dtd
++make meson8b_m200_1G.dtb
++
++#cd ../root/g18
++#find .| cpio -o -H newc | gzip -9 > ../ramdisk.img
++
++#rootfs.cpio -- original buildroot rootfs, busybox
++#m8rootfs.cpio -- build from buildroot
++ROOTFS="rootfs.cpio"
++
++#cd ..
++./mkbootimg --kernel ./arch/arm/boot/uImage --ramdisk ./${ROOTFS} --second ./arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtb --output ./m8200boot.img
++ls -l ./m8200boot.img
++echo "m8200boot.img for m8 baby done"
+diff --git a/sound/soc/aml/m8/aml_audio_hw.c b/sound/soc/aml/m8/aml_audio_hw.c
+index 3506e4f97751..bc3018e57064 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.c
++++ b/sound/soc/aml/m8/aml_audio_hw.c
+@@ -11,6 +11,9 @@
+ 
+ #include "aml_audio_hw.h"
+ 
++#define MPLL_I2S_CNTL		HHI_MPLL_CNTL7
++#define MPLL_958_CNTL		HHI_MPLL_CNTL8
++
+ #ifndef MREG_AIU_958_chstat0
+ #define AIU_958_chstat0	AIU_958_CHSTAT_L0
+ #endif
+@@ -758,7 +761,7 @@ void audio_set_clk(unsigned freq, unsigned fs_config)
+ 	WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL, 3, 9, 3);
+ 
+ 	// Configure Multi-Phase PLL2
+-	WRITE_MPEG_REG(HHI_MPLL_CNTL9, audio_clock_config[index][0]);
++	WRITE_MPEG_REG(MPLL_I2S_CNTL, audio_clock_config[index][0]);
+ 	// Set the XD value
+ 	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
+ 	// delay 5uS
+@@ -879,7 +882,7 @@ void audio_set_i2s_clk(unsigned freq, unsigned fs_config)
+ 	WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL, 3, 9, 2);
+ 
+ 	// Configure Multi-Phase PLL2
+-	WRITE_MPEG_REG(HHI_MPLL_CNTL9, audio_clock_config[index][0]);
++	WRITE_MPEG_REG(MPLL_I2S_CNTL, audio_clock_config[index][0]);
+ 	// Set the XD value
+ 	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
+ 
+@@ -1000,7 +1003,7 @@ void audio_set_958_clk(unsigned freq, unsigned fs_config)
+ 	WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL2, 2, 25, 2);
+ 
+ 	// Configure Multi-Phase PLL1
+-	WRITE_MPEG_REG(HHI_MPLL_CNTL8, audio_clock_config[index][0]);
++	WRITE_MPEG_REG(MPLL_958_CNTL, audio_clock_config[index][0]);
+ 	// Set the XD value
+ #if IEC958_OVERCLOCK	==1
+ 	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, (audio_clock_config[index][1]+1)/2 -1, 16, 8);
+@@ -1265,14 +1268,14 @@ unsigned int audio_hdmi_init_ready()
+ unsigned audio_spdifout_pg_enable(unsigned char enable)
+ {
+ 	if(enable){
+-			WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 1,14, 1);					
++			WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 1,14, 1);					
+ 			AUDIO_CLK_GATE_ON(AIU_IEC958);
+ 			AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
+ 	}
+ 	else{
+ 			AUDIO_CLK_GATE_OFF(AIU_IEC958);
+ 			AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);	
+-			WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 0,14, 1);								
++			WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 0,14, 1);								
+ 	}
+ 	return 0;
+ }
+-- 
+2.19.0
+

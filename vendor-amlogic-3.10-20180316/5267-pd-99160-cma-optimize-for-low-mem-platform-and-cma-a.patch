@@ -1,0 +1,216 @@
+From 5461e83914d30757970c4a634c009f2155dfe3e4 Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Fri, 26 Dec 2014 19:23:52 +0800
+Subject: [PATCH 5267/5965] pd#99160:cma: optimize for low mem platform and cma
+ allocation
+
+---
+ fs/block_dev.c      |  2 +-
+ include/linux/gfp.h |  5 +--
+ mm/page_alloc.c     | 74 ++++++++++++++++++++++++++++++++++++++++++---
+ mm/vmscan.c         |  2 +-
+ 4 files changed, 74 insertions(+), 9 deletions(-)
+ mode change 100644 => 100755 fs/block_dev.c
+ mode change 100644 => 100755 include/linux/gfp.h
+
+diff --git a/fs/block_dev.c b/fs/block_dev.c
+old mode 100644
+new mode 100755
+index 2abe67e33b21..02aaefcb6e7a
+--- a/fs/block_dev.c
++++ b/fs/block_dev.c
+@@ -539,7 +539,7 @@ struct block_device *bdget(dev_t dev)
+ 		inode->i_rdev = dev;
+ 		inode->i_bdev = bdev;
+ 		inode->i_data.a_ops = &def_blk_aops;
+-		mapping_set_gfp_mask(&inode->i_data, GFP_USER);
++		mapping_set_gfp_mask(&inode->i_data, GFP_USER | __GFP_BDEV);
+ 		inode->i_data.backing_dev_info = &default_backing_dev_info;
+ 		spin_lock(&bdev_lock);
+ 		list_add(&bdev->bd_list, &all_bdevs);
+diff --git a/include/linux/gfp.h b/include/linux/gfp.h
+old mode 100644
+new mode 100755
+index 0f615eb23d05..aeb4798ae343
+--- a/include/linux/gfp.h
++++ b/include/linux/gfp.h
+@@ -35,6 +35,7 @@ struct vm_area_struct;
+ #define ___GFP_NO_KSWAPD	0x400000u
+ #define ___GFP_OTHER_NODE	0x800000u
+ #define ___GFP_WRITE		0x1000000u
++#define ___GFP_BDEV		0x2000000u
+ /* If the above are modified, __GFP_BITS_SHIFT may need updating */
+ 
+ /*
+@@ -92,14 +93,14 @@ struct vm_area_struct;
+ #define __GFP_OTHER_NODE ((__force gfp_t)___GFP_OTHER_NODE) /* On behalf of other node */
+ #define __GFP_KMEMCG	((__force gfp_t)___GFP_KMEMCG) /* Allocation comes from a memcg-accounted resource */
+ #define __GFP_WRITE	((__force gfp_t)___GFP_WRITE)	/* Allocator intends to dirty page */
+-
++#define __GFP_BDEV ((__force gfp_t)___GFP_BDEV)
+ /*
+  * This may seem redundant, but it's a way of annotating false positives vs.
+  * allocations that simply cannot be supported (e.g. page tables).
+  */
+ #define __GFP_NOTRACK_FALSE_POSITIVE (__GFP_NOTRACK)
+ 
+-#define __GFP_BITS_SHIFT 25	/* Room for N __GFP_FOO bits */
++#define __GFP_BITS_SHIFT 26	/* Room for N __GFP_FOO bits */
+ #define __GFP_BITS_MASK ((__force gfp_t)((1 << __GFP_BITS_SHIFT) - 1))
+ 
+ /* This equals 0, but use constants in case they ever change */
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 8b877b2ad7d8..896743f24132 100755
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -938,7 +938,7 @@ static int fallbacks[MIGRATE_TYPES][4] = {
+ 	[MIGRATE_UNMOVABLE]   = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE,     MIGRATE_RESERVE },
+ 	[MIGRATE_RECLAIMABLE] = { MIGRATE_UNMOVABLE,   MIGRATE_MOVABLE,     MIGRATE_RESERVE },
+ #ifdef CONFIG_CMA
+-	[MIGRATE_MOVABLE]     = { MIGRATE_CMA,         MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_RESERVE },
++	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_CMA, MIGRATE_RESERVE },
+ 	[MIGRATE_CMA]         = { MIGRATE_RESERVE }, /* Never used */
+ #else
+ 	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE,   MIGRATE_RESERVE },
+@@ -1120,7 +1120,37 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
+ 						int migratetype)
+ {
+ 	struct page *page;
++#ifdef CONFIG_CMA
++	int i = 0;
++	int tmp_migratetype = MIGRATE_RESERVE;
++	int flags = migratetype & __GFP_BDEV;
++#endif
++
++#ifdef CONFIG_CMA
++	if(flags){
++		migratetype &= ~__GFP_BDEV;
++	}
++	if(migratetype == MIGRATE_MOVABLE){
++		for (i = 0;; i++) {
++			tmp_migratetype = fallbacks[migratetype][i];
++			if (tmp_migratetype == MIGRATE_CMA){
++				if(flags){
++					fallbacks[migratetype][i] = MIGRATE_RESERVE;
++					goto retry_reserve;
++				}
++				break;
++			}
++			if (tmp_migratetype == MIGRATE_RESERVE)
++				break;
++		}
++		if (tmp_migratetype == MIGRATE_CMA){
++			page = __rmqueue_smallest(zone, order, MIGRATE_CMA);
++			if(page)
++				goto alloc_page_success;
++		}
+ 
++	}
++#endif
+ retry_reserve:
+ 	page = __rmqueue_smallest(zone, order, migratetype);
+ 
+@@ -1137,7 +1167,12 @@ retry_reserve:
+ 			goto retry_reserve;
+ 		}
+ 	}
+-
++#ifdef CONFIG_CMA
++alloc_page_success:
++	if(flags && (migratetype == MIGRATE_MOVABLE) && (tmp_migratetype == MIGRATE_CMA)){
++		fallbacks[migratetype][i] = MIGRATE_CMA;
++	}
++#endif
+ 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
+ 	return page;
+ }
+@@ -1152,7 +1187,9 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
+ 			int migratetype, int cold)
+ {
+ 	int mt = migratetype, i;
+-
++#ifdef CONFIG_CMA
++	mt = migratetype & (~__GFP_BDEV);
++#endif
+ 	spin_lock(&zone->lock);
+ 	for (i = 0; i < count; ++i) {
+ 		struct page *page = __rmqueue(zone, order, migratetype);
+@@ -1175,7 +1212,11 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
+ 		if (IS_ENABLED(CONFIG_CMA)) {
+ 			mt = get_pageblock_migratetype(page);
+ 			if (!is_migrate_cma(mt) && !is_migrate_isolate(mt))
++#ifdef CONFIG_CMA
++				mt = migratetype & (~__GFP_BDEV);
++#else
+ 				mt = migratetype;
++#endif
+ 		}
+ 		set_freepage_migratetype(page, mt);
+ 		list = &page->lru;
+@@ -1513,9 +1554,19 @@ again:
+ 		pcp = &this_cpu_ptr(zone->pageset)->pcp;
+ 		list = &pcp->lists[migratetype];
+ 		if (list_empty(list)) {
++#ifdef CONFIG_CMA
++			if(gfp_flags & __GFP_BDEV){
++				migratetype |= __GFP_BDEV;
++			}
++#endif
+ 			pcp->count += rmqueue_bulk(zone, 0,
+ 					pcp->batch, list,
+ 					migratetype, cold);
++#ifdef CONFIG_CMA
++			if(gfp_flags & __GFP_BDEV){
++				migratetype &= (~__GFP_BDEV);
++			}
++#endif
+ 			if (unlikely(list_empty(list)))
+ 				goto failed;
+ 		}
+@@ -1524,7 +1575,20 @@ again:
+ 			page = list_entry(list->prev, struct page, lru);
+ 		else
+ 			page = list_entry(list->next, struct page, lru);
+-
++#ifdef CONFIG_CMA
++		if(gfp_flags & __GFP_BDEV){
++			if(get_pageblock_migratetype(page) == MIGRATE_CMA){
++				spin_lock(&zone->lock);
++				migratetype |= __GFP_BDEV;
++				page = __rmqueue(zone, order, migratetype);
++				migratetype &= (~__GFP_BDEV);
++				spin_unlock(&zone->lock);
++				if (!page)
++					goto failed;
++				goto alloc_sucess;
++			}
++		}
++#endif
+ 		list_del(&page->lru);
+ 		pcp->count--;
+ 	} else {
+@@ -1549,7 +1613,7 @@ again:
+ 		__mod_zone_freepage_state(zone, -(1 << order),
+ 					  get_pageblock_migratetype(page));
+ 	}
+-
++alloc_sucess:
+ 	__count_zone_vm_events(PGALLOC, zone, 1 << order);
+ 	zone_statistics(preferred_zone, zone, gfp_flags);
+ 	local_irq_restore(flags);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 6f9093183cbe..100821fa2130 100755
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -1818,7 +1818,7 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+ 	 * This scanning priority is essentially the inverse of IO cost.
+ 	 */
+ 	anon_prio = vmscan_swappiness(sc);
+-	if((totalram_pages <= 0x20000) && vm_swap_full()){
++	if(vm_swap_full()){
+ 		anon_prio >>= 1;
+ 	}
+ 	file_prio = 200 - anon_prio;
+-- 
+2.19.0
+

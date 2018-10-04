@@ -1,0 +1,98 @@
+From 8e67e4590e49825f24ae27426ec9eeb37a4aa8e2 Mon Sep 17 00:00:00 2001
+From: Zhi Zhou <zhi.zhou@amlogic.com>
+Date: Mon, 13 Jul 2015 04:56:55 -0400
+Subject: [PATCH 5695/5965] PD#108122: amports: fixe mpeg2 cc data crash
+ problem
+
+Change-Id: I96b7e5d6f1d419988606596b779bfbb29f478e32
+---
+ drivers/amlogic/amports/amstream.c       | 8 ++++----
+ drivers/amlogic/amports/vh264.c          | 2 +-
+ drivers/amlogic/amports/vmpeg12.c        | 9 +++++++--
+ include/linux/amlogic/amports/amstream.h | 2 +-
+ 4 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 0a6fe0bc608c..28839e5ae23f 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1058,12 +1058,12 @@ void init_userdata_fifo()
+     userdata_poc_wi = 0;
+ }
+ 
+-int wakeup_userdata_poll(int wp, int start_phyaddr, int buf_size, int data_length)
++int wakeup_userdata_poll(int wp, void *start_vaddr, int buf_size, int data_length)
+ {
+     stream_buf_t *userdata_buf = &bufs[BUF_TYPE_USERDATA];
+-	userdata_buf->buf_start= start_phyaddr;
+-	userdata_buf->buf_wp = wp;
+-	userdata_buf->buf_size = buf_size;
++    userdata_buf->buf_start= (u32)start_vaddr;
++    userdata_buf->buf_wp = wp;
++    userdata_buf->buf_size = buf_size;
+     atomic_set(&userdata_ready, 1);
+     userdata_length += data_length;
+     wake_up_interruptible(&amstream_userdata_wait);
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index bc8c285f6bdf..d17e1d0d73ea 100644
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -1523,7 +1523,7 @@ static void vh264_isr(void)
+         user_data_poc.poc_number = READ_VREG(AV_SCRATCH_M);
+         set_userdata_poc(user_data_poc);
+         WRITE_VREG(AV_SCRATCH_J, 0);
+-        wakeup_userdata_poll(sei_itu35_wp, (int)sei_data_buffer_remap, USER_DATA_SIZE, sei_itu35_data_length);
++        wakeup_userdata_poll(sei_itu35_wp, (void *)sei_data_buffer_remap, USER_DATA_SIZE, sei_itu35_data_length);
+     }
+ #ifdef HANDLE_H264_IRQ
+     return IRQ_HANDLED;
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index ddac69989df2..343e6afa41a3 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -156,6 +156,7 @@ static u32 frame_width, frame_height, frame_dur, frame_prog;
+ static struct timer_list recycle_timer;
+ static u32 stat;
+ static u32 buf_start, buf_size, ccbuf_phyAddress;
++static void *ccbuf_phyAddress_remap;
+ static DEFINE_SPINLOCK(lock);
+ 
+ static u32 frame_rpt_state;
+@@ -270,8 +271,8 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+ 
+     reg = READ_VREG(MREG_BUFFEROUT);
+ 
+-    if ((reg >> 16) == 0xfe) {	
+-        wakeup_userdata_poll(reg & 0xffff, ccbuf_phyAddress, CCBUF_SIZE, 0);
++    if ((reg >> 16) == 0xfe && ccbuf_phyAddress_remap != NULL) {
++        wakeup_userdata_poll(reg & 0xffff, ccbuf_phyAddress_remap, CCBUF_SIZE, 0);
+         WRITE_VREG(MREG_BUFFEROUT, 0);
+     }
+     else if (reg) {
+@@ -718,6 +719,10 @@ static void vmpeg12_canvas_init(void)
+     }
+ 
+     ccbuf_phyAddress = buf_start + 9 * decbuf_size;
++    ccbuf_phyAddress_remap = ioremap_nocache(ccbuf_phyAddress, CCBUF_SIZE);
++    if (!ccbuf_phyAddress_remap) {
++        printk("%s: Can not remap ccbuf_phyAddress\n", __FUNCTION__);
++    }
+     WRITE_VREG(MREG_CO_MV_START, buf_start + 9 * decbuf_size + CCBUF_SIZE);
+ 
+ }
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 77537e8ef06a..a11fbb14ca25 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -320,7 +320,7 @@ void set_trickmode_func(int (*trickmode_func)(unsigned long trickmode));
+ void wakeup_sub_poll(void);
+ void set_userdata_poc(struct userdata_poc_info_t poc);
+ void init_userdata_fifo(void);
+-int wakeup_userdata_poll(int wp, int start_phyaddr, int buf_size, int data_length);
++int wakeup_userdata_poll(int wp, void *start_phyaddr, int buf_size, int data_length);
+ int get_sub_type(void);
+ #endif
+ 
+-- 
+2.19.0
+

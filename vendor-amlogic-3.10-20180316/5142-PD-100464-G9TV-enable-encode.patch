@@ -1,0 +1,334 @@
+From 6746a54a40154876a5b59acec001793f1753955c Mon Sep 17 00:00:00 2001
+From: "kieth.liu" <kieth.liu@amlogic.com>
+Date: Mon, 1 Dec 2014 15:16:06 +0800
+Subject: [PATCH 5142/5965] PD#100464: G9TV enable encode
+
+Change-Id: I19765f898825c13e63fb612d9708f4d08a32f64c
+---
+ arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd |   2 +-
+ arch/arm/boot/dts/amlogic/mesong9tv_skt.dtd  |   2 +-
+ arch/arm/configs/mesong9tv_defconfig         |   2 +
+ drivers/amlogic/amports/encoder.c            | 100 ++++++++++++++-----
+ drivers/amlogic/amports/encoder.h            |   8 +-
+ drivers/amlogic/amports/encoder_mc.h         |   2 -
+ drivers/amlogic/amports/jpegenc.c            |  17 +++-
+ drivers/amlogic/amports/jpegenc.h            |  10 +-
+ 8 files changed, 108 insertions(+), 35 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+index a8fe4afbcd02..a6713e41cde7 100755
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+@@ -99,7 +99,7 @@
+ 
+ 		cma_0:region@0 {
+ 			region_name = "cma_0";
+-			reg = <0 0x00f00000>;
++			reg = <0 0x01200000>;
+ 			linux,contiguous-region;
+ 		};
+ 	};
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_skt.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_skt.dtd
+index a8fe4afbcd02..a6713e41cde7 100755
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_skt.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_skt.dtd
+@@ -99,7 +99,7 @@
+ 
+ 		cma_0:region@0 {
+ 			region_name = "cma_0";
+-			reg = <0 0x00f00000>;
++			reg = <0 0x01200000>;
+ 			linux,contiguous-region;
+ 		};
+ 	};
+diff --git a/arch/arm/configs/mesong9tv_defconfig b/arch/arm/configs/mesong9tv_defconfig
+index 089726252739..fad78c0771cc 100755
+--- a/arch/arm/configs/mesong9tv_defconfig
++++ b/arch/arm/configs/mesong9tv_defconfig
+@@ -203,6 +203,8 @@ CONFIG_AM_SI2157=y
+ CONFIG_MALI400=y
+ CONFIG_DEVTMPFS=y
+ CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_CMA=y
++CONFIG_CMA_SIZE_MBYTES=8
+ CONFIG_PROC_DEVICETREE=y
+ CONFIG_OF_SELFTEST=y
+ CONFIG_BLK_DEV_LOOP=y
+diff --git a/drivers/amlogic/amports/encoder.c b/drivers/amlogic/amports/encoder.c
+index de6790c2f9e1..ffdb12a77b77 100755
+--- a/drivers/amlogic/amports/encoder.c
++++ b/drivers/amlogic/amports/encoder.c
+@@ -291,11 +291,59 @@ extern bool jpegenc_on(void);
+ 
+ static void dma_flush(unsigned buf_start , unsigned buf_size );
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
+ static const u32 *select_ucode(u32 ucode_index)
+ {
+     const u32 * p = mix_dump_mc;
++    switch(ucode_index){
++        case UCODE_MODE_FULL:
++            if(enable_dblk)
++                p = mix_dump_mc_dblk;
++            else
++                p = mix_dump_mc;
++            break;
++        case UCODE_MODE_SW_MIX:
++            if(enable_dblk)
++                p = mix_sw_mc_hdec_m2_dblk;
++            else
++                p = mix_sw_mc;
++            break;
++        default:
++            break;
++    }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++    encode_manager.dblk_fix_flag = (p==mix_sw_mc_hdec_m2_dblk);
++    return p;
++}
++
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++static const u32 *select_ucode(u32 ucode_index)
++{
++    const u32 * p = mix_dump_mc;
++    switch(ucode_index){
++        case UCODE_MODE_FULL:
++            if(enable_dblk)
++                p = mix_dump_mc_dblk;
++            else
++                p = mix_dump_mc;
++            break;
++        case UCODE_MODE_SW_MIX:
++            if(enable_dblk)
++                p = mix_sw_mc_hdec_dblk;
++            else
++                p = mix_sw_mc;
++            break;
++        default:
++            break;
++    }
++    encode_manager.dblk_fix_flag = false;
++    return p;
++}
++
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++static const u32 *select_ucode(u32 ucode_index)
++{
++    const u32 * p = mix_dump_mc;
+     switch(ucode_index){
+         case UCODE_MODE_FULL:
+             if(enable_dblk)
+@@ -304,45 +352,40 @@ static const u32 *select_ucode(u32 ucode_index)
+                 p = mix_dump_mc;
+             break;
+         case UCODE_MODE_SW_MIX:
+-            if(IS_MESON_M8B_CPU){
++            if(IS_MESON_M8M2_CPU){
+                 if(enable_dblk)
+-                    p = mix_sw_mc_hdec_dblk;
++                    p = mix_sw_mc_hdec_m2_dblk;
+                 else
+                     p = mix_sw_mc;
+-            }
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+-            else if(IS_MESON_M8_CPU){
++            }else{
+                 if(enable_dblk == 1)
+                     p = mix_sw_mc_vdec2_dblk;
+                 else if (enable_dblk ==2)
+                     p = mix_sw_mc_hdec_dblk;
+                 else
+                     p = mix_sw_mc;
+-            }else if(IS_MESON_M8M2_CPU){
+-                if(enable_dblk)
+-                    p = mix_sw_mc_hdec_m2_dblk;
+-                else
+-                    p = mix_sw_mc;
+             }
+-#endif
+             break;
+         default:
+             break;
+     }
+ 
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+     if(IS_MESON_M8M2_CPU){
+         encode_manager.dblk_fix_flag = (p==mix_sw_mc_hdec_m2_dblk);
+-    }else
+-#endif
+-    {
++    }else{
+         encode_manager.dblk_fix_flag = false;
+     }
++    return p;
++}
++
+ #else
++static const u32 *select_ucode(u32 ucode_index)
++{
++    const u32 * p = mix_dump_mc;
+     encode_manager.dblk_fix_flag = false;
+-#endif
+     return p;
+ }
++#endif
+ 
+ /*output stream buffer setting*/
+ static void avc_init_output_buffer(encode_wq_t* wq)
+@@ -1335,8 +1378,9 @@ static s32 reload_mc(encode_wq_t* wq)
+     WRITE_VREG(DOS_SW_RESET1, 0);
+ 
+     udelay(10);
+-
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++    WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+     if(IS_MESON_M8M2_CPU){
+         WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
+     }else{
+@@ -1672,8 +1716,9 @@ s32 amvenc_avc_start(encode_wq_t* wq, int clock)
+ 
+     avc_poweron(clock);
+     avc_canvas_init(wq);
+-
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++    WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+     if(IS_MESON_M8M2_CPU){
+         WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
+     }else{
+@@ -2442,10 +2487,19 @@ static int encode_monitor_thread(void *data)
+ static int encode_start_monitor(void)
+ {
+     int ret =0;
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+-    if(IS_MESON_M8M2_CPU)
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++    clock_level = 3;
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++    if(IS_MESON_M8M2_CPU){
+         clock_level = 3;
++    }else{
++        clock_level = 1;
++    }
++#else
++    clock_level = 1;
+ #endif
++
+     encode_debug_level(LOG_LEVEL_DEBUG, "encode start monitor.\n");
+     encode_manager.process_queue_state=ENCODE_PROCESS_QUEUE_START;
+     encode_manager.encode_thread=kthread_run(encode_monitor_thread,&encode_manager,"encode_monitor");
+diff --git a/drivers/amlogic/amports/encoder.h b/drivers/amlogic/amports/encoder.h
+index e34e731c6985..4e668c385f56 100755
+--- a/drivers/amlogic/amports/encoder.h
++++ b/drivers/amlogic/amports/encoder.h
+@@ -10,13 +10,19 @@
+ #include <linux/wait.h>
+ #include <linux/slab.h>
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++#define AMVENC_DEV_VERSION "AML-G9"
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define AMVENC_DEV_VERSION "AML-M8"
++#else
++#define AMVENC_DEV_VERSION "AML-MT"
++#endif
++
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define INT_AMVENCODER INT_DOS_MAILBOX_2
+ #define HCODEC_IRQ_MBOX_CLR HCODEC_ASSIST_MBOX2_CLR_REG
+ #define HCODEC_IRQ_MBOX_MASK HCODEC_ASSIST_MBOX2_MASK
+ #else
+-//#define AMVENC_DEV_VERSION "AML-MT"
+ #define INT_AMVENCODER INT_MAILBOX_1A
+ #define HCODEC_IRQ_MBOX_CLR HCODEC_ASSIST_MBOX1_CLR_REG
+ #define HCODEC_IRQ_MBOX_MASK HCODEC_ASSIST_MBOX1_MASK
+diff --git a/drivers/amlogic/amports/encoder_mc.h b/drivers/amlogic/amports/encoder_mc.h
+index ae510d2c1938..b8471eb2c7ce 100755
+--- a/drivers/amlogic/amports/encoder_mc.h
++++ b/drivers/amlogic/amports/encoder_mc.h
+@@ -15,10 +15,8 @@ extern const u32 half_encoder_mc[];
+ extern const u32 mix_sw_mc[];
+ extern const u32 mix_sw_mc_hdec_dblk[];
+ extern const u32 mix_dump_mc_dblk[];
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+ extern const u32 mix_sw_mc_hdec_m2_dblk[];
+ extern const u32 mix_sw_mc_vdec2_dblk[];
+ extern const u32 vdec2_encoder_mc[];
+ #endif
+-#endif
+ #endif /* ENCODER_MC_H */
+diff --git a/drivers/amlogic/amports/jpegenc.c b/drivers/amlogic/amports/jpegenc.c
+index ef9b432224af..7ec7a4a58fb8 100755
+--- a/drivers/amlogic/amports/jpegenc.c
++++ b/drivers/amlogic/amports/jpegenc.c
+@@ -1315,14 +1315,14 @@ s32 jpegenc_loadmc(const u32 *p)
+ 
+ 
+ 
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TV
++#if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON8
+ #define  DMC_SEC_PORT8_RANGE0  0x840
+ #define  DMC_SEC_CTRL  0x829
+ #endif
+ 
+ static void enable_hcoder_ddr_access(void)
+ {
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TV
++#if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON8
+     WRITE_SEC_REG(DMC_SEC_PORT8_RANGE0 , 0xffff);
+     WRITE_SEC_REG(DMC_SEC_CTRL , 0x80000000);
+ #endif
+@@ -1428,11 +1428,18 @@ static s32 jpegenc_init(void)
+     int r;   
+     jpegenc_poweron();
+     jpegenc_canvas_init();
+-
+-    if(IS_MESON_M8M2_CPU)
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++    WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
++#elif MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++    if(IS_MESON_M8M2_CPU){
+         WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
+-    else
++    }else{
+         WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x2);
++    }
++#else
++    WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x2);
++#endif
++
+     debug_level(1,"start to load microcode\n");
+     if (jpegenc_loadmc(jpeg_encoder_mc) < 0) {
+         //amvdec_disable();
+diff --git a/drivers/amlogic/amports/jpegenc.h b/drivers/amlogic/amports/jpegenc.h
+index abec69cd068a..9cce45eff4c4 100755
+--- a/drivers/amlogic/amports/jpegenc.h
++++ b/drivers/amlogic/amports/jpegenc.h
+@@ -1,11 +1,17 @@
+ #ifndef __JPEG_ENC_H_
+ #define __JPEG_ENC_H_
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++#define JPEGENC_DEV_VERSION "AML-G9"
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define JPEGENC_DEV_VERSION "AML-M8"
+-#define INT_JPEG_ENCODER INT_DOS_MAILBOX_2
+ #else
+ #define JPEGENC_DEV_VERSION "AML-MT"
++#endif
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#define INT_JPEG_ENCODER INT_DOS_MAILBOX_2
++#else
+ #define INT_JPEG_ENCODER INT_MAILBOX_1A
+ #endif
+ 
+-- 
+2.19.0
+

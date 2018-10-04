@@ -1,0 +1,370 @@
+From ebe371801942a549dd8cf66bbc6825eb10554b2c Mon Sep 17 00:00:00 2001
+From: "zhenfei.li" <zhenfei.li@amlogic>
+Date: Thu, 19 Jun 2014 16:41:08 +0800
+Subject: [PATCH 4401/5965] PD #93380: power:clock gate : add 5 gates for
+ M8baby           1, lcd_driver : update CTS_ENCL_CLK_GATE controlling with
+ system power_gate API           2, hdmitx : add dynamic gate & power control 
+          3, CVBS : use CLK_GATE ctrl for cvbs of m8b.           4, backlight:
+ fix backlight sometimes wrong controlling status bug
+
+---
+ arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c | 91 ++++++++++++++++++-
+ .../mach-meson8b/include/mach/power_gate.h    | 32 ++++++-
+ drivers/amlogic/display/backlight/aml_bl.c    | 23 +++--
+ drivers/amlogic/display/vout/lcdoutc.c        |  7 +-
+ drivers/amlogic/display/vout/tvoutc.c         |  8 +-
+ .../linux/amlogic/hdmi_tx/hdmi_tx_module.h    | 11 +++
+ 6 files changed, 158 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
+index 07296c25b2f8..21fd872064c2 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
+@@ -109,6 +109,78 @@ static unsigned char use_tvenc_conf_flag=1;
+ 
+ static unsigned char cur_vout_index = 1; //CONFIG_AM_TV_OUTPUT2
+ 
++static void hdmi_tx_mode_ctrl(HDMI_Video_Codes_t vic)
++{
++    switch(vic) {
++    // Interlaced Mode
++    case HDMI_480i60:
++    case HDMI_480i60_16x9:
++    case HDMI_576i50:
++    case HDMI_576i50_16x9:
++        CLK_GATE_ON(CTS_ENCI);
++        CLK_GATE_OFF(CTS_ENCP);
++        CLK_GATE_ON(CTS_HDMI_TX_PIXEL);
++        hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 1, 15, 1);
++        break;
++    case HDMI_Unkown:
++        CLK_GATE_OFF(CTS_ENCI);
++        CLK_GATE_OFF(CTS_ENCP);
++        CLK_GATE_OFF(CTS_HDMI_TX_PIXEL);
++        hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 0, 15, 1);
++        break;
++    // Progressive Mode
++    default:
++        CLK_GATE_OFF(CTS_ENCI);
++        CLK_GATE_ON(CTS_ENCP);
++        CLK_GATE_ON(CTS_HDMI_TX_PIXEL);
++        hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 1, 15, 1);
++        break;
++    }
++}
++
++static void hdmi_tx_gate_pwr_ctrl(enum hd_ctrl cmd, void * data)
++{
++    hdmi_print(IMP, SYS "gate/pwr cmd: %d\n", cmd);
++    switch(cmd) {
++    case VID_EN:
++        {
++            hdmitx_dev_t* hdmitx_device = (hdmitx_dev_t *)data;
++            hdmi_tx_mode_ctrl(hdmitx_device->cur_VIC);
++        }
++        break;
++    case VID_DIS:
++        hdmi_tx_mode_ctrl(HDMI_Unkown);
++        break;
++    case AUD_EN:
++        if(i2s_to_spdif_flag == 1) {
++            hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 0, 13, 1);
++        }
++        else {
++            hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 1, 13, 1);
++        }
++        aml_set_reg32_bits(P_AIU_HDMI_CLK_DATA_CTRL, 2, 0, 2);
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 0, 10, 2);
++        break;
++    case AUD_DIS:
++        hdmi_set_reg_bits(OTHER_BASE_ADDR + HDMI_OTHER_CTRL1, 0, 13, 1);
++        aml_set_reg32_bits(P_AIU_HDMI_CLK_DATA_CTRL, 0, 0, 2);
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 3, 10, 2);
++        break;
++    case EDID_EN:
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 0, 8, 2);
++        break;
++    case EDID_DIS:
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 3, 8, 2);
++        break;
++    case HDCP_EN:
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 0, 12, 2);
++        break;
++    case HDCP_DIS:
++        aml_set_reg32_bits(P_HHI_MEM_PD_REG0, 3, 12, 2);
++        break;
++    }
++}
++
+ static unsigned long modulo(unsigned long a, unsigned long b)
+ {
+     if (a >= b) {
+@@ -980,13 +1052,19 @@ void hdmi_hw_init(hdmitx_dev_t* hdmitx_device)
+     aml_write_reg32(P_HHI_HDMI_AFC_CNTL, aml_read_reg32(P_HHI_HDMI_AFC_CNTL) | 0x3);
+ 
+     hdmi_wr_reg(TX_HDCP_MODE, 0x40);
+-
++#ifndef CONFIG_AML_HDMI_TX_HDCP
++    hdmi_tx_gate_pwr_ctrl(HDCP_DIS, NULL);
++#endif
+     vic = hdmitx_device->HWOp.GetState(hdmitx_device, STAT_VIDEO_VIC, 0);
+     if(vic != HDMI_Unkown) {
+         hdmi_print(IMP, SYS "ALREADY init VIC = %d\n", vic);
+         hdmitx_device->cur_VIC = vic;
++        hdmi_tx_gate_pwr_ctrl(VID_EN, hdmitx_device);
+         return;
+     }
++    else {
++        hdmi_tx_gate_pwr_ctrl(VID_DIS, NULL);
++    }
+     hdmi_phy_suspend();
+     //todo
+     aml_set_reg32_bits(P_PERIPHS_PIN_MUX_1, 0xf, 23, 4); //Enable reg1[23:24]:HDMI SDA(5v)/SCL(5V)
+@@ -1685,6 +1763,7 @@ static int hdmitx_set_phy(hdmitx_dev_t* hdmitx_device)
+ static int hdmitx_set_dispmode(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t *param)
+ {
+     if(param == NULL){ //disable HDMI
++        hdmi_tx_gate_pwr_ctrl(VID_DIS, hdmitx_device);
+         return 0;
+     }
+     else if((param->VIC!=HDMI_480p60)&&(param->VIC!=HDMI_480p60_16x9)
+@@ -1702,6 +1781,7 @@ static int hdmitx_set_dispmode(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t
+     else {
+     }
+     if((param->VIC==HDMI_4k2k_30)||(param->VIC==HDMI_4k2k_25)||(param->VIC==HDMI_4k2k_24)||(param->VIC==HDMI_4k2k_smpte_24)) {
++        hdmi_tx_gate_pwr_ctrl(VID_DIS, hdmitx_device);
+         printk("Not support HDMI format %d\n", param->VIC);
+     }
+ 
+@@ -1713,11 +1793,12 @@ static int hdmitx_set_dispmode(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t
+         param->color_depth = COLOR_36BIT;
+     else if(color_depth_f==48)
+         param->color_depth = COLOR_48BIT;
+-    hdmi_print(INF, SYS "set mode VIC %d (cd%d,cs%d,pm%d,vd%d,%x) \n",param->VIC, color_depth_f, color_space_f,power_mode,power_off_vdac_flag,serial_reg_val);
++    hdmi_print(INF, SYS " %d (cd%d,cs%d,pm%d,vd%d,%x) \n",param->VIC, color_depth_f, color_space_f,power_mode,power_off_vdac_flag,serial_reg_val);
+     if(color_space_f != 0){
+         param->color = color_space_f;
+     }
+-
++    hdmitx_device->cur_VIC = param->VIC;
++    hdmi_tx_gate_pwr_ctrl(VID_EN, hdmitx_device);
+     hdmi_hw_reset(hdmitx_device, param);    
+     hdmitx_set_pll(param);
+     hdmitx_set_phy(hdmitx_device);
+@@ -2687,6 +2768,7 @@ static int hdmitx_cntl_ddc(hdmitx_dev_t* hdmitx_device, unsigned cmd, unsigned a
+ 
+     switch(cmd) {
+     case DDC_RESET_EDID:
++        hdmi_tx_gate_pwr_ctrl(EDID_EN, NULL);
+         hdmi_set_reg_bits(TX_HDCP_EDID_CONFIG, 0, 6, 1);
+         hdmi_set_reg_bits(TX_SYS5_TX_SOFT_RESET_2, 1, 1, 1);
+         hdmi_set_reg_bits(TX_SYS5_TX_SOFT_RESET_2, 0, 1, 1);
+@@ -2699,6 +2781,7 @@ static int hdmitx_cntl_ddc(hdmitx_dev_t* hdmitx_device, unsigned cmd, unsigned a
+         break;
+     case DDC_EDID_GET_DATA:
+         hdmitx_getediddata(hdmitx_device, argv);
++        hdmi_tx_gate_pwr_ctrl(EDID_DIS, NULL);
+         break;
+     case DDC_PIN_MUX_OP:
+         if(argv == PIN_MUX) {
+@@ -2719,9 +2802,11 @@ static int hdmitx_cntl_ddc(hdmitx_dev_t* hdmitx_device, unsigned cmd, unsigned a
+         break;
+     case DDC_HDCP_OP:
+         if(argv == HDCP_ON) {
++            hdmi_tx_gate_pwr_ctrl(HDCP_EN, NULL);
+             hdmi_set_reg_bits(TX_HDCP_MODE, 1, 7, 1);
+         }
+         if(argv == HDCP_OFF) {
++            hdmi_tx_gate_pwr_ctrl(HDCP_DIS, NULL);
+             hdmi_set_reg_bits(TX_HDCP_MODE, 0, 7, 1);
+         }
+         break;
+diff --git a/arch/arm/mach-meson8b/include/mach/power_gate.h b/arch/arm/mach-meson8b/include/mach/power_gate.h
+index eff430d5cfd5..ac7bb760dc32 100755
+--- a/arch/arm/mach-meson8b/include/mach/power_gate.h
++++ b/arch/arm/mach-meson8b/include/mach/power_gate.h
+@@ -853,7 +853,37 @@ extern spinlock_t gate_lock;
+ #define GCLK_REG_AO_REGS      (HHI_GCLK_AO)
+ #define GCLK_MASK_AO_REGS      (1<<3)
+ 
+-#define GCLK_IDX_MAX 132
++#define GCLK_IDX_CTS_ENCI         132
++#define GCLK_NAME_CTS_ENCI      "CTS_ENCI"
++#define GCLK_DEV_CTS_ENCI      "CLKGATE_CTS_ENCI"
++#define GCLK_REG_CTS_ENCI      (HHI_VID_CLK_CNTL2)
++#define GCLK_MASK_CTS_ENCI      (1<<0)
++
++#define GCLK_IDX_CTS_ENCP         133
++#define GCLK_NAME_CTS_ENCP      "CTS_ENCP"
++#define GCLK_DEV_CTS_ENCP      "CLKGATE_CTS_ENCP"
++#define GCLK_REG_CTS_ENCP      (HHI_VID_CLK_CNTL2)
++#define GCLK_MASK_CTS_ENCP      (1<<2)
++
++#define GCLK_IDX_CTS_ENCL         134
++#define GCLK_NAME_CTS_ENCL      "CTS_ENCL"
++#define GCLK_DEV_CTS_ENCL      "CLKGATE_CTS_ENCL"
++#define GCLK_REG_CTS_ENCL      (HHI_VID_CLK_CNTL2)
++#define GCLK_MASK_CTS_ENCL      (1<<3)
++
++#define GCLK_IDX_CTS_VDAC         135
++#define GCLK_NAME_CTS_VDAC      "CTS_VDAC"
++#define GCLK_DEV_CTS_VDAC      "CLKGATE_CTS_VDAC"
++#define GCLK_REG_CTS_VDAC      (HHI_VID_CLK_CNTL2)
++#define GCLK_MASK_CTS_VDAC      (1<<4)
++
++#define GCLK_IDX_CTS_HDMI_TX_PIXEL         136
++#define GCLK_NAME_CTS_HDMI_TX_PIXEL      "CTS_HDMI_TX_PIXEL"
++#define GCLK_DEV_CTS_HDMI_TX_PIXEL      "CLKGATE_CTS_HDMI_TX_PIXEL"
++#define GCLK_REG_CTS_HDMI_TX_PIXEL      (HHI_VID_CLK_CNTL2)
++#define GCLK_MASK_CTS_HDMI_TX_PIXEL      (1<<5)
++
++#define GCLK_IDX_MAX 137
+ extern short GCLK_ref[GCLK_IDX_MAX];
+ 
+ #define REGISTER_CLK(_MOD) \
+diff --git a/drivers/amlogic/display/backlight/aml_bl.c b/drivers/amlogic/display/backlight/aml_bl.c
+index fe4d4ff29459..06ea2f010d2e 100755
+--- a/drivers/amlogic/display/backlight/aml_bl.c
++++ b/drivers/amlogic/display/backlight/aml_bl.c
+@@ -138,8 +138,8 @@ static Lcd_Bl_Config_t bl_config = {
+     .method = BL_CTL_MAX,
+ };
+ static unsigned bl_level = BL_LEVEL_DEFAULT;
+-static int bl_status = 1;
+-static int bl_real_status = 1;
++static unsigned int bl_status = 3; //0=off, 1=lcd_on_bl_off, 3=lcd_on_bl_on. //bit[0]:lcd, bit[1]:bl
++static unsigned int bl_real_status = 1;
+ 
+ #define FIN_FREQ				(24 * 1000)
+ 
+@@ -157,11 +157,15 @@ static void power_on_bl(int bl_flag)
+     int ret;
+ 
+     mutex_lock(&bl_power_mutex);
+-    if (bl_flag == LCD_BL_FLAG)
+-        bl_status = 1;
++    if (bl_flag == LCD_BL_FLAG) {
++        if (bl_status > 0)
++            bl_status = 3;
++        else
++            goto exit_power_on_bl;
++    }
+ 
+-    DPRINT("%s(bl_flag=%s): bl_level=%u, bl_status=%s, bl_real_status=%s\n", __FUNCTION__, (bl_flag ? "LCD_BL_FLAG" : "DRV_BL_FLAG"), bl_level, (bl_status ? "ON" : "OFF"), (bl_real_status ? "ON" : "OFF"));
+-    if ((bl_level == 0) || (bl_status == 0) || (bl_real_status == 1)) {
++    DPRINT("%s(bl_flag=%s): bl_level=%u, bl_status=%u, bl_real_status=%u\n", __FUNCTION__, (bl_flag ? "LCD_BL_FLAG" : "DRV_BL_FLAG"), bl_level, bl_status, bl_real_status);
++    if ((bl_level == 0) || (bl_status != 3) || (bl_real_status == 1)) {
+         goto exit_power_on_bl;
+     }
+ 
+@@ -339,6 +343,9 @@ static void bl_delayd_on(void) //bl_delayed_work for LCD_BL_FLAG control
+ void bl_power_on(int bl_flag)
+ {
+     DPRINT("%s(bl_flag=%s): bl_level=%u, bl_status=%s, bl_real_status=%s\n", __FUNCTION__, (bl_flag ? "LCD_BL_FLAG" : "DRV_BL_FLAG"), bl_level, (bl_status ? "ON" : "OFF"), (bl_real_status ? "ON" : "OFF"));
++    if (bl_flag == LCD_BL_FLAG)
++        bl_status = 1;
++
+     if (bl_config.method < BL_CTL_MAX) {
+         if (bl_flag == LCD_BL_FLAG) {
+             if (bl_config.workqueue) {
+@@ -371,7 +378,7 @@ void bl_power_off(int bl_flag)
+     if (bl_flag == LCD_BL_FLAG)
+         bl_status = 0;
+ 
+-    DPRINT("%s(bl_flag=%s): bl_level=%u, bl_status=%s, bl_real_status=%s\n", __FUNCTION__, (bl_flag ? "LCD_BL_FLAG" : "DRV_BL_FLAG"), bl_level, (bl_status ? "ON" : "OFF"), (bl_real_status ? "ON" : "OFF"));
++    DPRINT("%s(bl_flag=%s): bl_level=%u, bl_status=%u, bl_real_status=%u\n", __FUNCTION__, (bl_flag ? "LCD_BL_FLAG" : "DRV_BL_FLAG"), bl_level, bl_status, bl_real_status);
+     if (bl_real_status == 0) {
+         mutex_unlock(&bl_power_mutex);
+         return;
+@@ -649,7 +656,7 @@ static void set_backlight_level(unsigned level)
+             default:
+                 break;
+         }
+-        if ((bl_status == 1) && (bl_real_status == 0))
++        if ((bl_status == 3) && (bl_real_status == 0))
+             bl_power_on(DRV_BL_FLAG);
+     }
+     mutex_unlock(&bl_level_mutex);
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index a20f8bca1842..0033cc76d481 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -40,6 +40,7 @@
+ #include <linux/amlogic/vout/lcdoutc.h>
+ #include <linux/amlogic/vout/lcd_aml.h>
+ #include <mach/clock.h>
++#include <mach/power_gate.h>
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #include <mach/vpu.h>
+ #endif
+@@ -1489,7 +1490,7 @@ static void vclk_set_lcd(int lcd_type, int vclk_sel, unsigned long pll_reg, unsi
+ 	udelay(5);
+ 	
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B)
+-	WRITE_LCD_CBUS_REG_BITS(HHI_VID_CLK_CNTL2, 1, 3, 1);	//enable encl clk gate //new add for M8b
++	CLK_GATE_ON(CTS_ENCL); //enable encl clk gate //new add for M8b
+ #endif
+ 	
+ 	spin_unlock_irqrestore(&lcd_clk_lock, flags);
+@@ -3248,6 +3249,10 @@ static void _disable_lcd_driver(Lcd_Config_t *pConf)
+ #endif
+     WRITE_LCD_REG(ENCL_VIDEO_EN, 0);	//disable encl
+ 
++#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B)
++    CLK_GATE_OFF(CTS_ENCL); //disable encl clk gate //new add for M8b
++#endif
++
+     if (vclk_sel)
+         WRITE_LCD_CBUS_REG_BITS(HHI_VIID_CLK_CNTL, 0, 0, 5);	//close vclk2 gate: 0x104b[4:0]
+     else
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index eae32d36b4d2..0817f46558f6 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -391,6 +391,9 @@ int tvoutc_setmode(tvmode_t mode)
+ 		WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 0x0, 30, 1);
+ 	}
+     cvbs_cntl_output(0);
++#ifdef CONFIG_ARCH_MESON8B
++    CLK_GATE_OFF(CTS_VDAC);
++#endif
+ #endif
+     while (MREG_END_MARKER != s->reg)
+         setreg(s++);
+@@ -483,7 +486,10 @@ printk(" clk_util_clk_msr 29 = %d\n", clk_util_clk_msr(29));
+     if( (mode==TVMODE_480CVBS) || (mode==TVMODE_576CVBS) )
+     {
+         msleep(1000);
+-        aml_write_reg32(P_HHI_GCLK_OTHER, aml_read_reg32(P_HHI_GCLK_OTHER) | (0x1<<10) | (0x1<<8)); //enable CVBS GATE, DAC_CLK:bit[10] = 1;VCLK2_ENCI:bit[8] = 1;
++#ifdef CONFIG_ARCH_MESON8B
++        CLK_GATE_ON(CTS_ENCI);
++        CLK_GATE_ON(CTS_VDAC);
++#endif
+         cvbs_cntl_output(1);
+     }
+ #endif
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+index 53a9c5f1e157..fb6d291549e9 100755
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+@@ -22,6 +22,17 @@ typedef struct
+     unsigned char cc3;
+ } rx_audio_cap_t;
+ 
++enum hd_ctrl {
++    VID_EN,
++    VID_DIS,
++    AUD_EN,
++    AUD_DIS,
++    EDID_EN,
++    EDID_DIS,
++    HDCP_EN,
++    HDCP_DIS,
++};
++
+ typedef struct rx_cap_
+ {
+     unsigned char native_Mode;
+-- 
+2.19.0
+

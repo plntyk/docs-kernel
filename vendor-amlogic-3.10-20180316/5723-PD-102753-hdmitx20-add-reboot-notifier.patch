@@ -1,0 +1,111 @@
+From 30c48fba1f2490b715b7b97b0f46e3b6ec4dca30 Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Fri, 10 Jul 2015 16:23:08 +0800
+Subject: [PATCH 5723/5965] PD#102753: hdmitx20: add reboot notifier
+
+When system sleep, send avmute_set signal to HDMIRX.
+
+Change-Id: I5bfc2538409c0958b327496474e5c28f768c4218
+---
+ .../mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c   | 16 ++++++++++++++++
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c   | 17 +++++++++++++++--
+ include/linux/amlogic/hdmi_tx/hdmi_tx_module.h  |  1 +
+ 3 files changed, 32 insertions(+), 2 deletions(-)
+ mode change 100755 => 100644 arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+ mode change 100755 => 100644 include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+old mode 100755
+new mode 100644
+index c069cb3eae3c..5de23d44ce1a
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+@@ -498,6 +498,7 @@ void HDMITX_Meson_Init(hdmitx_dev_t* hdev)
+     digital_clk_on(0xff);
+     hdmi_hwp_init(hdev);
+     hdmi_hwi_init(hdev);
++    hdev->HWOp.Cntl(hdev, HDMITX_AVMUTE_CNTL, AVMUTE_CLEAR);
+     hdmitx_set_audmode(NULL, NULL);     // set default audio param
+ }
+ 
+@@ -2259,6 +2260,21 @@ static void hdmitx_uninit(hdmitx_dev_t* hdmitx_device)
+ static int hdmitx_cntl(hdmitx_dev_t* hdmitx_device, unsigned cmd, unsigned argv)
+ {
+     if(cmd == HDMITX_AVMUTE_CNTL) {
++        switch (argv) {
++        case AVMUTE_SET:
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 1, 1, 1);    // set_AVMUTE to 1
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 0, 0, 1);    // clear_AVMUTE to 0
++            break;
++        case AVMUTE_CLEAR:
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 0, 1, 1);    // set_AVMUTE to 0
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 1, 0, 1);    // clear_AVMUTE to 1
++            break;
++        case AVMUTE_OFF:
++        default:
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 0, 1, 1);    // set_AVMUTE to 0
++            hdmitx_set_reg_bits(HDMITX_DWC_FC_GCP, 0, 0, 1);    // clear_AVMUTE to 0
++            break;
++        }
+         return 0;
+     }
+     else if(cmd == HDMITX_SW_INTERNAL_HPD_TRIG){
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+index 234a8711bc01..76f003e3248c 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+@@ -33,7 +33,7 @@
+ #include <linux/proc_fs.h>
+ #include <asm/uaccess.h>
+ #include <mach/am_regs.h>
+-
++#include <linux/reboot.h>
+ #include <linux/amlogic/osd/osd_dev.h>
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ 
+@@ -116,6 +116,18 @@ static struct early_suspend hdmitx_early_suspend_handler = {
+ };
+ #endif
+ 
++/* Set avmute_set signal to HDMIRX */
++static int hdmitx_reboot_notifier(struct notifier_block *nb,
++    unsigned long action, void *data)
++{
++    hdmitx_dev_t *hdev = container_of(nb, struct hdmi_tx_dev_s, nb);
++    hdev->HWOp.Cntl(hdev, HDMITX_AVMUTE_CNTL, AVMUTE_SET);
++    mdelay(25);
++    if (hdev->task)
++        kthread_stop(hdev->task);
++    return NOTIFY_OK;
++}
++
+ //static HDMI_TX_INFO_t hdmi_info;
+ #define INIT_FLAG_VDACOFF        0x1
+     /* unplug powerdown */
+@@ -1460,7 +1472,8 @@ static int amhdmitx_probe(struct platform_device *pdev)
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+     register_early_suspend(&hdmitx_early_suspend_handler);
+ #endif
+-
++    hdmitx_device.nb.notifier_call = hdmitx_reboot_notifier;
++    register_reboot_notifier(&hdmitx_device.nb);
+     if((init_flag&INIT_FLAG_POWERDOWN)&&(hpdmode==2)){
+         hdmitx_device.mux_hpd_if_pin_high_flag=0;
+     }
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+old mode 100755
+new mode 100644
+index 5a11362fa9de..5b942121006d
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+@@ -96,6 +96,7 @@ typedef struct hdmi_tx_dev_s {
+     struct task_struct *task_monitor;
+     struct task_struct *task_hdcp;
+     struct task_struct *task_cec;
++    struct notifier_block nb;
+     struct workqueue_struct *hdmi_wq;
+     struct delayed_work work_hpd_plugin;
+     struct delayed_work work_hpd_plugout;
+-- 
+2.19.0
+

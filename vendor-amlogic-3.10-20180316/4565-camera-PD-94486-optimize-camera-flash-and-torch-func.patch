@@ -1,0 +1,235 @@
+From 4270e9e0767c2a37f4a92ac31c277fbd8bf9b903 Mon Sep 17 00:00:00 2001
+From: "zhenfei.li" <zhenfei.li@amlogic>
+Date: Fri, 18 Jul 2014 11:01:49 +0800
+Subject: [PATCH 4565/5965] camera : PD 94486: optimize camera flash and torch
+ function.
+
+Change-Id: I240c09ba238a7c1633d52f7dc649c15536f31bd1
+---
+ drivers/amlogic/camera/common/cam_prober.c  | 69 ++++++++++++++-------
+ drivers/amlogic/camera/hm5065.c             | 28 ++++++++-
+ drivers/amlogic/camera/ov5640.c             | 15 ++++-
+ drivers/amlogic/camera/ov5642.c             | 14 ++++-
+ include/linux/amlogic/camera/aml_cam_info.h |  5 +-
+ 5 files changed, 97 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/cam_prober.c b/drivers/amlogic/camera/common/cam_prober.c
+index da3d5be566ac..752170db9139 100755
+--- a/drivers/amlogic/camera/common/cam_prober.c
++++ b/drivers/amlogic/camera/common/cam_prober.c
+@@ -989,6 +989,16 @@ void aml_cam_flash(aml_cam_info_t* cam_dev, int is_on)
+ 	}
+ }
+ 
++void aml_cam_torch(aml_cam_info_t* cam_dev, int is_on)
++{
++	if (cam_dev->torch_support) {
++		printk( "aml_cams: %s torch %s.\n", 
++				cam_dev->name, is_on ? "on" : "off");
++		amlogic_gpio_direction_output(cam_dev->torch_ctrl_pin, 
++			cam_dev->torch_ctrl_level ? is_on : !is_on, "camera");
++	} 
++}
++
+ static struct list_head cam_head = LIST_HEAD_INIT(cam_head);
+ 
+ #define DEBUG_DUMP_CAM_INFO
+@@ -1149,32 +1159,43 @@ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+ 	}
+ 	printk("vcm mode is %d\n", cam_dev->vcm_mode);
+ 	
+-	ret = of_property_read_string(p_node, "flash_support", &str);
+-	if (ret) {
+-		printk("failed to read camera flash_support\n");
+-		cam_dev->flash_support = 0;
+-	} else {
+-		printk("camera interface:%s\n", str);
+-		if (strncmp("flash_support", str, 1) == 0){
+-                        cam_dev->flash_support = 1;
+-                        of_property_read_u32(p_node, "flash_ctrl_level", &cam_dev->flash_ctrl_level);
+-                        ret = of_property_read_string(p_node, "flash_ctrl_pin", &str);
+-			if (ret) {
+-				printk("%s: faild to get flash_ctrl_pin!\n", cam_dev->name);
++	ret = of_property_read_u32(p_node, "flash_support", &cam_dev->flash_support);
++	if (cam_dev->flash_support){
++                of_property_read_u32(p_node, "flash_ctrl_level", &cam_dev->flash_ctrl_level);
++                ret = of_property_read_string(p_node, "flash_ctrl_pin", &str);
++		if (ret) {
++			printk("%s: faild to get flash_ctrl_pin!\n", cam_dev->name);
++			cam_dev->flash_support = 0;
++		} else {
++			ret = amlogic_gpio_name_map_num(str);
++			if (ret < 0) {
++				printk("%s: faild to map flash_ctrl_pin !\n", cam_dev->name);
+ 				cam_dev->flash_support = 0;
+-			} else {
+-				ret = amlogic_gpio_name_map_num(str);
+-				if (ret < 0) {
+-					printk("%s: faild to map flash_ctrl_pin !\n", cam_dev->name);
+-					cam_dev->flash_support = 0;
+-					cam_dev->flash_ctrl_level = 0;
+-				}
+-				cam_dev->flash_ctrl_pin = ret;  
++				cam_dev->flash_ctrl_level = 0;
+ 			}
+-                }else{
+-                        cam_dev->flash_support = 0;
+-                }
+-	}
++			cam_dev->flash_ctrl_pin = ret;  
++			amlogic_gpio_request(cam_dev->flash_ctrl_pin,"camera");
++		}
++        }
++        
++        ret = of_property_read_u32(p_node, "torch_support", &cam_dev->torch_support);
++	if (cam_dev->torch_support){
++                of_property_read_u32(p_node, "torch_ctrl_level", &cam_dev->torch_ctrl_level);
++                ret = of_property_read_string(p_node, "torch_ctrl_pin", &str);
++		if (ret) {
++			printk("%s: faild to get torch_ctrl_pin!\n", cam_dev->name);
++			cam_dev->torch_support = 0;
++		} else {
++			ret = amlogic_gpio_name_map_num(str);
++			if (ret < 0) {
++				printk("%s: faild to map flash_ctrl_pin !\n", cam_dev->name);
++				cam_dev->torch_support = 0;
++				cam_dev->torch_ctrl_level = 0;
++			}
++			cam_dev->torch_ctrl_pin = ret;  
++			amlogic_gpio_request(cam_dev->torch_ctrl_pin,"camera");
++		}
++        }
+ 
+ 	ret = of_property_read_string(p_node, "interface", &str);
+ 	if (ret) {
+diff --git a/drivers/amlogic/camera/hm5065.c b/drivers/amlogic/camera/hm5065.c
+index 1d80fb871650..4b04384e6f18 100755
+--- a/drivers/amlogic/camera/hm5065.c
++++ b/drivers/amlogic/camera/hm5065.c
+@@ -1076,9 +1076,31 @@ static int HM5065_FlashCtrl(struct hm5065_device *dev, int flash_mode)
+ {
+ 	//struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
+ 	int ret = 0;
+-    //int i = 0;
+-    return ret;
+-
++    
++	switch (flash_mode) {
++	case FLASHLIGHT_ON:
++	case FLASHLIGHT_AUTO:
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 1);
++		aml_cam_flash(&dev->cam_info, 1);
++		break;
++	case FLASHLIGHT_TORCH:
++		if (dev->cam_info.torch_support) {
++			aml_cam_torch(&dev->cam_info, 1);
++			aml_cam_flash(&dev->cam_info, 0);
++		} else 
++			aml_cam_torch(&dev->cam_info, 1);
++		break;
++	case FLASHLIGHT_OFF:
++		aml_cam_flash(&dev->cam_info, 0);
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 0);
++		break;
++	default:
++		printk("this flash mode not support yet\n");
++		break;
++	}
++	return ret;
+ }    /* HM5065_FlashCtrl */
+ 
+ static resolution_size_t get_size_type(int width, int height)
+diff --git a/drivers/amlogic/camera/ov5640.c b/drivers/amlogic/camera/ov5640.c
+index 374688da2171..44f476ec6c88 100755
+--- a/drivers/amlogic/camera/ov5640.c
++++ b/drivers/amlogic/camera/ov5640.c
+@@ -3271,13 +3271,22 @@ static int OV5640_FlashCtrl(struct ov5640_device *dev, int flash_mode)
+ 	switch (flash_mode) {
+ 	case FLASHLIGHT_ON:
+ 	case FLASHLIGHT_AUTO:
+-	case FLASHLIGHT_TORCH:
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 1);
+ 		aml_cam_flash(&dev->cam_info, 1);
+-		printk("flash on\n");
++		break;
++	case FLASHLIGHT_TORCH:
++		if (dev->cam_info.torch_support) {
++			aml_cam_torch(&dev->cam_info, 1);
++			aml_cam_flash(&dev->cam_info, 0);
++		} else 
++			aml_cam_torch(&dev->cam_info, 1);
+ 		break;
+ 	case FLASHLIGHT_OFF:
+ 		aml_cam_flash(&dev->cam_info, 0);
+-		printk("flash off\n");
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 0);
++		break;
+ 	default:
+ 		printk("this flash mode not support yet\n");
+ 		break;
+diff --git a/drivers/amlogic/camera/ov5642.c b/drivers/amlogic/camera/ov5642.c
+index 10379d672818..1b33f37a8258 100755
+--- a/drivers/amlogic/camera/ov5642.c
++++ b/drivers/amlogic/camera/ov5642.c
+@@ -2099,13 +2099,21 @@ static int OV5642_FlashCtrl(struct ov5642_device *dev, int flash_mode)
+ 	switch (flash_mode) {
+ 	case FLASHLIGHT_ON:
+ 	case FLASHLIGHT_AUTO:
+-	case FLASHLIGHT_TORCH:
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 1);
+ 		aml_cam_flash(&dev->cam_info, 1);
+-		printk("flash on\n");
++		break;
++	case FLASHLIGHT_TORCH:
++		if (dev->cam_info.torch_support) {
++			aml_cam_torch(&dev->cam_info, 1);
++			aml_cam_flash(&dev->cam_info, 0);
++		} else 
++			aml_cam_torch(&dev->cam_info, 1);
+ 		break;
+ 	case FLASHLIGHT_OFF:
+ 		aml_cam_flash(&dev->cam_info, 0);
+-		printk("flash off\n");
++		if (dev->cam_info.torch_support)
++			aml_cam_torch(&dev->cam_info, 0);
+ 		break;
+ 	default:
+ 		printk("this flash mode not support yet\n");
+diff --git a/include/linux/amlogic/camera/aml_cam_info.h b/include/linux/amlogic/camera/aml_cam_info.h
+index f047be3db358..1efa0bdf4309 100755
+--- a/include/linux/amlogic/camera/aml_cam_info.h
++++ b/include/linux/amlogic/camera/aml_cam_info.h
+@@ -77,6 +77,8 @@ typedef struct {
+ 	unsigned mclk;
+ 	unsigned flash_support;
+ 	unsigned flash_ctrl_level;
++	unsigned torch_support;
++	unsigned torch_ctrl_level;
+ 	unsigned vcm_mode;
+ 	unsigned spread_spectrum;
+ 	bt_path_t bt_path;
+@@ -85,6 +87,7 @@ typedef struct {
+ 	gpio_t pwdn_pin;
+ 	gpio_t rst_pin;
+ 	gpio_t flash_ctrl_pin;
++	gpio_t torch_ctrl_pin;
+ 	resolution_size_t max_cap_size;
+ 	tvin_color_fmt_t bayer_fmt;
+ 	const char* config;
+@@ -108,7 +111,7 @@ typedef struct aml_camera_i2c_fig1_s{
+ extern void aml_cam_init(aml_cam_info_t* cam_dev);
+ extern void aml_cam_uninit(aml_cam_info_t* cam_dev);
+ extern void aml_cam_flash(aml_cam_info_t* cam_dev, int is_on);
+-
++extern void aml_cam_torch(aml_cam_info_t* cam_dev, int is_on);
+ extern int aml_cam_info_reg(aml_cam_info_t* cam_info);
+ extern int aml_cam_info_unreg(aml_cam_info_t* cam_info);
+ 
+-- 
+2.19.0
+

@@ -1,0 +1,95 @@
+From c1f5d8b56f536f451da4aa9c62dedf472bdf2a9f Mon Sep 17 00:00:00 2001
+From: "tao.dong" <tao.dong@amlogic.com>
+Date: Thu, 27 Mar 2014 16:27:38 +0800
+Subject: [PATCH 3825/5965] PD#89364 :dwc_otg: prevent crashes on host port
+ disconnects           Clean up queue heads properly in kill_urbs_in_qh_list
+ by           removing the empty QHs from the schedule lists
+
+---
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c      | 14 +++++++++-----
+ .../amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c    |  5 +++++
+ 2 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+index a4d757420ca3..2e10ddd50d04 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+@@ -158,22 +158,22 @@ static void del_timers(dwc_otg_hcd_t * hcd)
+  */
+ static void kill_urbs_in_qh_list(dwc_otg_hcd_t * hcd, dwc_list_link_t * qh_list)
+ {
+-	dwc_list_link_t *qh_item;
++	dwc_list_link_t *qh_item,*qh_tmp;
+ 	dwc_otg_qh_t *qh;
+ 	dwc_otg_qtd_t *qtd, *qtd_tmp;
+ 
+-	DWC_LIST_FOREACH(qh_item, qh_list) {
++	DWC_LIST_FOREACH_SAFE(qh_item, qh_tmp, qh_list) {
+ 		qh = DWC_LIST_ENTRY(qh_item, dwc_otg_qh_t, qh_list_entry);
+ 		DWC_CIRCLEQ_FOREACH_SAFE(qtd, qtd_tmp,
+ 					 &qh->qtd_list, qtd_list_entry) {
+ 			qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
+ 			if (qtd->urb != NULL) {
+ 				hcd->fops->complete(hcd, qtd->urb->priv,
+-						    qtd->urb, -DWC_E_TIMEOUT);
++						    qtd->urb, -DWC_E_SHUTDOWN);
+ 				dwc_otg_hcd_qtd_remove_and_free(hcd, qtd, qh);
+-			}
+-
++			}			
+ 		}
++		dwc_otg_hcd_qh_remove(hcd, qh);
+ 	}
+ }
+ 
+@@ -3369,6 +3369,9 @@ void dwc_otg_hcd_dump_state(dwc_otg_hcd_t * hcd)
+ 	int i;
+ 	gnptxsts_data_t np_tx_status;
+ 	hptxsts_data_t p_tx_status;
++	dwc_irqflags_t flags;
++
++	DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
+ 
+ 	num_channels = hcd->core_if->core_params->host_channels;
+ 	DWC_PRINTF("\n");
+@@ -3482,6 +3485,7 @@ void dwc_otg_hcd_dump_state(dwc_otg_hcd_t * hcd)
+ 	DWC_PRINTF
+ 	    ("************************************************************\n");
+ 	DWC_PRINTF("\n");
++	DWC_SPINUNLOCK_IRQRESTORE(hcd->lock, flags);
+ #endif
+ }
+ 
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
+index 5fd1eeeec01e..2c3f83c38e9a 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
+@@ -339,6 +339,9 @@ static int _complete(dwc_otg_hcd_t * hcd, void *urb_handle,
+ 	case -DWC_E_OVERFLOW:
+ 		status = -EOVERFLOW;
+ 		break;
++	case -DWC_E_SHUTDOWN:
++ 		status = -ESHUTDOWN;
++ 		break;	
+ 	default:
+ 		if (status) {
+ 			DWC_PRINTF("Uknown urb status %d\n", status);
+@@ -899,6 +902,7 @@ static int urb_enqueue(struct usb_hcd *hcd,
+ 	}
+ 	if (unlikely(atomic_read(&urb->reject))) {
+ 		printk("%s:urb(%p) had been killed2\n",__func__,urb);
++		DWC_FREE(dwc_otg_urb);
+ 		return -EPERM;
+ 	}
+ 	urb->hcpriv = dwc_otg_urb;
+@@ -911,6 +915,7 @@ static int urb_enqueue(struct usb_hcd *hcd,
+ 					       (dwc_otg_hcd, ep->hcpriv), urb);
+ 		}
+ 	} else {
++		DWC_FREE(dwc_otg_urb);
+ 		urb->hcpriv = NULL;
+ #if 0
+ 		usb_hcd_unlink_urb_from_ep(hcd,urb);
+-- 
+2.19.0
+

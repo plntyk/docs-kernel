@@ -1,0 +1,2238 @@
+From 5547589889246f08b1784abf2dea5de727d47c6c Mon Sep 17 00:00:00 2001
+From: "hui.fang" <hui.fang@amlogic.com>
+Date: Wed, 26 Feb 2014 15:24:13 +0800
+Subject: [PATCH 3584/5965] d2d3: add d2d3 module
+
+---
+ arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd |  10 +
+ drivers/amlogic/Kconfig                     |   1 +
+ drivers/amlogic/Makefile                    |   2 +
+ drivers/amlogic/d2d3/Kconfig                |   5 +
+ drivers/amlogic/d2d3/Makefile               |   2 +
+ drivers/amlogic/d2d3/d2d3_drv.c             | 715 +++++++++++++++++++
+ drivers/amlogic/d2d3/d2d3_drv.h             | 130 ++++
+ drivers/amlogic/d2d3/d2d3_hw.c              | 553 +++++++++++++++
+ drivers/amlogic/d2d3/d2d3_regs.h            | 725 ++++++++++++++++++++
+ 9 files changed, 2143 insertions(+)
+ create mode 100755 drivers/amlogic/d2d3/Kconfig
+ create mode 100755 drivers/amlogic/d2d3/Makefile
+ create mode 100755 drivers/amlogic/d2d3/d2d3_drv.c
+ create mode 100755 drivers/amlogic/d2d3/d2d3_drv.h
+ create mode 100755 drivers/amlogic/d2d3/d2d3_hw.c
+ create mode 100755 drivers/amlogic/d2d3/d2d3_regs.h
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+index b50356651964..99e63ff3bf0e 100755
+--- a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+@@ -776,6 +776,16 @@
+ 		>;
+ 	};
+ 
++	d2d3 {
++		compatible = "amlogic,d2d3";
++		dev_name = "d2d3";
++		status = "ok";
++		reserve-memory = <0x200000>;
++		reserve-iomap = "true";
++		irq = <165>;
++		d2d3_id = <1>;
++	};
++
+ //$$ MATCH "dvb_p_ts0_pins_match" = "&dvb_p_ts0_pins"
+ //$$ L2 PROP_U32 2 = "amlogic,setmask"
+ //$$ L2 PROP_U32 8 = "amlogic,clrmask"
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+index 4de3a80cc291..c80f7cc4cd5d 100755
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -74,6 +74,7 @@ source "drivers/amlogic/video_dev/Kconfig"
+ source "drivers/amlogic/ionvideo/Kconfig"
+ source "drivers/amlogic/deinterlace/Kconfig"
+ source "drivers/amlogic/mipi/Kconfig"
++source "drivers/amlogic/d2d3/Kconfig"
+ source "drivers/amlogic/amvecm/Kconfig"
+ source "drivers/amlogic/dvb_tv/Kconfig"
+ 
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+index e7b0d5247046..5a67b03f04ec 100755
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -102,6 +102,8 @@ obj-$(CONFIG_VIDEO_AMLOGIC_CAPTURE) += camera/
+ 
+ obj-$(CONFIG_AMLOGIC_MIPI) += mipi/
+ 
++obj-$(CONFIG_D2D3_PROCESS) += d2d3/
++
+ obj-$(CONFIG_AML_REG_DEBUG) += regd/
+ 
+ ifneq ($(wildcard $(srctree)/../hardware/arm/gpu),)
+diff --git a/drivers/amlogic/d2d3/Kconfig b/drivers/amlogic/d2d3/Kconfig
+new file mode 100755
+index 000000000000..65b3283a2436
+--- /dev/null
++++ b/drivers/amlogic/d2d3/Kconfig
+@@ -0,0 +1,5 @@
++config D2D3_PROCESS
++       tristate "AMLOGIC D2D3 SUPORT"
++       default n
++       help
++            "AMLOGIC D2D3 DRIVER SUPPORT"
+diff --git a/drivers/amlogic/d2d3/Makefile b/drivers/amlogic/d2d3/Makefile
+new file mode 100755
+index 000000000000..91204c323791
+--- /dev/null
++++ b/drivers/amlogic/d2d3/Makefile
+@@ -0,0 +1,2 @@
++obj-$(CONFIG_D2D3_PROCESS) = d2d3.o
++d2d3-objs=d2d3_hw.o d2d3_drv.o
+diff --git a/drivers/amlogic/d2d3/d2d3_drv.c b/drivers/amlogic/d2d3/d2d3_drv.c
+new file mode 100755
+index 000000000000..57cd90f74f4d
+--- /dev/null
++++ b/drivers/amlogic/d2d3/d2d3_drv.c
+@@ -0,0 +1,715 @@
++#include <linux/version.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <linux/kthread.h>
++#include <linux/semaphore.h>
++#include <linux/workqueue.h>
++#include <linux/spinlock.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/mm.h>
++#include <linux/major.h>
++#include <linux/platform_device.h>
++#include <linux/mutex.h>
++#include <linux/cdev.h>
++#include <linux/proc_fs.h>
++#include <asm/uaccess.h>
++#include <linux/slab.h>
++#include <linux/of.h>
++#include <linux/of_fdt.h>
++
++
++
++#include <linux/amlogic/amports/vframe.h>
++#include <linux/amlogic/amports/vframe_provider.h>
++#include <linux/amlogic/amports/vframe_receiver.h>
++#include <linux/amlogic/amports/canvas.h>
++#include <mach/am_regs.h>
++
++#include "d2d3_drv.h"
++#include "../deinterlace/deinterlace.h"
++#define D2D3_NAME               "d2d3"
++#define D2D3_DRIVER_NAME        "d2d3"
++#define D2D3_MODULE_NAME        "d2d3"
++#define D2D3_DEVICE_NAME        "d2d3"
++#define D2D3_CLASS_NAME         "d2d3"
++
++#define VFM_NAME        "d2d3"
++
++#define D2D3_COUNT 1
++
++static d2d3_dev_t *d2d3_devp;
++static struct vframe_provider_s * prov = NULL;
++static dev_t d2d3_devno;
++static struct class *d2d3_clsp;
++struct semaphore thread_sem;
++
++static bool d2d3_dbg_en = 0;
++module_param(d2d3_dbg_en, bool, 0664);
++MODULE_PARM_DESC(d2d3_dbg_en, "\n d2d3_dbg_en\n");
++
++static unsigned long post_count = 0;
++module_param(post_count,ulong,0644);
++MODULE_PARM_DESC(post_count,"count the irq");
++
++static unsigned long pre_count = 0;
++module_param(pre_count,ulong,0644);
++MODULE_PARM_DESC(pre_count,"count the di pre");
++
++static short depth = 0;
++module_param(depth,short,0644);
++MODULE_PARM_DESC(depth,"\n the depth of field\n");
++
++
++/*****************************
++ * d2d3 processing mode
++ * mode0:    DE_PRE-->DPG-->Memory
++ * mode0:   DE_POST-->DBG-->VPP_SCALER
++ *
++ * mode1:    DE_PRE-->DPG-->Memory
++ * mode1:VPP_SCALER-->DBG-->VPP_BLENDING
++ *
++ * mode2:   DE_POST-->DPG-->Memory
++ * mode2:   DE_POST-->DBG-->VPP_SCALER
++ *
++ * mode3:VPP_SCALER-->DPG-->Memory
++ * mode3:VPP_SCALER-->DBG-->VPP_BLENDING
++ ******************************/
++
++static int d2d3_receiver_event_fun(int type, void* data, void* arg);
++
++static const struct vframe_receiver_op_s d2d3_vf_receiver =
++{
++        .event_cb = d2d3_receiver_event_fun
++};
++
++static struct vframe_receiver_s d2d3_vf_recv;
++
++static vframe_t *d2d3_vf_peek(void* arg);
++static vframe_t *d2d3_vf_get(void* arg);
++static void d2d3_vf_put(vframe_t *vf, void* arg);
++static int d2d3_event_cb(int type, void *data, void *private_data);
++
++static const struct vframe_operations_s d2d3_vf_provider =
++{
++        .peek = d2d3_vf_peek,
++        .get  = d2d3_vf_get,
++        .put  = d2d3_vf_put,
++        .event_cb = d2d3_event_cb,
++};
++
++static struct vframe_provider_s d2d3_vf_prov;
++
++/*****************************
++ *    d2d3 process :
++ ******************************/
++#define D2D3_IDX_MAX  5
++typedef struct{
++        int (*pre_early_process_fun)(void* arg, vframe_t* vf);
++        int (*pre_process_fun)(void* arg, unsigned zoom_start_x_lines,
++                        unsigned zoom_end_x_lines, unsigned zoom_start_y_lines, unsigned zoom_end_y_lines, vframe_t* vf);
++        void* pre_private_data;
++        vframe_t* vf;
++        /*etc*/
++}d2d3_devnox_t;
++d2d3_devnox_t  d2d3_devnox[D2D3_IDX_MAX];
++
++static unsigned char have_process_fun_private_data = 0;
++
++static int d2d3_early_process_fun(void* arg, vframe_t* disp_vf)
++{//return 1, make video set video_property_changed
++        /* arg is vf->private_data */
++        int ret = 0;
++        int idx = (int)arg;
++        if(idx>=0 && idx<D2D3_IDX_MAX){
++                d2d3_devnox_t* p_d2d3_devnox = &d2d3_devnox[idx];
++                if(have_process_fun_private_data && p_d2d3_devnox->pre_early_process_fun){
++                        ret = p_d2d3_devnox->pre_early_process_fun(p_d2d3_devnox->pre_private_data, disp_vf);
++                }
++        }
++        return ret;
++}
++/*
++ *check the input&output format
++ */
++static int d2d3_update_param(struct d2d3_param_s *parm)
++{
++        bool config_flag = false;
++        struct d2d3_param_s *local_parm = &d2d3_devp->param;
++
++        if((parm->input_w != local_parm->input_w)||(parm->input_h != local_parm->input_h))
++        {
++                pr_info("[d2d3]%s: input fmt changed from %ux%u to %ux%u.\n",__func__,
++                                local_parm->input_w, local_parm->input_h, parm->input_w, parm->input_h);
++                local_parm->input_w  = parm->input_w;
++                local_parm->input_h= parm->input_h;
++                config_flag = true;
++        }
++        if((parm->output_w != local_parm->output_w)||(parm->output_h != local_parm->output_h))
++        {
++                pr_info("[d2d3]%s: output fmt changed from %ux%u to %ux%u.\n",__func__,
++                                local_parm->output_w,local_parm->output_h, parm->output_w, parm->output_h);
++
++                local_parm->output_w = parm->output_w;
++                local_parm->output_h = parm->output_h;
++                config_flag = true;
++        }
++        if(parm->reverse_flag != local_parm->reverse_flag){
++                pr_info("[d2d3]%s: reverse flag changed from %u to %u.\n",__func__,
++                         local_parm->reverse_flag, parm->reverse_flag);
++                local_parm->reverse_flag = parm->reverse_flag;
++                d2d3_canvas_reverse(local_parm->reverse_flag);
++        }
++        if(depth != local_parm->depth){
++                if(d2d3_depth_adjust(depth)){
++			depth = local_parm->depth;
++		}
++                else
++                        local_parm->depth = depth;
++        }
++        if(config_flag){
++                d2d3_config(d2d3_devp,local_parm);
++		return 1;
++        }
++        return 0;
++}
++
++static int d2d3_irq_process(unsigned int input_w, unsigned int input_h,unsigned int reverse_flag)
++{
++        struct d2d3_param_s parm;
++	int ret = 0;
++        parm.input_w = input_w;
++        parm.input_h = input_h;
++        parm.reverse_flag = reverse_flag;
++        get_real_display_size(&parm.output_w,&parm.output_h);
++        ret = d2d3_update_param(&parm);
++        if( D2D3_DPG_MUX_NRW != d2d3_devp->param.dpg_path){
++                d2d3_update_canvas(d2d3_devp);
++        }else{
++                /*just update the dbr canvas config with the addr from di*/
++                d2d3_config_dbr_canvas(d2d3_devp);
++        }
++
++        return ret;
++}
++static int d2d3_post_process_fun(void* arg, unsigned zoom_start_x_lines,
++                unsigned zoom_end_x_lines, unsigned zoom_start_y_lines, unsigned zoom_end_y_lines, vframe_t* disp_vf)
++{
++        int ret = 0;
++        int idx = (int)arg;
++        d2d3_devnox_t* p_d2d3_devnox = NULL;
++        di_buf_t *di_buf_p = NULL;
++        if((idx>=0) && (idx<D2D3_IDX_MAX)){
++                p_d2d3_devnox = &d2d3_devnox[idx];
++                if(have_process_fun_private_data && p_d2d3_devnox->pre_process_fun){
++                        ret = p_d2d3_devnox->pre_process_fun(p_d2d3_devnox->pre_private_data, zoom_start_x_lines, zoom_end_x_lines, zoom_start_y_lines, zoom_end_y_lines, disp_vf);
++                }
++        }else{
++                pr_info("[d2d3]%s: the index %d over the max index.\n",__func__,idx);
++        }
++        post_count++;
++        zoom_start_x_lines = zoom_start_x_lines&0xffff;
++        zoom_end_x_lines   = zoom_end_x_lines&0xffff;
++        zoom_start_y_lines = zoom_start_y_lines&0xffff;
++        zoom_end_y_lines   = zoom_end_y_lines&0xffff;
++        if(d2d3_devp->flag & D2D3_REG){
++        	vf_notify_receiver(VFM_NAME,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
++                /*d2d3 irq process*/
++                if(!(d2d3_devp->flag & D2D3_BYPASS)){
++                        di_buf_p = p_d2d3_devnox->pre_private_data;
++                        d2d3_devp->dbr_addr = di_buf_p->dp_buf_adr;
++                        ret = d2d3_irq_process(zoom_end_x_lines-zoom_start_x_lines+1,
++                                zoom_end_y_lines-zoom_start_y_lines+1,di_buf_p->reverse_flag);
++                }
++        }
++        return ret;
++}
++
++/*
++ *    d2d3 vfm interface
++ */
++
++static vframe_t *d2d3_vf_peek(void* arg)
++{
++        vframe_t* vframe_ret = vf_peek(d2d3_devp->vfm_name);
++        return vframe_ret;
++}
++
++static vframe_t *d2d3_vf_get(void* arg)
++{
++        vframe_t* vframe_ret = NULL;
++        int i;
++        vframe_ret = vf_get(d2d3_devp->vfm_name);
++        if(vframe_ret){
++                for(i=0; i<D2D3_IDX_MAX; i++){
++                        if(d2d3_devnox[i].vf == NULL){
++                                break;
++                        }
++                }
++                if(i==D2D3_IDX_MAX){
++                        printk("[d2d3]%s:D2D3 Error, idx is not enough.\n",__func__);
++                }
++                else{
++                        d2d3_devnox[i].vf = vframe_ret;
++                        /* backup early_process_fun/process_fun/private_data */
++                        d2d3_devnox[i].pre_early_process_fun = vframe_ret->early_process_fun;
++                        d2d3_devnox[i].pre_process_fun = vframe_ret->process_fun;
++                        d2d3_devnox[i].pre_private_data = vframe_ret->private_data;
++
++                        vframe_ret->early_process_fun = d2d3_early_process_fun;
++                        vframe_ret->process_fun = d2d3_post_process_fun;
++                        vframe_ret->private_data = (void*)i;
++
++                        /* d2d3 process code start*/
++
++                        /*d2d3 process code*/
++                        if(d2d3_dbg_en)
++                               printk("[d2d3]%s: %d 0x%x.\n", __func__, i, (unsigned int)vframe_ret);
++                }
++        }
++        return vframe_ret;
++}
++
++static void d2d3_vf_put(vframe_t *vf, void* arg)
++{
++
++        int idx = (int)(vf->private_data);
++        //printk("%s %d\n", __func__,idx);
++        /* d2d3 process code start*/
++
++        /*d2d3 process code*/
++        if((idx<D2D3_IDX_MAX)&&(idx>=0)){
++                d2d3_devnox[idx].vf = NULL;
++                /* restore early_process_fun/process_fun/private_data */
++                vf->early_process_fun = d2d3_devnox[idx].pre_early_process_fun;
++                vf->process_fun = d2d3_devnox[idx].pre_process_fun;
++                vf->private_data = d2d3_devnox[idx].pre_private_data;
++        } else {
++                printk("[d2d3]%s: error, return vf->private_data %x is not in the "\
++                                        "range.\n", __func__,idx);
++        }
++
++        prov = vf_get_provider(d2d3_devp->vfm_name);
++
++	if(prov&&prov->ops&&prov->ops->put){
++		prov->ops->put(vf,prov->op_arg);
++		vf_notify_provider(d2d3_devp->vfm_name,VFRAME_EVENT_RECEIVER_PUT,prov->op_arg);
++	}
++}
++
++static int d2d3_event_cb(int type, void *data, void *private_data)
++{
++        return 0;
++}
++static int d2d3_receiver_event_fun(int type, void* data, void* arg)
++{
++        int i, ret=0;
++        d2d3_param_t *parm = &d2d3_devp->param;
++        if((type == VFRAME_EVENT_PROVIDER_UNREG)||
++                        (type == VFRAME_EVENT_PROVIDER_LIGHT_UNREG_RETURN_VFRAME)){
++                prov = NULL;
++		if(d2d3_devp->flag & D2D3_BYPASS){
++                	d2d3_enable_hw(false);
++			d2d3_enable_path(false, parm);
++		}
++
++                vf_notify_receiver(d2d3_devp->vfm_name,VFRAME_EVENT_PROVIDER_UNREG,NULL);
++                vf_unreg_provider(&d2d3_vf_prov);
++                d2d3_devp->flag &= (~D2D3_REG); // keep flag when unreg
++                pr_info("[d2d3]%s: provider unregister,disable d2d3.\n",__func__);
++
++        }
++        else if(type == VFRAME_EVENT_PROVIDER_REG){
++                char* provider_name = (char*)data;
++
++                if((strcmp(provider_name, "deinterlace")==0)||(strcmp(provider_name, "ppmgr")==0)){
++                        have_process_fun_private_data = 1;
++                }
++                else{
++                        have_process_fun_private_data = 0;
++                }
++                vf_reg_provider(&d2d3_vf_prov);
++
++                for(i=0; i<D2D3_IDX_MAX; i++){
++                        d2d3_devnox[i].vf = NULL;
++                }
++                prov = vf_get_provider(d2d3_devp->vfm_name);
++		d2d3_devp->flag |= D2D3_REG;
++                vf_notify_receiver(d2d3_devp->vfm_name,VFRAME_EVENT_PROVIDER_START,NULL);
++        }
++        else if((VFRAME_EVENT_PROVIDER_DPBUF_CONFIG == type) &&
++                        (D2D3_DPG_MUX_NRW == parm->dpg_path))
++        {
++                vframe_t * vf = (vframe_t*)data;
++                struct di_buf_s *di_buf = vf->private_data;
++                d2d3_devp->dpg_addr = di_buf->dp_buf_adr;
++                /*just update the dpg canvas config with the addr from di*/
++                d2d3_config_dpg_canvas(d2d3_devp);
++                pre_count++;
++
++        }
++        return ret;
++}
++
++
++
++/*****************************
++ *    d2d3 driver file_operations
++ *
++ ******************************/
++static struct platform_device* d2d3_platform_device = NULL;
++
++static int d2d3_open(struct inode *node, struct file *file)
++{
++        d2d3_dev_t *d2d3_devp;
++
++        /* Get the per-device structure that contains this cdev */
++        d2d3_devp = container_of(node->i_cdev, d2d3_dev_t, cdev);
++        file->private_data = d2d3_devp;
++        return 0;
++}
++
++
++static int d2d3_release(struct inode *node, struct file *file)
++{
++        file->private_data = NULL;
++        return 0;
++}
++
++static int d2d3_add_cdev(struct cdev *cdevp, const struct file_operations *file_ops,int minor)
++{
++        int ret = 0;
++        dev_t devno = MKDEV(MAJOR(d2d3_devno),minor);
++        cdev_init(cdevp,file_ops);
++        cdevp->owner = THIS_MODULE;
++        ret = cdev_add(cdevp,devno,1);
++        return ret;
++}
++static struct device *d2d3_create_device(struct device *parent, int min)
++{
++        dev_t devno = MKDEV(MAJOR(d2d3_devno),min);
++        return device_create(d2d3_clsp,parent,devno,NULL, D2D3_DEVICE_NAME);
++}
++const static struct file_operations d2d3_fops = {
++        .owner    = THIS_MODULE,
++        .open     = d2d3_open,
++        .release  = d2d3_release,
++};
++
++/*
++ *  1.bypass d2d3 mode:echo bypass >/sys/class/d2d3/d2d3/debug
++ *  2.switch the dpg,dbr path,dbr output mode such as line interleave
++ *      echo swmode dpg_path dbr_path dbr_mode >/sys/class/d2d3/d2d3/debug
++ */
++static ssize_t store_dbg(struct device * dev, struct device_attribute *attr, const char * buf, size_t count)
++{
++        unsigned int n=0;
++        char *buf_orig, *ps, *token;
++        struct d2d3_dev_s *devp;
++        struct d2d3_param_s *parm;
++        char *parm_str[5];
++        buf_orig = kstrdup(buf, GFP_KERNEL);
++        //pr_info("[d2d3]%s:input cmd: %s",__func__,buf_orig);
++        ps = buf_orig;
++        devp = dev_get_drvdata(dev);
++        parm = &devp->param;
++        while (1) {
++                token = strsep(&ps, " \n");
++                if (token == NULL)
++                        break;
++                if (*token == '\0')
++                        continue;
++                parm_str[n++] = token;
++        }
++        if(!strcmp(parm_str[0],"swmode")){
++                unsigned short dpg_path = 5, dbr_path = 2;
++                unsigned short dbr_mode = 0;
++                dpg_path  = simple_strtoul(parm_str[1],NULL,10);
++                dbr_path  = simple_strtoul(parm_str[2],NULL,10);
++                dbr_mode = simple_strtol(parm_str[3],NULL,10);
++                /*load the default setting*/
++                d2d3_set_def_config(parm);
++                parm->dpg_path  = dpg_path;
++                parm->dbr_path   = dbr_path;
++                parm->dbr_mode = dbr_mode;
++                parm->input_w  = 0;
++                parm->input_h  = 0;
++                /*get the real vpp display size*/
++                get_real_display_size(&parm->output_w,&parm->output_h);
++                pr_info("[d2d3]%s: hw start: dpg path %u, dbr path %u,dbr mode %u.\n",__func__,
++                                devp->param.dpg_path, devp->param.dbr_path,devp->param.dbr_mode);
++        }else if(!strcmp(parm_str[0],"bypass")){
++		devp->flag |= D2D3_BYPASS;
++		d2d3_enable_path(false,parm);
++                d2d3_enable_hw(false);
++        }else if(!strcmp(parm_str[0],"enable")){
++	        if(devp->flag & D2D3_BYPASS) {
++                        d2d3_set_def_config(parm);
++                        d2d3_canvas_init(devp);
++                        d2d3_enable_hw(true);
++	                d2d3_enable_path(true,parm);
++                        devp->flag &= (~D2D3_BYPASS);
++                }
++        }
++
++        kfree(buf_orig);
++        return count;
++}
++static ssize_t show_dbg(struct device * dev, struct device_attribute *attr, char * buf)
++{
++        struct d2d3_dev_s *devp = dev_get_drvdata(dev);
++        ssize_t len = 0;
++        len += sprintf(buf,"  1.the current dpg path %u, dbr path %u,dbr mode %u,%s bypass.\n"
++                        "  2.set depth:echo x >/sys/module/d2d3/parameters/depth"
++                        "  x's range[2~128].\n  3.get depth:cat /sys/module/d2d3/parameters/depth.\n",
++                        devp->param.dpg_path,devp->param.dbr_path,devp->param.dbr_mode,
++                        (devp->flag&D2D3_BYPASS)?"enable":"disable");
++        return len;
++}
++
++static DEVICE_ATTR(debug, S_IWUGO | S_IRUGO, show_dbg, store_dbg);
++
++static struct resource memobj;
++
++static int d2d3_probe(struct platform_device *pdev)
++{
++        int ret = 0;
++        struct d2d3_dev_s *devp;
++        struct resource *res;
++
++        /* kmalloc d2d3 dev */
++        devp = kmalloc(sizeof(struct d2d3_dev_s), GFP_KERNEL);
++        if (!devp)
++        {
++                printk("[d2d3]%s: failed to allocate memory for d2d3 device.\n",__func__);
++                ret = -ENOMEM;
++                goto failed_kmalloc_devp;
++        }
++        memset(devp,0,sizeof(d2d3_dev_t));
++        d2d3_devp = devp;
++        //spin_lock_init(&d2d3_devp->buf_lock);
++        d2d3_devp->flag = D2D3_BYPASS;
++	/*disable hw&path*/
++	d2d3_enable_hw(false);
++	d2d3_enable_path(false,&d2d3_devp->param);
++        /*create cdev and register with sysfs*/
++        ret = d2d3_add_cdev(&devp->cdev, &d2d3_fops,0);
++        if (ret) {
++                printk("[d2d3]%s: failed to add device.\n",__func__);
++                /* @todo do with error */
++                goto failed_add_cdev;
++        }
++        /*create the udev node /dev/...*/
++        devp->dev = d2d3_create_device(&pdev->dev,0);
++        if (devp->dev == NULL) {
++                printk("[d2d3]%s: device_create create error.\n",__func__);
++                ret = -EEXIST;
++                goto failed_create_device;
++        }
++        ret = device_create_file(devp->dev, &dev_attr_debug);
++        if(ret < 0){
++                printk(KERN_ERR "[d2d3]%s: failed create device attr file.\n",__func__);
++                goto failed_create_device_file;
++        }
++      #ifdef CONFIG_USE_OF
++      	res = &memobj;
++       	ret = find_reserve_block(pdev->dev.of_node->name,0);
++      	if(ret < 0){
++             pr_err("\nd2d3 memory resource undefined.\n");
++             return -EFAULT;
++     	}
++      	printk("[d2d3]%s: hhhhhhhhhhhhhh[%d].\n",__func__,__LINE__);
++      	res->start = (phys_addr_t)get_reserve_block_addr(ret);
++      	res->end = res->start+ (phys_addr_t)get_reserve_block_size(ret)-1;
++      #else
++        /* get device memory */
++        res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++        if (!res) {
++                pr_err("[d2d3]%s: can't get memory resource.\n",__func__);
++                ret = -EFAULT;
++                goto failed_get_resource;
++        }
++	#endif
++        devp->mem_start = res->start;
++        devp->mem_size  = res->end - res->start + 1;
++        printk("[d2d3]%s: mem_start = 0x%x, mem_size = 0x%x.\n",__func__, devp->mem_start,devp->mem_size);
++#ifdef CONFIG_USE_OF
++     	if (pdev->dev.of_node) {
++               	ret = of_property_read_u32(pdev->dev.of_node,"irq",&(res->start));
++              	if(ret) {
++                       pr_err("don't find d2d3  match irq\n");
++                     	goto failed_get_resource;
++             	}
++              res->end = res->start;
++              res->flags = IORESOURCE_IRQ;
++      	}
++#else
++	/*get d2d3's irq*/
++        res = platform_get_resource(pdev,IORESOURCE_MEM,0);
++        if (!res) {
++                pr_err("[d2d3]%s: can't get irq resource.\n",__func__);
++                ret = -EFAULT;
++                goto failed_get_resource;
++        }
++#endif
++        devp->irq = res->start;
++        sprintf(devp->vfm_name,"%s",VFM_NAME);
++        platform_set_drvdata(pdev,(void *)devp);
++        dev_set_drvdata(devp->dev,(void *)devp);
++
++        vf_receiver_init(&d2d3_vf_recv, devp->vfm_name, &d2d3_vf_receiver, NULL);
++        vf_reg_receiver(&d2d3_vf_recv);
++
++        vf_provider_init(&d2d3_vf_prov, devp->vfm_name, &d2d3_vf_provider, NULL);
++        return ret;
++failed_get_resource:
++        device_remove_file(&pdev->dev,&dev_attr_debug);
++failed_create_device_file:
++        device_del(&pdev->dev);
++failed_create_device:
++        cdev_del(&devp->cdev);
++failed_add_cdev:
++        kfree(devp);
++failed_kmalloc_devp:
++        return ret;
++}
++
++static int d2d3_remove(struct platform_device *pdev)
++{
++        vf_unreg_provider(&d2d3_vf_prov);
++        vf_unreg_receiver(&d2d3_vf_recv);
++
++        /* Remove the cdev */
++        device_remove_file(d2d3_devp->dev, &dev_attr_debug);
++
++        cdev_del(&d2d3_devp->cdev);
++        kfree(d2d3_devp);
++        d2d3_devp = NULL;
++        device_del(d2d3_devp->dev);
++        return 0;
++}
++
++static int d2d3_suspend(struct platform_device *pdev, pm_message_t state)
++{
++        struct d2d3_dev_s *d2d3_devp;
++        d2d3_devp = platform_get_drvdata(pdev);
++        d2d3_enable_hw(false);
++		d2d3_enable_path(false,&d2d3_devp->param);
++        return 0;
++}
++
++static int d2d3_resume(struct platform_device *pdev)
++{
++        struct d2d3_dev_s *d2d3_devp;
++        d2d3_devp = platform_get_drvdata(pdev);
++	if(d2d3_devp->flag & D2D3_BYPASS){
++        	d2d3_enable_hw(false);
++		d2d3_enable_path(false,&d2d3_devp->param);
++	} else {
++        	d2d3_enable_hw(true);
++		d2d3_enable_path(true,&d2d3_devp->param);
++	}
++        return 0;
++}
++#ifdef CONFIG_OF
++static const struct of_device_id d2d3_dt_match[]={
++    {
++        .compatible     = "amlogic,d2d3",
++    },
++    {},
++};
++#else
++#define d2d3_dt_match NULL
++#endif
++
++
++
++static struct platform_driver d2d3_driver = {
++        .probe      = d2d3_probe,
++        .remove     = d2d3_remove,
++        .suspend    = d2d3_suspend,
++        .resume     = d2d3_resume,
++        .driver     = {
++                .name   = D2D3_DEVICE_NAME,
++                .owner  = THIS_MODULE,
++                .of_match_table = d2d3_dt_match,
++        }
++};
++
++static int  __init d2d3_drv_init(void)
++{
++        int ret = 0;
++#if 0
++        d2d3_platform_device = platform_device_alloc(D2D3_DEVICE_NAME,0);
++        if (!d2d3_platform_device) {
++                printk("failed to alloc d2d3_platform_device\n");
++                return -ENOMEM;
++        }
++
++        if(platform_device_add(d2d3_platform_device)){
++                platform_device_put(d2d3_platform_device);
++                printk("failed to add d2d3_platform_device\n");
++                return -ENODEV;
++        }
++        if (platform_driver_register(&d2d3_driver)) {
++                printk("failed to register d2d3 module\n");
++
++                platform_device_del(d2d3_platform_device);
++                platform_device_put(d2d3_platform_device);
++                return -ENODEV;
++        }
++#else
++        /*allocate major device number*/
++        ret = alloc_chrdev_region(&d2d3_devno, 0, D2D3_COUNT, D2D3_DEVICE_NAME);
++        if (ret < 0) {
++                printk("[d2d3..]%s can't register major for d2d3 device.\n",__func__);
++                goto failed_alloc_cdev_region;
++        }
++        d2d3_clsp = class_create(THIS_MODULE, D2D3_DEVICE_NAME);
++        if (IS_ERR(d2d3_clsp)){
++                ret = PTR_ERR(d2d3_clsp);
++                printk(KERN_ERR "[d2d3..] %s create class error.\n",__func__);
++                goto failed_create_class;
++        }
++        if (platform_driver_register(&d2d3_driver)) {
++                printk("[d2d3..]%s failed to register d2d3 driver.\n",__func__);
++                goto failed_register_driver;
++        }
++        printk("[d2d3..]%s:d2d3_init ok.\n",__func__);
++        return ret;
++#endif
++failed_register_driver:
++        class_destroy(d2d3_clsp);
++failed_create_class:
++        unregister_chrdev_region(d2d3_devno, D2D3_COUNT);
++failed_alloc_cdev_region:
++        return ret;
++}
++
++
++
++
++static void __exit d2d3_drv_exit(void)
++{
++        printk("[d2d3..]%s d2d3_exit.\n",__func__);
++        class_destroy(d2d3_clsp);
++        unregister_chrdev_region(d2d3_devno, D2D3_COUNT);
++        platform_driver_unregister(&d2d3_driver);
++        //platform_device_unregister(d2d3_platform_device);
++        d2d3_platform_device = NULL;
++        return ;
++}
++
++
++module_init(d2d3_drv_init);
++module_exit(d2d3_drv_exit);
++
++MODULE_DESCRIPTION("AMLOGIC D2D3 driver");
++MODULE_LICENSE("GPL");
++MODULE_VERSION("2013-7-23a");
++
++
+diff --git a/drivers/amlogic/d2d3/d2d3_drv.h b/drivers/amlogic/d2d3/d2d3_drv.h
+new file mode 100755
+index 000000000000..c287a4a64df1
+--- /dev/null
++++ b/drivers/amlogic/d2d3/d2d3_drv.h
+@@ -0,0 +1,130 @@
++/*******************************************************************
++ *  Copyright C 2010 by Amlogic, Inc. All Rights Reserved.
++ *  File name: d2d3_drv.h
++ *  Description: IO function, structure, enum, used in d2d3 sub-module processing
++ *******************************************************************/
++
++#ifndef D2D3_H_
++#define D2D3_H_
++
++#define D2D3_FLAG_NULL                          0x00000000
++#define D2D3_BYPASS                             0x00000001
++#define D2D3_DEV_INIT                           0x00000002
++#define D2D3_REG				0x00000004
++
++
++#define D2D3_CANVAS_MAX_WIDTH                   256
++#define D2D3_CANVAS_MAX_HEIGH                   1080
++
++#define D2D3_CANVAS_MAX_CNT                     2
++
++#define D2D3_HORIZONTAL_PIXLE_MAX               256
++
++#define D2D3_SCU18_MIN_SCALE_FACTOR             0
++#define D2D3_SCU18_MAX_SCALE_FACTOR             3
++
++
++#define D2d3_Wr_reg_bits(reg,val,start,len)          WRITE_CBUS_REG_BITS(reg,val,start,len)
++#define D2d3_Wr(reg,val)                             WRITE_CBUS_REG(reg,val)
++#define D2d3_Rd(reg)                                 READ_CBUS_REG(reg)
++
++typedef enum d2d3_path_e{
++        NRW_VPP = 0,    //dpg= 0,dbr=1
++        NRW_VDR,        //dpg=0,dbr=0
++        VDR_VDR,        //dpg=1,dbr=0
++        VDR_VPP,        //dpg=1,dbr=1
++        VPP_VPP,        //dpg=2,dbr=1
++}d2d3_path_t;
++
++typedef enum d2d3_dbr_mode_e{
++        FIELD_INTERLEAVED_LEFT_RIGHT = 0,
++        FIELD_INTERLEAVED_RIGHT_LEFT,
++        LINE_INTERLEAVED,
++        HALF_LINE_INTERLEAVED,
++        PIXEL_INTERLEAVED,
++        HALF_LINE_INTERLEAVED_DOUBLE_SIZE,
++}d2d3_dbr_mode_t;
++#define D2D3_DPG_MUX_NULL               0
++#define D2D3_DPG_MUX_VDIN0              1
++#define D2D3_DPG_MUX_VDIN1              2
++#define D2D3_DPG_MUX_NRW                3
++#define D2D3_DPG_MUX_VDR                4
++#define D2D3_DPG_MUX_VPP                5
++
++#define D2D3_DBR_MUX_NULL               0
++#define D2D3_DBR_MUX_VDR                1
++#define D2D3_DBR_MUX_VPP                2
++
++typedef struct d2d3_scu18_param_s{
++        int dbr_scu18_step_en;
++        int dbr_scu18_isize_x;
++        int dbr_scu18_isize_y;
++        int dbr_scu18_iniph_h;
++        int dbr_scu18_iniph_v;
++}d2d3_scu18_param_t;
++
++typedef struct d2d3_param_s{
++        unsigned int        input_w;
++        unsigned int        input_h;
++        unsigned int        output_w;
++        unsigned int        output_h;
++        unsigned int        reverse_flag;
++        	 short      depth;
++        unsigned short      dpg_path;
++        unsigned short      dbr_path;
++        enum d2d3_dbr_mode_e dbr_mode;
++        //unsigned short    dbr_mode;
++}d2d3_param_t;
++
++typedef struct d2d3_depth_s{
++        unsigned int        dpg_size_x;
++        unsigned int        dpg_size_y;
++        unsigned short      dpg_scale_x;
++        unsigned short      dpg_scale_y;
++        unsigned int        depthsize_x;
++        unsigned int        depthsize_y;
++        unsigned int        dbr_size_x;
++        unsigned int        dbr_size_y;
++        unsigned short      dbr_scale_x;
++        unsigned short      dbr_scale_y;
++}d2d3_depth_t;
++
++/* d2d3 device structure */
++typedef struct d2d3_dev_s {
++        unsigned int        flag;
++        int                 index;
++        dev_t               devt;
++        struct cdev         cdev;
++        struct device       *dev;
++        char                vfm_name[12];
++        unsigned int        irq;
++        //spinlock_t	    buf_lock;
++        /* d2d3 memory */
++        unsigned int        mem_start;
++        unsigned int        mem_size;
++        unsigned int        canvas_h;
++        unsigned int        canvas_w;
++        unsigned int        canvas_max_size;
++        unsigned int        canvas_max_num;
++        unsigned int        dpg_canvas_idx;
++        unsigned int        dbr_canvas_idx;
++        /*buffer management*/
++        unsigned int        dpg_addr;
++        unsigned int        dbr_addr;
++        /*d2d3 parameters*/
++        struct d2d3_param_s param;
++} d2d3_dev_t;
++
++extern void get_real_display_size(unsigned int *w,unsigned int *h);
++extern void d2d3_config_dpg_canvas(struct d2d3_dev_s *devp);
++extern void d2d3_config_dbr_canvas(struct d2d3_dev_s *devp);
++extern void d2d3_canvas_reverse(bool reverse);
++extern void d2d3_config(d2d3_dev_t *devp,d2d3_param_t *parm);
++extern void d2d3_enable_hw(bool enable);
++extern void d2d3_enable_path(bool enable, d2d3_param_t *parm);
++extern void d2d3_set_def_config(d2d3_param_t *parm);
++extern void d2d3_update_canvas(struct d2d3_dev_s *devp);
++extern void d2d3_canvas_init(struct d2d3_dev_s *devp);
++extern int d2d3_depth_adjust(short depth);
++#endif /* D2D3_H_ */
++
+diff --git a/drivers/amlogic/d2d3/d2d3_hw.c b/drivers/amlogic/d2d3/d2d3_hw.c
+new file mode 100755
+index 000000000000..e8a2d18d8edf
+--- /dev/null
++++ b/drivers/amlogic/d2d3/d2d3_hw.c
+@@ -0,0 +1,553 @@
++/*
++ * d2d3 char device driver.
++ *
++ * Copyright (c) 2010 Frank zhao <frank.zhao@amlogic.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the smems of the GNU General Public License as published by
++ * the Free Software Foundation; version 2 of the License.
++ */
++
++/* Standard Linux headers */
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/interrupt.h>
++#include <linux/fs.h>
++#include <linux/device.h>
++#include <linux/cdev.h>
++#include <linux/platform_device.h>
++#include <asm/uaccess.h>
++//#include <linux/mutex.h>
++#include <linux/mm.h>
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/poll.h>
++#include <linux/vmalloc.h>
++/* Amlogic headers */
++#include <mach/am_regs.h>
++#include <mach/register.h>
++#include <linux/amlogic/amports/canvas.h>
++/* Local include */
++#include "d2d3_drv.h"
++#include "d2d3_regs.h"
++
++#define D2D3_GOFILED_VPP         0
++#define D2D3_GOFILED_DIPRE     1
++#define D2D3_GOFILED_VDIN0     2
++#define D2D3_GOFILED_VDIN1     3
++
++static unsigned int depth_hmax = D2D3_CANVAS_MAX_WIDTH;
++static unsigned int depth_vmax = D2D3_CANVAS_MAX_HEIGH;
++module_param(depth_hmax,uint,0644);
++module_param(depth_vmax,uint,0644);
++MODULE_PARM_DESC(depth_hmax,"\n the horizontal max size of depth \n");
++MODULE_PARM_DESC(depth_vmax,"\n the vertial max size of depth \n");
++
++
++//reg00~3f
++static unsigned int d2d3_reg_table[D2D3_REG_NUM]={
++        //0x2b00    0x2b01      0x2b02     0x2b03     0x2b04     0x2b05     0x2b06    0x2b07
++        0x81550d1f,0x077f0437,0x077f0437,0x000000ef,0x00000086,0x40000000,0x000000ff,0x001ec8ff,
++        //0x2b08    0x2b09      0x2b0a     0x2b0b     0x2b0c     0x2b0d     0x2b0e    0x2b0f
++        0x00ff001e,0x04103fc0,0x008700c3,0x40000000,0x08081360,0x0606403f,0x0606403f,0x00012020,
++        //0x2b10    0x2b11      0x2b12     0x2b13     0x2b14     0x2b15     0x2b16    0x2b17
++        0x00000000,0x08000600,0x18001800,0x08000600,0x000c0c10,0x800c0c10,0x00404013,0x000700f0,
++        //0x2b18    0x2b19      0x2b1a     0x2b1b     0x2b1c     0x2b1d     0x2b1e    0x2b1f
++        0x000000a3,0xbb78c0c0,0xbb43c0c0,0x42427777,0x60606060,0x06cc0000,0x58381808,0x58381808,
++        //0x2b20    0x2b21      0x2b22     0x2b23     0x2b24     0x2b25     0x2b26    0x2b27
++        0x00008080,0x00000000,0x00000000,0x00000000,0x0000001df,0x00ef0000,0x00860000,0x008600ef,
++        //0x2b28    0x2b29      0x2b2a     0x2b2b     0x2b2c     0x2b2d     0x2b2e    0x2b2f
++        0x000001df,0x00ef0000,0x00860000,0x00000000,0x00000004,0x00000000,0x00000000,0x00000100,
++        //0x2b30    0x2b31      0x2b32     0x2b33     0x2b34     0x2b35     0x2b36    0x2b37
++        0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,
++        //0x2b38    0x2b39      0x2b3a     0x2b3b     0x2b3c     0x2b3d     0x2b3e    0x2b3f
++        0x15641145,0x00007e90,0x00520001,0x00000002,0x00000000,0x00000000,0x00000000,0x00000000,
++};
++
++//Initial D2D3 Register
++void d2d3_set_def_config(d2d3_param_t *parm)
++{
++        unsigned short i = 0;
++	parm->depth      = 0;
++        parm->input_w    = 0;
++        parm->input_h    = 0;
++        parm->output_w   = 1920;
++        parm->output_h   = 1080;
++        parm->dpg_path   = D2D3_DPG_MUX_VPP;
++        parm->dbr_path   = D2D3_DBR_MUX_VPP;
++        parm->dbr_mode   = LINE_INTERLEAVED;
++        //enable clk_d2d3_reg
++        D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,1,ON_CLK_D2D3_REG_BIT,ON_CLK_D2D3_REG_WID); //d2d3_intf_ctrl0[23:22];
++        //load default config as 1080p
++        for(i=0; i<D2D3_REG_NUM; i++){
++                D2d3_Wr(D2D3_CBUS_BASE + i, d2d3_reg_table[i]);
++        }
++        return;
++}
++
++inline void d2d3_canvas_init(struct d2d3_dev_s *devp)
++{
++        unsigned int canvas_max_w = D2D3_CANVAS_MAX_WIDTH;
++        unsigned int canvas_max_h = D2D3_CANVAS_MAX_HEIGH;
++        devp->dpg_canvas_idx = D2D3_CANVAS_DPG_INDEX;
++        devp->dbr_canvas_idx = D2D3_CANVAS_DBR_INDEX;
++        canvas_config(devp->dpg_canvas_idx,devp->mem_start,canvas_max_w,canvas_max_h,CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++        canvas_config(devp->dbr_canvas_idx,devp->mem_start+0x100000,canvas_max_w,canvas_max_h,CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++
++        D2d3_Wr_reg_bits(D2D3_DWMIF_CTRL,devp->dpg_canvas_idx,0,8);
++        D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,devp->dbr_canvas_idx,0,8);
++}
++
++inline void d2d3_update_canvas(d2d3_dev_t *devp)
++{
++        swap(devp->dpg_canvas_idx,devp->dbr_canvas_idx);
++        D2d3_Wr_reg_bits(D2D3_DWMIF_CTRL,devp->dpg_canvas_idx,0,8);
++        D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,devp->dbr_canvas_idx,0,8);
++}
++/*
++ *canvas reverse work with di&vdin
++ */
++inline void d2d3_canvas_reverse(bool reverse)
++{
++        if(reverse)
++                D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,3,16,2); //dr_req_en=1
++        else//normal
++                D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,0,16,2);
++}
++inline void d2d3_config_dpg_canvas(struct d2d3_dev_s *devp)
++{
++        canvas_config(devp->dpg_canvas_idx,devp->dpg_addr, devp->canvas_w,devp->canvas_h,
++                        CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++}
++
++inline void d2d3_config_dbr_canvas(struct d2d3_dev_s *devp)
++{
++        canvas_config(devp->dbr_canvas_idx,devp->dbr_addr, devp->canvas_w,devp->canvas_h,
++                        CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++}
++
++inline void get_real_display_size(unsigned int *w, unsigned int *h)
++{
++        unsigned int hstart,hend,vstart,vend;
++        hstart = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_H_START_END,16,12);
++        hend = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_H_START_END,0,12);
++        *w = hend -hstart + 1;
++
++        vstart = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_V_START_END,16,12);
++        vend = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_V_START_END,0,12);
++        *h = vend -vstart + 1;
++}
++inline int d2d3_depth_adjust(short depth)
++{
++	unsigned short min_dtp=0,max_dtp=0,d2p_offset=0,mg1=0,mg2=0;
++
++	if(depth > 127 || depth < -127){
++		pr_err("[d2d3]%s: the %u over the depth range [-127~127].\n",__func__,depth);
++		return 1;
++	}
++
++	if(depth >0){
++		min_dtp=max_dtp=d2p_offset = depth;
++		mg1 = mg2 = (depth>>2);
++	}
++	else {
++		min_dtp=max_dtp=d2p_offset = 255 + depth;
++		mg1 = mg2 = (abs(depth))>>2;
++	}
++	/*adjust the offset of d2p */
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,d2p_offset,D2P_OFFSET_BIT,D2P_OFFSET_WID);
++	/*if depth >0 the curve will be protruded, else will be concave*/
++	D2d3_Wr(D2D3_MBDG_PARAM_3,(max_dtp<<24)|(min_dtp<<16)|(max_dtp<<8)|min_dtp);
++	/*adjust the gain of mbdg*/
++	D2d3_Wr_reg_bits(D2D3_DBLD_MG_PARAM,mg1,DB_G1_MG_BIT,DB_G1_MG_WID);
++	D2d3_Wr_reg_bits(D2D3_DBLD_MG_PARAM,mg2,DB_G2_MG_BIT,DB_G2_MG_WID);
++
++        return 0;
++}
++
++inline void d2d3_enable_path(bool enable, d2d3_param_t *parm)
++{
++        unsigned short dpg_path = parm->dpg_path;
++        unsigned short dbr_path  = parm->dbr_path;
++        unsigned short dpg_gofield = D2D3_GOFILED_VPP;
++        unsigned short dbr_gofield  = D2D3_GOFILED_VPP;
++        unsigned short nr_splitter    = 1;
++        //dbr source
++        D2d3_Wr_reg_bits(VPP_INPUT_CTRL,0,VD1_LEAVE_MOD_BIT,VD1_LEAVE_MOD_WID); //vd1_interleave_mode:  0->no_interleave;
++        if(!enable)
++        {
++                //disable dpg path
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,1,26,2);
++                //disable dbr path
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,0,4,2); //d2d3_v1_sel: 1 to select VDR, 2 to select VPP scaler
++                D2d3_Wr_reg_bits(VPP_INPUT_CTRL,1,6,3); //vd1_l_sel: 1->vd1(vdr);2->vd2;3->d2d3_l;4->d2d3_r
++                //pr_info("[d2d3]%s: disable dpg dbr path.\n",__func__);
++        }
++        else
++        {
++                switch(dpg_path){
++                        case D2D3_DPG_MUX_VDIN0:
++                                dpg_gofield = D2D3_GOFILED_VDIN0;
++                                nr_splitter = 1;
++                                break;
++                        case D2D3_DPG_MUX_VDIN1:
++                                dpg_gofield = D2D3_GOFILED_VDIN1;
++                                nr_splitter = 1;
++                                break;
++                        case D2D3_DPG_MUX_NRW:
++                                dpg_gofield = D2D3_GOFILED_DIPRE;
++                                nr_splitter = 3;
++                                break;
++                        case D2D3_DPG_MUX_VDR:
++                        case D2D3_DPG_MUX_VPP:
++                                dpg_gofield = D2D3_GOFILED_VPP;
++                                nr_splitter = 1;
++                                break;
++                        default:
++                                break;
++                }
++
++                //turn on dpg path
++
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,nr_splitter,NRWR_DOUT_SPLITTER_BIT,NRWR_DOUT_SPLITTER_WID);
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,dpg_gofield,V0_GOFLD_SEL_BIT,V0_GOFLD_SEL_WID);
++                //enable dpg read nrw
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,dpg_path,D2D3_V0_SEL_BIT,D2D3_V0_SEL_WID);
++
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,dbr_gofield,V1_GOFLD_SEL_BIT,V1_GOFLD_SEL_WID);
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,dbr_path,D2D3_V1_SEL_BIT,D2D3_V1_SEL_WID);
++                if(D2D3_DBR_MUX_VDR == dbr_path){
++                        /*vd1_left select d2d3 left input */
++                        D2d3_Wr_reg_bits(VPP_INPUT_CTRL,3,VD1_L_SEL_BIT,VD1_L_SEL_WID);
++                        /*turn on vpp 3d scale */
++                        D2d3_Wr_reg_bits(VPP_VSC_PHASE_CTRL,2,DOUBLE_LINE_MODE_BIT,DOUBLE_LINE_MODE_WID);
++                }
++                else{
++                        /*turn off vpp 3d scale */
++                        D2d3_Wr_reg_bits(VPP_VSC_PHASE_CTRL,0,DOUBLE_LINE_MODE_BIT,DOUBLE_LINE_MODE_WID);
++                        /*vd1_left select vdr input*/
++                        D2d3_Wr_reg_bits(VPP_INPUT_CTRL,1,VD1_L_SEL_BIT,VD1_L_SEL_WID);
++                }
++                //pr_info("[d2d3]%s: enable dpg path %u. dbr path %u.\n",__func__,dpg_path,dbr_path);
++        }
++
++
++}
++
++
++// DBR Function:
++//input:
++//    DBR_Mode = 0:  the 1st output field is left, field interleave (left/right)
++//    DBR_Mode = 1:  the 1st output field is right, field interleave (left/ right)
++//    DBR_Mode = 2:  line interleave (left first): lllll|rrrrr|lllll|...
++//    DBR_Mode = 3:  half line interleave (left first): lllllrrrrr|lllllrrrrr|... (both left and right are half size)
++//    DBR_Mode = 4:  pixel interleave (left first): lrlrlrlr... (both left and right are half size)
++//    DBR_Mode = 5:  left/right output with full size : lllllrrrrr|lllllrrrrr
++
++void d2d3_enable_dbr(unsigned  int size_x, unsigned int size_y,unsigned int scale_x,
++                unsigned int scale_y, d2d3_dbr_mode_t dbr_mode,d2d3_scu18_param_t sSCU18Param)
++{
++        unsigned int dbr_d2p_smode, dbr_d2p_out_mode;
++        unsigned int dbr_d2p_lomode, dbr_d2p_1dtolr, dbr_ddd_hhalf, dbr_d2p_lar, dbr_d2p_lr_switch;
++        unsigned int dbr_scu18_rep_en, dbr_ddd_out_mode, dbr_ddd_lomode;
++        unsigned int szxScaled,szyScaled;
++        unsigned int scu18_hstep,scu18_vstep;
++        unsigned int scale_x_act;
++        unsigned int dwTemp;
++
++        //dbr source
++        D2d3_Wr_reg_bits(D2D3_INTF_LENGTH,size_x-1,V1_LINE_LENGTHM1_BIT,V1_LINE_LENGTHM1_WID);
++
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,DBR_EN_BIT,DBR_EN_WID); //Set dbr_en = 1
++
++        //0x02:{szx_m1(16),szy_m1(0)}
++        D2d3_Wr(D2D3_DBR_OUTPIC_SIZE,((size_x-1)<<16) | (size_y-1)); //image size
++
++        switch(dbr_mode){
++                case FIELD_INTERLEAVED_LEFT_RIGHT:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 3;
++                                dbr_d2p_lomode = 0;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 0;
++                                dbr_d2p_lar    = 0;
++                                dbr_d2p_lr_switch = 1;
++                                dbr_scu18_rep_en = 0;
++                        break;
++                case FIELD_INTERLEAVED_RIGHT_LEFT:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 3;
++                                dbr_d2p_lomode = 0;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 0;
++                                dbr_d2p_lar   = 1;
++                                dbr_d2p_lr_switch = 1;
++                                dbr_scu18_rep_en = 0;
++                        break;
++                case LINE_INTERLEAVED:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 1;
++                                dbr_d2p_lomode = 0;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 0;
++                                dbr_d2p_lar   = 0;
++                                dbr_d2p_lr_switch = 0;
++                                dbr_scu18_rep_en = 0;
++                        break;
++                case HALF_LINE_INTERLEAVED:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 1;
++                                dbr_d2p_lomode = 3;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 1;
++                                dbr_d2p_lar   = 0;
++                                dbr_d2p_lr_switch = 0;
++                                dbr_scu18_rep_en = 1;
++                        break;
++                case HALF_LINE_INTERLEAVED_DOUBLE_SIZE:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 0;
++                                dbr_d2p_lomode = 2;
++                                dbr_d2p_1dtolr = 1;
++                                dbr_ddd_hhalf = 1;
++                                dbr_d2p_lar   = 0;
++                                dbr_d2p_lr_switch = 0;
++                                dbr_scu18_rep_en = 0;
++                        break;
++                case PIXEL_INTERLEAVED:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 1;
++                                dbr_d2p_lomode = 3;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 0;
++                                dbr_d2p_lar   = 0;
++                                dbr_d2p_lr_switch = 0;
++                                dbr_scu18_rep_en = 1;
++                        break;
++                default:
++                                dbr_d2p_smode = 3;
++                                dbr_d2p_out_mode = 1;
++                                dbr_d2p_lomode = 0;
++                                dbr_d2p_1dtolr = 0;
++                                dbr_ddd_hhalf = 0;
++                                dbr_d2p_lar   = 0;
++                                dbr_d2p_lr_switch = 0;
++                                dbr_scu18_rep_en = 0;
++                        break;
++        }
++
++        dbr_ddd_out_mode = dbr_d2p_out_mode;
++        dbr_ddd_lomode   = dbr_d2p_lomode;
++        //d2p neg = 1
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,1,D2P_NEG_BIT,D2P_NEG_WID);
++        //smode
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_smode,D2P_SMODE_BIT,D2P_SMODE_WID);
++        //d2p out mode
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_out_mode,D2P_OUT_MODE_BIT,D2P_OUT_MODE_WID);
++
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_1dtolr,D2P_1DTOLR_BIT,D2P_1DTOLR_WID);
++
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_lr_switch,D2P_LR_SWITCH_BIT,D2P_LR_SWITCH_WID);
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_lar,D2P_LAR_BIT,D2P_LAR_WID);
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,0,D2P_WRAP_EN_BIT,D2P_WRAP_EN_WID);
++
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,dbr_d2p_lomode,D2P_LOMODE_BIT,D2P_LOMODE_WID);
++
++        //set bound default left 8 pixel&right 8 pixel
++        D2d3_Wr_reg_bits(D2D3_D2P_PARAM_1,8,D2P_BRDWID_BIT,D2P_BRDWID_WID);
++
++        dwTemp = dbr_ddd_lomode | (dbr_ddd_out_mode<<2) | (dbr_ddd_hhalf<<4) |
++                (0<<6) | (0 <<7);
++        D2d3_Wr(D2D3_DBR_DDD_CTRL,dwTemp);
++
++        D2d3_Wr_reg_bits(D2D3_DBR_LRDMX_CTRL,1,LR_MERGE_BIT,LR_MERGE_WID); //set lr_merge
++
++        if(sSCU18Param.dbr_scu18_step_en == 0)
++        {
++                scale_x_act = (dbr_ddd_hhalf) ? scale_x-1 : scale_x;
++                D2d3_Wr_reg_bits(D2D3_SCALER_CTRL,scale_x_act|(scale_y<<2),4,8-4);  //Set SCD18 factor:
++        }
++        else
++        {
++                scu18_hstep = (dbr_ddd_hhalf) ? ((sSCU18Param.dbr_scu18_isize_x*2*0x100)/size_x) : ((sSCU18Param.dbr_scu18_isize_x*0x100)/size_x);
++                scu18_vstep = ((sSCU18Param.dbr_scu18_isize_y*0x100)/size_y);
++                D2d3_Wr(D2D3_SCU18_INPIC_SIZE,((sSCU18Param.dbr_scu18_isize_y)<<16) | (sSCU18Param.dbr_scu18_isize_x));
++                D2d3_Wr(D2D3_SCU18_STEP,((1<<16)|(scu18_hstep<<8)|scu18_vstep));
++        }
++        D2d3_Wr_reg_bits(D2D3_SCALER_CTRL,dbr_scu18_rep_en,8,1);  //Set SCD18 factor:
++        D2d3_Wr_reg_bits(D2D3_SCALER_CTRL,sSCU18Param.dbr_scu18_iniph_h|(sSCU18Param.dbr_scu18_iniph_v<<8),16,16); //set phase
++
++        //=== DRMIFf ===
++        if(sSCU18Param.dbr_scu18_step_en == 0){
++                szxScaled = (size_x+(1<<scale_x)-1)>>scale_x;
++                szyScaled = (size_y+(1<<scale_y)-1)>>scale_y;
++        }
++        else{
++                szxScaled = sSCU18Param.dbr_scu18_isize_x;
++                szyScaled = sSCU18Param.dbr_scu18_isize_y;
++        }
++        //0x29:{drmif_end_x(16),drmif_start_x(0)}
++        dwTemp = (0x0) | ((szxScaled-1)<<16); //drmif_start_x=0x0; drmif_end_x=szxScaled-1;
++        D2d3_Wr(D2D3_DRMIF_HPOS, (0x0)|((szxScaled-1)<<16));
++
++        //0x2a:{drmif_end_y(16),drmif_start_y(0)}
++        D2d3_Wr(D2D3_DRMIF_VPOS,(0x0)|((szyScaled-1)<<16));
++
++        D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,1,DR_REQ_EN_BIT,DR_REQ_EN_WID); //dr_req_en=1
++}
++
++void d2d3_enable_dpg(unsigned int size_x, unsigned int size_y, unsigned int scale_x,
++                unsigned int  scale_y, unsigned int xsize_depth,unsigned int ysize_depth)
++{
++        D2d3_Wr_reg_bits(D2D3_INTF_LENGTH,size_x-1,V0_LINE_LENGTHM1_BIT,V0_LINE_LENGTHM1_WID); //use to generate eol
++
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,DPG_EN_BIT,DPG_EN_WID); //Set dpg_en = 1
++
++        D2d3_Wr(D2D3_DPG_INPIC_SIZE,((size_x-1)<<16) | (size_y-1)); //set image size of DPG
++
++        //scu18
++        D2d3_Wr_reg_bits(D2D3_SCALER_CTRL,scale_x|(scale_y<<2),0,4);
++        D2d3_Wr_reg_bits(D2D3_SCALER_CTRL,0,11,12-11);
++        D2d3_Wr(D2D3_DGEN_WIN_HOR,(0<<16) | (xsize_depth-1));
++        D2d3_Wr(D2D3_DGEN_WIN_VER,(0<<16) | (ysize_depth-1)); //set Windows of DPG
++
++        //=== Configure the DPG Models ===
++        //cpdg
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,2,1);
++        D2d3_Wr_reg_bits(D2D3_CG_PARAM_2,ysize_depth,16,16); //set cg_vpos_thr:    szyScaled
++        //mpdg
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,3,1);
++        D2d3_Wr_reg_bits(D2D3_MBDG_PARAM_0,xsize_depth/2,16,24-16);
++        D2d3_Wr_reg_bits(D2D3_MBDG_PARAM_1,ysize_depth/2,16,24-16);
++        D2d3_Wr(D2D3_MBDG_PARAM_2,((xsize_depth/2-1)) | ((xsize_depth/2-1)<<8) | ((ysize_depth/2-1)<<16) | ((ysize_depth/2-1)<<24));
++
++        //lpdg
++
++        //dbld
++
++        //dwmif
++        D2d3_Wr(D2D3_DWMIF_HPOS,(0x0)|((xsize_depth-1)<<16));
++        D2d3_Wr(D2D3_DWMIF_VPOS,(0x0)|((ysize_depth-1)<<16));
++        D2d3_Wr(D2D3_DWMIF_SIZE,(xsize_depth-1)|((ysize_depth-1)<<16));
++        D2d3_Wr_reg_bits(D2D3_DWMIF_CTRL,1,8,1); //dw_req_en = 1;
++
++}
++
++//*********************************************************************
++//      function to enable the D2D3 (DPG and DBR)
++//*********************************************************************
++//static void C_D2D3_Config(int dpg_size_x, int dpg_size_y, int dpg_scale_x, int dpg_scale_y, int d2d3_flow_mode, int DBR_Mode, int dbr_size_x, int dbr_size_y)
++//void d2d3_config(d2d3_param_t *d2d3_devp,int isize_x, int isize_y, int iscale_x, int iscale_y,
++//                  int osize_x, int osize_y, int oscale_x, int oscale_y,
++//                  int dpg_path,int dbr_path, int dbr_mode)
++void d2d3_config(d2d3_dev_t *d2d3_devp,d2d3_param_t *parm)
++{
++        unsigned int DepthSize_x,DepthSize_y;
++        d2d3_scu18_param_t scu18;
++
++        unsigned int isize_x,isize_y;
++        unsigned short iscale_x=0, iscale_y=0;
++
++        unsigned int osize_x,osize_y;
++        unsigned short oscale_x=0, oscale_y=0;
++
++        unsigned short dpg_path = parm->dpg_path;
++        unsigned short dbr_path = parm->dbr_path;
++
++        isize_x = (dpg_path==D2D3_DPG_MUX_NRW) ? parm->input_w : (dpg_path==D2D3_DPG_MUX_VDR) ?  parm->input_w  : parm->output_w;
++        isize_y = (dpg_path==D2D3_DPG_MUX_NRW) ? (parm->input_h>>1) : (dpg_path==D2D3_DPG_MUX_VDR) ? (parm->input_h) : parm->output_h;
++        osize_x = (dbr_path==D2D3_DBR_MUX_VDR) ? parm->input_w : parm->output_w;
++        osize_y = (dbr_path==D2D3_DBR_MUX_VDR) ? parm->input_h : parm->output_h;
++
++        if((D2D3_DPG_MUX_VPP == dpg_path)&&(D2D3_DBR_MUX_VPP == dbr_path))
++        {
++                iscale_x = iscale_y = oscale_x = oscale_y = 3;
++        }else if((D2D3_DPG_MUX_VDR == dpg_path)&&(D2D3_DBR_MUX_VDR == dbr_path)){
++                iscale_x = 1;
++                DepthSize_x = isize_x>>iscale_x;
++                while(DepthSize_x > depth_hmax){
++                        DepthSize_x>>=1;
++                        iscale_x++;
++                }
++                iscale_y = oscale_x = oscale_y = iscale_x;
++        }else if((D2D3_DPG_MUX_VDR == dpg_path)&&(D2D3_DBR_MUX_VPP == dbr_path)){
++                iscale_x = 1;
++                DepthSize_x = isize_x>>iscale_x;
++                while(DepthSize_x > depth_hmax){
++                        DepthSize_x>>=1;
++                        iscale_x++;
++                }
++                iscale_y = iscale_x;
++        }else if((D2D3_DPG_MUX_NRW == dpg_path)&&(D2D3_DBR_MUX_VDR== dbr_path)){
++                iscale_x = 1;
++                DepthSize_x = isize_x>>iscale_x;
++                while(DepthSize_x > depth_hmax){
++                        DepthSize_x>>=1;
++                        iscale_x++;
++                }
++                iscale_y = iscale_x;
++        }
++        DepthSize_x  = (isize_x+(1<<iscale_x)-1)>>iscale_x;
++        DepthSize_y  = (isize_y+(1<<iscale_y)-1)>>iscale_y;
++        pr_info("[d2d3]%s: dpg input size: %u x %u,depth size: %u x %u.down scaler factor %u x %u.\n",
++                        __func__,parm->input_w,parm->input_h,DepthSize_x,DepthSize_y,iscale_x,iscale_y);
++
++        //because the format of NRW is interlaced, so scale_y should minus 1
++        d2d3_enable_dpg(isize_x, isize_y, iscale_x, iscale_y,DepthSize_x,DepthSize_y);
++
++        /*if dpg and dbr is not at the same access point such as vpp,will enable scu18 */
++        if(parm->dbr_path == D2D3_DBR_MUX_VPP) {
++                //image1 input from vpp scaler
++                scu18.dbr_scu18_step_en = 1;
++                scu18.dbr_scu18_isize_x = DepthSize_x;
++                scu18.dbr_scu18_isize_y = DepthSize_y;
++                scu18.dbr_scu18_iniph_h = 0;
++                scu18.dbr_scu18_iniph_v = 0;
++        }
++        else {
++                scu18.dbr_scu18_step_en = 0;
++        }
++        pr_info("[d2d3]%s: output size %u x %u,dbr up scale factor %u x %u.\n",__func__,osize_x,osize_y,oscale_x,oscale_y);
++        d2d3_enable_dbr(osize_x,osize_y,oscale_x,oscale_y,parm->dbr_mode,scu18);
++
++        //enable DPG/DBR clock and DBR read REQ
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,0,1);
++        D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,1,1);
++        D2d3_Wr_reg_bits(D2D3_DRMIF_CTRL,1,8,9-8); //dr_req_en=1
++
++        //clear  D2D3_INT
++        //0x24:{x_rev(17),y_rev(16),dw_done_clr(15),dw_little_endian(14),dw_pic_struct(12),dw_urgent(11),
++        //dw_clr_wrrsp(10),dw_canvas_wr(9),dw_req_en(8),dw_canvas_index(0)}
++        D2d3_Wr_reg_bits(D2D3_DWMIF_CTRL,1,15,16-15); //dw_done_clr = 1;
++        D2d3_Wr_reg_bits(D2D3_DWMIF_CTRL,0,15,16-15); //dw_done_clr = 0;
++
++}
++/*
++ *disable d2d3 gate clock&disable d2d3 path
++ */
++void d2d3_enable_hw(bool enable)
++{
++        if(enable){
++                D2d3_Wr_reg_bits(D2D3_GLB_CTRL,0,CLK_CTRL_BIT,CLK_CTRL_WID);
++                //disable d2d3 clock
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,1,ON_CLK_D2D3_BIT,ON_CLK_D2D3_WID);
++        }else {
++                //soft reset d2d3 unit
++        	D2d3_Wr_reg_bits(D2D3_GLB_CTRL,1,SW_RST_NOBUF_BIT,SW_RST_NOBUF_WID);
++
++                // [27:26]  Enable d2d3 register clock    = 00/(auto, off, on, on)
++                // [ 25:24]  Disable dpg clock        = 01/(auto, off, on, on)
++                // [ 23:22]  Disable cbdg clock      = 01/(auto, off, on, on)
++                // [ 21:20]  Disable mbdg clock     = 01/(auto, off, on, on)
++                // [ 19:18]  Disable lbdg clock       = 01/(auto, off, on, on)
++                // [17:16]  Disable dbr clock          = 01/(auto, off!!!!!!!!)
++                D2d3_Wr_reg_bits(D2D3_GLB_CTRL,0x155,CLK_CTRL_BIT,CLK_CTRL_WID);
++                //disable d2d3 clock
++                D2d3_Wr_reg_bits(D2D3_INTF_CTRL0,0,ON_CLK_D2D3_BIT,ON_CLK_D2D3_WID);
++        }
++}
++
+diff --git a/drivers/amlogic/d2d3/d2d3_regs.h b/drivers/amlogic/d2d3/d2d3_regs.h
+new file mode 100755
+index 000000000000..818d362f604f
+--- /dev/null
++++ b/drivers/amlogic/d2d3/d2d3_regs.h
+@@ -0,0 +1,725 @@
++/*
++ * D2D3 register bit-field definition
++ * Sorted by the appearing order of registers in register.h.
++ *
++ * Author: bai kele <kele.bai@amlogic.com>
++ *
++ * Copyright (C) 2010 Amlogic Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++#ifndef _D2D3_REGS_H
++#define _D2D3_REGS_H
++
++//#define D2D3_INTF_LENGTH                0x1a08
++	#define V1_LINE_LENGTHM1_BIT		16
++	#define V1_LINE_LENGTHM1_WID		13
++	#define V0_LINE_LENGTHM1_BIT		0
++	#define V0_LINE_LENGTHM1_WID		13
++
++//#define D2D3_INTF_CTRL0                 0x1a09
++	#define VD0_DOUT_SPLITTER_BIT		30
++	#define VD0_DOUT_SPLITTER_WID		2
++	#define VD1_DOUT_SPLITTER_BIT		28
++	#define VD1_DOUT_SPLITTER_WID		2
++	#define NRWR_DOUT_SPLITTER_BIT	        26
++	#define NRWR_DOUT_SPLITTER_WID		2
++	#define ON_CLK_D2D3_REG_BIT		23
++	#define ON_CLK_D2D3_REG_WID		1
++	#define ON_CLK_D2D3_BIT			22
++	#define ON_CLK_D2D3_WID			1
++	#define V1_GO_LINE_BIT			21
++	#define V1_GO_LINE_WID			1
++	#define V1_GO_FIELD_BIT			20
++	#define V1_GO_FIELD_WID			1
++	#define V0_GO_FIELD_BIT			19
++	#define V0_GO_FIELD_WID			1
++	#define V1_GOFLD_SEL_BIT		16
++	#define V1_GOFLD_SEL_WID		3
++	#define V0_GOFLD_SEL_BIT		13
++	#define V0_GOFLD_SEL_WID 		3
++	#define HOLE_LINES_DEPTH_BIT		6
++	#define HOLE_LINES_DEPTH_WID		7
++	#define D2D3_V1_SEL_BIT			4
++	#define D2D3_V1_SEL_WID			2
++	#define USE_VDIN_EOL_BIT		3
++	#define USE_VDIN_EOL_WID		1
++	#define D2D3_V0_SEL_BIT			0
++	#define D2D3_V0_SEL_WID			3
++//#define VPP_VSC_PHASE_CTRL      0x1d0d
++        #define DOUBLE_LINE_MODE_BIT            17
++        #define DOUBLE_LINE_MODE_WID            2
++        #define OUTPUT_MODE_BIT                 16
++        #define OUTPUT_MODE_WID                 1
++
++//#define VPP_INPUT_CTRL                0x1dab     //default 12'h440
++	#define VD2_SEL_BIT				9
++	#define VD2_SEL_WID				3
++	#define VD1_L_SEL_BIT				6
++	#define VD1_L_SEL_WID				3
++	#define VD1_R_SEL_BIT				3
++	#define VD1_R_SEL_WID				3
++	#define VD1_LEAVE_MOD_BIT			0
++	#define VD1_LEAVE_MOD_WID			3
++
++
++#define D2D3_REG_NUM                    0x40
++
++#define D2D3_CBUS_BASE                0x2b00         // D2D3 address space
++
++
++//#define D2D3_GLB_CTRL            0x2b00
++	#define RD_LOCK_EN_BIT		        31
++	#define RD_LOCK_EN_WID			1
++	#define SW_RST_NOBUF_BIT		30
++	#define SW_RST_NOBUF_WID		1
++	#define  CLK_AUTO_DIS_BIT		28
++	#define  CLK_AUTO_DIS_WID		2
++	#define CLK_CTRL_BIT			16
++	#define CLK_CTRL_WID			12
++	#define GLB_CTRL_RS1_BIT		12
++	#define GLB_CTRL_RS1_WID		4
++	#define  LO_CHROMA_SIGN_BIT	        11
++	#define LO_CHROMA_SIGN_WID		1
++	#define  RO_CHROMA_SIGN_BIT	        10
++	#define  RO_CHROMA_SIGN_WID		1
++	#define vI0_CHROMA_SIGN_BIT	        9
++	#define VI0_CHROMA_SIGN_WID		1
++	#define VI1_CHROMA_SIGN_BIT	        8
++	#define VI1_CHROMA_SIGN_WID		1
++	#define GLB_CTRL_RS2_BIT		5
++	#define GLB_CTRL_RS2_WID		3
++	#define lG_EN_BIT			4
++	#define lG_EN_WID			1
++	#define MG_EN_BIT			3
++	#define MG_EN_WID			1
++	#define CG_EN_BIT			2
++	#define CG_EN_WID			1
++	#define DBR_EN_BIT			1
++	#define DBR_EN_WID			1
++	#define DPG_EN_BIT			0
++	#define  DPG_EN_WID			1
++
++
++//#define D2D3_DPG_INPIC_SIZE      0x2b01
++	#define SZX_VI_M1_BIT		        16
++	#define SZX_VI_M1_WID			16
++	#define SZY_VI_M1_BIT		        0
++	#define SZY_VI_M1_WID			16
++
++
++//#define D2D3_DBR_OUTPIC_SIZE     0x2b02
++	#define SZX_VO_M1_BIT		        16
++	#define SZX_VO_M1_WID			16
++	#define SZY_VO_M1_BIT		        0
++	#define SZY_VO_M1_WID			16
++
++//#define D2D3_DGEN_WIN_HOR        0x2b03
++	#define DG_WIN_X_START_BIT	        16
++	#define DG_WIN_X_START_WID		16
++	#define DG_WIN_X_END_BIT		0
++	#define DG_WIN_X_END_WID		16
++
++//#define D2D3_DGEN_WIN_VER        0x2b04
++	#define DG_WIN_Y_START_BIT		16
++	#define DG_WIN_Y_START_WID		16
++	#define DG_WIN_Y_END_BIT		0
++	#define DG_WIN_Y_END_WID		16
++
++//#define D2D3_PRE_SCD_H           0x2b05
++	#define  SCD81_HPHS_STEP_BIT	        16
++	#define  SCD81_HPHS_STEP_WID		16
++	#define SCD81_HPHS_INI_BIT	        0
++	#define SCD81_HPHS_INI_WID		16
++
++//#define D2D3_SCALER_CTRL         0x2b06
++	#define SCU18_INIPH_BIT		        16
++	#define SCU18_INIPH_WID			16
++	#define SCALER_RS_BIT			12
++	#define SCALER_RS_WID			4
++	#define SCD81_PREDROP_EN_BIT	        11
++	#define SCD81_PREDROP_EN_WID		1
++	#define CG_CSC_SEL_BIT			9
++	#define CG_CSC_SEL_WID			2
++	#define SCU18_REP_EN_BIT		8
++	#define SCU18_REP_EN_WID		1
++	#define SCU18_FACTOR_BIT		4
++	#define SCU18_FACTOR_WID		4
++	#define SCD81_FACTOR_BIT		0
++	#define SCD81_FACTOR_WID		4
++
++//#define D2D3_CG_THRESHOLD_1      0x2b07
++	#define CG_RPG_DTH_BIT		        24
++	#define CG_RPG_DTH_WID			8
++	#define  CG_RPG_UTH_BIT		        16
++	#define CG_RPG_UTH_WID			8
++	#define CG_LUM_DTH_BIT		        8
++	#define CG_LUM_DTH_WID			8
++	#define CG_LUM_UTH_BIT		        0
++	#define CG_LUM_UTH_WID			8
++
++//#define D2D3_CG_THRESHOLD_2      0x2b08
++	#define  CG_RPB_DTH_BIT		        24
++	#define  CG_RPB_DTH_WID			8
++	#define CG_RPB_UTH_BIT		        16
++	#define CG_RPB_UTH_WID			8
++	#define CG_BPG_DTH_BIT		        8
++	#define CG_BPG_DTH_WID			8
++	#define CG_BPG_UTH_BIT		        0
++	#define CG_BPG_UTH_WID			8
++
++//#define D2D3_CG_PARAM_1          0x2b09
++	#define CG_VP_REL_K_BIT		        24
++	#define CG_VP_REL_K_WID			8
++	#define CG_VP_Y_THR_BIT		        16
++	#define CG_VP_Y_THR_WID			8
++	#define G_MEET_DVAL_BIT		        8
++	#define G_MEET_DVAL_WID			8
++	#define CG_UNMT_DVAL_BIT		0
++	#define CG_UNMT_DVAL_WID		8
++
++//#define D2D3_CG_PARAM_2          0x2b0a
++	#define CG_VPOS_THR_BIT		        16
++	#define CG_VPOS_THR_WID			16
++	#define CG_PARAM_RS_BIT		        8
++	#define CG_PARAM_RS_WID			8
++	#define CG_VPOS_EN_BIT		        7
++	#define CG_VPOS_EN_WID			1
++	#define CG_VPOS_ADPT_EN_BIT	        6
++	#define CG_VPOS_ADPT_EN_WID		1
++	#define CG_LPF_BYPASS_BIT		4
++	#define CG_LPF_BYPASS_WID		2
++	#define CG_VP_REL_S_BIT		        0
++	#define  CG_VP_REL_S_WID		4
++
++//#define D2D3_PRE_SCD_V           0x2b0b
++	#define SCD81_VPHS_STEP_BIT		16
++	#define SCD81_VPHS_STEP_WID		16
++	#define  SCD81_VPHS_INI_BIT		0
++	#define SCD81_VPHS_INI_WID		16
++
++//#define D2D3_D2P_PARAM_1         0x2b0c
++	#define D2P_BRDWID_BIT			24
++	#define D2P_BRDWID_WID			8
++	#define D2P_PARAM_RS_BIT		22
++	#define D2P_PARAM_RS_WID		2
++	#define D2P_LOMODE_BIT			20
++	#define D2P_LOMODE_WID			2
++	#define D2P_NEG_BIT			19
++	#define D2P_NEG_WID			1
++	#define D2P_PARAM_RS2_BIT		18
++	#define D2P_PARAM_RS2_WID		1
++	#define  D2P_WRAP_EN_BIT		17
++	#define  D2P_WRAP_EN_WID		1
++	#define D2P_LAR_BIT			16
++	#define D2P_LAR_WID			1
++	#define D2P_LR_SWITCH_BIT		15
++	#define D2P_LR_SWITCH_WID		1
++	#define D2P_1DTOLR_BIT			14
++	#define D2P_1DTOLR_WID			1
++	#define D2P_OUT_MODE_BIT		12
++	#define D2P_OUT_MODE_WID		2
++	#define D2P_SMODE_BIT			8
++	#define D2P_SMODE_WID			4
++	#define D2P_OFFSET_BIT			0
++	#define D2P_OFFSET_WID			8
++
++//#define D2D3_D2P_PARAM_2         0x2b0d
++	#define  D2P_PG0_BIT 		        24
++	#define D2P_PG0_WID			8
++	#define  D2P_PG1_BIT		        16
++	#define  D2P_PG1_WID			8
++	#define D2P_PT_BIT			8
++	#define D2P_PT_WID			8
++	#define D2P_PLIMIT_BIT		        0
++	#define D2P_PLIMIT_WID		        8
++
++//#define D2D3_D2P_PARAM_3         0x2b0e
++	#define D2P_NG0_BIT		        24
++	#define D2P_NG0_WID			8
++	#define D2P_NG1_BIT		        16
++	#define D2P_NG1_WID			8
++	#define D2P_NT_BIT			8
++	#define D2P_NT_WID			8
++	#define D2P_NLIMIT_BIT		        0
++	#define D2P_NLIMIT_WID		        8
++
++//#define D2D3_SCU18_STEP          0x2b0f
++	#define SCU18_STEP_RS_BIT		17
++	#define SCU18_STEP_RS_WID		15
++	#define SCU18_STEP_EN_BIT		16
++	#define SCU18_STEP_EN_WID		1
++	#define SCU18_HPHS_STEP_BIT	        8
++	#define SCU18_HPHS_STEP_WID		8
++	#define SCU18_VPHS_STEP_BIT	        0
++	#define SCU18_VPHS_STEP_WID		8
++
++//#define D2D3_DPF_LPF_CTRL        0x2b10
++	#define DPF_LPF_CTRL_RS1_BIT		22
++	#define DPF_LPF_CTRL_RS1_WID		10
++	#define DB_LPF_BPCOEFF_BIT		20
++	#define DB_LPF_BPCOEFF_WID		2
++	#define   LG_LPF_BPCOEFF_BIT		18
++	#define  LG_LPF_BPCOEFF_WID		2
++	#define CG_LPF_BPCOEFF_BIT		16
++	#define CG_LPF_BPCOEFF_WID		2
++	#define DPF_LPF_CTRL_RS2_BIT		10
++	#define DPF_LPF_CTRL_RS2_WID		6
++	#define DB_LPF_BYPASS_BIT		8
++	#define DB_LPF_BYPASS_WID		2
++	#define LG_LPF_BYPASS_BIT		6
++	#define LG_LPF_BYPASS_WID		2
++	#define  LG_KC_BIT			0
++	#define  LG_KC_WID			6
++
++//#define D2D3_DBLD_CG_PARAM       0x2b11
++	#define  DB_G2_CG_BIT			24
++	#define  DB_G2_CG_WID			8
++	#define DB_O2_CG_BIT			16
++	#define DB_O2_CG_WID			8
++	#define DB_G1_CG_BIT			8
++	#define DB_G1_CG_WID			8
++	#define DB_O1_CG_BIT			0
++	#define DB_O1_CG_WID			8
++
++//#define D2D3_DBLD_MG_PARAM       0x2b12
++	#define  DB_G2_MG_BIT			24
++	#define  DB_G2_MG_WID			8
++	#define DB_O2_MG_BIT			16
++	#define DB_O2_MG_WID			8
++	#define DB_G1_MG_BIT			8
++	#define DB_G1_MG_WID			8
++	#define DB_O1_MG_BIT			0
++	#define DB_O1_MG_WID			8
++
++//#define D2D3_DBLD_LG_PARAM       0x2b13
++	#define DB_G2_LG_BIT			24
++	#define DB_G2_LG_WID			8
++	#define DB_O2_LG_BIT			16
++	#define DB_O2_LG_WID			8
++	#define  DB_G1_LG_BIT			8
++	#define  DB_G1_LG_WID			8
++	#define DB_O1_LG_BIT			0
++	#define DB_O1_LG_WID			8
++
++//#define D2D3_DBLD_LPF_HCOEFF     0x2b14
++	#define DB_FACTOR_BIT			24
++	#define DB_FACTOR_WID			8
++	#define  DB_HF_A_BIT			16
++	#define DB_HF_A_WID			8
++	#define DB_HF_B_BIT			8
++	#define DB_HF_B_WID			8
++	#define DB_HF_C_BIT			0
++	#define DB_HF_C_WID			8
++
++//#define D2D3_DBLD_LPF_VCOEFF     0x2b15
++	#define DB_OWIN_FILL_BIT		24
++	#define DB_OWIN_FILL_WID 		8
++	#define  DB_VF_A_BIT			16
++	#define  DB_VF_A_WID			8
++	#define DB_VF_B_BIT			8
++	#define DB_VF_B_WID			8
++	#define DB_VF_C_BIT			0
++	#define DB_VF_C_WID			8
++
++//#define D2D3_DBLD_PATH_CTRL      0x2b16
++	#define  HIST_DEPTH_IDX_BIT		28
++	#define  HIST_DEPTH_IDX_WID		4
++	#define DBLD_PATH_RS_BIT		26
++	#define DBLD_PATH_RS_WID		2
++	#define MBDG_DEP_NEG_BIT		25
++	#define MBDG_DEP_NEG_WID		1
++	#define  LBDG_DEP_NEG_BIT		24
++	#define  LBDG_DEP_NEG_WID		1
++	#define DB_F1_CTRL_BIT			16
++	#define DB_F1_CTRL_WID			8
++	#define DB_F2_CTRL_BIT			8
++	#define DB_F2_CTRL_WID			8
++	#define DB_FIFO0_SEL_BIT		4
++	#define DB_FIFO0_SEL_WID		4
++	#define DB_FIFO1_SEL_BIT		4
++	#define DB_FIFO1_SEL_WID		4
++
++//#define D2D3_SCU18_INPIC_SIZE    0x2b17
++	#define SZY_SCUI_BIT		        16
++	#define SZY_SCUI_WID			16
++	#define SZX_SCUI_BIT		        0
++	#define SZX_SCUI_WID			16
++
++//#define D2D3_MBDG_CTRL           0x2b18
++	#define MBDG_CTRL_RS_BIT		18
++	#define MBDG_CTRL_RS_WID		14
++	#define MG_VP_EN_BIT			17
++	#define MG_VP_EN_WID			1
++	#define MG_SW_EN_BIT			16
++	#define MG_SW_EN_WID			1
++	#define MG_OWIN_FILL_BIT		8
++	#define MG_OWIN_FILL_WID		8
++	#define MG_IIR_EN_BIT			7
++	#define MG_IIR_EN_WID			1
++	#define MG_IIR_BIT			0
++	#define MG_IIR_WID			7
++
++//#define D2D3_MBDG_PARAM_0        0x2b19
++	#define  MG_DTL_PXL_LEFT_BIT		28
++	#define  MG_DTL_PXL_LEFT_WID		4
++	#define MG_DTL_PXL_RIGHT_BIT		24
++	#define MG_DTL_PXL_RIGHT_WID		4
++	#define MG_CX_SW_BIT			16
++	#define MG_CX_SW_WID			8
++	#define MG_UX_SW_BIT			8
++	#define MG_UX_SW_WID			8
++	#define MG_DX_SW_BIT			0
++	#define MG_DX_SW_WID			8
++
++//#define D2D3_MBDG_PARAM_1        0x2b1a
++	#define MG_DTL_PXL_UP_BIT		28
++	#define MG_DTL_PXL_UP_WID		4
++	#define MG_DTL_PXL_DN_BIT		24
++	#define MG_DTL_PXL_DN_WID		4
++	#define MG_CY_SW_BIT			16
++	#define MG_CY_SW_WID			8
++	#define MG_UY_SW_BIT			8
++	#define  MG_UY_SW_WID			8
++	#define  MG_DY_SW_BIT			0
++	#define MG_DY_SW_WID			8
++
++//#define D2D3_MBDG_PARAM_2        0x2b1b
++	#define MG_DTL_LN_UP_BIT		24
++	#define MG_DTL_LN_UP_WID		8
++	#define MG_DTL_LN_DN_BIT		16
++	#define MG_DTL_LN_DN_WID		8
++	#define MG_DTL_LN_LEFT_BIT		8
++	#define MG_DTL_LN_LEFT_WID		8
++	#define MG_DTL_LN_RIGHT_BIT		0
++	#define MG_DTL_LN_RIGHT_WID		8
++
++//#define D2D3_MBDG_PARAM_3        0x2b1c
++	#define MG_Y_MAX_BIT		        24
++	#define MG_Y_MAX_WID			8
++	#define MG_Y_MIN_BIT		        16
++	#define MG_Y_MIN_WID			8
++	#define MG_X_MAX_BIT		        8
++	#define MG_X_MAX_WID			8
++	#define MG_X_MIN_BIT		        0
++	#define MG_X_MIN_WID			8
++
++//#define D2D3_MBDG_PARAM_4        0x2b1d
++	#define MBDG_PARM_4RS_BIT		27
++	#define MBDG_PARM_4RS_WID		5
++	#define MG_Y_ADP_EN_BIT			26
++	#define MG_Y_ADAPT_EN_WID		1
++	#define MG_XMM_ADP_EN_BIT		25
++	#define MG_XMM_ADP_EN_WID		1
++	#define MG_X_ADP_EN_BIT			24
++	#define MG_X_ADP_EN_WID			1
++	#define  MG_YTRANS_1_BIT		20
++	#define MG_YTRANS_1_WID			4
++	#define  MG_XTRANS_1_BIT		16
++	#define  MG_XTRANS_1_WID		4
++	#define MG_YK_0_BIT			8
++	#define MG_YK_0_WID			8
++	#define MG_XK_0_BIT			0
++	#define MG_XK_0_WID			8
++
++//#define D2D3_MBDG_PARAM_5        0x2b1e
++	#define  MG_YSU3_BIT		        24
++	#define  MG_YSU3_WID			8
++	#define MG_YSU2_BIT		        16
++	#define MG_YSU2_WID			8
++	#define MG_YSU1_BIT		        8
++	#define MG_YSU1_WID			8
++	#define MG_YSU0_BIT		        0
++	#define MG_YSU0_WID			8
++
++//#define D2D3_MBDG_PARAM_6        0x2b1f
++	#define MG_XSU3_BIT		        24
++	#define MG_XSU3_WID			8
++	#define  MG_XSU2_BIT		        16
++	#define  MG_XSU2_WID			8
++	#define MG_XSU1_BIT		        8
++	#define MG_XSU1_WID			8
++	#define  MG_XSU0_BIT		        0
++	#define  MG_XSU0_WID			8
++
++//#define D2D3_MBDG_PARAM_7        0x2b20
++	#define MBDG_PARM_7RS_BIT	        16
++	#define MBDG_PARM_7RS_WID		16
++	#define MG_XSU4_BIT			8
++	#define MG_XSU4_WID			8
++	#define MG_YSU4_BIT			0
++	#define MG_YSU4_WID			8
++
++//#define D2D3_DBG_CTRL            0x2b23
++	#define DBG_HSCNT_SEL_BIT		28
++	#define DBG_HSCNT_SEL_WID		4
++	#define DBG_CTRL_RS_BIT		        25
++	#define DBG_CTRL_RS_WID			3
++	#define DBG_DBR_EN_BIT		        24
++	#define DBG_DBR_EN_WID			1
++	#define DBG_FORCE_DATA_BIT	        16
++	#define DBG_FORCE_DATA_WID		8
++	#define DBG_BLD_CTRL_BIT		12
++	#define DBG_BLD_CTRL_WID		4
++	#define DBG_MG_CTRL_BIT		        8
++	#define DBG_MG_CTRL_WID			4
++	#define DBG_CG_CTRL_BIT		        4
++	#define DBG_CG_CTRL_WID			4
++	#define  DBG_LG_CTRL_BIT		0
++	#define DBG_LG_CTRL_WID			4
++
++//------------------------------------------------------------------------------
++// DWMIF registers
++//------------------------------------------------------------------------------
++
++//#define D2D3_DWMIF_CTRL          0x2b24
++	#define DWMIF_CTRL_RS_BIT		18
++	#define DWMIF_CTRL_RS_WID 		14
++	#define  DW_X_REV_BIT			17
++	#define  DW_X_REV_WID			1
++	#define DW_Y_REV_BIT			16
++	#define DW_Y_REV_WID			1
++	#define DW_DONE_CLR_BIT		        15
++	#define DW_DONE_CLR_WID			1
++	#define DW_LITTLE_ENDIAN_BIT	        14
++	#define DW_LITTLE_ENDIAN_WID		1
++	#define  DW_PIC_STRUCT_BIT	        12
++	#define  DW_PIC_STRUCT_WID		2
++	#define DW_URGENT_BIT			11
++	#define DW_URGENT_WID			1
++	#define DW_CLR_WRRSP_BIT		10
++	#define DW_CLR_WRRSP_WID		1
++	#define DW_CANVAS_WR_BIT		9
++	#define DW_CANVAS_WR_WID		1
++	#define DW_REQ_EN_BIT			8
++	#define DW_REQ_EN_WID			1
++	#define DW_CANVAS_INDEX_BIT	        0
++	#define DW_CANVAS_INDEX_WID		8
++
++//#define D2D3_DWMIF_HPOS          0x2b25
++	#define DWMIF_HPOS_RS1_BIT	        31
++	#define DWMIF_HPOS_RS1_WID	        1
++	#define  DW_END_X_BIT			16
++	#define  DW_END_X_WID			5
++	#define DWMIF_HPOS_RS2_BIT		15
++	#define DWMIF_HPOS_RS2_WID		1
++	#define  DW_START_X_BIT		        0
++	#define  DW_START_X_WID		        15
++
++//#define D2D3_DWMIF_VPOS          0x2b26
++	#define DWMIF_VPOS_RS1_BIT		29
++	#define DWMIF_VPOS_RS1_WID		3
++	#define  DW_END_Y_BIT			16
++	#define  DW_END_Y_WID			13
++	#define DWMIF_VPOS_RS2_BIT	        13
++	#define DWMIF_VPOS_RS2_WID	        3
++	#define  DW_START_Y_BIT		        0
++	#define  DW_START_Y_WID		        13
++
++//#define D2D3_DWMIF_SIZE          0x2b27
++	#define DWMIF_SIZE_RS1_BIT		28
++	#define DWMIF_SIZE_RS1_WID		4
++	#define  DW_VSIZEM1_BIT		        16
++	#define  DW_VSIZEM1_WID		        12
++	#define DWMIF_SIZE_RS2_BIT	        12
++	#define DWMIF_SIZE_RS2_WID	        4
++	#define DW_HSIZEM1_BIT		        0
++	#define  DW_HSIZEM1_WID		        12
++
++//------------------------------------------------------------------------------
++// DRMIF registers
++//------------------------------------------------------------------------------
++
++//#define D2D3_DRMIF_CTRL          0x2b28
++	#define DRMIF_CTRL_RS_BIT		18
++	#define DRMIF_CTRL_RS_WID		14
++	#define DR_Y_REV_BIT		        17
++	#define DR_Y_REV_WID		        1
++	#define DR_X_REV_BIT		        16
++	#define DR_X_REV_WID		        1
++	#define DR_CLR_FIFO_ERR_BIT	        15
++	#define DR_CLR_FIFO_ERR_WID	        1
++	#define DR_LITTLE_ENDIAN_BIT	        14
++	#define DR_LITTLE_ENDIAN_WID	        1
++	#define DR_PIC_STRUCT_BIT		12
++	#define DR_PIC_STRUCT_WID		2
++	#define DR_URGENT_BIT			11
++	#define DR_URGENT_WID			1
++	#define DR_BURST_SIZE_BIT		9
++	#define DR_BURST_SIZE_WID		2
++	#define DR_REQ_EN_BIT			8
++	#define DR_REQ_EN_WID			1
++	#define DR_CANVAS_INDEX_BIT		0
++	#define DR_CANVAS_INDEX_WID		8
++
++//#define D2D3_DRMIF_HPOS          0x2b29
++	#define DRMIF_HPOS_RS1_BIT		31
++	#define DRMIF_HPOS_RS1_WID		0
++	#define DR_END_X_BIT			16
++	#define DR_END_X_WID			15
++	#define DRMIF_HPOS_RS2_BIT	        15
++	#define DRMIF_HPOS_RS2_WID	        1
++	#define DR_START_X_BIT		        0
++	#define DR_START_X_WID		        15
++
++//#define D2D3_DRMIF_VPOS          0x2b2a
++	#define DRMIF_VPOS_RS1_BIT		29
++	#define DRMIF_VPOS_RS1_WID		3
++	#define  DR_END_Y_BIT		        16
++	#define  DR_END_Y_WID		        13
++	#define DRMIF_VPOS_RS2_BIT	        13
++	#define DRMIF_VPOS_RS2_WID	        3
++	#define DR_START_Y_BIT	                0
++	#define DR_START_Y_WID	                13
++
++//------------------------------------------------------------------------------
++// PDR registers
++// ddd: parallax based render
++//------------------------------------------------------------------------------
++
++//#define D2D3_DBR_DDD_CTRL        0x2b2c
++	#define DBR_DDD_RS_BIT		        8
++	#define DBR_DDD_RS_WID 		        24
++	#define DDD_BRDLPF_EN_BIT		7
++	#define DDD_BRDLPF_EN_WID	        1
++	#define DDD_EXTN_BLACK_BIT	        6
++	#define DDD_EXTN_BLACK_WID	        1
++	#define DDD_WRAP_EN_BIT		        5
++	#define DDD_WRAP_EN_WID		        1
++	#define DDD_HHALF_BIT			4
++	#define DDD_HHALF_WID			1
++	#define DDD_OUT_MODE_BIT		2
++	#define DDD_OUT_MODE_WID		2
++	#define  DDD_LOMODE_BIT		        0
++	#define  DDD_LOMODE_WID		        2
++
++
++//#define D2D3_DBR_DDD_DBG         0x2b2d
++	#define DBR_DDD_DBG_RS_BIT		0
++	#define DBR_DDD_DBG_RS_WID		32
++
++
++//------------------------------------------------------------------------------
++// LRDMX registers
++//------------------------------------------------------------------------------
++
++//#define D2D3_DBR_LRDMX_CTRL      0x2b2f
++	#define DBR_LRDMX_RS_BIT		9
++	#define DBR_LRDMX_RS_WID		23
++	#define  LR_MERGE_BIT			8
++	#define  LR_MERGE_WID			1
++	#define LRD_FF0_SEL_BIT		        6
++	#define LRD_FF0_SEL_WID		        2
++	#define  LRD_FF1_SEL_BIT		4
++	#define  LRD_FF1_SEL_WID		2
++	#define LRD_LOUT_SEL_BIT		2
++	#define LRD_LOUT_SEL_WID		2
++	#define LRD_ROUT_SEL_BIT		0
++	#define LRD_ROUT_SEL_WID		2
++
++//-----------------------------------------------------------------------
++// Read Only registers
++//-----------------------------------------------------------------------
++//#define D2D3_CBDG_STATUS_1       0x2b30
++	#define  RO_CG_VPREL_BIT		24
++	#define  RO_CG_VPREL_WID		8
++	#define RO_CG_VPX_BIT			12
++	#define RO_CG_VPX_WID			12
++	#define RO_CG_VPY_BIT			0
++	#define RO_CG_VPY_WID			12
++
++//#define D2D3_MBDG_STATUS_1       0x2b31
++	#define  STATS1_MG_CX_BIT	        24
++	#define  STATS1_MG_CX_WID	        8
++	#define RO_MG_UX_BIT		        16
++	#define RO_MG_UX_WID		        8
++	#define RO_MG_DX_BIT		        8
++	#define RO_MG_DX_WID		        8
++	#define RO_MG_MINX_BIT		        0
++	#define RO_MG_MINX_WID		        8
++
++//#define D2D3_MBDG_STATUS_2       0x2b32
++	#define STATS2_MG_CY_BIT		24
++	#define STATS2_MG_CY_WID		8
++	#define  RO_MG_UY_BIT			16
++	#define  RO_MG_UY_WID			8
++	#define   RO_MG_DY_BIT			8
++	#define   RO_MG_DY_WID		        8
++	#define  RO_MG_MINY_BIT		        0
++	#define  RO_MG_MINY_WID		        8
++
++//#define D2D3_MBDG_STATUS_3       0x2b33
++	#define RO_WRAP_STATUS_BIT		31
++	#define RO_WRAP_STATUS_WID		1
++	#define MBDG_STATS3_RS_BIT		8
++	#define MBDG_STATS3_RS_WID		23
++	#define STATS3_MG_CY_BIT		4
++	#define STATS3_MG_CY_WID		4
++	#define STATS3_RO_MG_CX_BIT		0
++	#define STATS3_RO_MG_CX_WID		4
++
++//#define D2D3_MBDG_STATUS_4       0x2b34
++	#define MBDG_STATS4_RS_BIT		21
++	#define MBDG_STATS4_RS_WID	        11
++	#define RO_MG_SUM_U_BIT		        0
++	#define RO_MG_SUM_U_WID		        21
++
++//#define D2D3_MBDG_STATUS_5       0x2b35
++	#define MBDG_STATS5_RS_BIT 		21
++	#define MBDG_STATS5_RS_WID 		11
++	#define RO_MG_SUM_D_BIT		        0
++	#define RO_MG_SUM_D_WID		        21
++
++//#define D2D3_MBDG_STATUS_6       0x2b36
++	#define MBDG_STATS6_RS_BIT		21
++	#define MBDG_STATS6_RS_WID		11
++	#define RO_MG_SUM_L_BIT			0
++	#define RO_MG_SUM_L_WID		        21
++
++//#define D2D3_MBDG_STATUS_7       0x2b37
++	#define MBDG_STATS7_RS_BIT		21
++	#define MBDG_STATS7_RS_WID		11
++	#define  RO_MG_SUM_R_BIT		0
++	#define  RO_MG_SUM_R_WID		21
++
++//#define D2D3_DBG_STATUS_1        0x2b38
++	#define DBG_HANDSHAKE_RO0_BIT		0
++	#define  DBG_HANDSHAKE_RO0_WID		32
++
++//#define D2D3_DBG_STATUS_2        0x2b39
++	#define  DBG_HSCNT_BIT		        0
++	#define  DBG_HSCNT_WID		        32
++
++//#define D2D3_DRMIF_STATUS        0x2b3a
++	#define DRMIF_STATS_BIT		        0
++	#define DRMIF_STATS_WID		        32
++
++//#define D2D3_DWMIF_STATUS        0x2b3b
++	#define  DWMIF_STATS_BIT		2
++	#define DWMIF_STATS_WID		        30
++	#define D2D3_STATS0_BIT		        0
++	#define D2D3_STATS0_WID		        2
++
++//#define D2D3_CBDG_STATUS_2       0x2b3c
++	#define CBDG_STATS2_RS_BIT	        24
++	#define CBDG_STATS2_RS_WID 	        8
++	#define RO_MEET_SUM_BIT		        0
++	#define RO_MEET_SUM_WID		        24
++
++//#define D2D3_DBLD_STATUS         0x2b3d
++	#define  DBLD_STATS_BIT
++	#define  DBLD_STATS_WID
++	#define RO_HIST_DEPTH_BIT
++	#define RO_HIST_DEPTH_WID
++
++//#define D2D3_RESEV_STATUS1       0x2b3e
++	#define RESEV_STATS1_RS_BIT	        0
++	#define RESEV_STATS1_RS_WID	        32
++
++//#define D2D3_RESEV_STATUS2       0x2b3f
++	#define RESEV_STATS2_RS_BIT  		0
++	#define RESEV_STATS2_RS_WID		32
++
++#endif
+-- 
+2.19.0
+

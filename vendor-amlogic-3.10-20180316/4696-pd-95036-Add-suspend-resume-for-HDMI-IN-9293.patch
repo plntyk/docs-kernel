@@ -1,0 +1,321 @@
+From a19c9b4624f656c115104bf82505f89e86aa7b36 Mon Sep 17 00:00:00 2001
+From: "lianghu.su" <lianghu.su@amlogic.com>
+Date: Fri, 8 Aug 2014 17:31:33 +0800
+Subject: [PATCH 4696/5965] pd 95036: Add suspend & resume for HDMI IN 9293.
+
+Change-Id: I8a69587ae5b062ac3ab37a5e9d71f3f9e325ed44
+---
+ .../sii9293/driver/rx_drv/si_drv_rx_isr.c     |   3 +
+ .../linux_driver/application/mhl_linuxdrv.h   |  29 +++++
+ .../application/mhl_linuxdrv_main.c           | 104 ++++++++++++++++++
+ .../linux_driver/application/vdin_interface.c |  48 ++++++++
+ 4 files changed, 184 insertions(+)
+
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
+index 5f2f115c185d..6b49f47d9b2b 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
+@@ -410,6 +410,7 @@ void sii_signal_notify(unsigned int status)
+     return ;
+ }
+ 
++extern void sii9293_cable_status_notify(unsigned int cable_status);
+ void SiiRxInterruptHandler(void)
+ {
+     uint8_t interrupts[NMB_OF_RX_INTERRUPTS];
+@@ -548,6 +549,7 @@ void SiiRxInterruptHandler(void)
+             rx_isr.shadow_interrupt_mask[INT8] |= RX_M__INTR8__CABLE_IN;            // Enable 5v plug-in interrupt
+             SiiRegWrite(RX_A__INTR6_MASK, rx_isr.shadow_interrupt_mask[INT6]);
+             SiiRegWrite(RX_A__INTR8_MASK, rx_isr.shadow_interrupt_mask[INT8]);
++            sii9293_cable_status_notify(0);
+             
+         }
+             
+@@ -562,6 +564,7 @@ void SiiRxInterruptHandler(void)
+             rx_isr.shadow_interrupt_mask[INT8] &= ~RX_M__INTR8__CABLE_IN;           // Disable 5v plug-in interrupt
+             SiiRegWrite(RX_A__INTR6_MASK, rx_isr.shadow_interrupt_mask[INT6]);
+             SiiRegWrite(RX_A__INTR8_MASK, rx_isr.shadow_interrupt_mask[INT8]);
++			sii9293_cable_status_notify(1);
+         }
+     }
+ }
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+index d173dbeff87e..8debb10ba0bc 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+@@ -171,6 +171,35 @@ typedef struct
+     unsigned int        signal_status; // external hdmi cable is insert or not
+ }sii9293_info_t;
+ 
++#define HDMIIN_FRAME_SKIP_MECHANISM 1
++
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++// frame skip configuration is needed as:
++//     for following status: standby/powerup, cable plug out/in, etc
++//     we need drop some frame for HDMIIN device will still keep old frames
++// the skip num maybe different in each status.
++
++#define FRAME_SKIP_NUM_NORMAL	1
++#define FRAME_SKIP_NUM_STANDBY	1
++#define FRAME_SKIP_NUM_CABLE	1
++
++typedef enum
++{
++	SKIP_STATUS_NORMAL 	= 0,
++	SKIP_STATUS_STANDBY = 1,
++	SKIP_STATUS_CABLE 	= 2,
++	SKIP_STATUS_MAX
++}skip_status_e;
++
++typedef struct
++{
++	unsigned char skip_num_normal;
++	unsigned char skip_num_standby;
++	unsigned char skip_num_cable;
++}sii9293_frame_skip_t;
++
++#endif
++
+ /***** global variables ********************************************/
+ 
+ extern MHL_DRIVER_CONTEXT_T gDriverContext;
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+index 1133c4989533..9b3285e608f7 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+@@ -47,6 +47,7 @@
+ 
+ #include "vdin_interface.h"
+ #include "sii5293_interface.h"
++#include "../platform/hal/sii_hal_priv.h"
+ 
+ 
+ 
+@@ -88,6 +89,14 @@ static char BUILT_TIME[64];
+ 
+ int32_t StartMhlTxDevice(void);
+ int32_t StopMhlTxDevice(void);
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++
++unsigned int flag_skip_status = SKIP_STATUS_NORMAL;
++unsigned int flag_skip_enable = 0;
++
++sii9293_frame_skip_t sii9293_skip;
++
++#endif
+ 
+ 
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+@@ -1662,6 +1671,22 @@ void sii5293_output_mode_trigger(unsigned int flag)
+ 	return ;
+ }
+ 
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++static unsigned int cable_status_old = 1;
++#endif
++
++void sii9293_cable_status_notify(unsigned int cable_status)
++{
++	sii9293_info.cable_status = cable_status;
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++	if( (0==cable_status_old) && (1==cable_status) )
++		flag_skip_status = SKIP_STATUS_CABLE;
++	cable_status_old = cable_status;
++#endif
++
++	return ;
++}
++
+ 
+ static ssize_t user_enable_show(struct class *class, struct class_attribute *attr, char *buf)
+ {
+@@ -2089,6 +2114,69 @@ static ssize_t sii9293_audio_sr_show(struct class *class, struct class_attribute
+ 	return sprintf(buf, "%s\n", audio_sr_array[audio_sr]);
+ }
+ 
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++
++static void sii9293_frame_skip_default(void)
++{
++	sii9293_skip.skip_num_normal = FRAME_SKIP_NUM_NORMAL;
++	sii9293_skip.skip_num_standby = FRAME_SKIP_NUM_STANDBY;
++	sii9293_skip.skip_num_cable = FRAME_SKIP_NUM_CABLE;
++
++	return ;
++}
++
++static ssize_t sii9293_frame_skip_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "normal=%d, standby=%d, cable=%d\n",
++		sii9293_skip.skip_num_normal, sii9293_skip.skip_num_standby, sii9293_skip.skip_num_cable);
++}
++
++static ssize_t sii9293_frame_skip_store(struct class *class, struct class_attribute *attr,
++									const char *buf, size_t count)
++
++{
++	int argn;
++	char *p=NULL, *para=NULL, *argv[4] = {NULL,NULL,NULL,NULL};
++	unsigned int skip_normal, skip_standby, skip_cable, skip_signal;
++	int ret = 0;
++
++	p = kstrdup(buf, GFP_KERNEL);
++	for( argn=0; argn<3; argn++ )
++	{
++		para = strsep(&p, " ");
++		if( para == NULL )
++			break;
++		argv[argn] = para;
++	}
++
++	if( argn != 3 )
++	{
++		printk("please input 3 skip num!\n");
++		return count;
++	}
++
++	skip_normal 	= (unsigned int)simple_strtoul(argv[0],NULL,10);
++	skip_standby 	= (unsigned int)simple_strtoul(argv[1],NULL,10);
++	skip_cable 		= (unsigned int)simple_strtoul(argv[2],NULL,10);
++
++	sii9293_skip.skip_num_normal 	= skip_normal;
++	sii9293_skip.skip_num_standby 	= skip_standby;
++	sii9293_skip.skip_num_cable 	= skip_cable;
++
++	printk("reconfig skip num: normal=%d, standby=%d, cable=%d\n",
++		sii9293_skip.skip_num_normal, sii9293_skip.skip_num_standby, sii9293_skip.skip_num_cable);
++
++	return count;
++}
++#endif
++
++
++static ssize_t sii9293_drv_init_flag_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++ return sprintf(buf, "drv_init_flag = %d\n", gHalInitedFlag);
++}
++
++
+ static CLASS_ATTR(enable, 				S_IRUGO | S_IWUGO,	user_enable_show,			user_enable_store);
+ static CLASS_ATTR(debug, 				S_IRUGO | S_IWUGO,	debug_show,					debug_store);
+ //static CLASS_ATTR(pinmux,				S_IRUGO | S_IWUGO,	pinmux_show,				pinmux_store);
+@@ -2096,6 +2184,10 @@ static CLASS_ATTR(input_mode, 			S_IRUGO,			sii5293_input_mode_show,	NULL);
+ static CLASS_ATTR(cable_status, 		S_IRUGO,			sii9293_cable_status_show,	NULL);
+ static CLASS_ATTR(signal_status, 		S_IRUGO,			sii9293_signal_status_show,	NULL);
+ static CLASS_ATTR(audio_sample_rate, 	S_IRUGO,			sii9293_audio_sr_show,		NULL);
++static CLASS_ATTR(drv_init_flag, 		S_IRUGO, 			sii9293_drv_init_flag_show, NULL);
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++static CLASS_ATTR(skip,				S_IRUGO | S_IWUGO,	sii9293_frame_skip_show,	sii9293_frame_skip_store);
++#endif
+ 
+ static int aml_sii5293_create_attrs(struct class *cls)
+ {
+@@ -2111,6 +2203,10 @@ static int aml_sii5293_create_attrs(struct class *cls)
+ 	ret |= class_create_file(cls, &class_attr_cable_status);
+ 	ret |= class_create_file(cls, &class_attr_signal_status);
+ 	ret |= class_create_file(cls, &class_attr_audio_sample_rate);
++	ret |= class_create_file(cls, &class_attr_drv_init_flag);
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++	ret |= class_create_file(cls, &class_attr_skip);
++#endif
+ 
+ 	return ret;
+ }
+@@ -2127,6 +2223,10 @@ static void aml_sii5293_remove_attrs(struct class *cls)
+ 	class_remove_file(cls, &class_attr_cable_status);
+ 	class_remove_file(cls, &class_attr_signal_status);
+ 	class_remove_file(cls, &class_attr_audio_sample_rate);
++	class_remove_file(cls, &class_attr_drv_init_flag);
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++	class_remove_file(cls, &class_attr_skip);
++#endif
+ 
+ 	return ;
+ }
+@@ -2366,6 +2466,10 @@ static int __init SiiMhlInit(void)
+         goto free_dev;
+     }
+ 
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++	sii9293_frame_skip_default();
++#endif
++
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+ 	register_early_suspend(&sii9293_early_suspend_handler);
+ #endif
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
+index 7b94b7de5250..5b37f3df0bc8 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
+@@ -6,6 +6,13 @@
+ #include "../../driver/cra_drv/si_cra.h"
+ #include "sii5293_interface.h"
+ 
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++extern unsigned int flag_skip_status ;
++extern unsigned int flag_skip_enable ;
++extern sii9293_frame_skip_t sii9293_skip;
++
++#endif
++
+ extern int start_tvin_service(int no ,vdin_parm_t *para);
+ extern int stop_tvin_service(int no);
+ extern void set_invert_top_bot(bool invert_flag);
+@@ -127,6 +134,40 @@ static void sii5293_tvin_stop(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ }
+ static int sii5293_tvin_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ {
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++	static unsigned int cnt = 0;
++	unsigned int max = 0;
++
++	if( flag_skip_status >= SKIP_STATUS_MAX )
++		return 0;
++
++	if( SKIP_STATUS_NORMAL == flag_skip_status )
++		max = sii9293_skip.skip_num_normal;
++	else if( SKIP_STATUS_STANDBY == flag_skip_status )
++		max = sii9293_skip.skip_num_standby;
++	else if( SKIP_STATUS_CABLE == flag_skip_status )
++		max = sii9293_skip.skip_num_cable;
++
++	if( flag_skip_enable == 1 )
++	{
++		flag_skip_enable = 0;
++		cnt = 0;
++	}
++
++	if( cnt < max )
++	{
++		cnt ++;
++		printk("sii9293 skip type = %d, cnt = %d, max = %d\n", flag_skip_status, cnt, max);
++		return TVIN_BUF_SKIP;
++	}
++	else if( cnt == max )
++	{
++		cnt = 0xffffffff;
++		flag_skip_status = SKIP_STATUS_NORMAL;
++	}
++	
++#endif
++
+ 	return 0;
+ }
+ 
+@@ -446,6 +487,13 @@ void sii5293_start_vdin(sii5293_vdin *info, int width, int height, int frame_rat
+ 		para.reserved = 0; //skip_num
+ 
+ 		printk("[%s] begin start_tvin_service() !\n",__FUNCTION__);
++
++#ifdef HDMIIN_FRAME_SKIP_MECHANISM
++		if( (SKIP_STATUS_NORMAL==flag_skip_status) ||
++			(SKIP_STATUS_STANDBY==flag_skip_status) ||
++			(SKIP_STATUS_CABLE==flag_skip_status) )
++			flag_skip_enable = 1;
++#endif
+ 		start_tvin_service(0,&para);
+ 		info->vdin_started = 1;
+ 
+-- 
+2.19.0
+

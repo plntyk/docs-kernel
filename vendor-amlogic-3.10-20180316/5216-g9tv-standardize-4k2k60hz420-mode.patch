@@ -1,0 +1,3363 @@
+From 9aae958f2fde9fdd11ebe9549e917540cb541565 Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Wed, 10 Dec 2014 23:53:30 +0800
+Subject: [PATCH 5216/5965] g9tv: standardize 4k2k60hz420 mode
+
+Meanwhile, using tvmode as index to set tvout
+---
+ arch/arm/mach-meson6/hdmi_tx_hw/tvenc_conf.h  |   4 -
+ arch/arm/mach-meson6/include/mach/tvregs.h    | 172 +++---
+ arch/arm/mach-meson6tv/include/mach/tvregs.h  |  77 ++-
+ arch/arm/mach-meson6tvd/include/mach/tvregs.h |  75 +--
+ arch/arm/mach-meson8/hdmi_tx_hw/tvenc_conf.h  |   4 -
+ arch/arm/mach-meson8/include/mach/tvregs.h    | 164 ++---
+ arch/arm/mach-meson8b/hdmi_tx_hw/tvenc_conf.h |   4 -
+ arch/arm/mach-meson8b/include/mach/tvregs.h   | 163 ++---
+ arch/arm/mach-mesong9tv/enc_clk_config.c      | 509 ++++++++--------
+ .../mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c | 161 ++---
+ .../hdmi_tx_hw_20/hdmitx_regs.h               | 564 ------------------
+ .../mach-mesong9tv/hdmi_tx_hw_20/tvenc_conf.h | 230 -------
+ arch/arm/mach-mesong9tv/hw_enc_clk_config.h   |   2 -
+ arch/arm/mach-mesong9tv/include/mach/tvregs.h | 123 ++--
+ drivers/amlogic/display/vout/tvconf.c         | 114 +++-
+ drivers/amlogic/display/vout/tvmode.h         |  54 +-
+ drivers/amlogic/display/vout/tvoutc.c         |  43 +-
+ drivers/amlogic/display/vout2/tvmode.h        |  29 -
+ drivers/amlogic/display/vout2/tvoutc2.c       |  43 +-
+ drivers/amlogic/display/vout2/tvregs.h        | 123 ++--
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c |   1 +
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c |   4 +
+ include/linux/amlogic/vout/vinfo.h            |  75 ++-
+ 23 files changed, 945 insertions(+), 1793 deletions(-)
+ delete mode 100644 arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmitx_regs.h
+
+diff --git a/arch/arm/mach-meson6/hdmi_tx_hw/tvenc_conf.h b/arch/arm/mach-meson6/hdmi_tx_hw/tvenc_conf.h
+index 0be2cfe625b3..75e852276bb5 100644
+--- a/arch/arm/mach-meson6/hdmi_tx_hw/tvenc_conf.h
++++ b/arch/arm/mach-meson6/hdmi_tx_hw/tvenc_conf.h
+@@ -1,7 +1,3 @@
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+ 
+ static  reg_t hdmi_tvenc_regs_480i[] = {
+     /*1st col: recommmended, but eof/sof/vs_lines +/- 1 from spec; 2nd col: from simu */
+diff --git a/arch/arm/mach-meson6/include/mach/tvregs.h b/arch/arm/mach-meson6/include/mach/tvregs.h
+index 290f35511df3..2dcbe35e1c68 100755
+--- a/arch/arm/mach-meson6/include/mach/tvregs.h
++++ b/arch/arm/mach-meson6/include/mach/tvregs.h
+@@ -26,6 +26,8 @@
+ #define TVREGS_H
+ 
+ #include "am_regs.h"
++#include <linux/amlogic/vout/vinfo.h>
++
+ #define MREG_END_MARKER 0xffff
+ 
+ 
+@@ -34,17 +36,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1478,109 +1469,80 @@ static const reg_t tvregs_fhdvga_1920x1080[] = {
+     {MREG_END_MARKER,            0,     }
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_480p,
+-#endif
+-    tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576i,
+-    tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_720p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_720p,
+-#endif
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080i,
+-#endif
+-    tvregs_1080p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p,
+-#endif
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_1080p_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p_24hz,
+-#endif
+-    tvregs_4k2k_30hz,
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab[] = {
++    {TVMODE_480I, tvregs_480i},
++    {TVMODE_480I_RPT, tvregs_480i},
++    {TVMODE_480CVBS, tvregs_480cvbs},
++    {TVMODE_480P, tvregs_480p},
++    {TVMODE_480P_RPT, tvregs_480p},
++    {TVMODE_576I, tvregs_576i},
++    {TVMODE_576I_RPT, tvregs_576i},
++    {TVMODE_576CVBS, tvregs_576cvbs},
++    {TVMODE_576P, tvregs_576p},
++    {TVMODE_576P_RPT, tvregs_576p},
++    {TVMODE_720P, tvregs_720p},
++    {TVMODE_1080I, tvregs_1080i},
++    {TVMODE_1080P, tvregs_1080p},
++    {TVMODE_720P_50HZ, tvregs_720p_50hz},
++    {TVMODE_1080I_50HZ, tvregs_1080i_50hz},
++    {TVMODE_1080P_50HZ, tvregs_1080p_50hz},
++    {TVMODE_1080P_24HZ, tvregs_1080p_24hz},
++    {TVMODE_4K2K_30HZ, tvregs_4k2k_30hz},
++    {TVMODE_4K2K_25HZ, tvregs_4k2k_25hz},
++    {TVMODE_4K2K_24HZ, tvregs_4k2k_24hz},
++    {TVMODE_4K2K_SMPTE, tvregs_4k2k_smpte},
++    {TVMODE_VGA, tvregs_vga_640x480,},
++    {TVMODE_SVGA, tvregs_svga_800x600,},
++    {TVMODE_XGA, tvregs_xga_1024x768,},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_30hz,
++	{TVMODE_480P_59HZ, tvregs_480p,},
++	{TVMODE_720P_59HZ , tvregs_720p,},
++	{TVMODE_1080I_59HZ, tvregs_1080i,},
++	{TVMODE_1080P_59HZ, tvregs_1080p,},
++	{TVMODE_1080P_23HZ, tvregs_1080p_24hz,},
++	{TVMODE_4K2K_29HZ, tvregs_4k2k_30hz,},
++	{TVMODE_4K2K_23HZ, tvregs_4k2k_24hz,},
+ #endif
+-    tvregs_4k2k_25hz,
+-    tvregs_4k2k_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_24hz,
+-#endif
+-    tvregs_4k2k_smpte,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768,
+-    tvregs_sxga_1280x1024,
+-    tvregs_wsxga_1440x900,
+-    tvregs_fhdvga_1920x1080,
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480i_rpt"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres =  720, .yres =	480, .id = "480p59hz"},
+-#endif
+-    {.xres =  720, .yres =  480, .id = "480p_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576i_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres =  720, .yres =  576, .id = "576p_prt"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.tvmode = TVMODE_480I_RPT, .xres =  720, .yres =  480, .id = "480i_rpt"},
++    {.tvmode = TVMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.tvmode = TVMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.tvmode = TVMODE_480P_RPT, .xres =  720, .yres =  480, .id = "480p_rpt"},
++    {.tvmode = TVMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.tvmode = TVMODE_576I_RPT, .xres =  720, .yres =  576, .id = "576i_rpt"},
++    {.tvmode = TVMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.tvmode = TVMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.tvmode = TVMODE_576P_RPT, .xres =  720, .yres =  576, .id = "576p_prt"},
++    {.tvmode = TVMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.tvmode = TVMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.tvmode = TVMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.tvmode = TVMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.tvmode = TVMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.tvmode = TVMODE_1080P_24HZ, .xres = 1920, .yres = 1080, .id = "1080p24hz"},
++    {.tvmode = TVMODE_4K2K_30HZ, .xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++    {.tvmode = TVMODE_4K2K_25HZ, .xres = 3840, .yres = 2160, .id = "4k2k25hz"},
++    {.tvmode = TVMODE_4K2K_24HZ, .xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_4K2K_SMPTE, .xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
++    {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1280, .yres =	720, .id = "720p59hz"},
++    {.tvmode = TVMODE_480P_59HZ, .xres =  720, .yres =	480, .id = "480p59hz"},
++    {.tvmode = TVMODE_720P_59HZ.xres = 1280, .yres =	720, .id = "720p59hz"},
++    {.tvmode = TVMODE_1080I_59HZ, .xres = 1920, .yres = 1080, .id = "1080i59hz"},
++    {.tvmode = TVMODE_1080P_59HZ, .xres = 1920, .yres = 1080, .id = "1080p59hz"},
++    {.tvmode = TVMODE_1080P_23HZ, .xres = 1920, .yres = 1080, .id = "1080p23hz"},
++    {.tvmode = TVMODE_4K2K_29HZ, .xres = 3840, .yres = 2160, .id = "4k2k29hz"},
++    {.tvmode = TVMODE_4K2K_23HZ, .xres = 3840, .yres = 2160, .id = "4k2k23hz"},
+ #endif
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
+-	{.xres = 1920, .yres = 1080, .id = "1080i59hz"},
+-#endif  	
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p59hz"},
+-#endif
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p23hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k29hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k23hz"},
+-#endif
+-    {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
+-    {.xres = 1280, .yres = 1024, .id = "sxga"},
+-    {.xres = 1440, .yres = 900, .id = "wsxga"},
+-    {.xres = 1920, .yres = 1080, .id = "fhdvga"},
+ };
+ 
++
+ static inline void setreg(const reg_t *r)
+ {
+     aml_write_reg32(CBUS_REG_ADDR(r->reg), r->val);
+diff --git a/arch/arm/mach-meson6tv/include/mach/tvregs.h b/arch/arm/mach-meson6tv/include/mach/tvregs.h
+index 09649a15726e..127914f6efd7 100755
+--- a/arch/arm/mach-meson6tv/include/mach/tvregs.h
++++ b/arch/arm/mach-meson6tv/include/mach/tvregs.h
+@@ -25,6 +25,8 @@
+ #ifndef TVREGS_H
+ #define TVREGS_H
+ #include <mach/register.h>
++#include <linux/amlogic/vout/vinfo.h>
++
+ #define MREG_END_MARKER 0xffff
+ 
+ 
+@@ -33,17 +35,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1145,41 +1136,41 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-    tvregs_576i,
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_720p,
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-    tvregs_1080p,
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
++// Using tvmode as index to set regs
++static struct tvregs_set_t tvregsTab[] = {
++    {VMODE_480I, tvregs_480i,        },
++    {VMODE_480CVBS, tvregs_480cvbs,     },
++    {VMODE_480P, tvregs_480p,        },
++    {VMODE_576I, tvregs_576i,        },
++    {VMODE_576CVBS, tvregs_576cvbs,     },
++    {VMODE_576P, tvregs_576p,        },
++    {VMODE_720P, tvregs_720p,        },
++    {VMODE_1080I, tvregs_1080i,       },//Adjust tvregs_* sequences and match the enum define in tvmode.h
++    {VMODE_1080P, tvregs_1080p,       },
++    {VMODE_720P_50HZ, tvregs_720p_50hz,   },
++    {VMODE_1080I_50HZ, tvregs_1080i_50hz,  },
++    {VMODE_1080P_50HZ, tvregs_1080p_50hz,  },
++    {VMODE_VGA, tvregs_vga_640x480, },
++    {VMODE_SVGA, tvregs_svga_800x600,},
++    {VMODE_XGA, tvregs_xga_1024x768,},
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
++    {.vmode = VMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.vmode = VMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.vmode = VMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.vmode = VMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.vmode = VMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.vmode = VMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.vmode = VMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.vmode = VMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.vmode = VMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.vmode = VMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.vmode = VMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.vmode = VMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.vmode = VMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.vmode = VMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.vmode = VMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/arch/arm/mach-meson6tvd/include/mach/tvregs.h b/arch/arm/mach-meson6tvd/include/mach/tvregs.h
+index 09649a15726e..51888418b39a 100755
+--- a/arch/arm/mach-meson6tvd/include/mach/tvregs.h
++++ b/arch/arm/mach-meson6tvd/include/mach/tvregs.h
+@@ -33,17 +33,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1145,41 +1134,41 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-    tvregs_576i,
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_720p,
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-    tvregs_1080p,
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab[] = {
++    {VMODE_480I, tvregs_480i,        },
++    {VMODE_480CVBS, tvregs_480cvbs,     },
++    {VMODE_480P, tvregs_480p,        },
++    {VMODE_576I, tvregs_576i,        },
++    {VMODE_576CVBS, tvregs_576cvbs,     },
++    {VMODE_576P, tvregs_576p,        },
++    {VMODE_720P, tvregs_720p,        },
++    {VMODE_1080I, tvregs_1080i,       },//Adjust tvregs_* sequences and match the enum define in tvmode.h
++    {VMODE_1080P, tvregs_1080p,       },
++    {VMODE_720P_50HZ, tvregs_720p_50hz,   },
++    {VMODE_1080I_50HZ, tvregs_1080i_50hz,  },
++    {VMODE_1080P_50HZ, tvregs_1080p_50hz,  },
++    {VMODE_VGA, tvregs_vga_640x480, },
++    {VMODE_SVGA, tvregs_svga_800x600,},
++    {VMODE_XGA, tvregs_xga_1024x768,},
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
++    {.vmode = VMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.vmode = VMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.vmode = VMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.vmode = VMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.vmode = VMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.vmode = VMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.vmode = VMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.vmode = VMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.vmode = VMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.vmode = VMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.vmode = VMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.vmode = VMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.vmode = VMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.vmode = VMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.vmode = VMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/tvenc_conf.h b/arch/arm/mach-meson8/hdmi_tx_hw/tvenc_conf.h
+index 0be2cfe625b3..75e852276bb5 100644
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/tvenc_conf.h
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/tvenc_conf.h
+@@ -1,7 +1,3 @@
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+ 
+ static  reg_t hdmi_tvenc_regs_480i[] = {
+     /*1st col: recommmended, but eof/sof/vs_lines +/- 1 from spec; 2nd col: from simu */
+diff --git a/arch/arm/mach-meson8/include/mach/tvregs.h b/arch/arm/mach-meson8/include/mach/tvregs.h
+index 15ecae53b3c2..565c0d5ced6f 100755
+--- a/arch/arm/mach-meson8/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8/include/mach/tvregs.h
+@@ -35,17 +35,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1495,102 +1484,77 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 	///////////////////////////////////
+ 
+ };
+-
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-    tvregs_480p,
+-#endif
+-    tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576i,
+-    tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_720p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_720p,
+-#endif
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080i,
+-#endif	
+-    tvregs_1080p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p,
+-#endif
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_1080p_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p_24hz,
+-#endif
+-    tvregs_4k2k_30hz,
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab[] = {
++    {TVMODE_480I, tvregs_480i},
++    {TVMODE_480I_RPT, tvregs_480i},
++    {TVMODE_480CVBS, tvregs_480cvbs},
++    {TVMODE_480P, tvregs_480p},
++    {TVMODE_480P_RPT, tvregs_480p},
++    {TVMODE_576I, tvregs_576i},
++    {TVMODE_576I_RPT, tvregs_576i},
++    {TVMODE_576CVBS, tvregs_576cvbs},
++    {TVMODE_576P, tvregs_576p},
++    {TVMODE_576P_RPT, tvregs_576p},
++    {TVMODE_720P, tvregs_720p},
++    {TVMODE_1080I, tvregs_1080i},
++    {TVMODE_1080P, tvregs_1080p},
++    {TVMODE_720P_50HZ, tvregs_720p_50hz},
++    {TVMODE_1080I_50HZ, tvregs_1080i_50hz},
++    {TVMODE_1080P_50HZ, tvregs_1080p_50hz},
++    {TVMODE_1080P_24HZ, tvregs_1080p_24hz},
++    {TVMODE_4K2K_30HZ, tvregs_4k2k_30hz},
++    {TVMODE_4K2K_25HZ, tvregs_4k2k_25hz},
++    {TVMODE_4K2K_24HZ, tvregs_4k2k_24hz},
++    {TVMODE_4K2K_SMPTE, tvregs_4k2k_smpte},
++    {TVMODE_VGA, tvregs_vga_640x480,},
++    {TVMODE_SVGA, tvregs_svga_800x600,},
++    {TVMODE_XGA, tvregs_xga_1024x768,},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_30hz,
++	{TVMODE_480P_59HZ, tvregs_480p,},
++	{TVMODE_720P_59HZ , tvregs_720p,},
++	{TVMODE_1080I_59HZ, tvregs_1080i,},
++	{TVMODE_1080P_59HZ, tvregs_1080p,},
++	{TVMODE_1080P_23HZ, tvregs_1080p_24hz,},
++	{TVMODE_4K2K_29HZ, tvregs_4k2k_30hz,},
++	{TVMODE_4K2K_23HZ, tvregs_4k2k_24hz,},
+ #endif
+-    tvregs_4k2k_25hz,
+-    tvregs_4k2k_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_24hz,
+-#endif
+-    tvregs_4k2k_smpte,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480i_rpt"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres =  720, .yres =  480, .id = "480p59hz"},
+-#endif
+-    {.xres =  720, .yres =  480, .id = "480p_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576i_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres =  720, .yres =  576, .id = "576p_prt"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1280, .yres =  720, .id = "720p59hz"},
+-#endif
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
+-  	{.xres = 1920, .yres = 1080, .id = "1080i59hz"},
+-#endif  	
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p59hz"},
+-#endif
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p23hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k29hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.tvmode = TVMODE_480I_RPT, .xres =  720, .yres =  480, .id = "480i_rpt"},
++    {.tvmode = TVMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.tvmode = TVMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.tvmode = TVMODE_480P_RPT, .xres =  720, .yres =  480, .id = "480p_rpt"},
++    {.tvmode = TVMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.tvmode = TVMODE_576I_RPT, .xres =  720, .yres =  576, .id = "576i_rpt"},
++    {.tvmode = TVMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.tvmode = TVMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.tvmode = TVMODE_576P_RPT, .xres =  720, .yres =  576, .id = "576p_prt"},
++    {.tvmode = TVMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.tvmode = TVMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.tvmode = TVMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.tvmode = TVMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.tvmode = TVMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.tvmode = TVMODE_1080P_24HZ, .xres = 1920, .yres = 1080, .id = "1080p24hz"},
++    {.tvmode = TVMODE_4K2K_30HZ, .xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++    {.tvmode = TVMODE_4K2K_25HZ, .xres = 3840, .yres = 2160, .id = "4k2k25hz"},
++    {.tvmode = TVMODE_4K2K_24HZ, .xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_4K2K_SMPTE, .xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
++    {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k23hz"},
++    {.tvmode = TVMODE_480P_59HZ, .xres =  720, .yres =	480, .id = "480p59hz"},
++    {.tvmode = TVMODE_720P_59HZ, .xres = 1280, .yres =    720, .id = "720p59hz"},
++    {.tvmode = TVMODE_1080I_59HZ, .xres = 1920, .yres = 1080, .id = "1080i59hz"},
++    {.tvmode = TVMODE_1080P_59HZ, .xres = 1920, .yres = 1080, .id = "1080p59hz"},
++    {.tvmode = TVMODE_1080P_23HZ, .xres = 1920, .yres = 1080, .id = "1080p23hz"},
++    {.tvmode = TVMODE_4K2K_29HZ, .xres = 3840, .yres = 2160, .id = "4k2k29hz"},
++    {.tvmode = TVMODE_4K2K_23HZ, .xres = 3840, .yres = 2160, .id = "4k2k23hz"},
+ #endif
+-    {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/tvenc_conf.h b/arch/arm/mach-meson8b/hdmi_tx_hw/tvenc_conf.h
+index 0be2cfe625b3..75e852276bb5 100644
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/tvenc_conf.h
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/tvenc_conf.h
+@@ -1,7 +1,3 @@
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+ 
+ static  reg_t hdmi_tvenc_regs_480i[] = {
+     /*1st col: recommmended, but eof/sof/vs_lines +/- 1 from spec; 2nd col: from simu */
+diff --git a/arch/arm/mach-meson8b/include/mach/tvregs.h b/arch/arm/mach-meson8b/include/mach/tvregs.h
+index 56a6952b7097..9b64db02aab6 100755
+--- a/arch/arm/mach-meson8b/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8b/include/mach/tvregs.h
+@@ -35,17 +35,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1462,101 +1451,77 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_480p,
+-#endif
+-    tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576i,
+-    tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_720p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_720p,
+-#endif
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080i,
+-#endif
+-    tvregs_1080p,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p,
+-#endif
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_1080p_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_1080p_24hz,
+-#endif
+-    tvregs_4k2k_30hz,
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab[] = {
++    {TVMODE_480I, tvregs_480i},
++    {TVMODE_480I_RPT, tvregs_480i},
++    {TVMODE_480CVBS, tvregs_480cvbs},
++    {TVMODE_480P, tvregs_480p},
++    {TVMODE_480P_RPT, tvregs_480p},
++    {TVMODE_576I, tvregs_576i},
++    {TVMODE_576I_RPT, tvregs_576i},
++    {TVMODE_576CVBS, tvregs_576cvbs},
++    {TVMODE_576P, tvregs_576p},
++    {TVMODE_576P_RPT, tvregs_576p},
++    {TVMODE_720P, tvregs_720p},
++    {TVMODE_1080I, tvregs_1080i},
++    {TVMODE_1080P, tvregs_1080p},
++    {TVMODE_720P_50HZ, tvregs_720p_50hz},
++    {TVMODE_1080I_50HZ, tvregs_1080i_50hz},
++    {TVMODE_1080P_50HZ, tvregs_1080p_50hz},
++    {TVMODE_1080P_24HZ, tvregs_1080p_24hz},
++    {TVMODE_4K2K_30HZ, tvregs_4k2k_30hz},
++    {TVMODE_4K2K_25HZ, tvregs_4k2k_25hz},
++    {TVMODE_4K2K_24HZ, tvregs_4k2k_24hz},
++    {TVMODE_4K2K_SMPTE, tvregs_4k2k_smpte},
++    {TVMODE_VGA, tvregs_vga_640x480,},
++    {TVMODE_SVGA, tvregs_svga_800x600,},
++    {TVMODE_XGA, tvregs_xga_1024x768,},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_30hz,
++	{TVMODE_480P_59HZ, tvregs_480p,},
++	{TVMODE_720P_59HZ , tvregs_720p,},
++	{TVMODE_1080I_59HZ, tvregs_1080i,},
++	{TVMODE_1080P_59HZ, tvregs_1080p,},
++	{TVMODE_1080P_23HZ, tvregs_1080p_24hz,},
++	{TVMODE_4K2K_29HZ, tvregs_4k2k_30hz,},
++	{TVMODE_4K2K_23HZ, tvregs_4k2k_24hz,},
+ #endif
+-    tvregs_4k2k_25hz,
+-    tvregs_4k2k_24hz,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	tvregs_4k2k_24hz,
+-#endif
+-    tvregs_4k2k_smpte,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480i_rpt"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres =  720, .yres =  480, .id = "480p59hz"},
+-#endif
+-    {.xres =  720, .yres =  480, .id = "480p_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576i_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres =  720, .yres =  576, .id = "576p_prt"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1280, .yres =  720, .id = "720p59hz"},
+-#endif
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
+-  	{.xres = 1920, .yres = 1080, .id = "1080i59hz"},
+-#endif  	
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p59hz"},
+-#endif
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 1920, .yres = 1080, .id = "1080p23hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k29hz"},
+-#endif
+-    {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.tvmode = TVMODE_480I_RPT, .xres =  720, .yres =  480, .id = "480i_rpt"},
++    {.tvmode = TVMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.tvmode = TVMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.tvmode = TVMODE_480P_RPT, .xres =  720, .yres =  480, .id = "480p_rpt"},
++    {.tvmode = TVMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.tvmode = TVMODE_576I_RPT, .xres =  720, .yres =  576, .id = "576i_rpt"},
++    {.tvmode = TVMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.tvmode = TVMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.tvmode = TVMODE_576P_RPT, .xres =  720, .yres =  576, .id = "576p_prt"},
++    {.tvmode = TVMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.tvmode = TVMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.tvmode = TVMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.tvmode = TVMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.tvmode = TVMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.tvmode = TVMODE_1080P_24HZ, .xres = 1920, .yres = 1080, .id = "1080p24hz"},
++    {.tvmode = TVMODE_4K2K_30HZ, .xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++    {.tvmode = TVMODE_4K2K_25HZ, .xres = 3840, .yres = 2160, .id = "4k2k25hz"},
++    {.tvmode = TVMODE_4K2K_24HZ, .xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_4K2K_SMPTE, .xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
++    {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	{.xres = 3840, .yres = 2160, .id = "4k2k23hz"},
++    {.tvmode = TVMODE_480P_59HZ, .xres =  720, .yres =	480, .id = "480p59hz"},
++    {.tvmode = TVMODE_720P_59HZ, .xres = 1280, .yres =	720, .id = "720p59hz"},
++    {.tvmode = TVMODE_1080I_59HZ, .xres = 1920, .yres = 1080, .id = "1080i59hz"},
++    {.tvmode = TVMODE_1080P_59HZ, .xres = 1920, .yres = 1080, .id = "1080p59hz"},
++    {.tvmode = TVMODE_1080P_23HZ, .xres = 1920, .yres = 1080, .id = "1080p23hz"},
++    {.tvmode = TVMODE_4K2K_29HZ, .xres = 3840, .yres = 2160, .id = "4k2k29hz"},
++    {.tvmode = TVMODE_4K2K_23HZ, .xres = 3840, .yres = 2160, .id = "4k2k23hz"},
+ #endif
+-    {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/arch/arm/mach-mesong9tv/enc_clk_config.c b/arch/arm/mach-mesong9tv/enc_clk_config.c
+index 9271e2133e3a..2c859f661f29 100644
+--- a/arch/arm/mach-mesong9tv/enc_clk_config.c
++++ b/arch/arm/mach-mesong9tv/enc_clk_config.c
+@@ -88,132 +88,6 @@ static void hpll_load_en(void);
+             printk(KERN_CRIT "pll[0x%x] reset %d times\n", reg, 9 - cnt);\
+     }while(0);
+ 
+-static void set_hpll_clk_out(unsigned clk)
+-{
+-    check_clk_config(clk);
+-    printk("config HPLL\n");
+-    aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c88000);
+-    aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0xca563823);
+-    aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x40238100);
+-    aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00012286);
+-    aml_write_reg32(P_HHI_VID2_PLL_CNTL2, 0x430a800);       // internal LDO share with HPLL & VIID PLL
+-    switch(clk){
+-        case 2970:
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x59c84e00);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0xce49c822);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x4123b100);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00012385);
+-
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6000043d);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4000043d);
+-            printk("waiting HPLL lock\n");
+-            while(!(aml_read_reg32(P_HHI_VID_PLL_CNTL) & (1 << 31))) {
+-                ;
+-            }
+-            h_delay();
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00016385);   // optimise HPLL VCO 2.97GHz performance
+-            break;
+-        case 2160:
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x59c80000);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x0a563823);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x0123b100);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x12385);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6001042d);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042d);
+-            while(!(aml_read_reg32(P_HHI_VID_PLL_CNTL) & (1 << 31))) {
+-                ;
+-            }
+-            break;
+-        case 1488:
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c8ce00);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x4023d100);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a7ad023);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x12286);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6000043d);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4000043d);
+-            while(!(aml_read_reg32(P_HHI_VID_PLL_CNTL) & (1 << 31))) {
+-                ;
+-            }
+-            break;
+-        case 1080:
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6000042d);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4000042d);
+-            break;
+-        case 1066:
+-            WRITE_CBUS_REG(HHI_VID_PLL_CNTL, 0x42a);
+-            break;
+-        case 1058:
+-            WRITE_CBUS_REG(HHI_VID_PLL_CNTL, 0x422);
+-            break;
+-        case 1086:
+-            WRITE_CBUS_REG(HHI_VID_PLL_CNTL, 0x43e);
+-            break;
+-        case 1296:
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x59c88000);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0xca49b022);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x0023b100);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00012385);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x600c0436);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x400c0436);
+-            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00016385);
+-            break;
+-        default:
+-            printk("error hpll clk: %d\n", clk);
+-            break;
+-    }
+-    if(clk < 2970)
+-        aml_write_reg32(P_HHI_VID_PLL_CNTL5, (aml_read_reg32(P_HHI_VID_PLL_CNTL5) & (~(0xf << 12))) | (0x6 << 12));
+-    printk("config HPLL done\n");
+-}
+-
+-static void set_hpll_hdmi_od(unsigned div)
+-{
+-    check_clk_config(div);
+-    switch(div){
+-        case 1:
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 0, 18, 2);
+-            break;
+-        case 2:
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 1, 18, 2);
+-            break;
+-        case 3:
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 1, 16, 2);
+-            break;
+-        case 4:
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 3, 18, 2);
+-            break;
+-        case 8:
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 1, 16, 2);
+-            WRITE_CBUS_REG_BITS(HHI_VID_PLL_CNTL, 3, 18, 2);
+-            break;
+-        default:
+-            break;
+-    }
+-}
+-
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-static void set_hpll_lvds_od(unsigned div)
+-{
+-    check_clk_config(div);
+-    switch(div) {
+-        case 1:
+-            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 0, 16, 2);
+-            break;
+-        case 2:
+-            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 1, 16, 2);
+-            break;
+-        case 4:
+-            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 2, 16, 2);
+-            break;
+-        case 8:     // note: need test
+-            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 3, 16, 2);
+-            break;
+-        default:
+-            break;
+-    }
+-}
+-#endif
+-
+ // viu_channel_sel: 1 or 2
+ // viu_type_sel: 0: 0=ENCL, 1=ENCI, 2=ENCP, 3=ENCT.
+ int set_viu_path(unsigned viu_channel_sel, viu_type_e viu_type_sel)
+@@ -234,91 +108,109 @@ int set_viu_path(unsigned viu_channel_sel, viu_type_e viu_type_sel)
+     return 0;
+ }
+ 
+-static void set_vid_pll_div(unsigned div)
+-{
+-    check_clk_config(div);
+-    // Gate disable
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 16, 1);
+-    switch(div){
+-        case 10:
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 4, 4, 3);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 8, 2);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 12, 3);
+-            break;
+-        case 5:
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 4, 4, 3);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 8, 2);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 12, 3);
+-            break;
+-        case 6:
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 5, 4, 3);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 8, 2);
+-            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 12, 3);
+-            break;
+-        default:
+-            break;
+-    }
+-    // Soft Reset div_post/div_pre
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 0, 2);
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 3, 1);
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 7, 1);
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 3, 0, 2);
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 3, 1);
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 7, 1);
+-    // Gate enable
+-    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 16, 1);
+-}
+-
+-static void set_clk_final_div(unsigned div)
++static void set_hdmitx_sys_clk(void)
+ {
+-    check_clk_config(div);
+-    if(div == 0)
+-        div = 1;
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_CNTL, 1, 19, 1);
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_CNTL, 0, 16, 3);
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_DIV, div-1, 0, 8);
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_CNTL, 7, 0, 3);
++    aml_set_reg32_bits(P_HHI_HDMI_CLK_CNTL, 0, 9, 3);
++    aml_set_reg32_bits(P_HHI_HDMI_CLK_CNTL, 0, 0, 7);
++    aml_set_reg32_bits(P_HHI_HDMI_CLK_CNTL, 1, 8, 1);
+ }
+ 
+-static void set_hdmi_tx_pixel_div(unsigned div)
+-{
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_HDMI_CLK_CNTL, div, 16, 4);
+-}
+-static void set_encp_div(unsigned div)
+-{
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_DIV, div, 24, 4);
+-}
+-
+-static void set_enci_div(unsigned div)
+-{
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_DIV, div, 28, 4);
+-}
+-
+-static void set_enct_div(unsigned div)
++static void set_hpll_clk_out(unsigned clk)
+ {
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VID_CLK_DIV, div, 20, 4);
++    check_clk_config(clk);
++    printk("config HPLL\n");
++    switch(clk){
++    case 2970:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 1, 14, 1); // div mode
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0xe00, 0, 12); // div_frac
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL3, 0x135c5091);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL4, 0x801da72c);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL5, 0x71486900);    //5940 0x71c86900      // 0x71486900 2970
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL6, 0x00000e55);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x0000023d);
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL, 0x5, 28, 3);  //reset hpll
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL, 0x4, 28, 3);
++        printk("waiting HPLL lock\n");
++        WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++        break;
++    case 2448:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 1, 14, 1); // div mode
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0xe00, 0, 12); // div_frac
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL3, 0x135c5091);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL4, 0x801da72c);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL5, 0x71486900);    //5940 0x71c86900      // 0x71486900 2970
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL6, 0x00000e55);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x00000266);
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL, 0x5, 28, 3);  //reset hpll
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL, 0x4, 28, 3);
++        printk("waiting HPLL lock\n");
++        WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++        break;
++    default:
++        printk("error hpll clk: %d\n", clk);
++        break;
++    }
++    printk("config HPLL done\n");
+ }
+ 
+-static void set_encl_div(unsigned div)
++static void set_hpll_od1(unsigned div)
+ {
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VIID_CLK_DIV, div, 12, 4);
++    switch(div){
++    case 1:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0, 16, 2);
++        break;
++    case 2:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 1, 16, 2);
++        break;
++    case 4:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 2, 16, 2);
++        break;
++    case 8:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 3, 16, 2);
++        break;
++    default:
++        break;
++    }
+ }
+ 
+-static void set_vdac0_div(unsigned div)
++static void set_hpll_od2(unsigned div)
+ {
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VIID_CLK_DIV, div, 28, 4);
++    switch(div){
++    case 1:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0, 22, 2);
++        break;
++    case 2:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 1, 22, 2);
++        break;
++    case 4:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 2, 22, 2);
++        break;
++    case 8:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 3, 22, 2);
++        break;
++    default:
++        break;
++    }
+ }
+ 
+-static void set_vdac1_div(unsigned div)
++static void set_hpll_od3(unsigned div)
+ {
+-    check_div();
+-    WRITE_CBUS_REG_BITS(HHI_VIID_CLK_DIV, div, 24, 4);
++    switch(div){
++    case 1:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0, 18, 2);
++        break;
++    case 2:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 1, 18, 2);
++        break;
++    case 4:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 2, 18, 2);
++        break;
++    case 8:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 3, 18, 2);
++        break;
++    default:
++        break;
++    }
+ }
+ 
+ // --------------------------------------------------
+@@ -377,6 +269,54 @@ void clocks_set_vid_clk_div(int div_sel)
+     aml_set_reg32_bits(P_HHI_VID_PLL_CLK_DIV, 1, 19, 1);
+ }
+ 
++static void set_vid_pll_div(unsigned div)
++{
++    clocks_set_vid_clk_div(div);
++}
++
++static void set_vid_clk_div(unsigned div)
++{
++    check_clk_config(div);
++    if(div == 0)
++        div = 1;
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 0, 16, 3);   // select vid_pll_clk
++    aml_set_reg32_bits(P_HHI_VID_CLK_DIV, div-1, 0, 8);
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 7, 0, 3);
++}
++
++static void set_hdmi_tx_pixel_div(unsigned div)
++{
++    check_div();
++    aml_set_reg32_bits(P_HHI_HDMI_CLK_CNTL, div, 16, 4);
++}
++static void set_encp_div(unsigned div)
++{
++    check_div();
++    aml_set_reg32_bits(P_HHI_VID_CLK_DIV, div, 24, 4);
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL2, 1, 2, 1);   //enable gate
++}
++
++static void set_enci_div(unsigned div)
++{
++    check_div();
++    aml_set_reg32_bits(P_HHI_VID_CLK_DIV, div, 28, 4);
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL2, 1, 0, 1);   //enable gate
++}
++
++static void set_encl_div(unsigned div)
++{
++    check_div();
++    aml_set_reg32_bits(P_HHI_VIID_CLK_DIV, div, 12, 4);
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL2, 1, 3, 1);   //enable gate
++}
++
++static void set_vdac0_div(unsigned div)
++{
++    check_div();
++    aml_set_reg32_bits(P_HHI_VIID_CLK_DIV, div, 28, 4); //???
++    aml_set_reg32_bits(P_HHI_VID_CLK_CNTL2, 1, 4, 1);   //enable gate
++}
++
+ static void hpll_load_initial(void)
+ {
+ //hdmi load initial
+@@ -413,36 +353,6 @@ static void hpll_load_en(void)
+     aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 0, 16, 3);  // use vid_pll
+ }
+ 
+-// mode hpll_clk_out hpll_hdmi_od viu_path viu_type vid_pll_div clk_final_div
+-// hdmi_tx_pixel_div unsigned encp_div unsigned enci_div unsigned enct_div unsigned ecnl_div;
+-static enc_clk_val_t setting_enc_clk_val[] = {
+-		{VMODE_480I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+-		{VMODE_480I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+-		{VMODE_480CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+-		{VMODE_480P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_480P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+-		{VMODE_576I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+-		{VMODE_576I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+-		{VMODE_576CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+-		{VMODE_576P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_576P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+-		{VMODE_720P,       1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080I,      1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080P,      1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080P,      1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_720P_50HZ,  1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080I_50HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080P_50HZ, 1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_1080P_24HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_4K2K_30HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_4K2K_25HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_4K2K_24HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_4K2K_SMPTE, 2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+-		{VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+-		{VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+-		{VMODE_XGA, 1085, 1, 1, 1, VIU_ENCP, 5, 1, 1, 1, -1, -1, -1,  1,  1},
+-};
+-
+ #define MAX_CLK_INDEX   4
+ #define MAX_SAME_CONF   (4 + 1)
+ struct cts_mode_clk {
+@@ -573,12 +483,8 @@ static int vmode_clk_match(vmode_t mode)
+     return 0;
+ }
+ 
+-void set_vmode_clk(vmode_t mode)
++void set_vmode_clk_va(vmode_t mode)
+ {
+-    int i = 0;
+-    int j = 0;
+-    enc_clk_val_t *p_enc =NULL;
+-
+     hpll_load_initial();
+ printk("set_vmode_clk mode is %d\n", mode);
+ 
+@@ -665,6 +571,93 @@ printk("set_vmode_clk mode is %d\n", mode);
+     clocks_set_vid_clk_div(CLK_UTIL_VID_PLL_DIV_5);
+     cts_clk_check(mode);
+ return;
++}
++
++// mode viu_path viu_type hpll_clk_out od1 od2 od3
++// vid_pll_div vid_clk_div hdmi_tx_pixel_div encp_div enci_div enct_div encl_div vdac0_div
++static hw_enc_clk_val_t setting_enc_clk_val[] = {
++    {VMODE_1080P,          1, VIU_ENCP, 2970, 1, 2, 2, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_1080P_50HZ,     1, VIU_ENCP, 2970, 1, 2, 2, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_30HZ,      1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 2, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_25HZ,      1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_24HZ,      1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_SMPTE,     1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_60HZ_Y420, 1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 2, 1, -1, -1, -1},
++    {VMODE_4K2K_60HZ,      1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_FAKE_5G,   1, VIU_ENCP, 2448, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K2K_5G,        1, VIU_ENCP, 2448, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++#if 0
++//todo
++    {VMODE_480I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_480I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
++    {VMODE_480CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_480P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_480P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
++    {VMODE_576I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_576I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
++    {VMODE_576CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_576P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_576P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
++    {VMODE_720P,       1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080I,      1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_720P_50HZ,  1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080I_50HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080P_24HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
++    {VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
++    {VMODE_XGA, 1085, 1, 1, 1, VIU_ENCP, 5, 1, 1, 1, -1, -1, -1,  1,  1},
++#endif
++};
++
++void set_vmode_clk(vmode_t mode)
++{
++    int i = 0;
++    int j = 0;
++    hw_enc_clk_val_t *p_enc =NULL;
++
++    if(IS_MESON_MG9TV_CPU_REVA) {
++        printk("set_vmode_clk for revA\n");
++        set_vmode_clk_va(mode);
++        return;
++    }
++    printk("set_vmode_clk for revB\n");
++    hpll_load_initial();
++printk("set_vmode_clk mode is %d\n", mode);
++
++	if( (VMODE_576CVBS==mode) || (VMODE_480CVBS==mode) )
++	{
++		printk("g9tv: cvbs clk!\n");
++		aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x5000022d);
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL2, 0x00890000);
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL3, 0x135c5091);
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL4, 0x801da72c);
++		// P_HHI_HDMI_PLL_CNTL5
++		// 0x71c86900 for div2 disable inside PLL2 of HPLL
++		// 0x71486900 for div2 enable inside PLL2 of HPLL
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL5, 0x71c86900);
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL6, 0x00000e55);
++	    aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x4000022d);
++
++	    WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++
++	    clocks_set_vid_clk_div(CLK_UTIL_VID_PLL_DIV_5);
++
++		// select vid_pll_clk for muxing
++		aml_write_reg32(P_HHI_VID_CLK_CNTL, (aml_read_reg32(P_HHI_VID_CLK_CNTL)&(~(0x7<<16))) );
++		// disable divider for clk_rst_tst()
++		aml_write_reg32(P_HHI_VID_CLK_DIV, (aml_read_reg32(P_HHI_VID_CLK_DIV)&(~0xff)) );
++		// select clk_div1 for enci clk muxing
++		aml_write_reg32(P_HHI_VID_CLK_DIV, (aml_read_reg32(P_HHI_VID_CLK_DIV)&(~(0xf<<28))) );
++		// select clk_div1 for vdac clk muxing
++		aml_write_reg32(P_HHI_VIID_CLK_DIV, (aml_read_reg32(P_HHI_VIID_CLK_DIV)&(~(0x1<<19))) );
++		aml_write_reg32(P_HHI_VIID_CLK_DIV, (aml_read_reg32(P_HHI_VIID_CLK_DIV)&(~(0xf<<28))) );
++		// clk gate for enci(bit0) and vdac(bit4)
++		aml_write_reg32(P_HHI_VID_CLK_CNTL2, (aml_read_reg32(P_HHI_VID_CLK_CNTL2)|0x1|(0x1<<4)) );
++
++		return;
++	}
++    if(!vmode_clk_match(mode)) {
++    }
+ 
+     p_enc=&setting_enc_clk_val[0];
+     i = sizeof(setting_enc_clk_val) / sizeof(enc_clk_val_t);
+@@ -675,18 +668,58 @@ return;
+             break;
+     }
+     set_viu_path(p_enc[j].viu_path, p_enc[j].viu_type);
++    set_hdmitx_sys_clk();
+     set_hpll_clk_out(p_enc[j].hpll_clk_out);
+-    set_hpll_lvds_od(p_enc[j].hpll_lvds_od);
+-    set_hpll_hdmi_od(p_enc[j].hpll_hdmi_od);
++    set_hpll_od1(p_enc[j].od1);
++    set_hpll_od2(p_enc[j].od2);
++    set_hpll_od3(p_enc[j].od3);
+     set_vid_pll_div(p_enc[j].vid_pll_div);
+-    set_clk_final_div(p_enc[j].clk_final_div);
++    set_vid_clk_div(p_enc[j].vid_clk_div);
+     set_hdmi_tx_pixel_div(p_enc[j].hdmi_tx_pixel_div);
+     set_encp_div(p_enc[j].encp_div);
+     set_enci_div(p_enc[j].enci_div);
+-    set_enct_div(p_enc[j].enct_div);
+     set_encl_div(p_enc[j].encl_div);
+     set_vdac0_div(p_enc[j].vdac0_div);
+-    set_vdac1_div(p_enc[j].vdac1_div);
++return;
++    
+ 
++    switch(mode) {
++    case VMODE_1080P:
++    case VMODE_1080P_50HZ:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0x44, 16, 8);
++        break;
++    case VMODE_4K2K_30HZ:
++    case VMODE_4K2K_25HZ:
++    case VMODE_4K2K_24HZ:
++    case VMODE_4K2K_SMPTE:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0, 16, 8);
++        aml_set_reg32_bits(P_HHI_VID_CLK_DIV, 1, 0, 8);
++        break;
++    case VMODE_4K2K_60HZ:
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0, 16, 8);
++        aml_set_reg32_bits(P_HHI_VID_CLK_DIV, 0, 0, 8);
++        break;
++    case VMODE_4K2K_60HZ_Y420:
++        printk("%s[%d]TODO\n", __func__, __LINE__);
++        break;
++    case VMODE_4K2K_FAKE_5G:
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x50000266);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x40000266);
++        WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0x40, 16, 8);
++        aml_set_reg32_bits(P_HHI_VID_CLK_DIV, 0, 0, 8);
++        break;
++    case VMODE_4K2K_5G:
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x50000266);
++        aml_write_reg32(P_HHI_HDMI_PLL_CNTL, 0x40000266);
++        WAIT_FOR_PLL_LOCKED(P_HHI_HDMI_PLL_CNTL);
++        aml_set_reg32_bits(P_HHI_HDMI_PLL_CNTL2, 0x44, 16, 8);
++        aml_set_reg32_bits(P_HHI_VID_CLK_DIV, 1, 0, 8);
++        break;
++    default:
++        break;
++    }
++    clocks_set_vid_clk_div(CLK_UTIL_VID_PLL_DIV_5);
++    cts_clk_check(mode);
+ }
+  
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+index b403555ed91d..fcfa77e7d654 100644
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+@@ -64,6 +64,7 @@
+ static void hdmi_audio_init(unsigned char spdif_flag);
+ static void hdmitx_dump_tvenc_reg(int cur_VIC, int printk_flag);
+ 
++static void mode420_half_horizontal_para(void);
+ static void hdmi_phy_suspend(void);
+ static void hdmi_phy_wakeup(hdmitx_dev_t* hdmitx_device);
+ static void hdmitx_set_phy(hdmitx_dev_t* hdmitx_device);
+@@ -1449,48 +1450,19 @@ static void enable_audio_i2s(void)
+ 
+ static void hdmitx_dump_tvenc_reg(int cur_VIC, int printk_flag) 
+ {
+-    int i,j;
+-    for(i=0;hdmi_tvenc_configs[i].vic!=HDMI_Unkown;i++){
+-        if(cur_VIC==hdmi_tvenc_configs[i].vic){
+-            reg_t* reg_set=hdmi_tvenc_configs[i].reg_set;
+-            hdmi_print(printk_flag, "------dump tevenc reg for mode %d----\n", cur_VIC);
+-            for(j=0;reg_set[j].reg;j++){
+-                hdmi_print(printk_flag, "[%08x]=%08x\n",reg_set[j].reg,aml_read_reg32(CBUS_REG_ADDR(reg_set[j].reg)));
+-            }
+-            hdmi_print(printk_flag, "------------------\n");
+-            break;
+-        }
+-    }
+ }    
+ 
+ static void hdmitx_config_tvenc_reg(int vic, unsigned reg, unsigned val)
+ {
+-    int i,j;
+-    for(i=0;hdmi_tvenc_configs[i].vic!=HDMI_Unkown;i++){
+-        if(vic==hdmi_tvenc_configs[i].vic){
+-            reg_t* reg_set=hdmi_tvenc_configs[i].reg_set;
+-            for(j=0;reg_set[j].reg;j++){
+-                if(reg_set[j].reg==reg){
+-                    reg_set[j].val = val;    
+-                    hdmi_print(INF, SYS "set [%08x]=%08x\n",reg_set[j].reg, reg_set[j].val);
+-                    break;
+-                }
+-            }
+-            if(reg_set[j].reg == 0){
+-                hdmi_print(INF, SYS "no [%08x] in config\n", reg);
+-            }
+-            break;
+-        }
+-    }
+ }
+ 
+-static void hdmitx_set_pll(Hdmi_tx_video_para_t *param)
++static void hdmitx_set_pll(hdmitx_dev_t *hdev)
+ {
+     hdmi_print(IMP, SYS "set pll\n");
+-    hdmi_print(IMP, SYS "param->VIC:%d\n", param->VIC);
++    hdmi_print(IMP, SYS "param->VIC:%d\n", hdev->cur_VIC);
+     
+     cur_vout_index = get_cur_vout_index();
+-    switch(param->VIC)
++    switch(hdev->cur_VIC)
+     {
+         case HDMI_480p60:
+         case HDMI_480p60_16x9:
+@@ -1543,7 +1515,11 @@ static void hdmitx_set_pll(Hdmi_tx_video_para_t *param)
+             set_vmode_clk(VMODE_4K2K_24HZ);
+             break;
+         case HDMI_3840x2160p60_16x9:
+-            set_vmode_clk(VMODE_4K2K_60HZ);
++            if(hdev->mode420 == 1) {
++                set_vmode_clk(VMODE_4K2K_60HZ_Y420);
++            } else {
++                set_vmode_clk(VMODE_4K2K_60HZ);
++            };
+             break;
+         case HDMI_3840x2160p50_16x9:
+             set_vmode_clk(VMODE_4K2K_FAKE_5G);
+@@ -1591,7 +1567,38 @@ static void hdmitx_set_phy(hdmitx_dev_t* hdmitx_device)
+     hdmi_print(IMP, SYS "phy setting done\n");
+ }
+ 
+-static int hdmitx_set_dispmode(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t *param)
++static void set_tmds_clk_div40(unsigned int div40)
++{
++    if (div40 == 1) {
++        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_01, 0);          // [25:16] tmds_clk_pttn[19:10]  [ 9: 0] tmds_clk_pttn[ 9: 0]
++        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_23, 0x03ff03ff); // [25:16] tmds_clk_pttn[39:30]  [ 9: 0] tmds_clk_pttn[29:20]
++    }
++    else {
++        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_01, 0x001f001f);
++        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_23, 0x001f001f);
++    }
++
++    printk("%s[%d]0x%x\n", __func__, __LINE__, hdmitx_rd_reg(HDMITX_TOP_TMDS_CLK_PTTN_01));
++    printk("%s[%d]0x%x\n", __func__, __LINE__, hdmitx_rd_reg(HDMITX_TOP_TMDS_CLK_PTTN_23));
++
++    hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x1);            // 0xc
++    msleep(10);
++    hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x2);            // 0xc
++}
++
++static void hdmitx_rst_main_ctrl(unsigned int bit)
++{
++    // [  7] gpaswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  6] cecswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  4] spdifswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  3] i2sswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  2] prepswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  1] tmdsswrst_req: 0=generate reset pulse; 1=no reset.
++    // [  0] pixelswrst_req: 0=generate reset pulse; 1=no reset.
++    hdmitx_wr_reg(HDMITX_DWC_MC_SWRSTZREQ, bit);
++}
++
++static int hdmitx_set_dispmode(hdmitx_dev_t* hdev, Hdmi_tx_video_para_t *param)
+ {
+     if(param == NULL){ //disable HDMI
+         return 0;
+@@ -1614,8 +1621,8 @@ static int hdmitx_set_dispmode(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t
+         param->color = color_space_f;
+     }
+     C_Entry(param->VIC);
+-    hdmitx_set_pll(param);
+-    hdmitx_set_phy(hdmitx_device);
++    hdmitx_set_pll(hdev);
++    hdmitx_set_phy(hdev);
+     switch(param->VIC){
+     case HDMI_480i60:
+     case HDMI_480i60_16x9:
+@@ -1665,17 +1672,28 @@ if(param->VIC == HDMI_1920x1080p60_16x9) {
+         break;
+     }
+ 
+-    hdmi_hw_reset(hdmitx_device, param);    
++    hdmi_hw_reset(hdev, param);    
+ 	// move hdmitx_set_pll() to the end of this function.
+     // hdmitx_set_pll(param);
+-    hdmitx_device->cur_VIC = param->VIC;
+-    hdmitx_set_phy(hdmitx_device);
++    hdev->cur_VIC = param->VIC;
++    hdmitx_set_phy(hdev);
+ 
+-	hdmitx_set_pll(param);
++	hdmitx_set_pll(hdev);
+ 
++    if(hdev->mode420 == 1) {
++        hdmitx_wr_reg(HDMITX_DWC_FC_AVICONF0, 0x43);    // change AVI packet
++        mode420_half_horizontal_para();
++    }
++    if(((hdev->cur_VIC == HDMI_3840x2160p50_16x9) || (hdev->cur_VIC == HDMI_3840x2160p60_16x9))
++       && (hdev->mode420 != 1)){
++        set_tmds_clk_div40(1);
++    } else {
++        set_tmds_clk_div40(0);
++    }
+     hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF, 0, 3, 1);
+     msleep(1);
+     hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF, 1, 3, 1);
++    hdmitx_rst_main_ctrl(~(0x7));
+ 
+     return 0;
+ }
+@@ -2314,18 +2332,6 @@ static void hdmitx_4k2k60hz444_debug(void)
+     hdmitx_wr_reg(HDMITX_DWC_FC_AVIVID, HDMI_3840x2160p60_16x9);
+ }
+ 
+-static void hdmitx_4k2k60hz420_debug(void)
+-{
+-    printk("4k2k60hzYCBCR420\n");
+-    printk("set clk:data = 1 : 10 set double rate\n");
+-    aml_write_reg32(P_HHI_VID_CLK_DIV, 0x101);
+-    //hdmitx_wr_reg(HDMITX_DWC_MC_FLOWCTRL, 1);   //csc_en
+-    //hdmitx_wr_reg(HDMITX_DWC_CSC_CFG, 2);
+-    hdmitx_wr_reg(HDMITX_DWC_FC_AVICONF0, 0x43);
+-    hdmitx_wr_reg(HDMITX_DWC_FC_AVIVID, HDMI_3840x2160p60_16x9);
+-    mode420_half_horizontal_para();
+-}
+-
+ static void hdmitx_4k2k5g_debug(void)
+ {
+     printk("4k2k5g\n");
+@@ -2386,9 +2392,6 @@ static void hdmitx_debug(hdmitx_dev_t* hdev, const char* buf)
+         set_vmode_clk((tmpbuf[7] == '0') ? VMODE_1080P : VMODE_4K2K_FAKE_5G);
+         return;
+     }
+-    else if(strncmp(tmpbuf, "4k2k60hz420", 11) == 0) {
+-        hdmitx_4k2k60hz420_debug();
+-    }
+     else if(strncmp(tmpbuf, "4k2k5g420", 9) == 0) {
+         hdmitx_4k2k5g420_debug();
+     }
+@@ -3506,42 +3509,6 @@ void config_hdmi20_tx ( HDMI_Video_Codes_t vic, struct hdmi_format_para *para,
+     data32 |= (0    << 0);  // [ 4: 0] prbs_pttn
+     hdmitx_wr_reg(HDMITX_TOP_BIST_CNTL, data32);                        // 0x6
+ 
+-    printk("vic = %d, tmds_clk_div40 = %d\n", vic, para->tmds_clk_div40);
+-    if (para->tmds_clk_div40) {
+-        data32  = 0;
+-        data32 |= (0    << 16); // [25:16] tmds_clk_pttn[19:10]
+-        data32 |= (0    << 0);  // [ 9: 0] tmds_clk_pttn[ 9: 0]
+-        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_01, data32);             // 0xa
+-        
+-        data32  = 0;
+-        data32 |= (0x3ff<< 16); // [25:16] tmds_clk_pttn[39:30]
+-        data32 |= (0x3ff<< 0);  // [ 9: 0] tmds_clk_pttn[29:20]
+-        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_23, data32);             // 0xb
+-    }
+-    else {
+-        data32  = 0;
+-        data32 |= (0x1f    << 16); // [25:16] tmds_clk_pttn[19:10]
+-        data32 |= (0x1f    << 0);  // [ 9: 0] tmds_clk_pttn[ 9: 0]
+-        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_01, data32);             // 0xa
+-        
+-        data32  = 0;
+-        data32 |= (0x1f<< 16); // [25:16] tmds_clk_pttn[39:30]
+-        data32 |= (0x1f<< 0);  // [ 9: 0] tmds_clk_pttn[29:20]
+-        hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_23, data32);             // 0xb
+-    }
+-
+-
+-    printk("%s[%d]0x%x\n", __func__, __LINE__, hdmitx_rd_reg(HDMITX_TOP_TMDS_CLK_PTTN_01));
+-    printk("%s[%d]0x%x\n", __func__, __LINE__, hdmitx_rd_reg(HDMITX_TOP_TMDS_CLK_PTTN_23));
+-
+-    hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x1);            // 0xc
+-
+-    msleep(10);
+-
+-    hdmitx_wr_reg(HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x2);            // 0xc
+-
+-    printk("%s[%d]0x%x\n", __func__, __LINE__, hdmitx_rd_reg(HDMITX_TOP_TMDS_CLK_PTTN_CNTL));
+-
+     //--------------------------------------------------------------------------
+     // Configure video
+     //--------------------------------------------------------------------------
+@@ -3990,17 +3957,7 @@ void config_hdmi20_tx ( HDMI_Video_Codes_t vic, struct hdmi_format_para *para,
+     //--------------------------------------------------------------------------
+ 
+     hdmitx_rd_check_reg(HDMITX_DWC_MC_LOCKONCLOCK, 0xff, 0x9f);
+-    
+-    data32  = 0;
+-    data32 |= (0    << 7);  // [  7] gpaswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 6);  // [  6] cecswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 4);  // [  4] spdifswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 3);  // [  3] i2sswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 2);  // [  2] prepswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 1);  // [  1] tmdsswrst_req: 0=generate reset pulse; 1=no reset.
+-    data32 |= (0    << 0);  // [  0] pixelswrst_req: 0=generate reset pulse; 1=no reset.
+-    hdmitx_wr_reg(HDMITX_DWC_MC_SWRSTZREQ, data32);
+-
++    hdmitx_wr_reg(HDMITX_DWC_MC_SWRSTZREQ, 0);
+ //TODO
+     printk("TODO %s[%d]\n", __func__, __LINE__);
+ } /* config_hdmi20_tx */
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmitx_regs.h b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmitx_regs.h
+deleted file mode 100644
+index 29b5e6681035..000000000000
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmitx_regs.h
++++ /dev/null
+@@ -1,564 +0,0 @@
+-#ifndef  HDMITX_PARAMETER_DEFINE_H
+-#define  HDMITX_PARAMETER_DEFINE_H
+-
+-// Use the following functions to access the on-chip HDMITX modules by default
+-extern void hdmitx_wr_reg(unsigned long addr, unsigned long data);
+-extern unsigned long hdmitx_rd_reg(unsigned long addr);
+-extern void hdmitx_rd_check_reg(unsigned long addr, unsigned long exp_data, unsigned long mask);
+-
+-//------------------------------------------------------------------------------
+-// TOP-level wrapper registers addresses
+-//------------------------------------------------------------------------------
+-#define TOP_OFFSET_MASK      (0x00 << 24)
+-#define DWC_OFFSET_MASK      (0x10 << 24)
+-
+-#define HDMITX_TOP_SW_RESET                     (TOP_OFFSET_MASK + 0x000)
+-#define HDMITX_TOP_CLK_CNTL                     (TOP_OFFSET_MASK + 0x001)
+-#define HDMITX_TOP_HPD_FILTER                   (TOP_OFFSET_MASK + 0x002)
+-#define HDMITX_TOP_INTR_MASKN                   (TOP_OFFSET_MASK + 0x003)
+-#define HDMITX_TOP_INTR_STAT                    (TOP_OFFSET_MASK + 0x004)
+-#define HDMITX_TOP_INTR_STAT_CLR                (TOP_OFFSET_MASK + 0x005)
+-#define HDMITX_TOP_BIST_CNTL                    (TOP_OFFSET_MASK + 0x006)
+-#define HDMITX_TOP_SHIFT_PTTN_012               (TOP_OFFSET_MASK + 0x007)
+-#define HDMITX_TOP_SHIFT_PTTN_345               (TOP_OFFSET_MASK + 0x008)
+-#define HDMITX_TOP_SHIFT_PTTN_67                (TOP_OFFSET_MASK + 0x009)
+-#define HDMITX_TOP_TMDS_CLK_PTTN_01             (TOP_OFFSET_MASK + 0x00A)
+-#define HDMITX_TOP_TMDS_CLK_PTTN_23             (TOP_OFFSET_MASK + 0x00B)
+-#define HDMITX_TOP_TMDS_CLK_PTTN_CNTL           (TOP_OFFSET_MASK + 0x00C)
+-#define HDMITX_TOP_REVOCMEM_STAT                (TOP_OFFSET_MASK + 0x00D)
+-#define HDMITX_TOP_STAT0                        (TOP_OFFSET_MASK + 0x00E)
+-
+-#define HDMITX_TOP_DONT_TOUCH0                  (TOP_OFFSET_MASK + 0x0FE)
+-#define HDMITX_TOP_DONT_TOUCH1                  (TOP_OFFSET_MASK + 0x0FF)
+-
+-//------------------------------------------------------------------------------
+-// DWC_HDMI_TX Controller registers addresses
+-//------------------------------------------------------------------------------
+-
+-// Identification Registers
+-#define HDMITX_DWC_DESIGN_ID                    (DWC_OFFSET_MASK + 0x0000)
+-#define HDMITX_DWC_REVISION_ID                  (DWC_OFFSET_MASK + 0x0001)
+-#define HDMITX_DWC_PRODUCT_ID0                  (DWC_OFFSET_MASK + 0x0002)
+-#define HDMITX_DWC_PRODUCT_ID1                  (DWC_OFFSET_MASK + 0x0003)
+-#define HDMITX_DWC_CONFIG0_ID                   (DWC_OFFSET_MASK + 0x0004)
+-#define HDMITX_DWC_CONFIG1_ID                   (DWC_OFFSET_MASK + 0x0005)
+-#define HDMITX_DWC_CONFIG2_ID                   (DWC_OFFSET_MASK + 0x0006)
+-#define HDMITX_DWC_CONFIG3_ID                   (DWC_OFFSET_MASK + 0x0007)
+-
+-// Interrupt Registers
+-#define HDMITX_DWC_IH_FC_STAT0                  (DWC_OFFSET_MASK + 0x0100)
+-#define HDMITX_DWC_IH_FC_STAT1                  (DWC_OFFSET_MASK + 0x0101)
+-#define HDMITX_DWC_IH_FC_STAT2                  (DWC_OFFSET_MASK + 0x0102)
+-#define HDMITX_DWC_IH_AS_STAT0                  (DWC_OFFSET_MASK + 0x0103)
+-#define HDMITX_DWC_IH_PHY_STAT0                 (DWC_OFFSET_MASK + 0x0104)
+-#define HDMITX_DWC_IH_I2CM_STAT0                (DWC_OFFSET_MASK + 0x0105)
+-#define HDMITX_DWC_IH_CEC_STAT0                 (DWC_OFFSET_MASK + 0x0106)
+-#define HDMITX_DWC_IH_VP_STAT0                  (DWC_OFFSET_MASK + 0x0107)
+-#define HDMITX_DWC_IH_I2CMPHY_STAT0             (DWC_OFFSET_MASK + 0x0108)
+-#define HDMITX_DWC_IH_DECODE                    (DWC_OFFSET_MASK + 0x0170)
+-#define HDMITX_DWC_IH_MUTE_FC_STAT0             (DWC_OFFSET_MASK + 0x0180)
+-#define HDMITX_DWC_IH_MUTE_FC_STAT1             (DWC_OFFSET_MASK + 0x0181)
+-#define HDMITX_DWC_IH_MUTE_FC_STAT2             (DWC_OFFSET_MASK + 0x0182)
+-#define HDMITX_DWC_IH_MUTE_AS_STAT0             (DWC_OFFSET_MASK + 0x0183)
+-#define HDMITX_DWC_IH_MUTE_PHY_STAT0            (DWC_OFFSET_MASK + 0x0184)
+-#define HDMITX_DWC_IH_MUTE_I2CM_STAT0           (DWC_OFFSET_MASK + 0x0185)
+-#define HDMITX_DWC_IH_MUTE_CEC_STAT0            (DWC_OFFSET_MASK + 0x0186)
+-#define HDMITX_DWC_IH_MUTE_VP_STAT0             (DWC_OFFSET_MASK + 0x0187)
+-#define HDMITX_DWC_IH_MUTE_I2CMPHY_STAT0        (DWC_OFFSET_MASK + 0x0188)
+-#define HDMITX_DWC_IH_MUTE                      (DWC_OFFSET_MASK + 0x01FF)
+-
+-// Video Sampler Registers
+-#define HDMITX_DWC_TX_INVID0                    (DWC_OFFSET_MASK + 0x0200)
+-#define HDMITX_DWC_TX_INSTUFFING                (DWC_OFFSET_MASK + 0x0201)
+-#define HDMITX_DWC_TX_GYDATA0                   (DWC_OFFSET_MASK + 0x0202)
+-#define HDMITX_DWC_TX_GYDATA1                   (DWC_OFFSET_MASK + 0x0203)
+-#define HDMITX_DWC_TX_RCRDATA0                  (DWC_OFFSET_MASK + 0x0204)
+-#define HDMITX_DWC_TX_RCRDATA1                  (DWC_OFFSET_MASK + 0x0205)
+-#define HDMITX_DWC_TX_BCBDATA0                  (DWC_OFFSET_MASK + 0x0206)
+-#define HDMITX_DWC_TX_BCBDATA1                  (DWC_OFFSET_MASK + 0x0207)
+-
+-// Video Packetizer Registers
+-#define HDMITX_DWC_VP_STATUS                    (DWC_OFFSET_MASK + 0x0800)
+-#define HDMITX_DWC_VP_PR_CD                     (DWC_OFFSET_MASK + 0x0801)
+-#define HDMITX_DWC_VP_STUFF                     (DWC_OFFSET_MASK + 0x0802)
+-#define HDMITX_DWC_VP_REMAP                     (DWC_OFFSET_MASK + 0x0803)
+-#define HDMITX_DWC_VP_CONF                      (DWC_OFFSET_MASK + 0x0804)
+-#define HDMITX_DWC_VP_MASK                      (DWC_OFFSET_MASK + 0x0807)
+-
+-// Frmae Composer Registers
+-#define HDMITX_DWC_FC_INVIDCONF                 (DWC_OFFSET_MASK + 0x1000)
+-#define HDMITX_DWC_FC_INHACTV0                  (DWC_OFFSET_MASK + 0x1001)
+-#define HDMITX_DWC_FC_INHACTV1                  (DWC_OFFSET_MASK + 0x1002)
+-#define HDMITX_DWC_FC_INHBLANK0                 (DWC_OFFSET_MASK + 0x1003)
+-#define HDMITX_DWC_FC_INHBLANK1                 (DWC_OFFSET_MASK + 0x1004)
+-#define HDMITX_DWC_FC_INVACTV0                  (DWC_OFFSET_MASK + 0x1005)
+-#define HDMITX_DWC_FC_INVACTV1                  (DWC_OFFSET_MASK + 0x1006)
+-#define HDMITX_DWC_FC_INVBLANK                  (DWC_OFFSET_MASK + 0x1007)
+-#define HDMITX_DWC_FC_HSYNCINDELAY0             (DWC_OFFSET_MASK + 0x1008)
+-#define HDMITX_DWC_FC_HSYNCINDELAY1             (DWC_OFFSET_MASK + 0x1009)
+-#define HDMITX_DWC_FC_HSYNCINWIDTH0             (DWC_OFFSET_MASK + 0x100A)
+-#define HDMITX_DWC_FC_HSYNCINWIDTH1             (DWC_OFFSET_MASK + 0x100B)
+-#define HDMITX_DWC_FC_VSYNCINDELAY              (DWC_OFFSET_MASK + 0x100C)
+-#define HDMITX_DWC_FC_VSYNCINWIDTH              (DWC_OFFSET_MASK + 0x100D)
+-#define HDMITX_DWC_FC_INFREQ0                   (DWC_OFFSET_MASK + 0x100E)
+-#define HDMITX_DWC_FC_INFREQ1                   (DWC_OFFSET_MASK + 0x100F)
+-#define HDMITX_DWC_FC_INFREQ2                   (DWC_OFFSET_MASK + 0x1010)
+-#define HDMITX_DWC_FC_CTRLDUR                   (DWC_OFFSET_MASK + 0x1011)
+-#define HDMITX_DWC_FC_EXCTRLDUR                 (DWC_OFFSET_MASK + 0x1012)
+-#define HDMITX_DWC_FC_EXCTRLSPAC                (DWC_OFFSET_MASK + 0x1013)
+-#define HDMITX_DWC_FC_CH0PREAM                  (DWC_OFFSET_MASK + 0x1014)
+-#define HDMITX_DWC_FC_CH1PREAM                  (DWC_OFFSET_MASK + 0x1015)
+-#define HDMITX_DWC_FC_CH2PREAM                  (DWC_OFFSET_MASK + 0x1016)
+-#define HDMITX_DWC_FC_AVICONF3                  (DWC_OFFSET_MASK + 0x1017)
+-#define HDMITX_DWC_FC_GCP                       (DWC_OFFSET_MASK + 0x1018)
+-#define HDMITX_DWC_FC_AVICONF0                  (DWC_OFFSET_MASK + 0x1019)
+-#define HDMITX_DWC_FC_AVICONF1                  (DWC_OFFSET_MASK + 0x101A)
+-#define HDMITX_DWC_FC_AVICONF2                  (DWC_OFFSET_MASK + 0x101B)
+-#define HDMITX_DWC_FC_AVIVID                    (DWC_OFFSET_MASK + 0x101C)
+-#define HDMITX_DWC_FC_AVIETB0                   (DWC_OFFSET_MASK + 0x101D)
+-#define HDMITX_DWC_FC_AVIETB1                   (DWC_OFFSET_MASK + 0x101E)
+-#define HDMITX_DWC_FC_AVISBB0                   (DWC_OFFSET_MASK + 0x101F)
+-#define HDMITX_DWC_FC_AVISBB1                   (DWC_OFFSET_MASK + 0x1020)
+-#define HDMITX_DWC_FC_AVIELB0                   (DWC_OFFSET_MASK + 0x1021)
+-#define HDMITX_DWC_FC_AVIELB1                   (DWC_OFFSET_MASK + 0x1022)
+-#define HDMITX_DWC_FC_AVISRB0                   (DWC_OFFSET_MASK + 0x1023)
+-#define HDMITX_DWC_FC_AVISRB1                   (DWC_OFFSET_MASK + 0x1024)
+-#define HDMITX_DWC_FC_AUDICONF0                 (DWC_OFFSET_MASK + 0x1025)
+-#define HDMITX_DWC_FC_AUDICONF1                 (DWC_OFFSET_MASK + 0x1026)
+-#define HDMITX_DWC_FC_AUDICONF2                 (DWC_OFFSET_MASK + 0x1027)
+-#define HDMITX_DWC_FC_AUDICONF3                 (DWC_OFFSET_MASK + 0x1028)
+-#define HDMITX_DWC_FC_VSDIEEEID0                (DWC_OFFSET_MASK + 0x1029)
+-#define HDMITX_DWC_FC_VSDSIZE                   (DWC_OFFSET_MASK + 0x102A)
+-#define HDMITX_DWC_FC_VSDIEEEID1                (DWC_OFFSET_MASK + 0x1030)
+-#define HDMITX_DWC_FC_VSDIEEEID2                (DWC_OFFSET_MASK + 0x1031)
+-#define HDMITX_DWC_FC_VSDPAYLOAD0               (DWC_OFFSET_MASK + 0x1032)
+-#define HDMITX_DWC_FC_VSDPAYLOAD1               (DWC_OFFSET_MASK + 0x1033)
+-#define HDMITX_DWC_FC_VSDPAYLOAD2               (DWC_OFFSET_MASK + 0x1034)
+-#define HDMITX_DWC_FC_VSDPAYLOAD3               (DWC_OFFSET_MASK + 0x1035)
+-#define HDMITX_DWC_FC_VSDPAYLOAD4               (DWC_OFFSET_MASK + 0x1036)
+-#define HDMITX_DWC_FC_VSDPAYLOAD5               (DWC_OFFSET_MASK + 0x1037)
+-#define HDMITX_DWC_FC_VSDPAYLOAD6               (DWC_OFFSET_MASK + 0x1038)
+-#define HDMITX_DWC_FC_VSDPAYLOAD7               (DWC_OFFSET_MASK + 0x1039)
+-#define HDMITX_DWC_FC_VSDPAYLOAD8               (DWC_OFFSET_MASK + 0x103A)
+-#define HDMITX_DWC_FC_VSDPAYLOAD9               (DWC_OFFSET_MASK + 0x103B)
+-#define HDMITX_DWC_FC_VSDPAYLOAD10              (DWC_OFFSET_MASK + 0x103C)
+-#define HDMITX_DWC_FC_VSDPAYLOAD11              (DWC_OFFSET_MASK + 0x103D)
+-#define HDMITX_DWC_FC_VSDPAYLOAD12              (DWC_OFFSET_MASK + 0x103E)
+-#define HDMITX_DWC_FC_VSDPAYLOAD13              (DWC_OFFSET_MASK + 0x103F)
+-#define HDMITX_DWC_FC_VSDPAYLOAD14              (DWC_OFFSET_MASK + 0x1040)
+-#define HDMITX_DWC_FC_VSDPAYLOAD15              (DWC_OFFSET_MASK + 0x1041)
+-#define HDMITX_DWC_FC_VSDPAYLOAD16              (DWC_OFFSET_MASK + 0x1042)
+-#define HDMITX_DWC_FC_VSDPAYLOAD17              (DWC_OFFSET_MASK + 0x1043)
+-#define HDMITX_DWC_FC_VSDPAYLOAD18              (DWC_OFFSET_MASK + 0x1044)
+-#define HDMITX_DWC_FC_VSDPAYLOAD19              (DWC_OFFSET_MASK + 0x1045)
+-#define HDMITX_DWC_FC_VSDPAYLOAD20              (DWC_OFFSET_MASK + 0x1046)
+-#define HDMITX_DWC_FC_VSDPAYLOAD21              (DWC_OFFSET_MASK + 0x1047)
+-#define HDMITX_DWC_FC_VSDPAYLOAD22              (DWC_OFFSET_MASK + 0x1048)
+-#define HDMITX_DWC_FC_VSDPAYLOAD23              (DWC_OFFSET_MASK + 0x1049)
+-#define HDMITX_DWC_FC_SPDVENDORNAME0            (DWC_OFFSET_MASK + 0x104A)
+-#define HDMITX_DWC_FC_SPDVENDORNAME1            (DWC_OFFSET_MASK + 0x104B)
+-#define HDMITX_DWC_FC_SPDVENDORNAME2            (DWC_OFFSET_MASK + 0x104C)
+-#define HDMITX_DWC_FC_SPDVENDORNAME3            (DWC_OFFSET_MASK + 0x104D)
+-#define HDMITX_DWC_FC_SPDVENDORNAME4            (DWC_OFFSET_MASK + 0x104E)
+-#define HDMITX_DWC_FC_SPDVENDORNAME5            (DWC_OFFSET_MASK + 0x104F)
+-#define HDMITX_DWC_FC_SPDVENDORNAME6            (DWC_OFFSET_MASK + 0x1050)
+-#define HDMITX_DWC_FC_SPDVENDORNAME7            (DWC_OFFSET_MASK + 0x1051)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME0           (DWC_OFFSET_MASK + 0x1052)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME1           (DWC_OFFSET_MASK + 0x1053)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME2           (DWC_OFFSET_MASK + 0x1054)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME3           (DWC_OFFSET_MASK + 0x1055)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME4           (DWC_OFFSET_MASK + 0x1056)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME5           (DWC_OFFSET_MASK + 0x1057)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME6           (DWC_OFFSET_MASK + 0x1058)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME7           (DWC_OFFSET_MASK + 0x1059)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME8           (DWC_OFFSET_MASK + 0x105A)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME9           (DWC_OFFSET_MASK + 0x105B)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME10          (DWC_OFFSET_MASK + 0x105C)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME11          (DWC_OFFSET_MASK + 0x105D)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME12          (DWC_OFFSET_MASK + 0x105E)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME13          (DWC_OFFSET_MASK + 0x105F)
+-#define HDMITX_DWC_FC_SDPPRODUCTNAME14          (DWC_OFFSET_MASK + 0x1060)
+-#define HDMITX_DWC_FC_SPDPRODUCTNAME15          (DWC_OFFSET_MASK + 0x1061)
+-#define HDMITX_DWC_FC_SPDDEVICEINF              (DWC_OFFSET_MASK + 0x1062)
+-#define HDMITX_DWC_FC_AUDSCONF                  (DWC_OFFSET_MASK + 0x1063)
+-#define HDMITX_DWC_FC_AUDSSTAT                  (DWC_OFFSET_MASK + 0x1064)
+-#define HDMITX_DWC_FC_AUDSV                     (DWC_OFFSET_MASK + 0x1065)
+-#define HDMITX_DWC_FC_AUDSU                     (DWC_OFFSET_MASK + 0x1066)
+-#define HDMITX_DWC_FC_AUDSCHNLS0                (DWC_OFFSET_MASK + 0x1067)
+-#define HDMITX_DWC_FC_AUDSCHNLS1                (DWC_OFFSET_MASK + 0x1068)
+-#define HDMITX_DWC_FC_AUDSCHNLS2                (DWC_OFFSET_MASK + 0x1069)
+-#define HDMITX_DWC_FC_AUDSCHNLS3                (DWC_OFFSET_MASK + 0x106A)
+-#define HDMITX_DWC_FC_AUDSCHNLS4                (DWC_OFFSET_MASK + 0x106B)
+-#define HDMITX_DWC_FC_AUDSCHNLS5                (DWC_OFFSET_MASK + 0x106C)
+-#define HDMITX_DWC_FC_AUDSCHNLS6                (DWC_OFFSET_MASK + 0x106D)
+-#define HDMITX_DWC_FC_AUDSCHNLS7                (DWC_OFFSET_MASK + 0x106E)
+-#define HDMITX_DWC_FC_AUDSCHNLS8                (DWC_OFFSET_MASK + 0x106F)
+-#define HDMITX_DWC_FC_DATACH0FILL               (DWC_OFFSET_MASK + 0x1070)
+-#define HDMITX_DWC_FC_DATACH1FILL               (DWC_OFFSET_MASK + 0x1071)
+-#define HDMITX_DWC_FC_DATACH2FILL               (DWC_OFFSET_MASK + 0x1072)
+-#define HDMITX_DWC_FC_CTRLQHIGH                 (DWC_OFFSET_MASK + 0x1073)
+-#define HDMITX_DWC_FC_CTRLQLOW                  (DWC_OFFSET_MASK + 0x1074)
+-#define HDMITX_DWC_FC_ACP0                      (DWC_OFFSET_MASK + 0x1075)
+-#define HDMITX_DWC_FC_ACP16                     (DWC_OFFSET_MASK + 0x1082)
+-#define HDMITX_DWC_FC_ACP15                     (DWC_OFFSET_MASK + 0x1083)
+-#define HDMITX_DWC_FC_ACP14                     (DWC_OFFSET_MASK + 0x1084)
+-#define HDMITX_DWC_FC_ACP13                     (DWC_OFFSET_MASK + 0x1085)
+-#define HDMITX_DWC_FC_ACP12                     (DWC_OFFSET_MASK + 0x1086)
+-#define HDMITX_DWC_FC_ACP11                     (DWC_OFFSET_MASK + 0x1087)
+-#define HDMITX_DWC_FC_ACP10                     (DWC_OFFSET_MASK + 0x1088)
+-#define HDMITX_DWC_FC_ACP9                      (DWC_OFFSET_MASK + 0x1089)
+-#define HDMITX_DWC_FC_ACP8                      (DWC_OFFSET_MASK + 0x108A)
+-#define HDMITX_DWC_FC_ACP7                      (DWC_OFFSET_MASK + 0x108B)
+-#define HDMITX_DWC_FC_ACP6                      (DWC_OFFSET_MASK + 0x108C)
+-#define HDMITX_DWC_FC_ACP5                      (DWC_OFFSET_MASK + 0x108D)
+-#define HDMITX_DWC_FC_ACP4                      (DWC_OFFSET_MASK + 0x108E)
+-#define HDMITX_DWC_FC_ACP3                      (DWC_OFFSET_MASK + 0x108F)
+-#define HDMITX_DWC_FC_ACP2                      (DWC_OFFSET_MASK + 0x1090)
+-#define HDMITX_DWC_FC_ACP1                      (DWC_OFFSET_MASK + 0x1091)
+-#define HDMITX_DWC_FC_ISCR1_0                   (DWC_OFFSET_MASK + 0x1092)
+-#define HDMITX_DWC_FC_ISCR1_16                  (DWC_OFFSET_MASK + 0x1093)
+-#define HDMITX_DWC_FC_ISCR1_15                  (DWC_OFFSET_MASK + 0x1094)
+-#define HDMITX_DWC_FC_ISCR1_14                  (DWC_OFFSET_MASK + 0x1095)
+-#define HDMITX_DWC_FC_ISCR1_13                  (DWC_OFFSET_MASK + 0x1096)
+-#define HDMITX_DWC_FC_ISCR1_12                  (DWC_OFFSET_MASK + 0x1097)
+-#define HDMITX_DWC_FC_ISCR1_11                  (DWC_OFFSET_MASK + 0x1098)
+-#define HDMITX_DWC_FC_ISCR1_10                  (DWC_OFFSET_MASK + 0x1099)
+-#define HDMITX_DWC_FC_ISCR1_9                   (DWC_OFFSET_MASK + 0x109A)
+-#define HDMITX_DWC_FC_ISCR1_8                   (DWC_OFFSET_MASK + 0x109B)
+-#define HDMITX_DWC_FC_ISCR1_7                   (DWC_OFFSET_MASK + 0x109C)
+-#define HDMITX_DWC_FC_ISCR1_6                   (DWC_OFFSET_MASK + 0x109D)
+-#define HDMITX_DWC_FC_ISCR1_5                   (DWC_OFFSET_MASK + 0x109E)
+-#define HDMITX_DWC_FC_ISCR1_4                   (DWC_OFFSET_MASK + 0x109F)
+-#define HDMITX_DWC_FC_ISCR1_3                   (DWC_OFFSET_MASK + 0x10A0)
+-#define HDMITX_DWC_FC_ISCR1_2                   (DWC_OFFSET_MASK + 0x10A1)
+-#define HDMITX_DWC_FC_ISCR1_1                   (DWC_OFFSET_MASK + 0x10A2)
+-#define HDMITX_DWC_FC_ISCR0_15                  (DWC_OFFSET_MASK + 0x10A3)
+-#define HDMITX_DWC_FC_ISCR0_14                  (DWC_OFFSET_MASK + 0x10A4)
+-#define HDMITX_DWC_FC_ISCR0_13                  (DWC_OFFSET_MASK + 0x10A5)
+-#define HDMITX_DWC_FC_ISCR0_12                  (DWC_OFFSET_MASK + 0x10A6)
+-#define HDMITX_DWC_FC_ISCR0_11                  (DWC_OFFSET_MASK + 0x10A7)
+-#define HDMITX_DWC_FC_ISCR0_10                  (DWC_OFFSET_MASK + 0x10A8)
+-#define HDMITX_DWC_FC_ISCR0_9                   (DWC_OFFSET_MASK + 0x10A9)
+-#define HDMITX_DWC_FC_ISCR0_8                   (DWC_OFFSET_MASK + 0x10AA)
+-#define HDMITX_DWC_FC_ISCR0_7                   (DWC_OFFSET_MASK + 0x10AB)
+-#define HDMITX_DWC_FC_ISCR0_6                   (DWC_OFFSET_MASK + 0x10AC)
+-#define HDMITX_DWC_FC_ISCR0_5                   (DWC_OFFSET_MASK + 0x10AD)
+-#define HDMITX_DWC_FC_ISCR0_4                   (DWC_OFFSET_MASK + 0x10AE)
+-#define HDMITX_DWC_FC_ISCR0_3                   (DWC_OFFSET_MASK + 0x10AF)
+-#define HDMITX_DWC_FC_ISCR0_2                   (DWC_OFFSET_MASK + 0x10B0)
+-#define HDMITX_DWC_FC_ISCR0_1                   (DWC_OFFSET_MASK + 0x10B1)
+-#define HDMITX_DWC_FC_ISCR0_0                   (DWC_OFFSET_MASK + 0x10B2)
+-#define HDMITX_DWC_FC_DATAUTO0                  (DWC_OFFSET_MASK + 0x10B3)
+-#define HDMITX_DWC_FC_DATAUTO1                  (DWC_OFFSET_MASK + 0x10B4)
+-#define HDMITX_DWC_FC_DATAUTO2                  (DWC_OFFSET_MASK + 0x10B5)
+-#define HDMITX_DWC_FC_DATMAN                    (DWC_OFFSET_MASK + 0x10B6)
+-#define HDMITX_DWC_FC_DATAUTO3                  (DWC_OFFSET_MASK + 0x10B7)
+-#define HDMITX_DWC_FC_RDRB0                     (DWC_OFFSET_MASK + 0x10B8)
+-#define HDMITX_DWC_FC_RDRB1                     (DWC_OFFSET_MASK + 0x10B9)
+-#define HDMITX_DWC_FC_RDRB2                     (DWC_OFFSET_MASK + 0x10BA)
+-#define HDMITX_DWC_FC_RDRB3                     (DWC_OFFSET_MASK + 0x10BB)
+-#define HDMITX_DWC_FC_RDRB4                     (DWC_OFFSET_MASK + 0x10BC)
+-#define HDMITX_DWC_FC_RDRB5                     (DWC_OFFSET_MASK + 0x10BD)
+-#define HDMITX_DWC_FC_RDRB6                     (DWC_OFFSET_MASK + 0x10BE)
+-#define HDMITX_DWC_FC_RDRB7                     (DWC_OFFSET_MASK + 0x10BF)
+-#define HDMITX_DWC_FC_MASK0                     (DWC_OFFSET_MASK + 0x10D2)
+-#define HDMITX_DWC_FC_MASK1                     (DWC_OFFSET_MASK + 0x10D6)
+-#define HDMITX_DWC_FC_MASK2                     (DWC_OFFSET_MASK + 0x10DA)
+-#define HDMITX_DWC_FC_PRCONF                    (DWC_OFFSET_MASK + 0x10E0)
+-#define HDMITX_DWC_FC_SCRAMBLER_CTRL            (DWC_OFFSET_MASK + 0x10E1)
+-
+-#define HDMITX_DWC_FC_GMD_STAT                  (DWC_OFFSET_MASK + 0x1100)
+-#define HDMITX_DWC_FC_GMD_EN                    (DWC_OFFSET_MASK + 0x1101)
+-#define HDMITX_DWC_FC_GMD_UP                    (DWC_OFFSET_MASK + 0x1102)
+-#define HDMITX_DWC_FC_GMD_CONF                  (DWC_OFFSET_MASK + 0x1103)
+-#define HDMITX_DWC_FC_GMD_HB                    (DWC_OFFSET_MASK + 0x1104)
+-#define HDMITX_DWC_FC_GMD_PB0                   (DWC_OFFSET_MASK + 0x1105)
+-#define HDMITX_DWC_FC_GMD_PB1                   (DWC_OFFSET_MASK + 0x1106)
+-#define HDMITX_DWC_FC_GMD_PB2                   (DWC_OFFSET_MASK + 0x1107)
+-#define HDMITX_DWC_FC_GMD_PB3                   (DWC_OFFSET_MASK + 0x1108)
+-#define HDMITX_DWC_FC_GMD_PB4                   (DWC_OFFSET_MASK + 0x1109)
+-#define HDMITX_DWC_FC_GMD_PB5                   (DWC_OFFSET_MASK + 0x110A)
+-#define HDMITX_DWC_FC_GMD_PB6                   (DWC_OFFSET_MASK + 0x110B)
+-#define HDMITX_DWC_FC_GMD_PB7                   (DWC_OFFSET_MASK + 0x110C)
+-#define HDMITX_DWC_FC_GMD_PB8                   (DWC_OFFSET_MASK + 0x110D)
+-#define HDMITX_DWC_FC_GMD_PB9                   (DWC_OFFSET_MASK + 0x110E)
+-#define HDMITX_DWC_FC_GMD_PB10                  (DWC_OFFSET_MASK + 0x110F)
+-#define HDMITX_DWC_FC_GMD_PB11                  (DWC_OFFSET_MASK + 0x1110)
+-#define HDMITX_DWC_FC_GMD_PB12                  (DWC_OFFSET_MASK + 0x1111)
+-#define HDMITX_DWC_FC_GMD_PB13                  (DWC_OFFSET_MASK + 0x1112)
+-#define HDMITX_DWC_FC_GMD_PB14                  (DWC_OFFSET_MASK + 0x1113)
+-#define HDMITX_DWC_FC_GMD_PB15                  (DWC_OFFSET_MASK + 0x1114)
+-#define HDMITX_DWC_FC_GMD_PB16                  (DWC_OFFSET_MASK + 0x1115)
+-#define HDMITX_DWC_FC_GMD_PB17                  (DWC_OFFSET_MASK + 0x1116)
+-#define HDMITX_DWC_FC_GMD_PB18                  (DWC_OFFSET_MASK + 0x1117)
+-#define HDMITX_DWC_FC_GMD_PB19                  (DWC_OFFSET_MASK + 0x1118)
+-#define HDMITX_DWC_FC_GMD_PB20                  (DWC_OFFSET_MASK + 0x1119)
+-#define HDMITX_DWC_FC_GMD_PB21                  (DWC_OFFSET_MASK + 0x111A)
+-#define HDMITX_DWC_FC_GMD_PB22                  (DWC_OFFSET_MASK + 0x111B)
+-#define HDMITX_DWC_FC_GMD_PB23                  (DWC_OFFSET_MASK + 0x111C)
+-#define HDMITX_DWC_FC_GMD_PB24                  (DWC_OFFSET_MASK + 0x111D)
+-#define HDMITX_DWC_FC_GMD_PB25                  (DWC_OFFSET_MASK + 0x111E)
+-#define HDMITX_DWC_FC_GMD_PB26                  (DWC_OFFSET_MASK + 0x111F)
+-#define HDMITX_DWC_FC_GMD_PB27                  (DWC_OFFSET_MASK + 0x1120)
+-
+-#define HDMITX_DWC_FC_DBGFORCE                  (DWC_OFFSET_MASK + 0x1200)
+-#define HDMITX_DWC_FC_DBGAUD0CH0                (DWC_OFFSET_MASK + 0x1201)
+-#define HDMITX_DWC_FC_DBGAUD1CH0                (DWC_OFFSET_MASK + 0x1202)
+-#define HDMITX_DWC_FC_DBGAUD2CH0                (DWC_OFFSET_MASK + 0x1203)
+-#define HDMITX_DWC_FC_DBGAUD0CH1                (DWC_OFFSET_MASK + 0x1204)
+-#define HDMITX_DWC_FC_DBGAUD1CH1                (DWC_OFFSET_MASK + 0x1205)
+-#define HDMITX_DWC_FC_DBGAUD2CH1                (DWC_OFFSET_MASK + 0x1206)
+-#define HDMITX_DWC_FC_DBGAUD0CH2                (DWC_OFFSET_MASK + 0x1207)
+-#define HDMITX_DWC_FC_DBGAUD1CH2                (DWC_OFFSET_MASK + 0x1208)
+-#define HDMITX_DWC_FC_DBGAUD2CH2                (DWC_OFFSET_MASK + 0x1209)
+-#define HDMITX_DWC_FC_DBGAUD0CH3                (DWC_OFFSET_MASK + 0x120A)
+-#define HDMITX_DWC_FC_DBGAUD1CH3                (DWC_OFFSET_MASK + 0x120B)
+-#define HDMITX_DWC_FC_DBGAUD2CH3                (DWC_OFFSET_MASK + 0x120C)
+-#define HDMITX_DWC_FC_DBGAUD0CH4                (DWC_OFFSET_MASK + 0x120D)
+-#define HDMITX_DWC_FC_DBGAUD1CH4                (DWC_OFFSET_MASK + 0x120E)
+-#define HDMITX_DWC_FC_DBGAUD2CH4                (DWC_OFFSET_MASK + 0x120F)
+-#define HDMITX_DWC_FC_DBGAUD0CH5                (DWC_OFFSET_MASK + 0x1210)
+-#define HDMITX_DWC_FC_DBGAUD1CH5                (DWC_OFFSET_MASK + 0x1211)
+-#define HDMITX_DWC_FC_DBGAUD2CH5                (DWC_OFFSET_MASK + 0x1212)
+-#define HDMITX_DWC_FC_DBGAUD0CH6                (DWC_OFFSET_MASK + 0x1213)
+-#define HDMITX_DWC_FC_DBGAUD1CH6                (DWC_OFFSET_MASK + 0x1214)
+-#define HDMITX_DWC_FC_DBGAUD2CH6                (DWC_OFFSET_MASK + 0x1215)
+-#define HDMITX_DWC_FC_DBGAUD0CH7                (DWC_OFFSET_MASK + 0x1216)
+-#define HDMITX_DWC_FC_DBGAUD1CH7                (DWC_OFFSET_MASK + 0x1217)
+-#define HDMITX_DWC_FC_DBGAUD2CH7                (DWC_OFFSET_MASK + 0x1218)
+-#define HDMITX_DWC_FC_DBGTMDS0                  (DWC_OFFSET_MASK + 0x1219)
+-#define HDMITX_DWC_FC_DBGTMDS1                  (DWC_OFFSET_MASK + 0x121A)
+-#define HDMITX_DWC_FC_DBGTMDS2                  (DWC_OFFSET_MASK + 0x121B)
+-
+-// HDMI Source PHY Registers
+-#define HDMITX_DWC_PHY_CONF0                    (DWC_OFFSET_MASK + 0x3000)
+-#define HDMITX_DWC_PHY_TST0                     (DWC_OFFSET_MASK + 0x3001)
+-#define HDMITX_DWC_PHY_TST1                     (DWC_OFFSET_MASK + 0x3002)
+-#define HDMITX_DWC_PHY_TST2                     (DWC_OFFSET_MASK + 0x3003)
+-#define HDMITX_DWC_PHY_STAT0                    (DWC_OFFSET_MASK + 0x3004)
+-#define HDMITX_DWC_PHY_INT0                     (DWC_OFFSET_MASK + 0x3005)
+-#define HDMITX_DWC_PHY_MASK0                    (DWC_OFFSET_MASK + 0x3006)
+-#define HDMITX_DWC_PHY_POL0                     (DWC_OFFSET_MASK + 0x3007)
+-
+-// I2C Master PHY Registers
+-#define HDMITX_DWC_I2CM_PHY_SLAVE               (DWC_OFFSET_MASK + 0x3020)
+-#define HDMITX_DWC_I2CM_PHY_ADDRESS             (DWC_OFFSET_MASK + 0x3021)
+-#define HDMITX_DWC_I2CM_PHY_DATAO_1             (DWC_OFFSET_MASK + 0x3022)
+-#define HDMITX_DWC_I2CM_PHY_DATAO_0             (DWC_OFFSET_MASK + 0x3023)
+-#define HDMITX_DWC_I2CM_PHY_DATAI_1             (DWC_OFFSET_MASK + 0x3024)
+-#define HDMITX_DWC_I2CM_PHY_DATAI_0             (DWC_OFFSET_MASK + 0x3025)
+-#define HDMITX_DWC_I2CM_PHY_OPERATION           (DWC_OFFSET_MASK + 0x3026)
+-#define HDMITX_DWC_I2CM_PHY_INT                 (DWC_OFFSET_MASK + 0x3027)
+-#define HDMITX_DWC_I2CM_PHY_CTLINT              (DWC_OFFSET_MASK + 0x3028)
+-#define HDMITX_DWC_I2CM_PHY_DIV                 (DWC_OFFSET_MASK + 0x3029)
+-#define HDMITX_DWC_I2CM_PHY_SOFTRSTZ            (DWC_OFFSET_MASK + 0x302A)
+-#define HDMITX_DWC_I2CM_PHY_SS_SCL_HCNT_1       (DWC_OFFSET_MASK + 0x302B)
+-#define HDMITX_DWC_I2CM_PHY_SS_SCL_HCNT_0       (DWC_OFFSET_MASK + 0x302C)
+-#define HDMITX_DWC_I2CM_PHY_SS_SCL_LCNT_1       (DWC_OFFSET_MASK + 0x302D)
+-#define HDMITX_DWC_I2CM_PHY_SS_SCL_LCNT_0       (DWC_OFFSET_MASK + 0x302E)
+-#define HDMITX_DWC_I2CM_PHY_FS_SCL_HCNT_1       (DWC_OFFSET_MASK + 0x302F)
+-#define HDMITX_DWC_I2CM_PHY_FS_SCL_HCNT_0       (DWC_OFFSET_MASK + 0x3030)
+-#define HDMITX_DWC_I2CM_PHY_FS_SCL_LCNT_1       (DWC_OFFSET_MASK + 0x3031)
+-#define HDMITX_DWC_I2CM_PHY_FS_SCL_LCNT_0       (DWC_OFFSET_MASK + 0x3032)
+-#define HDMITX_DWC_I2CM_PHY_SDA_HOLD            (DWC_OFFSET_MASK + 0x3033)
+-
+-// Audio Sampler Registers
+-#define HDMITX_DWC_AUD_CONF0                    (DWC_OFFSET_MASK + 0x3100)
+-#define HDMITX_DWC_AUD_CONF1                    (DWC_OFFSET_MASK + 0x3101)
+-#define HDMITX_DWC_AUD_INT                      (DWC_OFFSET_MASK + 0x3102)
+-#define HDMITX_DWC_AUD_CONF2                    (DWC_OFFSET_MASK + 0x3103)
+-#define HDMITX_DWC_AUD_INT1                     (DWC_OFFSET_MASK + 0x3104)
+-
+-#define HDMITX_DWC_AUD_N1                       (DWC_OFFSET_MASK + 0x3200)
+-#define HDMITX_DWC_AUD_N2                       (DWC_OFFSET_MASK + 0x3201)
+-#define HDMITX_DWC_AUD_N3                       (DWC_OFFSET_MASK + 0x3202)
+-#define HDMITX_DWC_AUD_CTS1                     (DWC_OFFSET_MASK + 0x3203)
+-#define HDMITX_DWC_AUD_CTS2                     (DWC_OFFSET_MASK + 0x3204)
+-#define HDMITX_DWC_AUD_CTS3                     (DWC_OFFSET_MASK + 0x3205)
+-#define HDMITX_DWC_AUD_INPUTCLKFS               (DWC_OFFSET_MASK + 0x3206)
+-
+-#define HDMITX_DWC_AUD_SPDIF0                   (DWC_OFFSET_MASK + 0x3300)
+-#define HDMITX_DWC_AUD_SPDIF1                   (DWC_OFFSET_MASK + 0x3301)
+-#define HDMITX_DWC_AUD_SPDIFINT                 (DWC_OFFSET_MASK + 0x3302)
+-#define HDMITX_DWC_AUD_SPDIFINT1                (DWC_OFFSET_MASK + 0x3303)
+-
+-// Generic Parallel Audio Interface Registers   (DWC_OFFSET_MASK + 0x3500)
+-// Audio DMA Registers                          (DWC_OFFSET_MASK + 0x3600)
+-
+-// Main Controller Registers
+-#define HDMITX_DWC_MC_CLKDIS                    (DWC_OFFSET_MASK + 0x4001)
+-#define HDMITX_DWC_MC_SWRSTZREQ                 (DWC_OFFSET_MASK + 0x4002)
+-#define HDMITX_DWC_MC_OPCTRL                    (DWC_OFFSET_MASK + 0x4003)
+-#define HDMITX_DWC_MC_FLOWCTRL                  (DWC_OFFSET_MASK + 0x4004)
+-#define HDMITX_DWC_MC_PHYRSTZ                   (DWC_OFFSET_MASK + 0x4005)
+-#define HDMITX_DWC_MC_LOCKONCLOCK               (DWC_OFFSET_MASK + 0x4006)
+-
+-// Color Space Converter Registers
+-#define HDMITX_DWC_CSC_CFG                      (DWC_OFFSET_MASK + 0x4100)
+-#define HDMITX_DWC_CSC_SCALE                    (DWC_OFFSET_MASK + 0x4101)
+-#define HDMITX_DWC_CSC_COEF_A1_MSB              (DWC_OFFSET_MASK + 0x4102)
+-#define HDMITX_DWC_CSC_COEF_A1_LSB              (DWC_OFFSET_MASK + 0x4103)
+-#define HDMITX_DWC_CSC_COEF_A2_MSB              (DWC_OFFSET_MASK + 0x4104)
+-#define HDMITX_DWC_CSC_COEF_A2_LSB              (DWC_OFFSET_MASK + 0x4105)
+-#define HDMITX_DWC_CSC_COEF_A3_MSB              (DWC_OFFSET_MASK + 0x4106)
+-#define HDMITX_DWC_CSC_COEF_A3_LSB              (DWC_OFFSET_MASK + 0x4107)
+-#define HDMITX_DWC_CSC_COEF_A4_MSB              (DWC_OFFSET_MASK + 0x4108)
+-#define HDMITX_DWC_CSC_COEF_A4_LSB              (DWC_OFFSET_MASK + 0x4109)
+-#define HDMITX_DWC_CSC_COEF_B1_MSB              (DWC_OFFSET_MASK + 0x410A)
+-#define HDMITX_DWC_CSC_COEF_B1_LSB              (DWC_OFFSET_MASK + 0x410B)
+-#define HDMITX_DWC_CSC_COEF_B2_MSB              (DWC_OFFSET_MASK + 0x410C)
+-#define HDMITX_DWC_CSC_COEF_B2_LSB              (DWC_OFFSET_MASK + 0x410D)
+-#define HDMITX_DWC_CSC_COEF_B3_MSB              (DWC_OFFSET_MASK + 0x410E)
+-#define HDMITX_DWC_CSC_COEF_B3_LSB              (DWC_OFFSET_MASK + 0x410F)
+-#define HDMITX_DWC_CSC_COEF_B4_MSB              (DWC_OFFSET_MASK + 0x4110)
+-#define HDMITX_DWC_CSC_COEF_B4_LSB              (DWC_OFFSET_MASK + 0x4111)
+-#define HDMITX_DWC_CSC_COEF_C1_MSB              (DWC_OFFSET_MASK + 0x4112)
+-#define HDMITX_DWC_CSC_COEF_C1_LSB              (DWC_OFFSET_MASK + 0x4113)
+-#define HDMITX_DWC_CSC_COEF_C2_MSB              (DWC_OFFSET_MASK + 0x4114)
+-#define HDMITX_DWC_CSC_COEF_C2_LSB              (DWC_OFFSET_MASK + 0x4115)
+-#define HDMITX_DWC_CSC_COEF_C3_MSB              (DWC_OFFSET_MASK + 0x4116)
+-#define HDMITX_DWC_CSC_COEF_C3_LSB              (DWC_OFFSET_MASK + 0x4117)
+-#define HDMITX_DWC_CSC_COEF_C4_MSB              (DWC_OFFSET_MASK + 0x4118)
+-#define HDMITX_DWC_CSC_COEF_C4_LSB              (DWC_OFFSET_MASK + 0x4119)
+-#define HDMITX_DWC_CSC_SPARE1                   (DWC_OFFSET_MASK + 0x411A)
+-#define HDMITX_DWC_CSC_SPARE2                   (DWC_OFFSET_MASK + 0x411B)
+-
+-// HDCP Encryption Engine Registers
+-#define HDMITX_DWC_A_HDCPCFG0                   (DWC_OFFSET_MASK + 0x5000)
+-#define HDMITX_DWC_A_HDCPCFG1                   (DWC_OFFSET_MASK + 0x5001)
+-#define HDMITX_DWC_A_HDCPOBS0                   (DWC_OFFSET_MASK + 0x5002)
+-#define HDMITX_DWC_A_HDCPOBS1                   (DWC_OFFSET_MASK + 0x5003)
+-#define HDMITX_DWC_A_HDCPOBS2                   (DWC_OFFSET_MASK + 0x5004)
+-#define HDMITX_DWC_A_HDCPOBS3                   (DWC_OFFSET_MASK + 0x5005)
+-#define HDMITX_DWC_A_APIINTCLR                  (DWC_OFFSET_MASK + 0x5006)
+-#define HDMITX_DWC_A_APIINTSTAT                 (DWC_OFFSET_MASK + 0x5007)
+-#define HDMITX_DWC_A_APIINTMSK                  (DWC_OFFSET_MASK + 0x5008)
+-#define HDMITX_DWC_A_VIDPOLCFG                  (DWC_OFFSET_MASK + 0x5009)
+-#define HDMITX_DWC_A_OESSWCFG                   (DWC_OFFSET_MASK + 0x500A)
+-#define HDMITX_DWC_A_COREVERLSB                 (DWC_OFFSET_MASK + 0x5014)
+-#define HDMITX_DWC_A_COREVERMSB                 (DWC_OFFSET_MASK + 0x5015)
+-#define HDMITX_DWC_A_KSVMEMCTRL                 (DWC_OFFSET_MASK + 0x5016)
+-
+-#define HDMITX_DWC_HDCP_BSTATUS_0               (DWC_OFFSET_MASK + 0x5020)
+-#define HDMITX_DWC_HDCP_BSTATUS_1               (DWC_OFFSET_MASK + 0x5021)
+-#define HDMITX_DWC_HDCP_M0_0                    (DWC_OFFSET_MASK + 0x5022)
+-#define HDMITX_DWC_HDCP_M0_1                    (DWC_OFFSET_MASK + 0x5023)
+-#define HDMITX_DWC_HDCP_M0_2                    (DWC_OFFSET_MASK + 0x5024)
+-#define HDMITX_DWC_HDCP_M0_3                    (DWC_OFFSET_MASK + 0x5025)
+-#define HDMITX_DWC_HDCP_M0_4                    (DWC_OFFSET_MASK + 0x5026)
+-#define HDMITX_DWC_HDCP_M0_5                    (DWC_OFFSET_MASK + 0x5027)
+-#define HDMITX_DWC_HDCP_M0_6                    (DWC_OFFSET_MASK + 0x5028)
+-#define HDMITX_DWC_HDCP_M0_7                    (DWC_OFFSET_MASK + 0x5029)
+-#define HDMITX_DWC_HDCP_KSV                     (DWC_OFFSET_MASK + 0x502A)
+-#define HDMITX_DWC_HDCP_VH                      (DWC_OFFSET_MASK + 0x52A5)
+-#define HDMITX_DWC_HDCP_REVOC_SIZE_0            (DWC_OFFSET_MASK + 0x52B9)
+-#define HDMITX_DWC_HDCP_REVOC_SIZE_1            (DWC_OFFSET_MASK + 0x52BA)
+-#define HDMITX_DWC_HDCP_REVOC_LIST              (DWC_OFFSET_MASK + 0x52BB)
+-
+-// HDCP BKSV Registers
+-#define HDMITX_DWC_HDCPREG_BKSV0                (DWC_OFFSET_MASK + 0x7800)
+-#define HDMITX_DWC_HDCPREG_BKSV1                (DWC_OFFSET_MASK + 0x7801)
+-#define HDMITX_DWC_HDCPREG_BKSV2                (DWC_OFFSET_MASK + 0x7802)
+-#define HDMITX_DWC_HDCPREG_BKSV3                (DWC_OFFSET_MASK + 0x7803)
+-#define HDMITX_DWC_HDCPREG_BKSV4                (DWC_OFFSET_MASK + 0x7804)
+-
+-// HDCP AN Registers
+-#define HDMITX_DWC_HDCPREG_ANCONF               (DWC_OFFSET_MASK + 0x7805)
+-#define HDMITX_DWC_HDCPREG_AN0                  (DWC_OFFSET_MASK + 0x7806)
+-#define HDMITX_DWC_HDCPREG_AN1                  (DWC_OFFSET_MASK + 0x7807)
+-#define HDMITX_DWC_HDCPREG_AN2                  (DWC_OFFSET_MASK + 0x7808)
+-#define HDMITX_DWC_HDCPREG_AN3                  (DWC_OFFSET_MASK + 0x7809)
+-#define HDMITX_DWC_HDCPREG_AN4                  (DWC_OFFSET_MASK + 0x780A)
+-#define HDMITX_DWC_HDCPREG_AN5                  (DWC_OFFSET_MASK + 0x780B)
+-#define HDMITX_DWC_HDCPREG_AN6                  (DWC_OFFSET_MASK + 0x780C)
+-#define HDMITX_DWC_HDCPREG_AN7                  (DWC_OFFSET_MASK + 0x780D)
+-#define HDMITX_DWC_HDCPREG_RMLCTL               (DWC_OFFSET_MASK + 0x780E)
+-
+-// Encrypted DPK Embedded Storage Registers
+-#define HDMITX_DWC_HDCPREG_RMLSTS               (DWC_OFFSET_MASK + 0x780F)
+-#define HDMITX_DWC_HDCPREG_SEED0                (DWC_OFFSET_MASK + 0x7810)
+-#define HDMITX_DWC_HDCPREG_SEED1                (DWC_OFFSET_MASK + 0x7811)
+-#define HDMITX_DWC_HDCPREG_DPK0                 (DWC_OFFSET_MASK + 0x7812)
+-#define HDMITX_DWC_HDCPREG_DPK1                 (DWC_OFFSET_MASK + 0x7813)
+-#define HDMITX_DWC_HDCPREG_DPK2                 (DWC_OFFSET_MASK + 0x7814)
+-#define HDMITX_DWC_HDCPREG_DPK3                 (DWC_OFFSET_MASK + 0x7815)
+-#define HDMITX_DWC_HDCPREG_DPK4                 (DWC_OFFSET_MASK + 0x7816)
+-#define HDMITX_DWC_HDCPREG_DPK5                 (DWC_OFFSET_MASK + 0x7817)
+-#define HDMITX_DWC_HDCPREG_DPK6                 (DWC_OFFSET_MASK + 0x7818)
+-
+-// CEC Engine Registers
+-#define HDMITX_DWC_CEC_CTRL                     (DWC_OFFSET_MASK + 0x7D00)
+-#define HDMITX_DWC_CEC_INTR_MASK                (DWC_OFFSET_MASK + 0x7D02)
+-#define HDMITX_DWC_CEC_LADD_LOW                 (DWC_OFFSET_MASK + 0x7D05)
+-#define HDMITX_DWC_CEC_LADD_HIGH                (DWC_OFFSET_MASK + 0x7D06)
+-#define HDMITX_DWC_CEC_TX_CNT                   (DWC_OFFSET_MASK + 0x7D07)
+-#define HDMITX_DWC_CEC_RX_CNT                   (DWC_OFFSET_MASK + 0x7D08)
+-#define HDMITX_DWC_CEC_TX_DATA00                (DWC_OFFSET_MASK + 0x7D10)
+-#define HDMITX_DWC_CEC_TX_DATA01                (DWC_OFFSET_MASK + 0x7D11)
+-#define HDMITX_DWC_CEC_TX_DATA02                (DWC_OFFSET_MASK + 0x7D12)
+-#define HDMITX_DWC_CEC_TX_DATA03                (DWC_OFFSET_MASK + 0x7D13)
+-#define HDMITX_DWC_CEC_TX_DATA04                (DWC_OFFSET_MASK + 0x7D14)
+-#define HDMITX_DWC_CEC_TX_DATA05                (DWC_OFFSET_MASK + 0x7D15)
+-#define HDMITX_DWC_CEC_TX_DATA06                (DWC_OFFSET_MASK + 0x7D16)
+-#define HDMITX_DWC_CEC_TX_DATA07                (DWC_OFFSET_MASK + 0x7D17)
+-#define HDMITX_DWC_CEC_TX_DATA08                (DWC_OFFSET_MASK + 0x7D18)
+-#define HDMITX_DWC_CEC_TX_DATA09                (DWC_OFFSET_MASK + 0x7D19)
+-#define HDMITX_DWC_CEC_TX_DATA10                (DWC_OFFSET_MASK + 0x7D1A)
+-#define HDMITX_DWC_CEC_TX_DATA11                (DWC_OFFSET_MASK + 0x7D1B)
+-#define HDMITX_DWC_CEC_TX_DATA12                (DWC_OFFSET_MASK + 0x7D1C)
+-#define HDMITX_DWC_CEC_TX_DATA13                (DWC_OFFSET_MASK + 0x7D1D)
+-#define HDMITX_DWC_CEC_TX_DATA14                (DWC_OFFSET_MASK + 0x7D1E)
+-#define HDMITX_DWC_CEC_TX_DATA15                (DWC_OFFSET_MASK + 0x7D1F)
+-#define HDMITX_DWC_CEC_RX_DATA00                (DWC_OFFSET_MASK + 0x7D20)
+-#define HDMITX_DWC_CEC_RX_DATA01                (DWC_OFFSET_MASK + 0x7D21)
+-#define HDMITX_DWC_CEC_RX_DATA02                (DWC_OFFSET_MASK + 0x7D22)
+-#define HDMITX_DWC_CEC_RX_DATA03                (DWC_OFFSET_MASK + 0x7D23)
+-#define HDMITX_DWC_CEC_RX_DATA04                (DWC_OFFSET_MASK + 0x7D24)
+-#define HDMITX_DWC_CEC_RX_DATA05                (DWC_OFFSET_MASK + 0x7D25)
+-#define HDMITX_DWC_CEC_RX_DATA06                (DWC_OFFSET_MASK + 0x7D26)
+-#define HDMITX_DWC_CEC_RX_DATA07                (DWC_OFFSET_MASK + 0x7D27)
+-#define HDMITX_DWC_CEC_RX_DATA08                (DWC_OFFSET_MASK + 0x7D28)
+-#define HDMITX_DWC_CEC_RX_DATA09                (DWC_OFFSET_MASK + 0x7D29)
+-#define HDMITX_DWC_CEC_RX_DATA10                (DWC_OFFSET_MASK + 0x7D2A)
+-#define HDMITX_DWC_CEC_RX_DATA11                (DWC_OFFSET_MASK + 0x7D2B)
+-#define HDMITX_DWC_CEC_RX_DATA12                (DWC_OFFSET_MASK + 0x7D2C)
+-#define HDMITX_DWC_CEC_RX_DATA13                (DWC_OFFSET_MASK + 0x7D2D)
+-#define HDMITX_DWC_CEC_RX_DATA14                (DWC_OFFSET_MASK + 0x7D2E)
+-#define HDMITX_DWC_CEC_RX_DATA15                (DWC_OFFSET_MASK + 0x7D2F)
+-#define HDMITX_DWC_CEC_LOCK_BUF                 (DWC_OFFSET_MASK + 0x7D30)
+-#define HDMITX_DWC_CEC_WAKEUPCTRL               (DWC_OFFSET_MASK + 0x7D31)
+-
+-// I2C Master Registers(E-DDC/SCDC)
+-#define HDMITX_DWC_I2CM_SLAVE                   (DWC_OFFSET_MASK + 0x7E00)
+-#define HDMITX_DWC_I2CM_ADDRESS                 (DWC_OFFSET_MASK + 0x7E01)
+-#define HDMITX_DWC_I2CM_DATAO                   (DWC_OFFSET_MASK + 0x7E02)
+-#define HDMITX_DWC_I2CM_DATAI                   (DWC_OFFSET_MASK + 0x7E03)
+-#define HDMITX_DWC_I2CM_OPERATION               (DWC_OFFSET_MASK + 0x7E04)
+-#define HDMITX_DWC_I2CM_INT                     (DWC_OFFSET_MASK + 0x7E05)
+-#define HDMITX_DWC_I2CM_CTLINT                  (DWC_OFFSET_MASK + 0x7E06)
+-#define HDMITX_DWC_I2CM_DIV                     (DWC_OFFSET_MASK + 0x7E07)
+-#define HDMITX_DWC_I2CM_SEGADDR                 (DWC_OFFSET_MASK + 0x7E08)
+-#define HDMITX_DWC_I2CM_SOFTRSTZ                (DWC_OFFSET_MASK + 0x7E09)
+-#define HDMITX_DWC_I2CM_SEGPTR                  (DWC_OFFSET_MASK + 0x7E0A)
+-#define HDMITX_DWC_I2CM_SS_SCL_HCNT_1           (DWC_OFFSET_MASK + 0x7E0B)
+-#define HDMITX_DWC_I2CM_SS_SCL_HCNT_0           (DWC_OFFSET_MASK + 0x7E0C)
+-#define HDMITX_DWC_I2CM_SS_SCL_LCNT_1           (DWC_OFFSET_MASK + 0x7E0D)
+-#define HDMITX_DWC_I2CM_SS_SCL_LCNT_0           (DWC_OFFSET_MASK + 0x7E0E)
+-#define HDMITX_DWC_I2CM_FS_SCL_HCNT_1           (DWC_OFFSET_MASK + 0x7E0F)
+-#define HDMITX_DWC_I2CM_FS_SCL_HCNT_0           (DWC_OFFSET_MASK + 0x7E10)
+-#define HDMITX_DWC_I2CM_FS_SCL_LCNT_1           (DWC_OFFSET_MASK + 0x7E11)
+-#define HDMITX_DWC_I2CM_FS_SCL_LCNT_0           (DWC_OFFSET_MASK + 0x7E12)
+-#define HDMITX_DWC_I2CM_SDA_HOLD                (DWC_OFFSET_MASK + 0x7E13)
+-#define HDMITX_DWC_I2CM_SCDC_UPDATE             (DWC_OFFSET_MASK + 0x7E14)
+-#define HDMITX_DWC_I2CM_READ_BUFF0              (DWC_OFFSET_MASK + 0x7E20)
+-#define HDMITX_DWC_I2CM_READ_BUFF1              (DWC_OFFSET_MASK + 0x7E21)
+-#define HDMITX_DWC_I2CM_READ_BUFF2              (DWC_OFFSET_MASK + 0x7E22)
+-#define HDMITX_DWC_I2CM_READ_BUFF3              (DWC_OFFSET_MASK + 0x7E23)
+-#define HDMITX_DWC_I2CM_READ_BUFF4              (DWC_OFFSET_MASK + 0x7E24)
+-#define HDMITX_DWC_I2CM_READ_BUFF5              (DWC_OFFSET_MASK + 0x7E25)
+-#define HDMITX_DWC_I2CM_READ_BUFF6              (DWC_OFFSET_MASK + 0x7E26)
+-#define HDMITX_DWC_I2CM_READ_BUFF7              (DWC_OFFSET_MASK + 0x7E27)
+-#define HDMITX_DWC_I2CM_SCDC_UPDATE0            (DWC_OFFSET_MASK + 0x7E30)
+-#define HDMITX_DWC_I2CM_SCDC_UPDATE1            (DWC_OFFSET_MASK + 0x7E31)
+-
+-#endif  /* HDMITX_PARAMETER_DEFINE_H */
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/tvenc_conf.h b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/tvenc_conf.h
+index 204eb88fe089..8b137891791f 100644
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/tvenc_conf.h
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/tvenc_conf.h
+@@ -1,231 +1 @@
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-static  reg_t hdmi_tvenc_regs_480i[] = {
+-    /*1st col: recommmended, but eof/sof/vs_lines +/- 1 from spec; 2nd col: from simu */
+-    {ENCP_VIDEO_MODE,             0      /*0     */  },
+-    {ENCI_DE_H_BEGIN,             229    /*0xeb  */  },
+-    {ENCI_DE_H_END,               1669   /*0x68b */  },
+-    {ENCI_DE_V_BEGIN_EVEN,        18     /*0x11  */  },
+-    {ENCI_DE_V_END_EVEN,          258    /*0x101 */  },
+-    {ENCI_DE_V_BEGIN_ODD,         19     /*0x12  */  },
+-    {ENCI_DE_V_END_ODD,           259    /*0x102 */  },
+-    {ENCI_DVI_HSO_BEGIN,          1707   /*0x6b1 */  },
+-    {ENCI_DVI_HSO_END,            115    /*0x79  */  },
+-    {ENCI_DVI_VSO_BLINE_EVN,      0      /*0x105 */  },
+-    {ENCI_DVI_VSO_ELINE_EVN,      2      /*0x1   */  },
+-    {ENCI_DVI_VSO_BEGIN_EVN,      1707   /*0x357 */  },
+-    {ENCI_DVI_VSO_END_EVN,        1707   /*0x6b1 */  },
+-    {ENCI_DVI_VSO_BLINE_ODD,      0      /*0x105 */  },
+-    {ENCI_DVI_VSO_BEGIN_ODD,      849    /*0x6b1 */  },
+-    {ENCI_DVI_VSO_ELINE_ODD,      3      /*0x2   */  },
+-    {ENCI_DVI_VSO_END_ODD,        849    /*0x357 */  },
+-    {VENC_DVI_SETTING,            0x809c /*0x809c*/  },
+-    {VENC_DVI_SETTING_MORE,       0x0    /*0x0   */  },
+-    {0,0}
+-};
+-
+-static  reg_t hdmi_tvenc_regs_576i[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004000},
+-    {ENCI_DE_H_BEGIN,                    0x000000f9},
+-    {ENCI_DE_H_END,                      0x00000699},
+-    {ENCI_DE_V_BEGIN_EVEN,               0x00000015},
+-    {ENCI_DE_V_END_EVEN,                 0x00000135},
+-    {ENCI_DE_V_BEGIN_ODD,                0x00000016},
+-    {ENCI_DE_V_END_ODD,                  0x00000136},
+-    {ENCI_DVI_HSO_BEGIN,                 0x000006b1},
+-    {ENCI_DVI_HSO_END,                   0x0000006f},
+-    {ENCI_DVI_VSO_BLINE_EVN,             0x00000137},
+-    {ENCI_DVI_VSO_ELINE_EVN,             0x00000001},
+-    {ENCI_DVI_VSO_BEGIN_EVN,             0x00000351},
+-    {ENCI_DVI_VSO_END_EVN,               0x000006b1},
+-    {ENCI_DVI_VSO_BLINE_ODD,             0x00000137},
+-    {ENCI_DVI_VSO_BEGIN_ODD,             0x000006b1},
+-    {ENCI_DVI_VSO_ELINE_ODD,             0x00000002},
+-    {ENCI_DVI_VSO_END_ODD,               0x00000351},
+-    {VENC_DVI_SETTING,                   0x0000809c},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {0,0}
+-};
+-
+-static  reg_t hdmi_tvenc_regs_1080i[] = {
+-    {ENCP_VIDEO_MODE,                    0x00005ffc},
+-    {ENCP_DE_H_BEGIN,                    0x00000210},
+-    {ENCP_DE_H_END,                      0x00001110},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x00000014},
+-    {ENCP_DE_V_END_EVEN,                 0x00000230},
+-    {ENCP_DE_V_BEGIN_ODD,                0x00000247},
+-    {ENCP_DE_V_END_ODD,                  0x00000463},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000090},
+-    {ENCP_DVI_HSO_END,                   0x000000e8},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000000},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000005},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000090},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000090},
+-    {ENCP_DVI_VSO_BLINE_ODD,             0x00000232},
+-    {ENCP_DVI_VSO_ELINE_ODD,             0x00000237},
+-    {ENCP_DVI_VSO_BEGIN_ODD,             0x00000928},
+-    {ENCP_DVI_VSO_END_ODD,               0x00000928},
+-    {VENC_DVI_SETTING,                   0x000080ad},
+-    {VENC_DVI_SETTING_MORE,              0x00000000}, 
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_1080i50[] = {
+-    {ENCP_VIDEO_MODE,                    0x00005ffc},
+-    {ENCP_DE_H_BEGIN,                    0x00000210},
+-    {ENCP_DE_H_END,                      0x00001110},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x00000014},
+-    {ENCP_DE_V_END_EVEN,                 0x00000230},
+-    {ENCP_DE_V_BEGIN_ODD,                0x00000247},
+-    {ENCP_DE_V_END_ODD,                  0x00000463},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000090},
+-    {ENCP_DVI_HSO_END,                   0x000000e8},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000000},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000005},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000090},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000090},
+-    {ENCP_DVI_VSO_BLINE_ODD,             0x00000232},
+-    {ENCP_DVI_VSO_ELINE_ODD,             0x00000237},
+-    {ENCP_DVI_VSO_BEGIN_ODD,             0x00000ae0},
+-    {ENCP_DVI_VSO_END_ODD,               0x00000ae0},
+-    {VENC_DVI_SETTING,                   0x000080ad},
+-    {VENC_DVI_SETTING_MORE,              0x00000000}, 
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_480p[] = {
+-    {ENCP_VIDEO_MODE,                   /*0x4000 */ 0x00004000},
+-    {ENCP_DE_H_BEGIN,                   /*0xdc   */ 0x000000d7},
+-    {ENCP_DE_H_END,                     /*0x67c  */ 0x00000677},
+-    {ENCP_DE_V_BEGIN_EVEN,              /*0x2a   */ 0x0000002b},
+-    {ENCP_DE_V_END_EVEN,                /*0x2a   */ 0x0000020b},
+-    {ENCP_DVI_HSO_BEGIN,                /*0x69c  */ 0x00000697},
+-    {ENCP_DVI_HSO_END,                  /*0x64   */ 0x0000005f},
+-    {ENCP_DVI_VSO_BLINE_EVN,            /*0x5    */ 0x00000006},
+-    {ENCP_DVI_VSO_ELINE_EVN,            /*0xb    */ 0x0000000c},
+-    {ENCP_DVI_VSO_BEGIN_EVN,            /*0x69c  */ 0x00000697},
+-    {ENCP_DVI_VSO_END_EVN,              /*0x69c  */ 0x00000697},
+-    {VENC_DVI_SETTING_MORE,             /*0x0    */ 0x00000000},
+-    {VENC_DVI_SETTING,                  /*0x80ad */ 0x000080ad},
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_576p[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004000},
+-    {ENCP_DE_H_BEGIN,                    0x000000ef},
+-    {ENCP_DE_H_END,                      0x0000068f},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x0000002d},
+-    {ENCP_DE_V_END_EVEN,                 0x0000026d},
+-    {ENCP_DVI_HSO_BEGIN,                 0x000006a7},
+-    {ENCP_DVI_HSO_END,                   0x00000067},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000000},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000005},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x000006a7},
+-    {ENCP_DVI_VSO_END_EVN,               0x000006a7},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {VENC_DVI_SETTING,                   0x000080ad},
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_720p[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004040},
+-    {ENCP_DE_H_BEGIN,                    0x0000028a},
+-    {ENCP_DE_H_END,                      0x00000c8a},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x0000001d},
+-    {ENCP_DE_V_END_EVEN,                 0x000002ed},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000082},
+-    {ENCP_DVI_HSO_END,                   0x000000d2},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000004},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000009},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000082},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000082},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {VENC_DVI_SETTING,                   0x000080ad},
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_1080p[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004040},
+-    {ENCP_DE_H_BEGIN,                    0x00000112},
+-    {ENCP_DE_H_END,                      0x00000892},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x00000029},
+-    {ENCP_DE_V_END_EVEN,                 0x00000461},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000052},
+-    {ENCP_DVI_HSO_END,                   0x0000007e},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000000},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000005},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000052},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000052},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {VENC_DVI_SETTING,                   0x0000809d},
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_720p50[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004040},
+-    {ENCP_DE_H_BEGIN,                    0x0000028a},
+-    {ENCP_DE_H_END,                      0x00000c8a},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x0000001d},
+-    {ENCP_DE_V_END_EVEN,                 0x000002ed},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000082},
+-    {ENCP_DVI_HSO_END,                   0x000000d2},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000004},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000009},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000082},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000082},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {VENC_DVI_SETTING,                   0x000080ad},
+-    {0,0}
+-};    
+-
+-static  reg_t hdmi_tvenc_regs_1080p50[] = {
+-    {ENCP_VIDEO_MODE,                    0x00004040},
+-    {ENCP_DE_H_BEGIN,                    0x00000112},
+-    {ENCP_DE_H_END,                      0x00000892},
+-    {ENCP_DE_V_BEGIN_EVEN,               0x00000029},
+-    {ENCP_DE_V_END_EVEN,                 0x00000461},
+-    {ENCP_DVI_HSO_BEGIN,                 0x00000052},
+-    {ENCP_DVI_HSO_END,                   0x0000007e},
+-    {ENCP_DVI_VSO_BLINE_EVN,             0x00000000},
+-    {ENCP_DVI_VSO_ELINE_EVN,             0x00000005},
+-    {ENCP_DVI_VSO_BEGIN_EVN,             0x00000052},
+-    {ENCP_DVI_VSO_END_EVN,               0x00000052},
+-    {VENC_DVI_SETTING_MORE,              0x00000000},
+-    {VENC_DVI_SETTING,                   0x0000809d},
+-    {0,0}
+-};    
+-
+-typedef struct hdmi_tvenc_config_
+-{
+-    int vic;
+-    reg_t* reg_set;
+-}hdmi_tvenc_config_t;
+-
+-static const hdmi_tvenc_config_t hdmi_tvenc_configs[] = {
+-    {HDMI_640x480p60  ,          NULL          },
+-    {HDMI_480p60,                hdmi_tvenc_regs_480p},
+-    {HDMI_480p60_16x9,           hdmi_tvenc_regs_480p},
+-    {HDMI_720p60,                hdmi_tvenc_regs_720p},
+-    {HDMI_1080i60,               hdmi_tvenc_regs_1080i},
+-    {HDMI_480i60,                hdmi_tvenc_regs_480i},
+-    {HDMI_480i60_16x9,           hdmi_tvenc_regs_480i},
+-    {HDMI_1440x480p60  ,         NULL          },
+-    {HDMI_1440x480p60_16x9  ,    NULL          },
+-    {HDMI_1080p60 ,              hdmi_tvenc_regs_1080p},
+-    {HDMI_576p50,                hdmi_tvenc_regs_576p},
+-    {HDMI_576p50_16x9,           hdmi_tvenc_regs_576p},
+-    {HDMI_720p50,                hdmi_tvenc_regs_720p50},
+-    {HDMI_1080i50,               hdmi_tvenc_regs_1080i50},
+-    {HDMI_576i50,                hdmi_tvenc_regs_576i},
+-    {HDMI_576i50_16x9,           hdmi_tvenc_regs_576i},
+-    {HDMI_1080p50 ,              hdmi_tvenc_regs_1080p50},
+-    {HDMI_1080p24,               hdmi_tvenc_regs_1080p},
+-    {HDMI_1080p25,               hdmi_tvenc_regs_1080p},
+-    {HDMI_1080p30,               hdmi_tvenc_regs_1080p},
+-    {HDMI_Unkown,               NULL},
+-};
+-
+ 
+diff --git a/arch/arm/mach-mesong9tv/hw_enc_clk_config.h b/arch/arm/mach-mesong9tv/hw_enc_clk_config.h
+index 50e454200ecc..701d85242d94 100644
+--- a/arch/arm/mach-mesong9tv/hw_enc_clk_config.h
++++ b/arch/arm/mach-mesong9tv/hw_enc_clk_config.h
+@@ -32,10 +32,8 @@ typedef struct{
+     unsigned hdmi_tx_pixel_div;
+     unsigned encp_div;
+     unsigned enci_div;
+-    unsigned enct_div;
+     unsigned encl_div;
+     unsigned vdac0_div;
+-    unsigned vdac1_div;
+ }hw_enc_clk_val_t;
+ 
+ #endif
+diff --git a/arch/arm/mach-mesong9tv/include/mach/tvregs.h b/arch/arm/mach-mesong9tv/include/mach/tvregs.h
+index d5a254ec502d..08bd4dd95ad1 100644
+--- a/arch/arm/mach-mesong9tv/include/mach/tvregs.h
++++ b/arch/arm/mach-mesong9tv/include/mach/tvregs.h
+@@ -25,6 +25,8 @@
+ #ifndef TVREGS_H
+ #define TVREGS_H
+ #include <mach/register.h>
++#include <linux/amlogic/vout/vinfo.h>
++
+ #define MREG_END_MARKER 0xffff
+ 
+ 
+@@ -33,17 +35,6 @@
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -1191,63 +1182,65 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_480cvbs,
+-    tvregs_480p,
+-    tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576i,
+-    tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+-    tvregs_720p,
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-    tvregs_1080p,
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_1080p_24hz,
+-    tvregs_4k2k_30hz,
+-    tvregs_4k2k_25hz,
+-    tvregs_4k2k_24hz,
+-    tvregs_4k2k_smpte,
+-    tvregs_4k2k_30hz,         // FAKE 4k2k5g
+-    tvregs_4k2k_30hz,         // 4k2k60hz
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab[] = {
++    {TVMODE_480I, tvregs_480i,        },
++    {TVMODE_480I_RPT, tvregs_480i,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_480CVBS, tvregs_480cvbs,     },
++    {TVMODE_480P, tvregs_480p,        },
++    {TVMODE_480P_RPT, tvregs_480p,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_576I, tvregs_576i,        },
++    {TVMODE_576I_RPT, tvregs_576i,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_576CVBS, tvregs_576cvbs,     },
++    {TVMODE_576P, tvregs_576p,        },
++    {TVMODE_576P_RPT, tvregs_576p,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_720P, tvregs_720p,        },
++    {TVMODE_1080I, tvregs_1080i,       },//Adjust tvregs_* sequences and match the enum define in tvmode.h
++    {TVMODE_1080P, tvregs_1080p,       },
++    {TVMODE_720P_50HZ, tvregs_720p_50hz,   },
++    {TVMODE_1080I_50HZ, tvregs_1080i_50hz,  },
++    {TVMODE_1080P_50HZ, tvregs_1080p_50hz,  },
++    {TVMODE_1080P_24HZ, tvregs_1080p_24hz,  },
++    {TVMODE_4K2K_30HZ, tvregs_4k2k_30hz,   },
++    {TVMODE_4K2K_25HZ, tvregs_4k2k_25hz,   },
++    {TVMODE_4K2K_24HZ, tvregs_4k2k_24hz,   },
++    {TVMODE_4K2K_SMPTE, tvregs_4k2k_smpte,  },
++    {TVMODE_4K2K_FAKE_5G, tvregs_4k2k_30hz,   },      // FAKE 4k2k5g
++    {TVMODE_4K2K_60HZ, tvregs_4k2k_30hz,   },      // 4k2k60hz
++    {TVMODE_4K2K_60HZ_Y420, tvregs_4k2k_30hz,   },      // 4k2k60hz YCbCr420 mode
++    {TVMODE_VGA, tvregs_vga_640x480, },
++    {TVMODE_SVGA, tvregs_svga_800x600,},
++    {TVMODE_XGA, tvregs_xga_1024x768,},
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480i_rpt"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-    {.xres =  720, .yres =  480, .id = "480p_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576i_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres =  720, .yres =  576, .id = "576p_prt"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
+-    {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+-    {.xres = 4096, .yres = 2160, .id = "4k2k5g"},
+-    {.xres = 4096, .yres = 2160, .id = "4k2k60hz"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
++    {.tvmode = TVMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.tvmode = TVMODE_480I_RPT, .xres =  720, .yres =  480, .id = "480i_rpt"},
++    {.tvmode = TVMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.tvmode = TVMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.tvmode = TVMODE_480P_RPT, .xres =  720, .yres =  480, .id = "480p_rpt"},
++    {.tvmode = TVMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.tvmode = TVMODE_576I_RPT, .xres =  720, .yres =  576, .id = "576i_rpt"},
++    {.tvmode = TVMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.tvmode = TVMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.tvmode = TVMODE_576P_RPT, .xres =  720, .yres =  576, .id = "576p_prt"},
++    {.tvmode = TVMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.tvmode = TVMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.tvmode = TVMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.tvmode = TVMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.tvmode = TVMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.tvmode = TVMODE_1080P_24HZ, .xres = 1920, .yres = 1080, .id = "1080p24hz"},
++    {.tvmode = TVMODE_4K2K_30HZ, .xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++    {.tvmode = TVMODE_4K2K_25HZ, .xres = 3840, .yres = 2160, .id = "4k2k25hz"},
++    {.tvmode = TVMODE_4K2K_24HZ, .xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_4K2K_SMPTE, .xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
++    {.tvmode = TVMODE_4K2K_FAKE_5G, .xres = 4096, .yres = 2160, .id = "4k2k5g"},
++    {.tvmode = TVMODE_4K2K_60HZ_Y420, .xres = 3840, .yres = 2160, .id = "4k2k60hz420"},
++    {.tvmode = TVMODE_4K2K_60HZ, .xres = 3840, .yres = 2160, .id = "4k2k60hz"},
++    {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index edb0d5987f6d..a5d6714d7d0f 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -82,40 +82,61 @@ SET_TV_CLASS_ATTR(policy_fr_auto, policy_framerate_automation_store)
+ *	S-CHRO	----  DAC0
+ ******************************/
+ 
+-static const tvmode_t vmode_tvmode_tab[] =
+-{
+-	TVMODE_480I, TVMODE_480I_RPT, TVMODE_480CVBS, TVMODE_480P, 
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_480P_59HZ,
+-#endif
+-	TVMODE_480P_RPT, TVMODE_576I, TVMODE_576I_RPT, TVMODE_576CVBS, TVMODE_576P, TVMODE_576P_RPT, TVMODE_720P, 
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_720P_59HZ , // for 720p 59.94hz
+-#endif
+-	TVMODE_1080I, 
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080I_59HZ,
+-#endif	
+-	TVMODE_1080P,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080P_59HZ , // for 1080p 59.94hz
+-#endif
+-    TVMODE_720P_50HZ, TVMODE_1080I_50HZ, TVMODE_1080P_50HZ,TVMODE_1080P_24HZ, 
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080P_23HZ , // for 1080p 23.97hz
+-#endif
+-	TVMODE_4K2K_30HZ, 
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-		TVMODE_4K2K_29HZ , // for 4k2k 29.97hz
+-#endif
+-	TVMODE_4K2K_25HZ, TVMODE_4K2K_24HZ, 
++struct vmode_tvmode_tab_t {
++    tvmode_t tvmode;
++    vmode_t  mode;
++};
++
++static struct vmode_tvmode_tab_t mode_tab[] = {
++    {TVMODE_480I, VMODE_480I},
++    {TVMODE_480I_RPT, VMODE_480I_RPT},
++    {TVMODE_480CVBS, VMODE_480CVBS},
++    {TVMODE_480P, VMODE_480P},
++    {TVMODE_480P_RPT, VMODE_480P_RPT},
++    {TVMODE_576I, VMODE_576I},
++    {TVMODE_576I_RPT, VMODE_576I_RPT},
++    {TVMODE_576CVBS, VMODE_576CVBS},
++    {TVMODE_576P, VMODE_576P},
++    {TVMODE_576P_RPT, VMODE_576P_RPT},
++    {TVMODE_720P, VMODE_720P},
++    {TVMODE_1080I, VMODE_1080I},
++    {TVMODE_1080P, VMODE_1080P},
++    {TVMODE_720P_50HZ, VMODE_720P_50HZ},
++    {TVMODE_1080I_50HZ, VMODE_1080I_50HZ},
++    {TVMODE_1080P_50HZ, VMODE_1080P_50HZ},
++    {TVMODE_1080P_24HZ, VMODE_1080P_24HZ},
++    {TVMODE_4K2K_30HZ, VMODE_4K2K_30HZ},
++    {TVMODE_4K2K_25HZ, VMODE_4K2K_25HZ},
++    {TVMODE_4K2K_24HZ, VMODE_4K2K_24HZ},
++    {TVMODE_4K2K_SMPTE, VMODE_4K2K_SMPTE},
++    {TVMODE_4K2K_60HZ_Y420, VMODE_4K2K_60HZ_Y420},
++    {TVMODE_VGA, VMODE_VGA},
++    {TVMODE_SVGA, VMODE_SVGA},
++    {TVMODE_XGA, VMODE_XGA},
++    {TVMODE_SXGA, VMODE_SXGA},
++    {TVMODE_WSXGA, VMODE_WSXGA},
++    {TVMODE_FHDVGA, VMODE_FHDVGA},
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-		TVMODE_4K2K_23HZ , // for 4k2k 23.97hz
++    {TVMODE_480P_59HZ, VMODE_480P_59HZ},
++    {TVMODE_720P_59HZ, VMODE_720P_59HZ}, // for 720p 59.94hz
++    {TVMODE_1080I_59HZ, VMODE_1080P_59HZ},
++    {TVMODE_1080P_59HZ, VMODE_1080P_59HZ}, // for 1080p 59.94hz
++    {TVMODE_1080P_23HZ, VMODE_1080P_23HZ}, // for 1080p 23.97hz
++    {TVMODE_4K2K_29HZ, VMODE_4K2K_29HZ}, // for 4k2k 29.97hz
++    {TVMODE_4K2K_23HZ, VMODE_4K2K_23HZ}, // for 4k2k 23.97hz
+ #endif
+-	TVMODE_4K2K_SMPTE, 
+-    TVMODE_VGA, TVMODE_SVGA, TVMODE_XGA, TVMODE_SXGA, TVMODE_WSXGA, TVMODE_FHDVGA,
+ };
+ 
++static const tvmode_t vmode_tvmode_map(vmode_t mode)
++{
++    int i = 0;
++
++    for(i = 0; i < ARRAY_SIZE(mode_tab); i++) {
++        if(mode == mode_tab[i].mode)
++            return mode_tab[i].tvmode;
++    }
++    return TVMODE_MAX;
++}
+ 
+ static const vinfo_t tv_info[] = 
+ {
+@@ -481,6 +502,18 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 495000000,
+     },
++    { /* VMODE_4K2K_60HZ_Y420 */
++        .name              = "4k2k60hz420",
++        .mode              = TVMODE_4K2K_60HZ_Y420,
++        .width             = 3840,
++        .height            = 2160,
++        .field_height      = 2160,
++        .aspect_ratio_num  = 16,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 60,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
+     { /* VMODE_4K2K_60HZ */
+         .name              = "4k2k60hz",
+         .mode              = TVMODE_4K2K_60HZ,
+@@ -602,14 +635,29 @@ static const vinfo_t *tv_get_current_info(void)
+ 
+ tvmode_t vmode_to_tvmode(vmode_t mod) 
+ {
+-    return vmode_tvmode_tab[mod];
++    return vmode_tvmode_map(mod);
++}
++
++static const vinfo_t *get_tv_info(vmode_t mode)
++{
++    int i = 0;
++    for(i = 0; i < ARRAY_SIZE(tv_info); i++) {
++        if(mode == tv_info[i].mode)
++            return &tv_info[i];
++    }
++    return NULL;
+ }
+ 
+ static int tv_set_current_vmode(vmode_t mod)
+ {
+-	if ((mod&VMODE_MODE_BIT_MASK)> VMODE_FHDVGA)
++	if ((mod&VMODE_MODE_BIT_MASK)> VMODE_MAX)
+ 		return -EINVAL;
+-	info->vinfo = &tv_info[mod & VMODE_MODE_BIT_MASK];
++    info->vinfo = get_tv_info(mod & VMODE_MODE_BIT_MASK);
++    if(!info->vinfo) {
++        printk("don't get tv_info, mode is %d\n", mod);
++        return 1;
++    }
++//	info->vinfo = &tv_info[mod & VMODE_MODE_BIT_MASK];
+ 	if(mod&VMODE_LOGO_BIT_MASK)  return 0;
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	switch_vpu_mem_pd_vmod(info->vinfo->mode, VPU_MEM_POWER_ON);
+diff --git a/drivers/amlogic/display/vout/tvmode.h b/drivers/amlogic/display/vout/tvmode.h
+index b24de47c8ab0..4d7015058f45 100755
+--- a/drivers/amlogic/display/vout/tvmode.h
++++ b/drivers/amlogic/display/vout/tvmode.h
+@@ -25,58 +25,6 @@
+ #ifndef TVMODE_H
+ #define TVMODE_H
+ 
+-typedef enum {
+-    TVMODE_480I  = 0,
+-    TVMODE_480I_RPT  ,
+-    TVMODE_480CVBS,
+-    TVMODE_480P  ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_480P_59HZ , // for framerate automation 480p 59.94hz
+-#endif
+-    TVMODE_480P_RPT  ,
+-    TVMODE_576I  ,
+-    TVMODE_576I_RPT  ,
+-    TVMODE_576CVBS,
+-    TVMODE_576P  ,
+-    TVMODE_576P_RPT  ,
+-    TVMODE_720P  ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_720P_59HZ , // for framerate automation 720p 59.94hz
+-#endif
+-    TVMODE_1080I ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080I_59HZ , // for framerate automation 1080i 59.94hz
+-#endif
+-    TVMODE_1080P ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080P_59HZ , // for framerate automation 1080p 59.94hz
+-#endif
+-    TVMODE_720P_50HZ ,
+-    TVMODE_1080I_50HZ ,
+-    TVMODE_1080P_50HZ ,
+-    TVMODE_1080P_24HZ ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_1080P_23HZ , // for framerate automation 1080p 23.97hz
+-#endif
+-    TVMODE_4K2K_30HZ ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_4K2K_29HZ , // for framerate automation 4k2k 29.97hz
+-#endif
+-    TVMODE_4K2K_25HZ ,
+-    TVMODE_4K2K_24HZ ,
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+-	TVMODE_4K2K_23HZ , // for framerate automation 4k2k 23.97hz
+-#endif
+-    TVMODE_4K2K_SMPTE ,
+-    TVMODE_4K2K_FAKE_5G ,
+-    TVMODE_4K2K_60HZ ,
+-    TVMODE_VGA ,
+-    TVMODE_SVGA,
+-    TVMODE_XGA,
+-    TVMODE_SXGA,
+-    TVMODE_WSXGA,
+-    TVMODE_FHDVGA,
+-    TVMODE_MAX    
+-} tvmode_t;
++// move to <linux/amlogic/vout/vinfo.h>
+ 
+ #endif /* TVMODE_H */
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index d6405110654c..2e170b21db42 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -240,7 +240,8 @@ int tvoutc_setclk(tvmode_t mode)
+ 			  }
+ 			  break;
+ 		default:
+-			printk(KERN_ERR "unsupport tv mode,video clk is not set!!\n");
++			//printk(KERN_ERR "unsupport tv mode,video clk is not set!!\n");
++            break;
+ 	}
+ 
+ 	return 0 ;
+@@ -408,9 +409,30 @@ static void cvbs_performance_enhancement(tvmode_t mode)
+ 
+ static DEFINE_MUTEX(setmode_mutex);
+ 
++static const reg_t * tvregs_setting_mode(tvmode_t mode)
++{
++    int i = 0;
++    for(i = 0; i < ARRAY_SIZE(tvregsTab); i++) {
++        if(mode == tvregsTab[i].tvmode)
++            return tvregsTab[i].reg_setting;
++    }
++    return NULL;
++}
++
++const static tvinfo_t * tvinfo_mode(tvmode_t mode)
++{
++    int i = 0;
++    for(i = 0; i < ARRAY_SIZE(tvinfoTab); i++) {
++        if(mode == tvinfoTab[i].tvmode)
++            return &tvinfoTab[i];
++    }
++    return NULL;
++}
++
+ int tvoutc_setmode(tvmode_t mode)
+ {
+-    const  reg_t *s;
++    const reg_t *s;
++    const tvinfo_t * tvinfo;
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     static int uboot_display_flag = 1;
+ #else
+@@ -425,7 +447,12 @@ int tvoutc_setmode(tvmode_t mode)
+ //TODO
+ //    switch_mod_gate_by_name("venc", 1);
+ #endif
+-    printk("TV mode %s selected.\n", tvinfoTab[mode].id);
++    tvinfo = tvinfo_mode(mode);
++    if(!tvinfo) {
++        printk(KERN_ERR "tvinfo %d not find\n", mode);
++        return 0;
++    }
++    printk("TV mode %s selected.\n", tvinfo->id);
+ 
+ #ifdef CONFIG_ARCH_MESON8B
+ 	if( (mode!=TVMODE_480CVBS) && (mode!=TVMODE_576CVBS) )
+@@ -441,8 +468,12 @@ int tvoutc_setmode(tvmode_t mode)
+ 		CLK_GATE_OFF(VCLK2_VENCI1);
+ 	}
+ #endif
+-
+-    s = tvregsTab[mode];
++    s = tvregs_setting_mode(mode);
++    if(!s) {
++        printk("display mode %d regs setting failed\n", mode);
++        return 0;
++    }
++    //s = tvregsTab[mode];
+ 
+     if(uboot_display_flag) {
+         uboot_display_flag = 0;
+@@ -563,7 +594,7 @@ printk("%s[%d] mode is %d\n", __func__, __LINE__, mode);
+ 	}
+ #endif
+ 
+-    aml_write_reg32(P_VPP_POSTBLEND_H_SIZE, tvinfoTab[mode].xres);
++    aml_write_reg32(P_VPP_POSTBLEND_H_SIZE, tvinfo->xres);
+ 
+ #ifdef CONFIG_ARCH_MESON3
+ printk(" clk_util_clk_msr 6 = %d\n", clk_util_clk_msr(6));
+diff --git a/drivers/amlogic/display/vout2/tvmode.h b/drivers/amlogic/display/vout2/tvmode.h
+index a39a0a7c30af..2d9e81c80bee 100755
+--- a/drivers/amlogic/display/vout2/tvmode.h
++++ b/drivers/amlogic/display/vout2/tvmode.h
+@@ -25,33 +25,4 @@
+ #ifndef TVMODE_H
+ #define TVMODE_H
+ 
+-typedef enum {
+-    TVMODE_480I  = 0,
+-    TVMODE_480I_RPT,
+-    TVMODE_480CVBS,
+-    TVMODE_480P  ,
+-    TVMODE_480P_RPT,
+-    TVMODE_576I  ,
+-    TVMODE_576I_RPT,
+-    TVMODE_576CVBS,
+-    TVMODE_576P  ,
+-    TVMODE_576P_RPT,
+-    TVMODE_720P  ,
+-    TVMODE_1080I ,
+-    TVMODE_1080P ,
+-    TVMODE_720P_50HZ ,
+-    TVMODE_1080I_50HZ ,
+-    TVMODE_1080P_50HZ ,
+-    TVMODE_1080P_24HZ ,
+-    TVMODE_4K2K_30HZ ,
+-    TVMODE_4K2K_25HZ ,
+-    TVMODE_4K2K_24HZ ,
+-    TVMODE_4K2K_SMPTE ,
+-    TVMODE_VGA ,
+-    TVMODE_SVGA,
+-    TVMODE_XGA,
+-    TVMODE_SXGA,
+-    TVMODE_MAX   
+-} tvmode_t;
+-
+ #endif /* TVMODE_H */
+diff --git a/drivers/amlogic/display/vout2/tvoutc2.c b/drivers/amlogic/display/vout2/tvoutc2.c
+index e447b22bc912..976a2d65ddc4 100755
+--- a/drivers/amlogic/display/vout2/tvoutc2.c
++++ b/drivers/amlogic/display/vout2/tvoutc2.c
+@@ -228,19 +228,52 @@ int tvoutc_setclk2(tvmode_t mode)
+ 	return 0;
+ }
+ 
++static const reg_t * tvregs_setting_mode(tvmode_t mode)
++{
++    int i = 0;
++    for(i = 0; i < ARRAY_SIZE(tvregsTab2); i++) {
++        if(mode == tvregsTab2[i].tvmode)
++            return tvregsTab2[i].reg_setting;
++    }
++    return NULL;
++}
++
++const static tvinfo_t * tvinfo_mode(tvmode_t mode)
++{
++    int i = 0;
++    for(i = 0; i < ARRAY_SIZE(tvinfoTab2); i++) {
++        if(mode == tvinfoTab2[i].tvmode)
++            return &tvinfoTab2[i];
++    }
++    return NULL;
++}
++
+ int tvoutc_setmode2(tvmode_t mode)
+ {
+     const  reg_t *s;
++    const tvinfo_t * tvinfo;
+ 
+     if (mode >= TVMODE_MAX) {
+         printk(KERN_ERR "Invalid video output modes.\n");
+         return -ENODEV;
+     }
+ 
+-    printk(KERN_DEBUG "TV mode %s selected.\n", tvinfoTab[mode].id);
+-   
+-    s = tvregsTab[mode];
+-			
++    printk(KERN_DEBUG "TV mode %s selected.\n", tvinfoTab2[mode].id);
++
++    tvinfo = tvinfo_mode(mode);
++    if(!tvinfo) {
++        printk(KERN_ERR "tvinfo %d not find\n", mode);
++        return 0;
++    }
++    printk("TV mode %s selected.\n", tvinfo->id);
++
++    s = tvregs_setting_mode(mode);
++    if(!s) {
++        printk("display mode %d regs setting failed\n", mode);
++        return 0;
++    }
++    //s = tvregsTab[mode];
++
+     while (MREG_END_MARKER != s->reg)
+         setreg(s++);
+ 	//tvoutc_setclk2(mode);
+@@ -304,7 +337,7 @@ int tvoutc_setmode2(tvmode_t mode)
+     aml_write_reg32(P_ENCI_MACV_N0, 0x00000000);
+     aml_write_reg32(P_HHI_GCLK_OTHER, aml_read_reg32(P_HHI_GCLK_OTHER)|(1<<8));
+     #endif
+-    aml_write_reg32(P_VPP2_POSTBLEND_H_SIZE, tvinfoTab[mode].xres);
++    aml_write_reg32(P_VPP2_POSTBLEND_H_SIZE, tvinfo->xres);
+     
+ // For debug only
+ #if 0
+diff --git a/drivers/amlogic/display/vout2/tvregs.h b/drivers/amlogic/display/vout2/tvregs.h
+index 56da502ab4f2..fef8c26b5869 100755
+--- a/drivers/amlogic/display/vout2/tvregs.h
++++ b/drivers/amlogic/display/vout2/tvregs.h
+@@ -26,24 +26,13 @@
+ #define TVREGS_H
+ 
+ #define MREG_END_MARKER 0xffff
+-
++#include <linux/amlogic/vout/vinfo.h>
+ 
+ 	#define VIDEO_CLOCK_HD_25	0x00101529
+ 	#define VIDEO_CLOCK_SD_25	0x00500a6c
+ 	#define VIDEO_CLOCK_HD_24	0x00140863
+ 	#define VIDEO_CLOCK_SD_24	0x0050042d
+ 
+-
+-typedef struct reg_s {
+-    uint reg;
+-    uint val;
+-} reg_t;
+-
+-typedef struct tvinfo_s {
+-    uint xres;
+-    uint yres;
+-    const char *id;
+-} tvinfo_t;
+ /*
+ 24M
+ 25M
+@@ -733,82 +722,90 @@ static const reg_t tvregs_1080p_50hz[] = {
+ };
+ 
+ static const reg_t tvregs_1080p_24hz[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_4k2k_30hz[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_4k2k_25hz[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_4k2k_24hz[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_4k2k_smpte[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_vga_640x480[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_svga_800x600[]={
++    {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_xga_1024x768[] = {
++    {MREG_END_MARKER,            0      }
+ };
+ 
+-/* The sequence of register tables items must match the enum define in tvmode.h */
+-static const reg_t *tvregsTab[] = {
+-    tvregs_480i,
+-    tvregs_480i,
+-    tvregs_480cvbs,		
+-    tvregs_480p,
+-    tvregs_480p,
+-    tvregs_576i,
+-    tvregs_576i,
+-    tvregs_576cvbs,
+-    tvregs_576p,
+-    tvregs_576p,
+-    tvregs_720p,
+-    tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
+-    tvregs_1080p,
+-    tvregs_720p_50hz,
+-    tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
+-    tvregs_1080p_24hz,
+-    tvregs_4k2k_30hz,
+-    tvregs_4k2k_25hz,
+-    tvregs_4k2k_24hz,
+-    tvregs_4k2k_smpte,
+-    tvregs_vga_640x480,
+-    tvregs_svga_800x600,
+-    tvregs_xga_1024x768
++// Using tvmode as index
++static struct tvregs_set_t tvregsTab2[] = {
++    {TVMODE_480I, tvregs_480i,        },
++    {TVMODE_480I_RPT, tvregs_480i,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_480CVBS, tvregs_480cvbs,     },
++    {TVMODE_480P, tvregs_480p,        },
++    {TVMODE_480P_RPT, tvregs_480p,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_576I, tvregs_576i,        },
++    {TVMODE_576I_RPT, tvregs_576i,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_576CVBS, tvregs_576cvbs,     },
++    {TVMODE_576P, tvregs_576p,        },
++    {TVMODE_576P_RPT, tvregs_576p,        },// For REPEAT MODE use, ENC setting is same
++    {TVMODE_720P, tvregs_720p,        },
++    {TVMODE_1080I, tvregs_1080i,       },//Adjust tvregs_* sequences and match the enum define in tvmode.h
++    {TVMODE_1080P, tvregs_1080p,       },
++    {TVMODE_720P_50HZ, tvregs_720p_50hz,   },
++    {TVMODE_1080I_50HZ, tvregs_1080i_50hz,  },
++    {TVMODE_1080P_50HZ, tvregs_1080p_50hz,  },
++    {TVMODE_1080P_24HZ, tvregs_1080p_24hz,  },
++    {TVMODE_4K2K_30HZ, tvregs_4k2k_30hz,   },
++    {TVMODE_4K2K_25HZ, tvregs_4k2k_25hz,   },
++    {TVMODE_4K2K_24HZ, tvregs_4k2k_24hz,   },
++    {TVMODE_4K2K_SMPTE, tvregs_4k2k_smpte,  },
++    {TVMODE_VGA, tvregs_vga_640x480, },
++    {TVMODE_SVGA, tvregs_svga_800x600,},
++    {TVMODE_XGA, tvregs_xga_1024x768,},
+ };
+ 
+-static const tvinfo_t tvinfoTab[] = {
+-    {.xres =  720, .yres =  480, .id = "480i"},
+-    {.xres =  720, .yres =  480, .id = "480i_rpt"},
+-    {.xres =  720, .yres =  480, .id = "480cvbs"},		
+-    {.xres =  720, .yres =  480, .id = "480p"},
+-    {.xres =  720, .yres =  480, .id = "480p_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576i"},
+-    {.xres =  720, .yres =  576, .id = "576i_rpt"},
+-    {.xres =  720, .yres =  576, .id = "576cvbs"},
+-    {.xres =  720, .yres =  576, .id = "576p"},
+-    {.xres =  720, .yres =  576, .id = "576p_prt"},
+-    {.xres = 1280, .yres =  720, .id = "720p"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p"},
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+-    {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+-    {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
+-    {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+-    {.xres = 640, .yres = 480, .id = "vga"},
+-    {.xres = 800, .yres = 600, .id = "svga"},
+-    {.xres = 1024, .yres = 768, .id = "xga"},
++static const tvinfo_t tvinfoTab2[] = {
++    {.tvmode = TVMODE_480I, .xres =  720, .yres =  480, .id = "480i"},
++    {.tvmode = TVMODE_480I_RPT, .xres =  720, .yres =  480, .id = "480i_rpt"},
++    {.tvmode = TVMODE_480CVBS, .xres =  720, .yres =  480, .id = "480cvbs"},
++    {.tvmode = TVMODE_480P, .xres =  720, .yres =  480, .id = "480p"},
++    {.tvmode = TVMODE_480P_RPT, .xres =  720, .yres =  480, .id = "480p_rpt"},
++    {.tvmode = TVMODE_576I, .xres =  720, .yres =  576, .id = "576i"},
++    {.tvmode = TVMODE_576I_RPT, .xres =  720, .yres =  576, .id = "576i_rpt"},
++    {.tvmode = TVMODE_576CVBS, .xres =  720, .yres =  576, .id = "576cvbs"},
++    {.tvmode = TVMODE_576P, .xres =  720, .yres =  576, .id = "576p"},
++    {.tvmode = TVMODE_576P_RPT, .xres =  720, .yres =  576, .id = "576p_prt"},
++    {.tvmode = TVMODE_720P, .xres = 1280, .yres =  720, .id = "720p"},
++    {.tvmode = TVMODE_1080I, .xres = 1920, .yres = 1080, .id = "1080i"},
++    {.tvmode = TVMODE_1080P, .xres = 1920, .yres = 1080, .id = "1080p"},
++    {.tvmode = TVMODE_720P_50HZ, .xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.tvmode = TVMODE_1080I_50HZ, .xres = 1920, .yres = 1080, .id = "1080i50hz"},
++    {.tvmode = TVMODE_1080P_50HZ, .xres = 1920, .yres = 1080, .id = "1080p50hz"},
++    {.tvmode = TVMODE_1080P_24HZ, .xres = 1920, .yres = 1080, .id = "1080p24hz"},
++    {.tvmode = TVMODE_4K2K_30HZ, .xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++    {.tvmode = TVMODE_4K2K_25HZ, .xres = 3840, .yres = 2160, .id = "4k2k25hz"},
++    {.tvmode = TVMODE_4K2K_24HZ, .xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++    {.tvmode = TVMODE_4K2K_SMPTE, .xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
++    {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
++    {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
++    {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+ };
+ 
+ static inline void setreg(const reg_t *r)
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
+index a8559fa16584..4c3cf2c52919 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
+@@ -1309,6 +1309,7 @@ static dispmode_vic_t dispmode_VIC_tab[]=
+     {"4k2k24hz",  HDMI_4k2k_24},
+     {"4k2ksmpte", HDMI_4k2k_smpte_24},
+     {"4k2k5g",    HDMI_3840x2160p50_16x9},
++    {"4k2k60hz420", HDMI_3840x2160p60_16x9},
+     {"4k2k60hz",  HDMI_3840x2160p60_16x9},
+ };
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+index 33dd80085e6a..395d5623115c 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+@@ -364,6 +364,10 @@ static int set_disp_mode_auto(void)
+     }
+     else if(strncmp(mode, "4k2k60hz", strlen("4k2k60hz")) == 0) {
+         vic = HDMI_3840x2160p60_16x9;
++        if(strncmp(mode+8, "420", 3) == 0)
++            hdmitx_device.mode420 = 1;
++        else
++            hdmitx_device.mode420 = 0;
+     }
+     else {
+         //nothing
+diff --git a/include/linux/amlogic/vout/vinfo.h b/include/linux/amlogic/vout/vinfo.h
+index f4360902e602..ba32f64e8992 100755
+--- a/include/linux/amlogic/vout/vinfo.h
++++ b/include/linux/amlogic/vout/vinfo.h
+@@ -72,6 +72,7 @@ typedef enum {
+     VMODE_4K2K_SMPTE,
+     VMODE_4K2K_FAKE_5G,   // timing same as 4k2k30hz, Vsync from 30hz to 50hz
+     VMODE_4K2K_60HZ,	  // timing same as 4k2k30hz, Vsync from 30hz to 60hz
++    VMODE_4K2K_60HZ_Y420,
+     VMODE_4K2K_5G,
+     VMODE_VGA,
+     VMODE_SVGA,
+@@ -88,6 +89,61 @@ typedef enum {
+     VMODE_MASK = 0xFF,
+ } vmode_t;
+ 
++typedef enum {
++    TVMODE_480I  = 0,
++    TVMODE_480I_RPT  ,
++    TVMODE_480CVBS,
++    TVMODE_480P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_480P_59HZ , // for framerate automation 480p 59.94hz
++#endif
++    TVMODE_480P_RPT  ,
++    TVMODE_576I  ,
++    TVMODE_576I_RPT  ,
++    TVMODE_576CVBS,
++    TVMODE_576P  ,
++    TVMODE_576P_RPT  ,
++    TVMODE_720P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_720P_59HZ , // for framerate automation 720p 59.94hz
++#endif
++    TVMODE_1080I ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080I_59HZ , // for framerate automation 1080i 59.94hz
++#endif
++    TVMODE_1080P ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_59HZ , // for framerate automation 1080p 59.94hz
++#endif
++    TVMODE_720P_50HZ ,
++    TVMODE_1080I_50HZ ,
++    TVMODE_1080P_50HZ ,
++    TVMODE_1080P_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_23HZ , // for framerate automation 1080p 23.97hz
++#endif
++    TVMODE_4K2K_30HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_4K2K_29HZ , // for framerate automation 4k2k 29.97hz
++#endif
++    TVMODE_4K2K_25HZ ,
++    TVMODE_4K2K_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_4K2K_23HZ , // for framerate automation 4k2k 23.97hz
++#endif
++    TVMODE_4K2K_SMPTE ,
++    TVMODE_4K2K_FAKE_5G ,
++    TVMODE_4K2K_60HZ ,
++    TVMODE_4K2K_60HZ_Y420,
++    TVMODE_VGA ,
++    TVMODE_SVGA,
++    TVMODE_XGA,
++    TVMODE_SXGA,
++    TVMODE_WSXGA,
++    TVMODE_FHDVGA,
++    TVMODE_MAX    
++} tvmode_t;
++
+ typedef struct {
+ 	char  		*name;
+ 	vmode_t		mode;
+@@ -103,4 +159,21 @@ typedef struct {
+ 	u32			video_clk;
+ } vinfo_t;
+ 
+-#endif /* TVMODE_H */
++typedef struct reg_s {
++    uint reg;
++    uint val;
++} reg_t;
++
++struct tvregs_set_t {
++    tvmode_t tvmode;
++    const reg_t *reg_setting;
++};
++
++typedef struct tvinfo_s {
++    tvmode_t tvmode;
++    uint xres;
++    uint yres;
++    const char *id;
++} tvinfo_t;
++
++#endif /* VINFO_H */
+-- 
+2.19.0
+

@@ -1,0 +1,159 @@
+From 11d7d81b9957f9fa8c5264fcf0728791dba494dd Mon Sep 17 00:00:00 2001
+From: Shijie Rong <shijie.rong@amlogic.com>
+Date: Fri, 12 Jun 2015 16:52:45 +0800
+Subject: [PATCH 5649/5965] PD#107805 dtvdemod: optimize dtmb performance
+
+Change-Id: I08323e0d4a2373b378c54485cb941a95f3e2740d
+---
+ drivers/amlogic/dvb_tv/amldemod/aml_demod.c   |  6 +--
+ drivers/amlogic/dvb_tv/amldemod/amlfrontend.c |  2 +-
+ drivers/amlogic/dvb_tv/amldemod/demod_func.c  | 41 ++++++++++++-------
+ 3 files changed, 30 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+index 094102077b25..1dbfa77e873a 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
++++ b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+@@ -297,7 +297,7 @@ static long aml_demod_ioctl(struct file *file,
+ 	int i=0;
+ 	int step;
+ 
+-#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157) || (defined CONFIG_AM_SI2151))
+ 	int strength=0;
+ 	struct dvb_frontend *dvbfe;
+ #endif
+@@ -311,7 +311,7 @@ static long aml_demod_ioctl(struct file *file,
+     switch (cmd) {
+ 	case AML_DEMOD_GET_RSSI :
+ 		printk("Ioctl Demod GET_RSSI. \n");
+-#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157) || (defined CONFIG_AM_SI2151))
+ 		dvbfe = get_tuner();
+ 		if (dvbfe != NULL)
+ 			strength=dvbfe->ops.tuner_ops.get_strength(dvbfe);
+@@ -329,7 +329,7 @@ static long aml_demod_ioctl(struct file *file,
+ 
+ 	case AML_DEMOD_SET_TUNER :
+ 		 printk("Ioctl Demod Set Tuner.\n");
+-#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157) || (defined CONFIG_AM_SI2151))
+ 		printk("1234 \n");
+ 		dvbfe = get_tuner();
+ 		printk("1234999 \n");
+diff --git a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
+index 7bd48399888a..bf3c6e9845a8 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
++++ b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
+@@ -1180,7 +1180,7 @@ static int m6_demod_fe_get_ops(struct aml_fe_dev *dev, int mode, void *ops)
+ 	fe_ops->read_signal_strength = m6_demod_dtmb_read_signal_strength;
+ 	fe_ops->read_snr = m6_demod_dtmb_read_snr;
+ 	fe_ops->read_ucblocks = m6_demod_dtmb_read_ucblocks;
+-	M6_Demod_Dtmb_Init(dev);
++//	M6_Demod_Dtmb_Init(dev);
+ 	}
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.c b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+index 26fa65da1b68..3503b5b962dd 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+@@ -1120,18 +1120,21 @@ void dtmb_all_reset(void)
+ 	dtmb_write_reg(0x010, 0x52);
+ 	dtmb_write_reg(0x047, 0x33202);  //20 bits, 1 - fpga. 0 - m6tvd
+ 	dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
+-    dtmb_write_reg(0xc, 0x41444400); // shorten che waiting time.
+-    dtmb_write_reg(0x18,0x000a1316); // shorten mobile detect time.
+-    dtmb_write_reg(0x15,0x0199999A); // shift -5M.
++	dtmb_write_reg(0xc, 0x41444400); // shorten che waiting time.
++	dtmb_write_reg(0x18,0x000a1316); // shorten mobile detect time.
++	dtmb_write_reg(0x15,0x0199999A); // shift -5M.
+ 	dtmb_write_reg(0x2f,0x13064263); // speed up src
+-
++	dtmb_write_reg(0x6b,0x7810c0f);
++	dtmb_write_reg(0x46,0x1000000);
++	dtmb_write_reg(0x2e,0x131a747d);
+ }
+ 
+ void dtmb_initial(struct aml_demod_sta *demod_sta)
+ {
+ //	dtmb_write_reg(0x049, memstart);		//only for init
++	dtmb_register_reset();
+ 	dtmb_all_reset();
+-#if 0	
++#if 0
+ 	int i;
+ 	  for (i=0; list_dtmb_v1[i].adr != 0; i++) {
+ 	        if (list_dtmb_v1[i].rw){
+@@ -1291,6 +1294,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 			time_eq = (dtmb_read_reg(0x46) >> 16) & 0x1;
+ 			fec_ldpc_it_avg = dtmb_read_reg(0xdd) & 0xffff;
+ 			mobi_det_power = (dtmb_read_reg(0xf1)>>8) & 0x7ffff;
++#if 0
+ 			if ((mobi_det_power > 10) && (time_eq == 0)) {
+ 				mobile_times = 8;//8;
+ 				dtmb_mobile_mode_set(enable_mobile);
+@@ -1302,6 +1306,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 					mobile_times = 0;
+ 					}
+ 				}
++#endif
+ 			if ((fbe_in_num > 360) && (pm_change == 0)) {// two path mode, test distance.
+ 				dtmb_write_reg(0x42, 0x03030202);
+ 				dtmb_write_reg(0x5c, 0x00000000);
+@@ -1330,7 +1335,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 					pr_dbg("*************** local_state = %d ************ \n",local_state);
+ 					}
+ 				else {
+-					if (fbe_in_num < 30 || time_eq_lost_cnt > 5) { // MC mode or not two path mode, restore normal mode
++					if (fbe_in_num < 30 || time_eq_lost_cnt > 2) { // MC mode or not two path mode, restore normal mode
+ 						if (time_eq_cnt <= 0) {
+ 							time_eq_lost_cnt = 0;
+ 							dtmb_time_eq_mode_set(CLOSE_TIME_EQ);
+@@ -1351,10 +1356,16 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 			else {
+ 				local_state = AMLOGIC_DTMB_STEP7;
+ 				front_cci0_count=(dtmb_read_reg(0xe9) >> 22) & 0xff;
++					constell = (dtmb_read_reg(0xe5) >> 16) & 0x3;
+ 				pr_dbg("*************** local_state = %d ************ ,front_cci0_count is %d\n", local_state,front_cci0_count);
+-				constell = (dtmb_read_reg(0xe5) >> 16) & 0x3;
++		            if ((front_cci0_count>0) && (SC_mode == 0) && (fec_ldpc_it_avg > 640) && (constell > 0)) {
++									pr_dbg("check cci wait 500ms\n");
++									msleep(500);
++									front_cci0_count=(dtmb_read_reg(0xe9) >> 22) & 0xff;
++									pr_dbg("front_cci0_count is %d\n",front_cci0_count);
++					}
+ 				if ((SC_mode == 0) && (fec_ldpc_it_avg > 640) && (constell > 0)/*2.5*256*/ && ((fbe_in_num > 30) || (front_cci0_count > 0))) { // switch to time_eq mode
+-					time_eq_cnt = 5;
++		                time_eq_cnt = 2;
+ 					time_eq_lost_cnt = 0;
+ 					dtmb_set_ddc_phase();
+ 					dtmb_time_eq_mode_set(OPEN_TIME_EQ);
+@@ -1365,17 +1376,17 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 					msleep(300);
+ 					}
+ 				}
+-			}
+-		else if (time_cnt >= 10) // don't sync, all reset
++	           }else if(time_cnt >=10) // don't sync, all reset
+ 		{
+ 			local_state = AMLOGIC_DTMB_STEP9;
+ 			pr_dbg("*************** local_state = %d ************ \n", local_state);
+-			dtmb_register_reset();
++	//		dtmb_register_reset();
+ 			dtmb_all_reset();
+-			if ((dtmb_read_reg(0xd7) == 1) && (dtmb_read_reg(0xd6) == 0) && (dtmb_read_reg(0xd5) == 0) && (dtmb_read_reg(0xd4) == 0))//tuner error,need reset
+-			{
+-				aml_fe_analog_set_frontend(fe);
+-			}
++	//				if((dtmb_read_reg(0xd7)==1)&&(dtmb_read_reg(0xd6)==0)&&(dtmb_read_reg(0xd5)==0)&&(dtmb_read_reg(0xd4)==0))//tuner error,need reset
++	//				{
++	//					aml_fe_analog_set_frontend(fe);
++	//				}
++			time_eq_cnt = 0;
+ 			time_eq_lost_cnt = 0;
+ 			mobile_times= 0;
+ 			pm_change = 0;
+-- 
+2.19.0
+

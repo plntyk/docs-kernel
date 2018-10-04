@@ -1,0 +1,110 @@
+From b7e4a88906767a93cd883bb7c8ad8cf9f69f8c0e Mon Sep 17 00:00:00 2001
+From: "chen.zhang" <chen.zhang@amlogic.com>
+Date: Tue, 3 Jun 2014 17:16:22 +0800
+Subject: [PATCH 4388/5965] PD[#92716] add interface in command line and ioctl
+ for slow-playing
+
+---
+ drivers/amlogic/amports/video.c          | 44 ++++++++++++++++++++++--
+ include/linux/amlogic/amports/amstream.h |  2 ++
+ 2 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index ef39814da52f..4ef4efa0126c 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -593,6 +593,7 @@ static u32 vsync_pts_112 = 0;
+ static u32 vsync_pts_101 = 0;
+ static u32 vsync_pts_100 = 0;
+ static u32 vsync_freerun = 0;
++static u32 vsync_slow_factor = 1;
+ 
+ /* frame rate calculate */
+ static u32 last_frame_count = 0;
+@@ -2208,8 +2209,12 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             timestamp_apts_inc(vsync_pts_inc+ 1);
+         }
+     } else {
+-        timestamp_pcrscr_inc(vsync_pts_inc);
+-        timestamp_apts_inc(vsync_pts_inc);
++        if (vsync_slow_factor == 0) {
++            printk("invalid vsync_slow_factor, set to 1\n");
++            vsync_slow_factor = 1;
++        }
++        timestamp_pcrscr_inc(vsync_pts_inc / vsync_slow_factor);
++        timestamp_apts_inc(vsync_pts_inc / vsync_slow_factor);
+     }
+ 
+     if (trickmode_duration_count > 0) {
+@@ -3618,6 +3623,14 @@ static long amvideo_ioctl(struct file *file,
+         vsync_pts_inc_upint = arg;
+         break;
+ 
++    case AMSTREAM_IOC_GET_VSYNC_SLOW_FACTOR:
++        *((unsigned int *)arg) = vsync_slow_factor;
++        break;
++
++    case AMSTREAM_IOC_SET_VSYNC_SLOW_FACTOR:
++        vsync_slow_factor = arg;
++        break;
++        
+ #if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON6
+     /**********************************************************************
+     video enhancement ioctl
+@@ -4639,6 +4652,29 @@ static ssize_t video_vsync_pts_inc_upint_store(struct class *cla, struct class_a
+     return count;
+ }
+ 
++static ssize_t video_vsync_slow_factor_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++    return sprintf(buf, "%d\n", vsync_slow_factor);
++}
++
++static ssize_t video_vsync_slow_factor_store(struct class *cla, struct class_attribute *attr, const char *buf,
++        size_t count)
++{
++    size_t r;
++
++    r = sscanf(buf, "%d", &vsync_slow_factor);
++
++    if(debug_flag){
++        printk("%s(%d)\n", __func__, vsync_slow_factor);
++    }
++    if (r != 1) {
++        return -EINVAL;
++    }
++
++    return count;
++}
++
++
+ static ssize_t fps_info_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+     u32 cnt = frame_count - last_frame_count;
+@@ -4776,6 +4812,10 @@ static struct class_attribute amvideo_class_attrs[] = {
+     S_IRUGO | S_IWUSR,
+     video_vsync_pts_inc_upint_show,
+     video_vsync_pts_inc_upint_store),
++    __ATTR(vsync_slow_factor,
++    S_IRUGO | S_IWUSR,
++    video_vsync_slow_factor_show,
++    video_vsync_slow_factor_store),
+     __ATTR(angle,
+     S_IRUGO | S_IWUSR,
+     video_angle_show,
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index d87004d00730..241a5ab52d5d 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -147,6 +147,8 @@
+ #define AMSTREAM_IOC_GET_FREERUN_MODE  _IOR(AMSTREAM_IOC_MAGIC, 0x87, unsigned long)
+ #define AMSTREAM_IOC_SET_FREERUN_MODE  _IOW(AMSTREAM_IOC_MAGIC, 0x88, unsigned long)
+ #define AMSTREAM_IOC_SET_VSYNC_UPINT   _IOW(AMSTREAM_IOC_MAGIC, 0x89, unsigned long)
++#define AMSTREAM_IOC_GET_VSYNC_SLOW_FACTOR   _IOW(AMSTREAM_IOC_MAGIC, 0x8a, unsigned long)
++#define AMSTREAM_IOC_SET_VSYNC_SLOW_FACTOR   _IOW(AMSTREAM_IOC_MAGIC, 0x8b, unsigned long)
+ #define AMSTREAM_IOC_SET_DEMUX  _IOW(AMSTREAM_IOC_MAGIC, 0x90, unsigned long)
+ #define AMSTREAM_IOC_SET_DRMMODE _IOW(AMSTREAM_IOC_MAGIC, 0x91, unsigned long)
+ #define AMSTREAM_IOC_TSTAMP_uS64 _IOW(AMSTREAM_IOC_MAGIC, 0x95, unsigned long)
+-- 
+2.19.0
+

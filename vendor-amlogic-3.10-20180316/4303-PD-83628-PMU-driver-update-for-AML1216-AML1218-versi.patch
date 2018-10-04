@@ -1,0 +1,125 @@
+From 001e41c59e9d85543ecef9e1c66a7e585974b073 Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Fri, 6 Jun 2014 19:04:46 +0800
+Subject: [PATCH 4303/5965] PD #83628: PMU driver update for AML1216/AML1218,
+ version 0.50
+
+1. for REVB chip, if battery voltage is larger than 3.95v, not open charger;
+2. increase driver version to v0.50.
+---
+ drivers/amlogic/power/aml_pmu/aml1216-sply.c | 18 ++++++++++--------
+ drivers/amlogic/power/aml_pmu/aml1218-sply.c | 20 +++++++++++---------
+ 2 files changed, 21 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-sply.c b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+index 30a3f0166190..f0795cb71509 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+@@ -348,7 +348,7 @@ int aml1216_set_charge_enable(int enable)
+         if (usb_bc_mode == USB_BC_MODE_SDP) {
+             return aml1216_set_bits(0x0017, 0x00, 0x01);
+         }
+-        if (ocv_voltage > 4050)
++        if (ocv_voltage > 3950)
+         {   
+             printk("%s, otp_version:%d, ocv = %d, do not open charger.\n", __func__, otp_version, ocv_voltage);
+             return aml1216_set_bits(0x0017, 0x00, 0x01);
+@@ -1344,11 +1344,13 @@ static int aml1216_update_state(struct aml_charger *charger)
+         msleep(1000);
+         aml1216_set_charge_enable(1);               
+     }
+-    if ((vsys_voltage > charger->vbat) && (vsys_voltage - charger->vbat < 500)) {
+-        printk("%s, vsys is not large, vsys:%d, vbat:%d\n", __func__, vsys_voltage, charger->vbat);
+-        aml1216_set_charge_enable(0);
+-    } else {
+-        aml1216_set_charge_enable(1);
++    if (aml1216_get_otp_version() == 0) {
++        if ((vsys_voltage > charger->vbat) && (vsys_voltage - charger->vbat < 500) || charger->vbat > 3950) {
++            printk("%s, vsys is not large, or vbat is too large, vsys:%d, vbat:%d\n", __func__, vsys_voltage, charger->vbat);
++            aml1216_set_charge_enable(0);
++        } else {
++            aml1216_set_charge_enable(1);
++        }
+     }
+ 
+     return 0;
+@@ -1412,7 +1414,7 @@ static void aml1216_charging_monitor(struct work_struct *work)
+         (pre_chg_status != charger->charge_status) ||
+         charger->resume                            ||
+         power_protection) {
+-        AML1216_DBG("battery vol change: %d->%d \n", pre_rest_cap, charger->rest_vol);
++        AML1216_DBG("battery vol change: %d->%d vsys:%d\n", pre_rest_cap, charger->rest_vol, aml1216_get_vsys_voltage());
+         if (unlikely(charger->resume)) {
+             charger->resume = 0;                                        // MUST clear this flag
+         }
+@@ -1501,7 +1503,7 @@ static int aml1216_battery_probe(struct platform_device *pdev)
+     uint32_t tmp2;
+ 
+ 	AML1216_DBG("call %s in", __func__);
+-	AML1216_DBG("AML_PMU driver version:0.40\n");
++	AML1216_DBG("AML_PMU driver version:0.50\n");
+ 
+     g_aml1216_init = pdev->dev.platform_data;
+     if (g_aml1216_init == NULL) {
+diff --git a/drivers/amlogic/power/aml_pmu/aml1218-sply.c b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+index 831bbb9681d1..2889f2f043e2 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1218-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+@@ -348,7 +348,7 @@ int aml1218_set_charge_enable(int enable)
+         if (usb_bc_mode == USB_BC_MODE_SDP) {
+             return aml1218_set_bits(0x0017, 0x00, 0x01);
+         }
+-        if (ocv_voltage > 4050)
++        if (ocv_voltage > 3950)
+         {   
+             printk("%s, otp_version:%d, ocv = %d, do not open charger.\n", __func__, otp_version, ocv_voltage);
+             return aml1218_set_bits(0x0017, 0x00, 0x01);
+@@ -574,7 +574,7 @@ int aml1218_first_init(struct aml1218_supply *supply)
+      */
+     if (aml1218_battery) {
+         aml1218_set_charging_current   (aml1218_battery->pmu_init_chgcur);
+-        //aml1218_set_full_charge_voltage(aml1218_battery->pmu_init_chgvol);
++      //aml1218_set_full_charge_voltage(aml1218_battery->pmu_init_chgvol);
+         aml1218_set_charge_end_rate    (aml1218_battery->pmu_init_chgend_rate);
+         aml1218_set_trickle_time       (aml1218_battery->pmu_init_chg_pretime);
+         aml1218_set_rapid_time         (aml1218_battery->pmu_init_chg_csttime);
+@@ -1336,11 +1336,13 @@ static int aml1218_update_state(struct aml_charger *charger)
+         aml1218_set_charge_enable(1);
+     }
+     vsys = aml1218_get_vsys_voltage();
+-    if ((vsys > charger->vbat) && (vsys - charger->vbat < 500)) {
+-        printk("%s, vsys is not large, vsys:%d, vbat:%d\n", __func__, vsys, charger->vbat);
+-        aml1218_set_charge_enable(0);
+-    } else {
+-        aml1218_set_charge_enable(1);
++    if (aml1218_get_otp_version() == 0) {
++        if ((vsys > charger->vbat) && (vsys - charger->vbat < 500) || charger->vbat > 3950) {
++            printk("%s, vsys is not large or vbat too large, vsys:%d, vbat:%d\n", __func__, vsys, charger->vbat);
++            aml1218_set_charge_enable(0);
++        } else {
++            aml1218_set_charge_enable(1);
++        }
+     }
+ 
+     return 0;
+@@ -1404,7 +1406,7 @@ static void aml1218_charging_monitor(struct work_struct *work)
+         (pre_chg_status != charger->charge_status) ||
+         charger->resume                            ||
+         power_protection) {
+-        AML1218_DBG("battery vol change: %d->%d \n", pre_rest_cap, charger->rest_vol);
++        AML1218_DBG("battery vol change: %d->%d, vsys:%d\n", pre_rest_cap, charger->rest_vol, aml1218_get_vsys_voltage());
+         if (unlikely(charger->resume)) {
+             charger->resume = 0;                                        // MUST clear this flag
+         }
+@@ -1493,7 +1495,7 @@ static int aml1218_battery_probe(struct platform_device *pdev)
+     uint32_t tmp2;
+ 
+ 	AML1218_DBG("call %s in", __func__);
+-	AML1218_DBG("AML_PMU driver version:0.40\n");
++	AML1218_DBG("AML_PMU driver version:0.50\n");
+     g_aml1218_init = pdev->dev.platform_data;
+     if (g_aml1218_init == NULL) {
+         AML1218_DBG("%s, NO platform data\n", __func__);
+-- 
+2.19.0
+

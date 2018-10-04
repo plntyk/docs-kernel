@@ -1,0 +1,126 @@
+From 8206093cf910e6ffce1c6961edb03a828a33ca41 Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Wed, 15 Oct 2014 16:18:25 +0800
+Subject: [PATCH 5004/5965] PD#95360: m8b/m8m2 uart use xtal pad clock source
+
+Change-Id: I32a4eea1ef61b3728a32e8099b730394e00adb9a
+---
+ arch/arm/mach-meson8/pm.c              |  6 ++++--
+ arch/arm/mach-meson8b/pm.c             |  7 +++++--
+ drivers/amlogic/uart/uart/meson_uart.c | 28 +++++++++++++++++++-------
+ 3 files changed, 30 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/pm.c b/arch/arm/mach-meson8/pm.c
+index 3f4d04b83541..5b77a5890b4b 100755
+--- a/arch/arm/mach-meson8/pm.c
++++ b/arch/arm/mach-meson8/pm.c
+@@ -97,7 +97,8 @@ void clk_switch(int flag)
+ 					udelay(10);
+ 					aml_set_reg32_mask(clks[i].clk_addr,(1<<8));//switch to pll
+ 					udelay(10);
+-					uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
++					if(!((aml_read_reg32(P_AO_UART_REG5) & (1 << 24)) && IS_MESON_M8M2_CPU))//Not from crystal pad
++						uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
+ 					clks[i].clk_flag = 0;
+ 				}
+                 	printk(KERN_INFO "clk %s(%x) on\n", clks[i].clk_name, ((clks[i].clk_addr)&0xffff)>>2);
+@@ -114,7 +115,8 @@ void clk_switch(int flag)
+ 					udelay(10);
+ 					aml_clr_reg32_mask(clks[i].clk_addr, (1 << 7)); // switch to 24M
+ 					udelay(10);
+-					uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
++					if(!((aml_read_reg32(P_AO_UART_REG5) & (1 << 24)) && IS_MESON_M8M2_CPU))//Not from crystal pad
++						uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
+ 					clks[i].clk_flag=1;
+ 				}
+ 			} 
+diff --git a/arch/arm/mach-meson8b/pm.c b/arch/arm/mach-meson8b/pm.c
+index 694bc66db54d..6dbccef4b8e0 100755
+--- a/arch/arm/mach-meson8b/pm.c
++++ b/arch/arm/mach-meson8b/pm.c
+@@ -73,6 +73,7 @@ static void uart_change_buad(unsigned reg,unsigned clk_rate){
+ 	aml_clr_reg32_mask(reg, 0x7FFFFF);
+ 	aml_set_reg32_bits(reg, (((clk_rate / (115200 * 4)) - 1) & 0x7fffff)|(1<<23), 0, 24);
+ }
++
+ static void wait_uart_empty(void)
+ {
+ 	do{
+@@ -97,7 +98,8 @@ void clk_switch(int flag)
+ 					udelay(10);
+ 					aml_set_reg32_mask(clks[i].clk_addr,(1<<8));//switch to pll
+ 					udelay(10);
+-					uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
++					if(!(aml_read_reg32(P_AO_UART_REG5) & (1 << 24)))//Not from crystal pad
++						uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
+ 					clks[i].clk_flag = 0;
+ 				}
+                 	printk(KERN_INFO "clk %s(%x) on\n", clks[i].clk_name, ((clks[i].clk_addr)&0xffff)>>2);
+@@ -114,7 +116,8 @@ void clk_switch(int flag)
+ 					udelay(10);
+ 					aml_clr_reg32_mask(clks[i].clk_addr, (1 << 7)); // switch to 24M
+ 					udelay(10);
+-					uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
++					if(!(aml_read_reg32(P_AO_UART_REG5) & (1 << 24)))//Not from crystal pad
++						uart_change_buad(P_AO_UART_REG5,uart_rate_clk);
+ 					clks[i].clk_flag=1;
+ 				}
+ 			} 
+diff --git a/drivers/amlogic/uart/uart/meson_uart.c b/drivers/amlogic/uart/uart/meson_uart.c
+index de38cbc11f8c..ecef54fdcf8f 100755
+--- a/drivers/amlogic/uart/uart/meson_uart.c
++++ b/drivers/amlogic/uart/uart/meson_uart.c
+@@ -293,29 +293,43 @@ static void meson_uart_change_speed(struct meson_uart_port *mup, unsigned long n
+ 	am_uart_t *uart = mup->uart;
+ 	unsigned long value;
+ 	struct clk * clk81;
++	struct clk * xtal;
+ 
+ 	if (!newbaud || newbaud == mup->baud)
+ 		return;
+ 
+-	clk81 = clk_get_sys("clk81", "pll_fixed");
+-	if (IS_ERR_OR_NULL(clk81)) {
+-		printk(KERN_ERR "meson_uart_change_speed: clk81 is not available\n");
+-		return;
++	if (IS_MESON_M8B_CPU || IS_MESON_M8M2_CPU) {
++		msleep(1);
++		xtal = clk_get_sys("xtal", NULL);
++		value = (clk_get_rate(xtal) / 3) / newbaud - 1;
++	}
++	else {
++		clk81 = clk_get_sys("clk81", "pll_fixed");
++		if (IS_ERR_OR_NULL(clk81)) {
++			printk(KERN_ERR "meson_uart_change_speed: clk81 is not available\n");
++			return;
++		}
++		msleep(1);
++		value = ((clk_get_rate(clk81) * 10 / (newbaud * 4) + 5) / 10) - 1;
+ 	}
+-	msleep(1);
+-
+ 	while (!(readl(&uart->status) & UART_TXEMPTY))
+ 		msleep(10);
+ 
+ 	printk(KERN_INFO "Changing %s baud from %d to %d\n", mup->name,mup->baud, (int)newbaud);
+-	value = ((clk_get_rate(clk81) * 10 / (newbaud * 4) + 5) / 10) - 1;
++
+ 	mup->baud = (int)newbaud;
+ #if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON6
+ 	value = (readl(&uart->mode) & ~0xfff) | (value & 0xfff);
+ 	writel(value, &uart->mode);
+ #else
+     value = (readl(&uart->reg5) & ~0x7fffff) | (value & 0x7fffff);
++
+ 	value |= 0x800000;
++
++	//Set USE_XTAL_CLK bit
++	if(IS_MESON_M8B_CPU || IS_MESON_M8M2_CPU)
++		value  |= 1<<24;
++
+ 	writel(value, &uart->reg5);
+ #endif
+ 	msleep(1);
+-- 
+2.19.0
+

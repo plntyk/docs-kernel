@@ -1,0 +1,177 @@
+From 6b38ddcacd04ea06aaeaabb0bdba63bb4a8a79c7 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Fri, 8 Nov 2013 20:49:00 +0800
+Subject: [PATCH 1791/5965] prot rotate by angle and frame orientation
+
+---
+ drivers/amlogic/amports/video.c            |  7 ++++--
+ drivers/amlogic/amports/video_prot.c       | 27 ++++++++++++++--------
+ drivers/amlogic/ppmgr/ppmgr_vpp.c          | 22 ++++++++++++++----
+ include/linux/amlogic/amports/video_prot.h |  1 +
+ 4 files changed, 41 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index ec4372cfa4b8..1728e887f0e5 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -1055,7 +1055,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0,0,1);
+     }
+ #ifdef USE_PROT
+-    if (video_prot.angle == 2) {
++    if ((video_prot.angle + video_prot.src_vframe_orientation) % 4 == 2) {
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0xf, 2, 4);
+     } else {
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0, 2, 4);
+@@ -1133,6 +1133,9 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 1, 17, 1);
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 1, 17, 1);
+     }
+ #endif
+ 
+@@ -1729,7 +1732,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #endif
+ #ifdef USE_PROT
+     if (video_prot.angle_changed & 0x2) {
+-        if (video_prot.angle == 1 || video_prot.angle == 3) {
++        if ((video_prot.angle + video_prot.src_vframe_orientation) % 4 == 1 || (video_prot.angle + video_prot.src_vframe_orientation) % 4 == 3) {
+             PROT2_MEM_POWER_ON();
+             PROT3_MEM_POWER_ON();
+             video_prot.power_down = 0;
+diff --git a/drivers/amlogic/amports/video_prot.c b/drivers/amlogic/amports/video_prot.c
+index bb26c787fbce..f4271492463f 100755
+--- a/drivers/amlogic/amports/video_prot.c
++++ b/drivers/amlogic/amports/video_prot.c
+@@ -209,31 +209,34 @@ void video_prot_init(video_prot_t* video_prot, vframe_t *vf) {
+     video_prot->x_end = vf->width - 1;
+     video_prot->y_end = vf->height - 1;
+     video_prot->viu_type = vf->type;
++    video_prot->src_vframe_orientation = vf->orientation;
+ 
+ }
+ 
+ void video_prot_set_angle(video_prot_t* video_prot, u32 angle) {
+ 
+     u32 data32;
++    u32 angle_orientation = (angle + video_prot->src_vframe_orientation) % 4;
+ 
+     video_prot->angle = angle;
+ 
+     if (video_prot->viu_type & VIDTYPE_VIU_NV21) {
+-        set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++        set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle_orientation, video_prot->pat_val);
+     } else if (video_prot->viu_type & VIDTYPE_VIU_422) {
+-        set_prot_422(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++        set_prot_422(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle_orientation, video_prot->pat_val);
+     } else if (video_prot->viu_type & VIDTYPE_VIU_444) {
+-        set_prot_444(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++        set_prot_444(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle_orientation, video_prot->pat_val);
+     } else {
+         set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, 0, video_prot->pat_val);
+     }
+-    video_prot->status = video_prot->angle % 2;
++    video_prot->status = angle_orientation % 2;
+ }
+ 
+ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf) {
++    u32 angle_orientation = (video_prot->angle + video_prot->src_vframe_orientation) % 4;
+ 
+     if (video_prot->viu_type & (VIDTYPE_VIU_444 | VIDTYPE_VIU_422 | VIDTYPE_VIU_NV21)) {
+-        if (video_prot->angle == 1 || video_prot->angle == 3) {
++        if (angle_orientation == 1 || angle_orientation == 3) {
+             if (video_prot->is_4k2k) {
+                 vf->width = video_prot->src_vframe_height / (video_prot->y_step + 1);
+                 vf->height = video_prot->src_vframe_width >> 1;
+@@ -241,13 +244,17 @@ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf) {
+                 vf->width = video_prot->src_vframe_height;
+                 vf->height = video_prot->src_vframe_width;
+             }
+-            vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
+-            vf->ratio_control |= (0x10000 / video_prot->src_vframe_ratio) << DISP_RATIO_ASPECT_RATIO_BIT;
+-        } else if (video_prot->angle == 0 || video_prot->angle == 2) {
++            if (video_prot->src_vframe_ratio != 0) {
++                vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
++                vf->ratio_control |= (0x10000 / video_prot->src_vframe_ratio) << DISP_RATIO_ASPECT_RATIO_BIT;
++            }
++        } else if (angle_orientation == 0 || angle_orientation == 2) {
+             vf->width = video_prot->src_vframe_width;
+             vf->height = video_prot->src_vframe_height;
+-            vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
+-            vf->ratio_control |= video_prot->src_vframe_ratio << DISP_RATIO_ASPECT_RATIO_BIT;
++            if (video_prot->src_vframe_ratio != 0) {
++                vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
++                vf->ratio_control |= video_prot->src_vframe_ratio << DISP_RATIO_ASPECT_RATIO_BIT;
++            }
+         }
+     }
+ 
+diff --git a/drivers/amlogic/ppmgr/ppmgr_vpp.c b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+index ab2ccad9a422..1a249011d063 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_vpp.c
++++ b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+@@ -1272,12 +1272,12 @@ static void process_vf_rotate(vframe_t *vf, ge2d_context_t *context, config_para
+     cur_angle = (ppmgr_device.videoangle + vf->orientation)%4;
+ #ifdef CONFIG_V4L_AMLOGIC_VIDEO
+ 	if(ppmgr_device.receiver==0) {
+-	    pp_vf->dec_frame = (ppmgr_device.bypass || (cur_angle == 0 && ppmgr_device.mirror_flag == 0)) ? vf : NULL;
++	    pp_vf->dec_frame = (ppmgr_device.bypass || (cur_angle == 0 && ppmgr_device.mirror_flag == 0) || ppmgr_device.use_prot) ? vf : NULL;
+ 	}else{
+ 	    pp_vf->dec_frame = NULL;
+ 	}
+ #else
+-	pp_vf->dec_frame = (ppmgr_device.bypass || (cur_angle == 0 && ppmgr_device.mirror_flag == 0)) ? vf : NULL;
++	pp_vf->dec_frame = (ppmgr_device.bypass || (cur_angle == 0 && ppmgr_device.mirror_flag == 0) || ppmgr_device.use_prot) ? vf : NULL;
+ #endif
+ 
+ #ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
+@@ -2343,7 +2343,14 @@ static int ppmgr_task(void *data)
+             platform_type_t plarform_type;
+             vf = ppmgr_vf_get_dec();
+             if (ppmgr_device.started) {
+-                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot
++#ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
++                || amvideo_get_scaler_mode()
++#endif
++#ifdef CONFIG_V4L_AMLOGIC_VIDEO
++                || ppmgr_device.receiver
++#endif
++                ) {
+                     ppmgr_device.use_prot = 0;
+                     set_video_angle(0);
+                     _ppmgr_angle_write(ppmgr_device.global_angle);
+@@ -2377,7 +2384,14 @@ static int ppmgr_task(void *data)
+             int ret = 0;
+             vf = ppmgr_vf_get_dec();
+             if (ppmgr_device.started) {
+-                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot
++#ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
++                || amvideo_get_scaler_mode()
++#endif
++#ifdef CONFIG_V4L_AMLOGIC_VIDEO
++                || ppmgr_device.receiver
++#endif
++                ) {
+                     ppmgr_device.use_prot = 0;
+                     set_video_angle(0);
+                     _ppmgr_angle_write(ppmgr_device.global_angle);
+diff --git a/include/linux/amlogic/amports/video_prot.h b/include/linux/amlogic/amports/video_prot.h
+index 2585dcf004b5..355e6d2a0fb5 100755
+--- a/include/linux/amlogic/amports/video_prot.h
++++ b/include/linux/amlogic/amports/video_prot.h
+@@ -35,6 +35,7 @@ typedef struct {
+     u32 src_vframe_width;
+     u32 src_vframe_height;
+     u32 src_vframe_ratio;
++    u32 src_vframe_orientation;
+ } video_prot_t;
+ 
+ //extern void early_init_prot();
+-- 
+2.19.0
+

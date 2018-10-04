@@ -1,0 +1,146 @@
+From 02b0825e2eea60cdaad6c68c5e04247538710bc1 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Thu, 20 Feb 2014 16:34:19 +0800
+Subject: [PATCH 3417/5965] PD# 86871:add ionvideo size changed response
+
+---
+ drivers/amlogic/ionvideo/ionvideo.c | 49 ++++++++++++++++++++++++-----
+ drivers/amlogic/ionvideo/ionvideo.h |  5 +--
+ 2 files changed, 45 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/ionvideo/ionvideo.c b/drivers/amlogic/ionvideo/ionvideo.c
+index c24cbb67324f..9bff116b9c2b 100755
+--- a/drivers/amlogic/ionvideo/ionvideo.c
++++ b/drivers/amlogic/ionvideo/ionvideo.c
+@@ -9,7 +9,7 @@
+ 
+ #define IONVIDEO_MODULE_NAME "ionvideo"
+ 
+-#define IONVIDEO_VERSION "3.0"
++#define IONVIDEO_VERSION "1.0"
+ #define RECEIVER_NAME "ionvideo"
+ 
+ static int is_actived = 0;
+@@ -228,23 +228,43 @@ static int ionvideo_fillbuff(struct ionvideo_dev *dev, struct ionvideo_buffer *b
+     return 0;
+ }
+ 
++static int ionvideo_size_changed(struct ionvideo_dev *dev, struct vframe_s* vf) {
++    int aw = vf->width;
++    int ah = vf->height;
++
++    v4l_bound_align_image(&aw, 48, MAX_WIDTH, 5, &ah, 32, MAX_HEIGHT, 0, 0);
++    dev->c_width = aw;
++    dev->c_height = ah;
++    if (aw != dev->width || ah != dev->height) {
++        dprintk(dev, 2, "Video frame size changed w:%d h:%d\n", aw, ah);
++        return -EAGAIN;
++    }
++    return 0;
++}
++
+ static void ionvideo_thread_tick(struct ionvideo_dev *dev) {
+     struct ionvideo_dmaqueue *dma_q = &dev->vidq;
+     struct ionvideo_buffer *buf;
+     unsigned long flags = 0;
++    struct vframe_s* vf;
+ 
+     dprintk(dev, 4, "Thread tick\n");
+     /* video seekTo clear list */
+ 
+-    if (!vf_peek(RECEIVER_NAME)) {
+-        msleep(5);
++    vf = vf_peek(RECEIVER_NAME);
++    if (!vf) {
++        msleep(2);
++        return;
++    }
++    if (ionvideo_size_changed(dev, vf)) {
++        msleep(10);
+         return;
+     }
+     spin_lock_irqsave(&dev->slock, flags);
+     if (list_empty(&dma_q->active)) {
+         dprintk(dev, 3, "No active queue to serve\n");
+         spin_unlock_irqrestore(&dev->slock, flags);
+-        msleep(5);
++        msleep(2);
+         return;
+     }
+     buf = list_entry(dma_q->active.next, struct ionvideo_buffer, list);
+@@ -476,6 +496,8 @@ static int vidioc_open(struct file *file) {
+         return -EBUSY;
+     }
+     dev->pts = 0;
++    dev->c_width = 0;
++    dev->c_height = 0;
+     dprintk(dev, 2, "vidioc_open\n");
+     printk("ionvideo open\n");
+     return v4l2_fh_open(file);
+@@ -515,9 +537,15 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void *priv, struct v4l2_fm
+ 
+ static int vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f) {
+     struct ionvideo_dev *dev = video_drvdata(file);
++    struct vb2_queue *q = &dev->vb_vidq;
++    int ret = 0;
++    unsigned long flags;
+ 
+-    f->fmt.pix.width = dev->width;
+-    f->fmt.pix.height = dev->height;
++    if (dev->c_width == 0 || dev->c_height == 0) {
++        return -EINVAL;
++    }
++    f->fmt.pix.width = dev->c_width;
++    f->fmt.pix.height = dev->c_height;
+     f->fmt.pix.field = V4L2_FIELD_INTERLACED;
+     f->fmt.pix.pixelformat = dev->fmt->fourcc;
+     f->fmt.pix.bytesperline = (f->fmt.pix.width * dev->fmt->depth) >> 3;
+@@ -526,6 +554,13 @@ static int vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2_forma
+         f->fmt.pix.colorspace = V4L2_COLORSPACE_SMPTE170M;
+     else
+         f->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
++
++    spin_lock_irqsave(&q->done_lock, flags);
++    ret = list_empty(&q->done_list);
++    spin_unlock_irqrestore(&q->done_lock, flags);
++    if (!ret) {
++        return -EAGAIN;
++    }
+     return 0;
+ }
+ 
+@@ -540,7 +575,7 @@ static int vidioc_try_fmt_vid_cap(struct file *file, void *priv, struct v4l2_for
+     }
+ 
+     f->fmt.pix.field = V4L2_FIELD_INTERLACED;
+-    v4l_bound_align_image(&f->fmt.pix.width, 48, MAX_WIDTH, 4, &f->fmt.pix.height, 32, MAX_HEIGHT, 0, 0);
++    v4l_bound_align_image(&f->fmt.pix.width, 48, MAX_WIDTH, 5, &f->fmt.pix.height, 32, MAX_HEIGHT, 0, 0);
+     f->fmt.pix.bytesperline = (f->fmt.pix.width * fmt->depth) >> 3;
+     f->fmt.pix.sizeimage = f->fmt.pix.height * f->fmt.pix.bytesperline;
+     if (fmt->is_yuv)
+diff --git a/drivers/amlogic/ionvideo/ionvideo.h b/drivers/amlogic/ionvideo/ionvideo.h
+index fff245bfd7a6..b5e72095b67f 100755
+--- a/drivers/amlogic/ionvideo/ionvideo.h
++++ b/drivers/amlogic/ionvideo/ionvideo.h
+@@ -41,8 +41,8 @@
+ #define WAKE_NUMERATOR 30
+ #define WAKE_DENOMINATOR 1001
+ 
+-#define MAX_WIDTH 3840
+-#define MAX_HEIGHT 2160
++#define MAX_WIDTH 1920
++#define MAX_HEIGHT 1088
+ 
+ #define PPMGR2_MAX_CANVAS 8
+ #define PPMGR2_CANVAS_INDEX 0x70
+@@ -124,6 +124,7 @@ struct ionvideo_dev {
+     /* video capture */
+     const struct ionvideo_fmt *fmt;
+     unsigned int width, height;
++    unsigned int c_width, c_height;
+     struct vb2_queue vb_vidq;
+     unsigned int field_count;
+ 
+-- 
+2.19.0
+

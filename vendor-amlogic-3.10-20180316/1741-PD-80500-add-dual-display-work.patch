@@ -1,0 +1,4186 @@
+From e9144d746506747815282866e90f46790472980d Mon Sep 17 00:00:00 2001
+From: "wei.nie" <wei.nie@amlogic.com>
+Date: Wed, 6 Nov 2013 18:10:39 +0800
+Subject: [PATCH 1741/5965] PD# 80500:add dual display work
+
+---
+ drivers/amlogic/amports/video2.c              |  190 +--
+ drivers/amlogic/display/ge2d/ge2d_wq.c        |   12 +-
+ drivers/amlogic/display/osd/osd_hw_def.h      |    4 +-
+ drivers/amlogic/display/osd_ext/Makefile      |    4 +
+ drivers/amlogic/display/osd_ext/osd_clone.c   |   40 +-
+ drivers/amlogic/display/osd_ext/osd_clone.h   |    2 +-
+ drivers/amlogic/display/osd_ext/osd_dev.c     |   53 +-
+ drivers/amlogic/display/osd_ext/osd_dev.h     |   10 +
+ drivers/amlogic/display/osd_ext/osd_hw.c      | 1035 ++++++++++++++---
+ drivers/amlogic/display/osd_ext/osd_hw.h      |   15 +-
+ drivers/amlogic/display/osd_ext/osd_hw_def.h  |   22 +-
+ drivers/amlogic/display/osd_ext/osd_main.c    |  171 ++-
+ drivers/amlogic/display/osd_ext/osd_main.h    |    5 +
+ drivers/amlogic/display/osd_ext/osd_prot.c    |  132 +++
+ drivers/amlogic/display/osd_ext/osd_prot.h    |   41 +
+ drivers/amlogic/display/vout/enc_clk_config.c |   14 +-
+ drivers/amlogic/display/vout/tvoutc.c         |   12 +-
+ drivers/amlogic/display/vout2/nulldisp.c      |    4 +-
+ drivers/amlogic/display/vout2/tvoutc2.c       |    4 +-
+ drivers/amlogic/display/vout2/tvregs.h        | 1005 ++++++++--------
+ drivers/amlogic/display/vout2/vout2_serve.c   |   19 +-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c        |    4 +-
+ include/linux/amlogic/osd/osd_main.h          |    2 +-
+ 23 files changed, 2010 insertions(+), 790 deletions(-)
+ create mode 100755 drivers/amlogic/display/osd_ext/osd_prot.c
+ create mode 100755 drivers/amlogic/display/osd_ext/osd_prot.h
+
+diff --git a/drivers/amlogic/amports/video2.c b/drivers/amlogic/amports/video2.c
+index dac357c7345f..c83251b7faf3 100755
+--- a/drivers/amlogic/amports/video2.c
++++ b/drivers/amlogic/amports/video2.c
+@@ -197,22 +197,22 @@ void vdin0_set_hscale(
+ #define RESERVE_CLR_FRAME
+ 
+ #define EnableVideoLayer()  \
+-    do { SET_MPEG_REG_MASK(VPP2_MISC, \
++    do { aml_set_reg32_mask(P_VPP2_MISC, \
+          VPP_VD1_PREBLEND | VPP_PREBLEND_EN | VPP_VD1_POSTBLEND); \
+     } while (0)
+ 
+ #define EnableVideoLayer2()  \
+-    do { SET_MPEG_REG_MASK(VPP2_MISC, \
++    do { aml_set_reg32_mask(P_VPP2_MISC, \
+          VPP_VD2_PREBLEND | (0x1ff << VPP_VD2_ALPHA_BIT)); \
+     } while (0)
+ 
+ #define DisableVideoLayer() \
+-    do { CLEAR_MPEG_REG_MASK(VPP2_MISC, \
++    do { aml_clr_reg32_mask(P_VPP2_MISC, \
+          VPP_VD1_PREBLEND|VPP_VD2_PREBLEND|VPP_VD2_POSTBLEND|VPP_VD1_POSTBLEND ); \
+     } while (0)
+ 
+ #define DisableVideoLayer_PREBELEND() \
+-    do { CLEAR_MPEG_REG_MASK(VPP2_MISC, \
++    do { aml_clr_reg32_mask(P_VPP2_MISC, \
+          VPP_VD1_PREBLEND|VPP_VD2_PREBLEND); \
+     } while (0)
+ 
+@@ -530,7 +530,7 @@ static void vpp_settings_h(vpp_frame_par_t *framePtr)
+     r2 = framePtr->VPP_hsc_linear_endp   - framePtr->VPP_hsc_startp;
+     r3 = framePtr->VPP_hsc_endp          - framePtr->VPP_hsc_startp;
+ 
+-    WRITE_MPEG_REG(VPP2_POSTBLEND_VD1_H_START_END,
++    aml_write_reg32(P_VPP2_POSTBLEND_VD1_H_START_END,
+                    ((framePtr->VPP_hsc_startp & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                    ((framePtr->VPP_hsc_endp   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+ 
+@@ -538,26 +538,26 @@ static void vpp_settings_h(vpp_frame_par_t *framePtr)
+     //               ((framePtr->VPP_hsc_startp & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+     //               ((framePtr->VPP_hsc_endp   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+ 
+-    WRITE_MPEG_REG(VPP_HSC_REGION12_STARTP,
++    aml_write_reg32(P_VPP_HSC_REGION12_STARTP,
+                    (0 << VPP_REGION1_BIT) |
+                    ((r1 & VPP_REGION_MASK) << VPP_REGION2_BIT));
+ 
+-    WRITE_MPEG_REG(VPP2_HSC_REGION34_STARTP,
++    aml_write_reg32(P_VPP2_HSC_REGION34_STARTP,
+                    ((r2 & VPP_REGION_MASK) << VPP_REGION3_BIT) |
+                    ((r3 & VPP_REGION_MASK) << VPP_REGION4_BIT));
+-    WRITE_MPEG_REG(VPP2_HSC_REGION4_ENDP, r3);
++    aml_write_reg32(P_VPP2_HSC_REGION4_ENDP, r3);
+ 
+-    WRITE_MPEG_REG(VPP2_HSC_START_PHASE_STEP,
++    aml_write_reg32(P_VPP2_HSC_START_PHASE_STEP,
+                    vpp_filter->vpp_hf_start_phase_step);
+ 
+-    WRITE_MPEG_REG(VPP2_HSC_REGION1_PHASE_SLOPE,
++    aml_write_reg32(P_VPP2_HSC_REGION1_PHASE_SLOPE,
+                    vpp_filter->vpp_hf_start_phase_slope);
+ 
+-    WRITE_MPEG_REG(VPP2_HSC_REGION3_PHASE_SLOPE,
++    aml_write_reg32(P_VPP2_HSC_REGION3_PHASE_SLOPE,
+                    vpp_filter->vpp_hf_end_phase_slope);
+ 
+-    WRITE_MPEG_REG(VPP2_LINE_IN_LENGTH, framePtr->VPP_line_in_length_);
+-    WRITE_MPEG_REG(VPP2_PREBLEND_H_SIZE, framePtr->VPP_line_in_length_);
++    aml_write_reg32(P_VPP2_LINE_IN_LENGTH, framePtr->VPP_line_in_length_);
++    aml_write_reg32(P_VPP2_PREBLEND_H_SIZE, framePtr->VPP_line_in_length_);
+ }
+ 
+ static void vpp_settings_v(vpp_frame_par_t *framePtr)
+@@ -567,16 +567,16 @@ static void vpp_settings_v(vpp_frame_par_t *framePtr)
+ 
+     r = framePtr->VPP_vsc_endp - framePtr->VPP_vsc_startp;
+ 
+-    WRITE_MPEG_REG(VPP2_POSTBLEND_VD1_V_START_END,
++    aml_write_reg32(P_VPP2_POSTBLEND_VD1_V_START_END,
+                    ((framePtr->VPP_vsc_startp & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                    ((framePtr->VPP_vsc_endp   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+ 
+     if((framePtr->VPP_post_blend_vd_v_end_ - framePtr->VPP_post_blend_vd_v_start_+1)>1080){
+-        WRITE_MPEG_REG(VPP2_PREBLEND_VD1_V_START_END,
++        aml_write_reg32(P_VPP2_PREBLEND_VD1_V_START_END,
+                    ((framePtr->VPP_post_blend_vd_v_start_ & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                    ((framePtr->VPP_post_blend_vd_v_end_   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+     }else{
+-        WRITE_MPEG_REG(VPP2_PREBLEND_VD1_V_START_END,
++        aml_write_reg32(P_VPP2_PREBLEND_VD1_V_START_END,
+                    ((0 & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                    ((1079 & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+     }
+@@ -584,35 +584,35 @@ static void vpp_settings_v(vpp_frame_par_t *framePtr)
+     //               (((framePtr->VPP_vsc_endp / 2) & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+     //               (((framePtr->VPP_vsc_endp) & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+ 
+-    WRITE_MPEG_REG(VPP2_VSC_REGION12_STARTP, 0);
+-    WRITE_MPEG_REG(VPP2_VSC_REGION34_STARTP,
++    aml_write_reg32(P_VPP2_VSC_REGION12_STARTP, 0);
++    aml_write_reg32(P_VPP2_VSC_REGION34_STARTP,
+                    ((r & VPP_REGION_MASK) << VPP_REGION3_BIT) |
+                    ((r & VPP_REGION_MASK) << VPP_REGION4_BIT));
+-    WRITE_MPEG_REG(VPP2_VSC_REGION4_ENDP, r);
++    aml_write_reg32(P_VPP2_VSC_REGION4_ENDP, r);
+ 
+-    WRITE_MPEG_REG(VPP2_VSC_START_PHASE_STEP,
++    aml_write_reg32(P_VPP2_VSC_START_PHASE_STEP,
+                    vpp_filter->vpp_vsc_start_phase_step);
+ }
+ 
+ static void zoom_display_horz(void)
+ {
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_X0,
++    aml_write_reg32(P_VIU2_VD1_IF0_LUMA_X0,
+                    (zoom_start_x_lines << VDIF_PIC_START_BIT) |
+                    (zoom_end_x_lines   << VDIF_PIC_END_BIT));
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_X0,
++    aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_X0,
+                    (zoom_start_x_lines / 2 << VDIF_PIC_START_BIT) |
+                    (zoom_end_x_lines / 2   << VDIF_PIC_END_BIT));
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_X1,
++    aml_write_reg32(P_VIU2_VD1_IF0_LUMA_X1,
+                    (zoom_start_x_lines << VDIF_PIC_START_BIT) |
+                    (zoom_end_x_lines   << VDIF_PIC_END_BIT));
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_X1,
++    aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_X1,
+                    (zoom_start_x_lines / 2 << VDIF_PIC_START_BIT) |
+                    (zoom_end_x_lines / 2   << VDIF_PIC_END_BIT));
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_FMT_W,
++    aml_write_reg32(P_VIU2_VD1_FMT_W,
+                    ((zoom_end_x_lines - zoom_start_x_lines + 1) << VD1_FMT_LUMA_WIDTH_BIT) |
+                    ((zoom_end_x_lines / 2 - zoom_start_x_lines / 2 + 1) << VD1_FMT_CHROMA_WIDTH_BIT));
+ #if 0
+@@ -641,11 +641,11 @@ static void zoom_display_horz(void)
+ static void zoom_display_vert(void)
+ {
+     if ((cur_dispbuf) && (cur_dispbuf->type & VIDTYPE_MVC)) {
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_Y0,
++        aml_write_reg32(P_VIU2_VD1_IF0_LUMA_Y0,
+                        (zoom_start_y_lines * 2 << VDIF_PIC_START_BIT) |
+                        (zoom_end_y_lines * 2   << VDIF_PIC_END_BIT));
+ 
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_Y0,
++        aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_Y0,
+                        ((zoom_start_y_lines) << VDIF_PIC_START_BIT) |
+                        ((zoom_end_y_lines)   << VDIF_PIC_END_BIT));
+ 
+@@ -657,19 +657,19 @@ static void zoom_display_vert(void)
+         //               ((zoom_start_y_lines) << VDIF_PIC_START_BIT) |
+         //               ((zoom_end_y_lines)   << VDIF_PIC_END_BIT));
+     } else {
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_Y0,
++        aml_write_reg32(P_VIU2_VD1_IF0_LUMA_Y0,
+                        (zoom_start_y_lines << VDIF_PIC_START_BIT) |
+                        (zoom_end_y_lines   << VDIF_PIC_END_BIT));
+ 
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_Y0,
++        aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_Y0,
+                        ((zoom_start_y_lines / 2) << VDIF_PIC_START_BIT) |
+                        ((zoom_end_y_lines / 2)   << VDIF_PIC_END_BIT));
+ 
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_Y1,
++        aml_write_reg32(P_VIU2_VD1_IF0_LUMA_Y1,
+                        (zoom_start_y_lines << VDIF_PIC_START_BIT) |
+                        (zoom_end_y_lines << VDIF_PIC_END_BIT));
+ 
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_Y1,
++        aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_Y1,
+                        ((zoom_start_y_lines / 2) << VDIF_PIC_START_BIT) |
+                        ((zoom_end_y_lines / 2) << VDIF_PIC_END_BIT));
+     }
+@@ -735,8 +735,8 @@ static void vsync_toggle_frame(vframe_t *vf)
+     canvas_copy((vf->canvas1Addr >> 8) & 0xff, disp_canvas_index[4]);
+     canvas_copy((vf->canvas1Addr >> 16) & 0xff, disp_canvas_index[5]);
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CANVAS0, disp_canvas[0]);
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CANVAS1, disp_canvas[1]);
++    aml_write_reg32(P_VIU2_VD1_IF0_CANVAS0, disp_canvas[0]);
++    aml_write_reg32(P_VIU2_VD1_IF0_CANVAS1, disp_canvas[1]);
+     //WRITE_MPEG_REG(VD2_IF0_CANVAS0, disp_canvas[1]);
+     //WRITE_MPEG_REG(VD2_IF0_CANVAS1, disp_canvas[1]);
+ 
+@@ -853,25 +853,25 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         }
+     }
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_GEN_REG, r);
++    aml_write_reg32(P_VIU2_VD1_IF0_GEN_REG, r);
+     //WRITE_MPEG_REG(VD2_IF0_GEN_REG, r);
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     if (vf->type & VIDTYPE_VIU_NV21) {
+-        WRITE_MPEG_REG_BITS(VIU2_VD1_IF0_GEN_REG2, 1,0,1);
++        aml_set_reg32_bits(P_VIU2_VD1_IF0_GEN_REG2, 1,0,1);
+     } else {
+-        WRITE_MPEG_REG_BITS(VIU2_VD1_IF0_GEN_REG2, 0,0,1);
++        aml_set_reg32_bits(P_VIU2_VD1_IF0_GEN_REG2, 0,0,1);
+     }
+ #endif
+ 
+     /* chroma formatter */
+     if (vf->type & VIDTYPE_VIU_444) {
+-        WRITE_MPEG_REG(VIU2_VD1_FMT_CTRL, HFORMATTER_YC_RATIO_1_1);
++        aml_write_reg32(P_VIU2_VD1_FMT_CTRL, HFORMATTER_YC_RATIO_1_1);
+         //WRITE_MPEG_REG(VIU_VD2_FMT_CTRL, HFORMATTER_YC_RATIO_1_1);
+     } else if (vf->type & VIDTYPE_VIU_FIELD) {
+         vini_phase = 0xc << VFORMATTER_INIPHASE_BIT;
+         vphase = ((vf->type & VIDTYPE_VIU_422) ? 0x10 : 0x08) << VFORMATTER_PHASE_BIT;
+ 
+-        WRITE_MPEG_REG(VIU2_VD1_FMT_CTRL,
++        aml_write_reg32(P_VIU2_VD1_FMT_CTRL,
+                        HFORMATTER_YC_RATIO_2_1 | HFORMATTER_EN |
+                        VFORMATTER_RPTLINE0_EN | vini_phase | vphase | VFORMATTER_EN);
+ 
+@@ -879,7 +879,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         //               HFORMATTER_YC_RATIO_2_1 | HFORMATTER_EN |
+         //               VFORMATTER_RPTLINE0_EN | vini_phase | vphase | VFORMATTER_EN);
+     } else if (vf->type & VIDTYPE_MVC) {
+-        WRITE_MPEG_REG(VIU2_VD1_FMT_CTRL,
++        aml_write_reg32(P_VIU2_VD1_FMT_CTRL,
+                        HFORMATTER_YC_RATIO_2_1 |
+                        HFORMATTER_EN |
+                        VFORMATTER_RPTLINE0_EN |
+@@ -895,7 +895,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+                        VFORMATTER_EN);*/
+     } else if ((vf->type & VIDTYPE_INTERLACE) &&
+                (((vf->type & VIDTYPE_TYPEMASK) == VIDTYPE_INTERLACE_TOP))) {
+-        WRITE_MPEG_REG(VIU2_VD1_FMT_CTRL,
++        aml_write_reg32(P_VIU2_VD1_FMT_CTRL,
+                        HFORMATTER_YC_RATIO_2_1 |
+                        HFORMATTER_EN |
+                        VFORMATTER_RPTLINE0_EN |
+@@ -911,7 +911,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+                        (((vf->type & VIDTYPE_VIU_422) ? 0x10 : 0x08) << VFORMATTER_PHASE_BIT) |
+                        VFORMATTER_EN);*/
+     } else {
+-        WRITE_MPEG_REG(VIU2_VD1_FMT_CTRL,
++        aml_write_reg32(P_VIU2_VD1_FMT_CTRL,
+                        HFORMATTER_YC_RATIO_2_1 |
+                        HFORMATTER_EN |
+                        VFORMATTER_RPTLINE0_EN |
+@@ -947,7 +947,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         loop = 0;
+     }
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_RPT_LOOP,
++    aml_write_reg32(P_VIU2_VD1_IF0_RPT_LOOP,
+                    (loop << VDIF_CHROMA_LOOP1_BIT) |
+                    (loop << VDIF_LUMA_LOOP1_BIT)   |
+                    (loop << VDIF_CHROMA_LOOP0_BIT) |
+@@ -959,10 +959,10 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+                    (loop << VDIF_CHROMA_LOOP0_BIT) |
+                    (loop << VDIF_LUMA_LOOP0_BIT));*/
+ 
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA0_RPT_PAT,   pat);
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA0_RPT_PAT, pat);
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA1_RPT_PAT,   pat);
+-    WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA1_RPT_PAT, pat);
++    aml_write_reg32(P_VIU2_VD1_IF0_LUMA0_RPT_PAT,   pat);
++    aml_write_reg32(P_VIU2_VD1_IF0_CHROMA0_RPT_PAT, pat);
++    aml_write_reg32(P_VIU2_VD1_IF0_LUMA1_RPT_PAT,   pat);
++    aml_write_reg32(P_VIU2_VD1_IF0_CHROMA1_RPT_PAT, pat);
+ 
+     if (vf->type & VIDTYPE_MVC)
+         pat = 0x88;
+@@ -977,19 +977,19 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         ((vf->type & VIDTYPE_VIU_FIELD) == 0) &&
+         ((vf->type & VIDTYPE_MVC) == 0)) {
+         /* progressive frame in two pictures */
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_PSEL,
++        aml_write_reg32(P_VIU2_VD1_IF0_LUMA_PSEL,
+                        (2 << 26) |    /* two pic mode */
+                        (2 << 24) |    /* use own last line */
+                        (2 << 8)  |    /* toggle pic 0 and 1, use pic0 first */
+                        (0x01));       /* loop pattern */
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_PSEL,
++        aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_PSEL,
+                        (2 << 26) |    /* two pic mode */
+                        (2 << 24) |    /* use own last line */
+                        (2 << 8)  |    /* toggle pic 0 and 1, use pic0 first */
+                        (0x01));       /* loop pattern */
+     } else {
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_LUMA_PSEL, 0);
+-        WRITE_MPEG_REG(VIU2_VD1_IF0_CHROMA_PSEL, 0);
++        aml_write_reg32(P_VIU2_VD1_IF0_LUMA_PSEL, 0);
++        aml_write_reg32(P_VIU2_VD1_IF0_CHROMA_PSEL, 0);
+         //WRITE_MPEG_REG(VD2_IF0_LUMA_PSEL, 0);
+         //WRITE_MPEG_REG(VD2_IF0_CHROMA_PSEL, 0);
+     }
+@@ -1006,14 +1006,14 @@ static int detect_vout_type(void)
+             case VMODE_480CVBS:
+             case VMODE_576I:
+             case VMODE_576CVBS:
+-                vout_type = (READ_CBUS_REG(ENCI_INFO_READ) & (1<<29)) ?
++                vout_type = (aml_read_reg32(P_ENCI_INFO_READ) & (1<<29)) ?
+                              VOUT_TYPE_BOT_FIELD : VOUT_TYPE_TOP_FIELD;
+                 break;
+ 
+             case VMODE_1080I:
+             case VMODE_1080I_50HZ:
+                 //vout_type = (((READ_CBUS_REG(ENCI_INFO_READ) >> 16) & 0x1fff) < 562) ?
+-                vout_type = (((READ_CBUS_REG(ENCP_INFO_READ) >> 16) & 0x1fff) < 562) ?
++                vout_type = (((aml_read_reg32(P_ENCP_INFO_READ) >> 16) & 0x1fff) < 562) ?
+                              VOUT_TYPE_TOP_FIELD : VOUT_TYPE_BOT_FIELD;
+                 break;
+ 
+@@ -1032,12 +1032,12 @@ static int detect_vout_type(void)
+     return VOUT_TYPE_PROG;
+ #else
+     int vout_type;
+-    int encp_enable = READ_MPEG_REG(ENCP_VIDEO_EN) & 1;
++    int encp_enable = aml_read_reg32(P_ENCP_VIDEO_EN) & 1;
+ 
+     if (encp_enable) {
+-        if (READ_MPEG_REG(ENCP_VIDEO_MODE) & (1 << 12)) {
++        if (aml_read_reg32(P_ENCP_VIDEO_MODE) & (1 << 12)) {
+             /* 1080I */
+-            if (READ_MPEG_REG(VENC_ENCP_LINE) < 562) {
++            if (aml_read_reg32(P_VENC_ENCP_LINE) < 562) {
+                 vout_type = VOUT_TYPE_TOP_FIELD;
+ 
+             } else {
+@@ -1049,7 +1049,7 @@ static int detect_vout_type(void)
+         }
+ 
+     } else {
+-        vout_type = (READ_MPEG_REG(VENC_STATA) & 1) ?
++        vout_type = (aml_read_reg32(P_VENC_STATA) & 1) ?
+                     VOUT_TYPE_BOT_FIELD : VOUT_TYPE_TOP_FIELD;
+     }
+ 
+@@ -1079,10 +1079,10 @@ static inline bool interlace_field_type_match(int vout_type, vframe_t *vf)
+ 
+ static int calc_hold_line(void)
+ {
+-    if ((READ_MPEG_REG(ENCI_VIDEO_EN) & 1) == 0) {
+-        return READ_MPEG_REG(ENCP_VIDEO_VAVON_BLINE) >> 1;
++    if ((aml_read_reg32(P_ENCI_VIDEO_EN) & 1) == 0) {
++        return aml_read_reg32(P_ENCP_VIDEO_VAVON_BLINE) >> 1;
+     } else {
+-        return READ_MPEG_REG(ENCP_VFIFO2VD_LINE_TOP_START) >> 1;
++        return aml_read_reg32(P_ENCP_VFIFO2VD_LINE_TOP_START) >> 1;
+     }
+ }
+ 
+@@ -1478,11 +1478,11 @@ SET_FILTER:
+ 
+         /* vertical phase */
+         vphase = &cur_frame_par->VPP_vf_ini_phase_[vpp_phase_table[vin_type][vout_type]];
+-        WRITE_MPEG_REG(VPP2_VSC_INI_PHASE, ((u32)(vphase->phase) << 8));
++        aml_write_reg32(P_VPP2_VSC_INI_PHASE, ((u32)(vphase->phase) << 8));
+ 
+         if (vphase->repeat_skip >= 0) {
+             /* skip lines */
+-            WRITE_MPEG_REG_BITS(VPP2_VSC_PHASE_CTRL,
++            aml_set_reg32_bits(P_VPP2_VSC_PHASE_CTRL,
+                                 skip_tab[vphase->repeat_skip],
+                                 VPP_PHASECTL_INIRCVNUMT_BIT,
+                                 VPP_PHASECTL_INIRCVNUM_WID +
+@@ -1490,10 +1490,10 @@ SET_FILTER:
+ 
+         } else {
+             /* repeat first line */
+-            WRITE_MPEG_REG_BITS(VPP2_VSC_PHASE_CTRL, 4,
++            aml_set_reg32_bits(P_VPP2_VSC_PHASE_CTRL, 4,
+                                 VPP_PHASECTL_INIRCVNUMT_BIT,
+                                 VPP_PHASECTL_INIRCVNUM_WID);
+-            WRITE_MPEG_REG_BITS(VPP2_VSC_PHASE_CTRL,
++            aml_set_reg32_bits(P_VPP2_VSC_PHASE_CTRL,
+                                 1 - vphase->repeat_skip,
+                                 VPP_PHASECTL_INIRPTNUMT_BIT,
+                                 VPP_PHASECTL_INIRPTNUM_WID);
+@@ -1535,57 +1535,57 @@ SET_FILTER:
+         }
+ 
+         /* vpp filters */
+-        SET_MPEG_REG_MASK(VPP2_SC_MISC,
++        aml_set_reg32_mask(P_VPP2_SC_MISC,
+                           VPP_SC_TOP_EN | VPP_SC_VERT_EN | VPP_SC_HORZ_EN);
+ 
+         /* horitontal filter settings */
+-        WRITE_MPEG_REG_BITS(VPP2_SC_MISC,
++        aml_set_reg32_bits(P_VPP2_SC_MISC,
+                             vpp_filter->vpp_horz_coeff[0],
+                             VPP_SC_HBANK_LENGTH_BIT,
+                             VPP_SC_BANK_LENGTH_WID);
+ 
+         if (vpp_filter->vpp_horz_coeff[1] & 0x8000) {
+-            WRITE_MPEG_REG(VPP2_SCALE_COEF_IDX, VPP_COEF_HORZ | VPP_COEF_9BIT);
++            aml_write_reg32(P_VPP2_SCALE_COEF_IDX, VPP_COEF_HORZ | VPP_COEF_9BIT);
+         } else {
+-            WRITE_MPEG_REG(VPP2_SCALE_COEF_IDX, VPP_COEF_HORZ);
++            aml_write_reg32(P_VPP2_SCALE_COEF_IDX, VPP_COEF_HORZ);
+         }
+ 
+         for (i = 0; i < (vpp_filter->vpp_horz_coeff[1] & 0xff); i++) {
+-            WRITE_MPEG_REG(VPP2_SCALE_COEF, vpp_filter->vpp_horz_coeff[i + 2]);
++            aml_write_reg32(P_VPP2_SCALE_COEF, vpp_filter->vpp_horz_coeff[i + 2]);
+         }
+ 
+         /* vertical filter settings */
+-        WRITE_MPEG_REG_BITS(VPP2_SC_MISC,
++        aml_set_reg32_bits(P_VPP2_SC_MISC,
+                             vpp_filter->vpp_vert_coeff[0],
+                             VPP_SC_VBANK_LENGTH_BIT,
+                             VPP_SC_BANK_LENGTH_WID);
+ 
+-        WRITE_MPEG_REG(VPP2_SCALE_COEF_IDX, VPP_COEF_VERT);
++        aml_write_reg32(P_VPP2_SCALE_COEF_IDX, VPP_COEF_VERT);
+         for (i = 0; i < vpp_filter->vpp_vert_coeff[1]; i++) {
+-            WRITE_MPEG_REG(VPP2_SCALE_COEF,
++            aml_write_reg32(P_VPP2_SCALE_COEF,
+                            vpp_filter->vpp_vert_coeff[i + 2]);
+         }
+ 
+-        WRITE_MPEG_REG(VPP2_PIC_IN_HEIGHT,
++        aml_write_reg32(P_VPP2_PIC_IN_HEIGHT,
+                        cur_frame_par->VPP_pic_in_height_);
+ 
+-        WRITE_MPEG_REG_BITS(VPP2_HSC_PHASE_CTRL,
++        aml_set_reg32_bits(P_VPP2_HSC_PHASE_CTRL,
+                             cur_frame_par->VPP_hf_ini_phase_,
+                             VPP_HSC_TOP_INI_PHASE_BIT,
+                             VPP_HSC_TOP_INI_PHASE_WID);
+-        WRITE_MPEG_REG(VPP2_POSTBLEND_VD1_H_START_END,
++        aml_write_reg32(P_VPP2_POSTBLEND_VD1_H_START_END,
+                        ((cur_frame_par->VPP_post_blend_vd_h_start_ & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                        ((cur_frame_par->VPP_post_blend_vd_h_end_   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+-        WRITE_MPEG_REG(VPP2_POSTBLEND_VD1_V_START_END,
++        aml_write_reg32(P_VPP2_POSTBLEND_VD1_V_START_END,
+                        ((cur_frame_par->VPP_post_blend_vd_v_start_ & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                        ((cur_frame_par->VPP_post_blend_vd_v_end_   & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+-        WRITE_MPEG_REG(VPP2_POSTBLEND_H_SIZE, cur_frame_par->VPP_post_blend_h_size_);
++        aml_write_reg32(P_VPP2_POSTBLEND_H_SIZE, cur_frame_par->VPP_post_blend_h_size_);
+         if((cur_frame_par->VPP_post_blend_vd_v_end_ - cur_frame_par->VPP_post_blend_vd_v_start_+1)>1080){
+-            WRITE_MPEG_REG(VPP2_PREBLEND_VD1_V_START_END,
++            aml_write_reg32(P_VPP2_PREBLEND_VD1_V_START_END,
+                        ((cur_frame_par->VPP_post_blend_vd_v_start_ & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                        ((cur_frame_par->VPP_post_blend_vd_v_end_ & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+         }else{
+-            WRITE_MPEG_REG(VPP2_PREBLEND_VD1_V_START_END,
++            aml_write_reg32(P_VPP2_PREBLEND_VD1_V_START_END,
+                        ((0 & VPP_VD_SIZE_MASK) << VPP_VD1_START_BIT) |
+                        ((1079 & VPP_VD_SIZE_MASK) << VPP_VD1_END_BIT));
+         }
+@@ -2332,7 +2332,7 @@ static ssize_t video_blackout_policy_store(struct class *cla, struct class_attri
+ 
+ static ssize_t video_brightness_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+-    s32 val = (READ_MPEG_REG(VPP2_VADJ1_Y) >> 8) & 0x1ff;
++    s32 val = (aml_read_reg32(P_VPP2_VADJ1_Y) >> 8) & 0x1ff;
+ 
+     val = (val << 23) >> 23;
+ 
+@@ -2350,8 +2350,8 @@ static ssize_t video_brightness_store(struct class *cla, struct class_attribute
+         return -EINVAL;
+     }
+ 
+-    WRITE_MPEG_REG_BITS(VPP2_VADJ1_Y, val, 8, 9);
+-    WRITE_MPEG_REG(VPP2_VADJ_CTRL, VPP_VADJ1_EN);
++    aml_set_reg32_bits(P_VPP2_VADJ1_Y, val, 8, 9);
++    aml_write_reg32(P_VPP2_VADJ_CTRL, VPP_VADJ1_EN);
+ 
+     return count;
+ }
+@@ -2374,8 +2374,8 @@ static ssize_t video_contrast_store(struct class *cla, struct class_attribute *a
+ 
+     val += 0x80;
+ 
+-    WRITE_MPEG_REG_BITS(VPP2_VADJ1_Y, val, 0, 8);
+-    WRITE_MPEG_REG(VPP2_VADJ_CTRL, VPP_VADJ1_EN);
++    aml_set_reg32_bits(P_VPP2_VADJ1_Y, val, 0, 8);
++    aml_write_reg32(P_VPP2_VADJ_CTRL, VPP_VADJ1_EN);
+ 
+     return count;
+ }
+@@ -2396,8 +2396,8 @@ static ssize_t video_saturation_store(struct class *cla, struct class_attribute
+         return -EINVAL;
+     }
+ 
+-    WRITE_MPEG_REG_BITS(VPP2_VADJ1_Y, val, 0, 8);
+-    WRITE_MPEG_REG(VPP2_VADJ_CTRL, VPP_VADJ1_EN);
++    aml_set_reg32_bits(P_VPP2_VADJ1_Y, val, 0, 8);
++    aml_write_reg32(P_VPP2_VADJ_CTRL, VPP_VADJ1_EN);
+ 
+     return count;
+ }
+@@ -2478,12 +2478,12 @@ static int start_clone(void)
+     if(info){
+         printk("%s source is %s\n", __func__, info->name);
+         if(strcmp(info->name, "panel")==0){
+-            WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 4, 4, 4); //reg0x271a, Select encT clock to VDIN            
+-            WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 4, 8, 4); //reg0x271a,Enable VIU of ENC_T domain to VDIN;
++            aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 4, 4, 4); //reg0x271a, Select encT clock to VDIN
++            aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 4, 8, 4); //reg0x271a,Enable VIU of ENC_T domain to VDIN;
+         }
+         else{
+-            WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 4, 4); //reg0x271a, Select encP clock to VDIN            
+-            WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 8, 4); //reg0x271a,Enable VIU of ENC_P domain to VDIN;
++            aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 4, 4); //reg0x271a, Select encP clock to VDIN
++            aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 8, 4); //reg0x271a,Enable VIU of ENC_P domain to VDIN;
+         }
+         clone_vpts_remainder = 0;
+         memset(&para,0,sizeof(tvin_parm_t));
+@@ -2853,23 +2853,23 @@ static int __init video2_early_init(void)
+ 
+     if(NULL==init_logo_obj || !init_logo_obj->para.loaded)
+     {
+-   	 CLEAR_MPEG_REG_MASK(VPP2_VSC_PHASE_CTRL, VPP_PHASECTL_TYPE_INTERLACE);
++	aml_clr_reg32_mask(P_VPP2_VSC_PHASE_CTRL, VPP_PHASECTL_TYPE_INTERLACE);
+ #ifndef CONFIG_FB_AML_TCON
+-    	SET_MPEG_REG_MASK(VPP2_MISC, VPP_OUT_SATURATE);
++	aml_set_reg32_mask(P_VPP2_MISC, VPP_OUT_SATURATE);
+ #endif
+-    	WRITE_MPEG_REG(VPP2_HOLD_LINES, 0x08080808);
++	aml_write_reg32(P_VPP2_HOLD_LINES, 0x08080808);
+     }
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-   	WRITE_VCBUS_REG_BITS(VPP2_OFIFO_SIZE, 0x800,
++   	aml_set_reg32_bits(P_VPP2_OFIFO_SIZE, 0x800,
+                         VPP_OFIFO_SIZE_BIT, VPP_OFIFO_SIZE_WID);
+ #else
+-   	WRITE_VCBUS_REG_BITS(VPP2_OFIFO_SIZE, 0x780,
++   	aml_set_reg32_bits(P_VPP2_OFIFO_SIZE, 0x780,
+                         VPP_OFIFO_SIZE_BIT, VPP_OFIFO_SIZE_WID);
+ #endif                        
+                         
+    	//WRITE_MPEG_REG_BITS(VPU_OSD3_MMC_CTRL, 1, 12, 2); //select vdisp_mmc_arb for VIU2_OSD1 request
+-   	WRITE_MPEG_REG_BITS(VPU_OSD3_MMC_CTRL, 2, 12, 2); // select vdin_mmc_arb for VIU2_OSD1 request
++	aml_set_reg32_bits(P_VPU_OSD3_MMC_CTRL, 2, 12, 2); // select vdin_mmc_arb for VIU2_OSD1 request
+ 
+     printk("%s exit\n", __func__);
+ 
+diff --git a/drivers/amlogic/display/ge2d/ge2d_wq.c b/drivers/amlogic/display/ge2d/ge2d_wq.c
+index b6be504c0ce7..64ada8426dce 100755
+--- a/drivers/amlogic/display/ge2d/ge2d_wq.c
++++ b/drivers/amlogic/display/ge2d/ge2d_wq.c
+@@ -39,12 +39,18 @@ static int   get_queue_member_count(struct list_head  *head)
+ ssize_t work_queue_status_show(struct class *cla,struct class_attribute *attr,char *buf)
+ {
+ 	ge2d_context_t *wq=ge2d_manager.current_wq;
+-     	return snprintf(buf,40,"cmd count in queue:%d\n",get_queue_member_count(&wq->work_queue));
++	if (wq == 0) {
++		return 0;
++	}
++	return snprintf(buf,40,"cmd count in queue:%d\n",get_queue_member_count(&wq->work_queue));
+ }
+ ssize_t free_queue_status_show(struct class *cla,struct class_attribute *attr, char *buf)
+ {
+ 	ge2d_context_t *wq=ge2d_manager.current_wq;
+-     	return snprintf(buf, 40, "free space :%d\n",get_queue_member_count(&wq->free_queue));
++	if (wq == 0) {
++		return 0;
++	}
++	return snprintf(buf, 40, "free space :%d\n",get_queue_member_count(&wq->free_queue));
+ }
+ 
+ static inline  int  work_queue_no_space(ge2d_context_t* queue)
+@@ -446,7 +452,7 @@ setup_display_property(src_dst_para_t *src_dst,int index)
+ 
+ 	index=(index==OSD1_CANVAS_INDEX?0:1);
+ 	amlog_mask_level(LOG_MASK_CONFIG,LOG_LEVEL_HIGH,"osd%d ",index);
+-	data32=READ_MPEG_REG(VIU_OSD1_BLK0_CFG_W0+ REG_OFFSET*index);
++	data32=aml_read_reg32(P_VIU_OSD1_BLK0_CFG_W0+ REG_OFFSET*index);
+ 	index=(data32>>8) & 0xf;
+ 	bpp=block_mode[index];  //OSD_BLK_MODE[8..11]
+ 	amlog_mask_level(LOG_MASK_CONFIG,LOG_LEVEL_HIGH,"%d bpp \n",bpp);
+diff --git a/drivers/amlogic/display/osd/osd_hw_def.h b/drivers/amlogic/display/osd/osd_hw_def.h
+index 0205d8d4631c..92131c4d12ac 100755
+--- a/drivers/amlogic/display/osd/osd_hw_def.h
++++ b/drivers/amlogic/display/osd/osd_hw_def.h
+@@ -135,14 +135,14 @@ typedef  struct {
+ 	u32				scan_mode;
+ 	u32				osd_order;
+ 	osd_3d_mode_t	mode_3d[HW_OSD_COUNT];
+-	u32			updated[HW_OSD_COUNT];	
+-	hw_list_t	 	reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
++	u32			updated[HW_OSD_COUNT];
+ 	u32 			block_windows[HW_OSD_COUNT][HW_OSD_BLOCK_REG_COUNT];
+ 	u32 			block_mode[HW_OSD_COUNT];
+ 	u32			free_scale_mode[HW_OSD_COUNT];
+ 	u32			osd_reverse[HW_OSD_COUNT];
+ 	osd_rotate_t		rotate[HW_OSD_COUNT];
+ 	pandata_t	rotation_pandata[HW_OSD_COUNT];
++	hw_list_t	 	reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+ 	u32			field_out_en;
+ }hw_para_t;
+ 
+diff --git a/drivers/amlogic/display/osd_ext/Makefile b/drivers/amlogic/display/osd_ext/Makefile
+index cd84a2c85aa1..cf8a4c551daa 100755
+--- a/drivers/amlogic/display/osd_ext/Makefile
++++ b/drivers/amlogic/display/osd_ext/Makefile
+@@ -6,5 +6,9 @@
+ obj-$(CONFIG_AM_FB_EXT) += fb_ext.o
+ fb_ext-objs =  osd_hw.o osd_main.o osd_dev.o osd_clone.o
+ 
++ifeq ($(CONFIG_ARCH_MESON8),y)
++fb_ext-objs += osd_prot.o
++endif
++
+ EXTRA_CFLAGS += -Iinclude/linux/osd/
+ EXTRA_CFLAGS += -Iinclude/linux/ge2d/
+diff --git a/drivers/amlogic/display/osd_ext/osd_clone.c b/drivers/amlogic/display/osd_ext/osd_clone.c
+index 16606f2b3c63..8928a2dbcd48 100755
+--- a/drivers/amlogic/display/osd_ext/osd_clone.c
++++ b/drivers/amlogic/display/osd_ext/osd_clone.c
+@@ -58,27 +58,21 @@ static osd_clone_t s_osd_clone;
+ static void osd_clone_process(void)
+ {
+ 	canvas_t cs, cd;
+-	u32 width = 0;
+-	u32 height = 0;
+ 	u32 x0 = 0;
+ 	u32 y0 = 0;
++	u32 y1 = 0;
+ 	unsigned char x_rev = 0;
+ 	unsigned char y_rev = 0;
+ 	unsigned char xy_swap = 0;
+-	const vinfo_t *vinfo = NULL;
+ 	config_para_ex_t *ge2d_config = &s_osd_clone.ge2d_config;
+ 	ge2d_context_t *context = s_osd_clone.ge2d_context;
+ 
+-	vinfo = get_current_vinfo2();
+-	if (vinfo == NULL) {
+-		printk("++ osd_clone vinfo2 NULL\n");
+-		return;
+-	}
+-	width = vinfo->width;
+-	height = vinfo->height;
++	canvas_read(OSD1_CANVAS_INDEX, &cs);
++	canvas_read(OSD3_CANVAS_INDEX, &cd);
+ 
+ 	if (s_osd_clone.pan == 1) {
+-		y0 = height;
++		y0 = cs.height/2;
++		y1 = cd.height/2;
+ 	}
+ 
+ 	if (s_osd_clone.angle == 1) {
+@@ -97,20 +91,19 @@ static void osd_clone_process(void)
+ 	ge2d_config->bitmask_en = 0;
+ 	ge2d_config->src1_gb_alpha = 0;
+ 	ge2d_config->dst_xy_swap = 0;
+-	canvas_read(OSD1_CANVAS_INDEX, &cs);
++
+ 	ge2d_config->src_planes[0].addr = cs.addr;
+-	ge2d_config->src_planes[0].w = cs.width / 4;
++	ge2d_config->src_planes[0].w = cs.width/4;
+ 	ge2d_config->src_planes[0].h = cs.height;
+ 
+-	canvas_read(OSD3_CANVAS_INDEX, &cd);
+ 	ge2d_config->dst_planes[0].addr = cd.addr;
+-	ge2d_config->dst_planes[0].w = cd.width / 4;
++	ge2d_config->dst_planes[0].w = cd.width/4;
+ 	ge2d_config->dst_planes[0].h = cd.height;
+ 
+ 	ge2d_config->src_para.canvas_index = OSD1_CANVAS_INDEX;
+ 	ge2d_config->src_para.mem_type = CANVAS_OSD0;
+ 	ge2d_config->dst_para.mem_type = CANVAS_TYPE_INVALID;
+-	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ABGR;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
+ 	ge2d_config->src_para.fill_color_en = 0;
+ 	ge2d_config->src_para.fill_mode = 0;
+ 	ge2d_config->src_para.x_rev = 0;
+@@ -118,21 +111,18 @@ static void osd_clone_process(void)
+ 	ge2d_config->src_para.color = 0xffffffff;
+ 	ge2d_config->src_para.top = 0;
+ 	ge2d_config->src_para.left = 0;
+-	ge2d_config->src_para.width = width;
+-	ge2d_config->src_para.height = height * 2;
++	ge2d_config->src_para.width = cs.width/4;
++	ge2d_config->src_para.height = cs.height;
+ 
+ 	ge2d_config->dst_para.canvas_index = OSD3_CANVAS_INDEX;
+ 	ge2d_config->dst_para.mem_type = CANVAS_TYPE_INVALID;
+-	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ABGR;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
+ 	ge2d_config->dst_para.top = 0;
+ 	ge2d_config->dst_para.left = 0;
+-	ge2d_config->dst_para.width = width;
+-	ge2d_config->dst_para.height = height * 2;
++	ge2d_config->dst_para.width = cd.width/4;
++	ge2d_config->dst_para.height = cd.height;
+ 	ge2d_config->dst_para.fill_color_en = 0;
+ 	ge2d_config->dst_para.fill_mode = 0;
+-	ge2d_config->dst_para.x_rev = 0;
+-	ge2d_config->dst_para.y_rev = 0;
+-	ge2d_config->dst_xy_swap = 0;
+ 	ge2d_config->dst_para.color = 0;
+ 	ge2d_config->dst_para.x_rev = x_rev;
+ 	ge2d_config->dst_para.y_rev = y_rev;
+@@ -142,7 +132,7 @@ static void osd_clone_process(void)
+ 		printk("++ osd clone ge2d config error.\n");
+ 		return;
+ 	}
+-	stretchblt_noalpha(context, x0, y0, width, height, x0, y0, width, height);
++	stretchblt(context, x0, y0, cs.width/4, cs.height/2, x0, y1, cd.width/4, cd.height/2);
+ }
+ 
+ void osd_clone_update_pan(int pan)
+diff --git a/drivers/amlogic/display/osd_ext/osd_clone.h b/drivers/amlogic/display/osd_ext/osd_clone.h
+index 6efd8102f2d6..5d121e902b01 100755
+--- a/drivers/amlogic/display/osd_ext/osd_clone.h
++++ b/drivers/amlogic/display/osd_ext/osd_clone.h
+@@ -1,5 +1,5 @@
+ /*
+- * Amlogic Ethernet Driver
++ * Amlogic OSD Driver
+  *
+  * Copyright (C) 2012 Amlogic, Inc.
+  *
+diff --git a/drivers/amlogic/display/osd_ext/osd_dev.c b/drivers/amlogic/display/osd_ext/osd_dev.c
+index 7401e7071285..63443a5c13ad 100755
+--- a/drivers/amlogic/display/osd_ext/osd_dev.c
++++ b/drivers/amlogic/display/osd_ext/osd_dev.c
+@@ -63,7 +63,7 @@ void osddev_ext_set(struct myfb_dev *fbdev)
+ 
+ void osddev_ext_update_disp_axis(struct myfb_dev *fbdev, int  mode_change)
+ {
+-	osd_ext_update_disp_axis_hw(fbdev->osd_ext_ctl.disp_start_x,
++	osddev_ext_update_disp_axis_hw(fbdev->osd_ext_ctl.disp_start_x,
+ 	                            fbdev->osd_ext_ctl.disp_end_x,
+ 	                            fbdev->osd_ext_ctl.disp_start_y,
+ 	                            fbdev->osd_ext_ctl.disp_end_y,
+@@ -187,6 +187,26 @@ void osddev_ext_get_scale_axis(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1)
+ 	osd_ext_get_scale_axis_hw(index - 2, x0, y0, x1, y1);
+ }
+ 
++void osddev_ext_free_scale_mode(u32 index ,u32 freescale_mode)
++{
++	osd_ext_free_scale_mode_hw(index - 2, freescale_mode);
++}
++
++void osddev_ext_get_free_scale_mode(u32 index, u32 *freescale_mode)
++{
++	osd_ext_get_free_scale_mode_hw(index - 2, freescale_mode);
++}
++
++void osddev_ext_get_window_axis(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1)
++{
++	osd_ext_get_window_axis_hw(index - 2, x0, y0, x1, y1);
++}
++
++void osddev_ext_set_window_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
++{
++	osd_ext_set_window_axis_hw(index - 2, x0, y0, x1, y1);
++}
++
+ void osddev_ext_get_osd_ext_info(u32 index, s32(*posdval)[4], u32(*posdreg)[5], s32 info_flag)
+ {
+ 	osd_ext_get_osd_ext_info_hw(index - 2, posdval, posdreg, info_flag);
+@@ -197,6 +217,37 @@ void osddev_ext_set_2x_scale(u32 index, u16 h_scale_enable, u16 v_scale_enable)
+ 	osd_ext_set_2x_scale_hw(index - 2, h_scale_enable, v_scale_enable);
+ }
+ 
++
++void osddev_ext_get_osd_ext_rotate_on(u32 index, u32 *on_off)
++{
++        osd_ext_get_osd_ext_rotate_on_hw(index - 2, on_off);
++}
++
++void osddev_ext_set_osd_ext_rotate_on(u32 index, u32 on_off)
++{
++        osd_ext_set_osd_ext_rotate_on_hw(index - 2, on_off);
++}
++
++void osddev_ext_get_osd_ext_rotate_angle(u32 index, u32 *angle)
++{
++        osd_ext_get_osd_ext_rotate_angle_hw(index - 2, angle);
++}
++
++void osddev_ext_set_osd_ext_rotate_angle(u32 index, u32 angle)
++{
++        osd_ext_set_osd_ext_rotate_angle_hw(index - 2, angle);
++}
++
++void osddev_ext_get_prot_canvas(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end)
++{
++	osd_ext_get_prot_canvas_hw(index - 2, x_start, y_start, x_end, y_end);
++}
++
++void osddev_ext_set_prot_canvas(u32 index, s32 x_start, s32 y_start, s32 x_end, s32 y_end)
++{
++	osd_ext_set_prot_canvas_hw(index - 2, x_start, y_start, x_end, y_end);
++}
++
+ void osddev_ext_set_block_windows(u32 index, u32 *block_windows)
+ {
+ 	osd_ext_set_block_windows_hw(index - 2, block_windows);
+diff --git a/drivers/amlogic/display/osd_ext/osd_dev.h b/drivers/amlogic/display/osd_ext/osd_dev.h
+index 14dc6a88fd11..4a6d8c729657 100755
+--- a/drivers/amlogic/display/osd_ext/osd_dev.h
++++ b/drivers/amlogic/display/osd_ext/osd_dev.h
+@@ -82,6 +82,10 @@ extern void osddev_ext_get_free_scale_axis(u32 index, s32 *x0, s32 *y0, s32 *x1,
+ extern void osddev_ext_set_free_scale_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
+ extern void osddev_ext_get_scale_axis(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1);
+ extern void osddev_ext_set_scale_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
++extern void osddev_ext_get_free_scale_mode(u32 index, u32 *freescale_mode);
++extern void osddev_ext_free_scale_mode(u32 index ,u32 freescale_mode);
++extern void osddev_ext_get_window_axis(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1);
++extern void osddev_ext_set_window_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
+ extern void osddev_ext_get_osd_ext_info(u32 index, s32(*posdval)[4], u32(*posdreq)[5], s32 info_flag);
+ extern void osddev_ext_get_block_windows(u32 index, u32 *windows);
+ extern void osddev_ext_set_block_windows(u32 index, u32 *windows);
+@@ -90,6 +94,12 @@ extern void osddev_ext_set_block_mode(u32 index, u32 mode);
+ extern int osddev_ext_select_mode(struct myfb_dev *fbdev);
+ extern void osddev_ext_enable_3d_mode(u32 index , u32 enable);
+ extern void osddev_ext_set_2x_scale(u32 index, u16 h_scale_enable, u16 v_scale_enable);
++extern void osddev_ext_get_osd_ext_rotate_on(u32 index, u32 *on_off);
++extern void osddev_ext_set_osd_ext_rotate_on(u32 index, u32 on_off);
++extern void osddev_ext_get_osd_ext_rotate_angle(u32 index, u32 *angle);
++extern void osddev_ext_set_osd_ext_rotate_angle(u32 index, u32 angle);
++extern void osddev_ext_get_prot_canvas(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end);
++extern void osddev_ext_set_prot_canvas(u32 index, s32 x_start, s32 y_start, s32 x_end, s32 y_end);
+ extern void osddev_ext_set(struct myfb_dev *fbdev);
+ extern void osddev_ext_update_disp_axis(struct myfb_dev *fbdev, int  mode_change) ;
+ extern int osddev_ext_setcolreg(unsigned regno, u16 red, u16 green, u16 blue,
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw.c b/drivers/amlogic/display/osd_ext/osd_hw.c
+index 10af2990612c..080f4e529fda 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw.c
++++ b/drivers/amlogic/display/osd_ext/osd_hw.c
+@@ -35,21 +35,138 @@
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/amports/vframe_receiver.h>
+ #include <linux/amlogic/osd/osd.h>
+-
++#include <linux/amlogic/vout/vout_notify.h>
+ #ifdef CONFIG_AML_VSYNC_FIQ_ENABLE
+ #define FIQ_VSYNC
+ #endif
+ #include "osd_log.h"
+ #include "osd_hw_def.h"
+ #include "osd_clone.h"
++#include "osd_prot.h"
+ 
+ static DECLARE_WAIT_QUEUE_HEAD(osd_ext_vsync_wq);
+ static bool vsync_hit = false;
+ static bool osd_ext_vf_need_update = false;
+ 
+ static struct vframe_provider_s osd_ext_vf_prov;
++static int  g_vf_visual_width;
++static int  g_vf_width;
++static int  g_vf_height;
++static int  g_rotation_width;
++static int  g_rotation_height;
+ extern hw_para_t osd_hw;
+ 
++static unsigned int filt_coef0[] =   //bicubic
++{
++	0x00800000,
++	0x007f0100,
++	0xff7f0200,
++	0xfe7f0300,
++	0xfd7e0500,
++	0xfc7e0600,
++	0xfb7d0800,
++	0xfb7c0900,
++	0xfa7b0b00,
++	0xfa7a0dff,
++	0xf9790fff,
++	0xf97711ff,
++	0xf87613ff,
++	0xf87416fe,
++	0xf87218fe,
++	0xf8701afe,
++	0xf76f1dfd,
++	0xf76d1ffd,
++	0xf76b21fd,
++	0xf76824fd,
++	0xf76627fc,
++	0xf76429fc,
++	0xf7612cfc,
++	0xf75f2ffb,
++	0xf75d31fb,
++	0xf75a34fb,
++	0xf75837fa,
++	0xf7553afa,
++	0xf8523cfa,
++	0xf8503ff9,
++	0xf84d42f9,
++	0xf84a45f9,
++	0xf84848f8
++};
++
++static unsigned int filt_coef1[] =  //2 point bilinear
++{
++	0x00800000,
++	0x007e0200,
++	0x007c0400,
++	0x007a0600,
++	0x00780800,
++	0x00760a00,
++	0x00740c00,
++	0x00720e00,
++	0x00701000,
++	0x006e1200,
++	0x006c1400,
++	0x006a1600,
++	0x00681800,
++	0x00661a00,
++	0x00641c00,
++	0x00621e00,
++	0x00602000,
++	0x005e2200,
++	0x005c2400,
++	0x005a2600,
++	0x00582800,
++	0x00562a00,
++	0x00542c00,
++	0x00522e00,
++	0x00503000,
++	0x004e3200,
++	0x004c3400,
++	0x004a3600,
++	0x00483800,
++	0x00463a00,
++	0x00443c00,
++	0x00423e00,
++	0x00404000
++};
++
++static unsigned int filt_coef2[] =  //2 point bilinear, bank_length == 2
++{
++	0x80000000,
++	0x7e020000,
++	0x7c040000,
++	0x7a060000,
++	0x78080000,
++	0x760a0000,
++	0x740c0000,
++	0x720e0000,
++	0x70100000,
++	0x6e120000,
++	0x6c140000,
++	0x6a160000,
++	0x68180000,
++	0x661a0000,
++	0x641c0000,
++	0x621e0000,
++	0x60200000,
++	0x5e220000,
++	0x5c240000,
++	0x5a260000,
++	0x58280000,
++	0x562a0000,
++	0x542c0000,
++	0x522e0000,
++	0x50300000,
++	0x4e320000,
++	0x4c340000,
++	0x4a360000,
++	0x48380000,
++	0x463a0000,
++	0x443c0000,
++	0x423e0000,
++	0x40400000
++};
++
+ /********************************************************************/
+ /***********		osd psedu frame provider 			*****************/
+ /********************************************************************/
+@@ -126,16 +243,28 @@ static void osd_ext_fiq_isr(void)
+ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #endif
+ {
++#define  	VOUT_ENCI	1
++#define   	VOUT_ENCP	2
++#define		VOUT_ENCT	3
+ 	unsigned int fb0_cfg_w0, fb1_cfg_w0;
+ 	unsigned int odd_or_even_line;
+ 	unsigned int scan_line_number = 0;
++	unsigned char output_type=0;
++
++	output_type=aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0x3;
++	osd_ext_hw.scan_mode= SCAN_MODE_PROGRESSIVE;
++	switch(output_type)
++	{
++		case VOUT_ENCP:
++			if (aml_read_reg32(P_ENCP_VIDEO_MODE) & (1 << 12)) //1080i
++				osd_ext_hw.scan_mode= SCAN_MODE_INTERLACE;
++			break;
++		case VOUT_ENCI:
++			if (aml_read_reg32(P_ENCI_VIDEO_EN) & 1)
++				osd_ext_hw.scan_mode = SCAN_MODE_INTERLACE;
++			break;
++	}
+ 
+-	if (aml_read_reg32(P_ENCI_VIDEO_EN) & 1)
+-		osd_ext_hw.scan_mode = SCAN_MODE_INTERLACE;
+-	else if (aml_read_reg32(P_ENCP_VIDEO_MODE) & (1 << 12))
+-		osd_ext_hw.scan_mode = SCAN_MODE_INTERLACE;
+-	else
+-		osd_ext_hw.scan_mode = SCAN_MODE_PROGRESSIVE;
+ 
+ 	if (osd_ext_hw.free_scale_enable[OSD1]) {
+ 		osd_ext_hw.scan_mode = SCAN_MODE_PROGRESSIVE;
+@@ -165,9 +294,9 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 			}
+ 		} else {
+ 			if ((osd_ext_hw.pandata[OSD1].y_start % 2) == 0) {
+-				odd_or_even_line = aml_read_reg32(P_VENC_STATA) & 1;
++				odd_or_even_line = aml_read_reg32(P_ENCI_INFO_READ) & 1;
+ 			} else {
+-				odd_or_even_line = !(aml_read_reg32(P_VENC_STATA) & 1);
++				odd_or_even_line = !(aml_read_reg32(P_ENCI_INFO_READ) & 1);
+ 			}
+ 		}
+ 
+@@ -281,10 +410,15 @@ void osd_ext_srckey_enable_hw(u32 index, u8 enable)
+ 
+ }
+ 
+-void osd_ext_update_disp_axis_hw(u32 display_h_start,
++void osddev_ext_update_disp_axis_hw(
++				 u32 display_h_start,
+ 				 u32 display_h_end,
+ 				 u32 display_v_start,
+-				 u32 display_v_end, u32 xoffset, u32 yoffset, u32 mode_change, u32 index)
++				 u32 display_v_end,
++				 u32 xoffset,
++				 u32 yoffset,
++				 u32 mode_change,
++				 u32 index)
+ {
+ 	dispdata_t disp_data;
+ 	pandata_t pan_data;
+@@ -321,7 +455,11 @@ void osd_ext_setup(struct osd_ctl_s *osd_ext_ctl,
+ 		   u32 yres_virtual,
+ 		   u32 disp_start_x,
+ 		   u32 disp_start_y,
+-		   u32 disp_end_x, u32 disp_end_y, u32 fbmem, const color_bit_define_t * color, int index)
++		   u32 disp_end_x,
++		   u32 disp_end_y,
++		   u32 fbmem,
++		   const color_bit_define_t * color,
++		   int index)
+ {
+ 	u32 w = (color->bpp * xres_virtual + 7) >> 3;
+ 	dispdata_t disp_data;
+@@ -331,14 +469,34 @@ void osd_ext_setup(struct osd_ctl_s *osd_ext_ctl,
+ #endif
+ 
+ 	pan_data.x_start = xoffset;
+-	pan_data.x_end = xoffset + (disp_end_x - disp_start_x);
+ 	pan_data.y_start = yoffset;
+-	pan_data.y_end = yoffset + (disp_end_y - disp_start_y);
+ 
+ 	disp_data.x_start = disp_start_x;
+ 	disp_data.y_start = disp_start_y;
+-	disp_data.x_end = disp_end_x;
+-	disp_data.y_end = disp_end_y;
++	if(likely(osd_ext_hw.free_scale_enable[OSD1] && index==OSD1))
++	{
++		if(!osd_ext_hw.free_scale_mode[OSD1]){
++			pan_data.x_end=xoffset + g_vf_visual_width;
++			pan_data.y_end=yoffset + g_vf_height;
++			disp_data.x_end=disp_start_x + g_vf_width;
++			disp_data.y_end=disp_start_y + g_vf_height;
++		}else{
++			pan_data.x_end=xoffset + (disp_end_x-disp_start_x);
++			pan_data.y_end=yoffset + (disp_end_y-disp_start_y);
++			disp_data.x_end=disp_end_x;
++			disp_data.y_end=disp_end_y;
++		}
++	}else{
++		pan_data.x_end=xoffset + (disp_end_x-disp_start_x);
++		pan_data.y_end=yoffset + (disp_end_y-disp_start_y);
++		if (likely(osd_ext_hw.rotate[index].on_off && osd_ext_hw.rotate[index].on_off > 0)){
++			disp_data.x_end = disp_start_x + g_rotation_height;
++			disp_data.y_end = disp_start_y + g_rotation_width;
++		}else{
++			disp_data.x_end=disp_end_x;
++			disp_data.y_end=disp_end_y;
++		}
++	}
+ 
+ 	if (osd_ext_hw.fb_gem[index].addr != fbmem || osd_ext_hw.fb_gem[index].width != w
+ 	    || osd_ext_hw.fb_gem[index].height != yres_virtual) {
+@@ -364,12 +522,10 @@ void osd_ext_setup(struct osd_ctl_s *osd_ext_ctl,
+ 	   } */
+ 	if (memcmp(&pan_data, &osd_ext_hw.pandata[index], sizeof(pandata_t)) != 0 ||
+ 	    memcmp(&disp_data, &osd_ext_hw.dispdata[index], sizeof(dispdata_t)) != 0) {
+-		if (!osd_ext_hw.free_scale_enable[OSD1])	//in free scale mode ,adjust geometry para is abandoned.
+-		{
++		//if (!osd_ext_hw.free_scale_enable[OSD1])	//in free scale mode ,adjust geometry para is abandoned.		{
+ 			memcpy(&osd_ext_hw.pandata[index], &pan_data, sizeof(pandata_t));
+ 			memcpy(&osd_ext_hw.dispdata[index], &disp_data, sizeof(dispdata_t));
+ 			add_to_update_list(index, DISP_GEOMETRY);
+-		}
+ 	}
+ #ifdef CONFIG_AM_LOGO
+ 	if (!logo_setup_ok) {
+@@ -385,12 +541,20 @@ void osd_ext_setup(struct osd_ctl_s *osd_ext_ctl,
+ 	osd_ext_wait_vsync_hw();
+ }
+ 
+-void osd_ext_setpal_hw(unsigned regno, unsigned red, unsigned green, unsigned blue, unsigned transp, int index)
++void osd_ext_setpal_hw(unsigned regno,
++		unsigned red,
++		unsigned green,
++		unsigned blue,
++		unsigned transp,
++		int index)
+ {
+ 
+ 	if (regno < 256) {
+ 		u32 pal;
+-		pal = ((red & 0xff) << 24) | ((green & 0xff) << 16) | ((blue & 0xff) << 8) | (transp & 0xff);
++		pal = ((red   & 0xff) << 24) |
++			((green & 0xff) << 16) |
++			((blue & 0xff) << 8) |
++			(transp & 0xff);
+ 
+ 		aml_write_reg32(P_VIU2_OSD1_COLOR_ADDR + REG_OFFSET * index, regno);
+ 		aml_write_reg32(P_VIU2_OSD1_COLOR + REG_OFFSET * index, pal);
+@@ -413,8 +577,52 @@ void osd_ext_change_osd_ext_order_hw(u32 index, u32 order)
+ 
+ void osd_ext_free_scale_enable_hw(u32 index, u32 enable)
+ {
++	if (osd_ext_hw.free_scale_mode[index]){
++		unsigned int hfs_enable = 0;
++		unsigned int vfs_enable = 0;
++
++		hfs_enable = (enable&0xffff0000?1:0);
++		vfs_enable = (enable&0xffff?1:0);
++		osd_ext_hw.free_scale[index].hfs_enable = hfs_enable;
++		osd_ext_hw.free_scale[index].vfs_enable = vfs_enable;
++
++		if (hfs_enable ||vfs_enable){
++			osd_ext_hw.free_scale_enable[index] = 1;
++		}else if (!hfs_enable && !vfs_enable){
++			osd_ext_hw.free_scale_enable[index] = 0;
++		}
++
++		if (index==OSD1)
++		{
++			if (osd_ext_hw.free_scale_enable[index])
++			{
++				if ((osd_ext_hw.free_scale_data[OSD1].x_end > 0) && hfs_enable){
++					osd_ext_hw.free_scale_width[OSD1] = osd_ext_hw.free_scale_data[OSD1].x_end - \
++									osd_ext_hw.free_scale_data[OSD1].x_start;
++				}
++
++				if ((osd_ext_hw.free_scale_data[OSD1].y_end > 0) && vfs_enable){
++					osd_ext_hw.free_scale_height[OSD1] = osd_ext_hw.free_scale_data[OSD1].y_end -\
++									 osd_ext_hw.free_scale_data[OSD1].y_start;
++				}
++
++				add_to_update_list(index,OSD_COLOR_MODE);
++				add_to_update_list(index,OSD_FREESCALE_COEF);
++				add_to_update_list(index,DISP_GEOMETRY);
++				add_to_update_list(index,DISP_FREESCALE_ENABLE);
++			}else{
++				add_to_update_list(index,OSD_COLOR_MODE);
++				add_to_update_list(index,DISP_GEOMETRY);
++				add_to_update_list(index,DISP_FREESCALE_ENABLE);
++			}
++		}else{
++			add_to_update_list(OSD2,DISP_GEOMETRY);
++			add_to_update_list(OSD2,OSD_COLOR_MODE);
++		}
++
++		osd_ext_enable_hw(osd_ext_hw.enable[index],index);
++	}else{
+ 	static dispdata_t save_disp_data = { 0, 0, 0, 0 };
+-	static pandata_t save_pan_data = { 0, 0, 0, 0 };
+ #ifdef CONFIG_AM_VIDEO
+ #ifdef CONFIG_POST_PROCESS_MANAGER
+ 	int mode_changed = 0;
+@@ -451,10 +659,10 @@ void osd_ext_free_scale_enable_hw(u32 index, u32 enable)
+ 			vf_reg_provider(&osd_ext_vf_prov);
+ #endif
+ 			memcpy(&save_disp_data, &osd_ext_hw.dispdata[OSD1], sizeof(dispdata_t));
+-			memcpy(&save_pan_data, &osd_ext_hw.pandata[OSD1], sizeof(pandata_t));
+-			osd_ext_hw.pandata[OSD1].x_end =
+-			    osd_ext_hw.pandata[OSD1].x_start + vf.width - 1 - osd_ext_hw.dispdata[OSD1].x_start;
+-			osd_ext_hw.pandata[OSD1].y_end = osd_ext_hw.pandata[OSD1].y_start + vf.height - 1;
++
++			g_vf_visual_width=vf.width-1-osd_hw.dispdata[OSD1].x_start ;
++			g_vf_width=vf.width-1;
++			g_vf_height=vf.height-1;
+ 			osd_ext_hw.dispdata[OSD1].x_end = osd_ext_hw.dispdata[OSD1].x_start + vf.width - 1;
+ 			osd_ext_hw.dispdata[OSD1].y_end = osd_ext_hw.dispdata[OSD1].y_start + vf.height - 1;
+ 			add_to_update_list(OSD1, DISP_GEOMETRY);
+@@ -466,7 +674,7 @@ void osd_ext_free_scale_enable_hw(u32 index, u32 enable)
+ 				return;
+ 			}
+ 			memcpy(&osd_ext_hw.dispdata[OSD1], &save_disp_data, sizeof(dispdata_t));
+-			memcpy(&osd_ext_hw.pandata[OSD1], &save_pan_data, sizeof(pandata_t));
++
+ 			add_to_update_list(OSD1, DISP_GEOMETRY);
+ 			add_to_update_list(OSD1, OSD_COLOR_MODE);
+ #ifdef CONFIG_AM_VIDEO
+@@ -484,10 +692,11 @@ void osd_ext_free_scale_enable_hw(u32 index, u32 enable)
+ 	if (mode_changed) {
+ 		//vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_RESET,NULL);
+ 		extern void vf_ppmgr_reset(int type);
+-		//vf_ppmgr_reset(1);
++		vf_ppmgr_reset(1);
+ 	}
+ #endif
+ #endif
++	}
+ }
+ 
+ void osd_ext_get_free_scale_enable_hw(u32 index, u32 * free_scale_enable)
+@@ -498,14 +707,10 @@ void osd_ext_get_free_scale_enable_hw(u32 index, u32 * free_scale_enable)
+ void osd_ext_free_scale_width_hw(u32 index, u32 width)
+ {
+ 	osd_ext_hw.free_scale_width[index] = width;
+-	if (osd_ext_hw.free_scale_enable[index]) {
++	if (osd_ext_hw.free_scale_enable[index] &&
++			(!osd_ext_hw.free_scale_mode[index])) {
+ 		osd_ext_vf_need_update = true;
+ 		vf.width = osd_ext_hw.free_scale_width[index];
+-		osd_ext_hw.pandata[OSD1].x_end =
+-		    osd_ext_hw.pandata[OSD1].x_start + vf.width - 1 - osd_ext_hw.dispdata[OSD1].x_start;
+-		osd_ext_hw.dispdata[OSD1].x_end = osd_ext_hw.dispdata[OSD1].x_start + vf.width - 1;
+-		add_to_update_list(index, DISP_GEOMETRY);
+-		add_to_update_list(index, OSD_COLOR_MODE);
+ 	}
+ }
+ 
+@@ -517,13 +722,10 @@ void osd_ext_get_free_scale_width_hw(u32 index, u32 * free_scale_width)
+ void osd_ext_free_scale_height_hw(u32 index, u32 height)
+ {
+ 	osd_ext_hw.free_scale_height[index] = height;
+-	if (osd_ext_hw.free_scale_enable[index]) {
++	if (osd_ext_hw.free_scale_enable[index] &&
++			(!osd_ext_hw.free_scale_mode[index])) {
+ 		osd_ext_vf_need_update = true;
+ 		vf.height = osd_ext_hw.free_scale_height[index];
+-		osd_ext_hw.pandata[OSD1].y_end = osd_ext_hw.pandata[OSD1].y_start + vf.height - 1;
+-		osd_ext_hw.dispdata[OSD1].y_end = osd_ext_hw.dispdata[OSD1].y_start + vf.height - 1;
+-		add_to_update_list(index, DISP_GEOMETRY);
+-		add_to_update_list(index, OSD_COLOR_MODE);
+ 	}
+ }
+ 
+@@ -546,20 +748,6 @@ void osd_ext_set_free_scale_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
+ 	osd_ext_hw.free_scale_data[index].y_start = y0;
+ 	osd_ext_hw.free_scale_data[index].x_end = x1;
+ 	osd_ext_hw.free_scale_data[index].y_end = y1;
+-
+-	if (osd_ext_hw.free_scale_enable[index]) {
+-		osd_ext_vf_need_update = true;
+-		vf.width = osd_ext_hw.free_scale_data[index].x_end - osd_ext_hw.free_scale_data[index].x_start + 1;
+-		vf.height = osd_ext_hw.free_scale_data[index].y_end - osd_ext_hw.free_scale_data[index].y_start + 1;
+-		osd_ext_hw.pandata[OSD1].x_end =
+-		    osd_ext_hw.pandata[OSD1].x_start + vf.width - 1 - osd_ext_hw.dispdata[OSD1].x_start;
+-		osd_ext_hw.pandata[OSD1].y_end = osd_ext_hw.pandata[OSD1].y_start + vf.height - 1;
+-		osd_ext_hw.dispdata[OSD1].x_end = osd_ext_hw.dispdata[OSD1].x_start + vf.width - 1;
+-		osd_ext_hw.dispdata[OSD1].y_end = osd_ext_hw.dispdata[OSD1].y_start + vf.height - 1;
+-
+-		add_to_update_list(index, DISP_GEOMETRY);
+-		add_to_update_list(index, OSD_COLOR_MODE);
+-	}
+ }
+ 
+ void osd_ext_get_scale_axis_hw(u32 index, s32 * x0, s32 * y0, s32 * x1, s32 * y1)
+@@ -578,6 +766,32 @@ void osd_ext_set_scale_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
+ 	osd_ext_hw.scaledata[index].y_end = y1;
+ }
+ 
++void osd_ext_free_scale_mode_hw(u32 index,u32 freescale_mode)
++{
++	osd_ext_hw.free_scale_mode[index] = freescale_mode;
++}
++
++void osd_ext_get_free_scale_mode_hw(u32 index, u32 *freescale_mode)
++{
++	*freescale_mode = osd_ext_hw.free_scale_mode[index];
++}
++
++void osd_ext_get_window_axis_hw(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1)
++{
++	*x0 = osd_ext_hw.free_dst_data[index].x_start;
++	*x1 = osd_ext_hw.free_dst_data[index].x_end;
++	*y0 = osd_ext_hw.free_dst_data[index].y_start;
++	*y1 = osd_ext_hw.free_dst_data[index].y_end;
++}
++
++void osd_ext_set_window_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
++{
++	osd_ext_hw.free_dst_data[index].x_start = x0;
++	osd_ext_hw.free_dst_data[index].x_end = x1;
++	osd_ext_hw.free_dst_data[index].y_start = y0;
++	osd_ext_hw.free_dst_data[index].y_end = y1;
++}
++
+ void osd_ext_get_osd_ext_info_hw(u32 index, s32(*posdval)[4], u32(*posdreg)[5], s32 info_flag)
+ {
+ 	if (info_flag == 0) {
+@@ -596,17 +810,17 @@ void osd_ext_get_osd_ext_info_hw(u32 index, s32(*posdval)[4], u32(*posdreg)[5],
+ 		posdval[2][2] = osd_ext_hw.scaledata[index].y_start;
+ 		posdval[2][3] = osd_ext_hw.scaledata[index].y_end;
+ 	} else if (info_flag == 1) {
+-		posdreg[0][0] = READ_CBUS_REG(VIU2_OSD1_BLK0_CFG_W0);
+-		posdreg[0][1] = READ_CBUS_REG(VIU2_OSD1_BLK0_CFG_W1);
+-		posdreg[0][2] = READ_CBUS_REG(VIU2_OSD1_BLK0_CFG_W2);
+-		posdreg[0][3] = READ_CBUS_REG(VIU2_OSD1_BLK0_CFG_W3);
+-		posdreg[0][4] = READ_CBUS_REG(VIU2_OSD1_BLK0_CFG_W4);
+-
+-		posdreg[1][0] = READ_CBUS_REG(VIU2_OSD2_BLK0_CFG_W0);
+-		posdreg[1][1] = READ_CBUS_REG(VIU2_OSD2_BLK0_CFG_W1);
+-		posdreg[1][2] = READ_CBUS_REG(VIU2_OSD2_BLK0_CFG_W2);
+-		posdreg[1][3] = READ_CBUS_REG(VIU2_OSD2_BLK0_CFG_W3);
+-		posdreg[1][4] = READ_CBUS_REG(VIU2_OSD2_BLK0_CFG_W4);
++		posdreg[0][0] = aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W0);
++		posdreg[0][1] = aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W1);
++		posdreg[0][2] = aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W2);
++		posdreg[0][3] = aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W3);
++		posdreg[0][4] = aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W4);
++
++		posdreg[1][0] = aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W0);
++		posdreg[1][1] = aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W1);
++		posdreg[1][2] = aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W2);
++		posdreg[1][3] = aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W3);
++		posdreg[1][4] = aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W4);
+ 	} else {
+ 		;		//ToDo
+ 	}
+@@ -675,12 +889,14 @@ void osd_ext_set_2x_scale_hw(u32 index, u16 h_scale_enable, u16 v_scale_enable)
+ 		    index,
+ 		    osd_ext_hw.scaledata[index].x_start,
+ 		    osd_ext_hw.scaledata[index].x_end,
+-		    osd_ext_hw.scaledata[index].y_start, osd_ext_hw.scaledata[index].y_end);
++			osd_ext_hw.scaledata[index].y_start,
++			osd_ext_hw.scaledata[index].y_end);
+ 	amlog_level(LOG_LEVEL_HIGH, "osd[%d].pandata: %d %d %d %d\n",
+ 		    index,
+ 		    osd_ext_hw.pandata[index].x_start,
+ 		    osd_ext_hw.pandata[index].x_end,
+-		    osd_ext_hw.pandata[index].y_start, osd_ext_hw.pandata[index].y_end);
++		    osd_ext_hw.pandata[index].y_start,
++            osd_ext_hw.pandata[index].y_end);
+ 
+ 	osd_ext_hw.scale[index].h_enable = h_scale_enable;
+ 	osd_ext_hw.scale[index].v_enable = v_scale_enable;
+@@ -690,6 +906,87 @@ void osd_ext_set_2x_scale_hw(u32 index, u16 h_scale_enable, u16 v_scale_enable)
+ 	osd_ext_wait_vsync_hw();
+ }
+ 
++void osd_ext_set_osd_ext_rotate_angle_hw(u32 index, u32 angle)
++{
++	osd_ext_hw.rotate[index].angle = angle;
++	add_to_update_list(index, DISP_OSD_ROTATE);
++	osd_ext_wait_vsync_hw();
++}
++
++void osd_ext_get_osd_ext_rotate_angle_hw(u32 index,u32 *angle)
++{
++	*angle = osd_ext_hw.rotate[index].angle;
++}
++
++void osd_ext_set_osd_ext_rotate_on_hw(u32 index, u32 on_off)
++{
++	static dispdata_t save_disp_data={0,0,0,0};
++	static dispdata_t save_disp_data2={0,0,0,0};
++	osd_ext_hw.rotate[index].on_off = on_off;
++
++	if(on_off)
++	{
++		if(index == OSD1){
++			memcpy(&save_disp_data,&osd_ext_hw.dispdata[index],sizeof(dispdata_t));
++		}else if(index == OSD2){
++			memcpy(&save_disp_data2,&osd_ext_hw.dispdata[index],sizeof(dispdata_t));
++		}
++		g_rotation_width = osd_ext_hw.rotation_pandata[index].x_end-osd_ext_hw.rotation_pandata[index].x_start;
++		g_rotation_height = osd_ext_hw.rotation_pandata[index].y_end-osd_ext_hw.rotation_pandata[index].y_start;
++		osd_ext_hw.dispdata[index].x_end = osd_ext_hw.dispdata[OSD1].x_start+g_rotation_height;
++		osd_ext_hw.dispdata[index].y_end = osd_ext_hw.dispdata[OSD1].y_start+g_rotation_width;
++	}
++	else
++	{
++		aml_set_reg32_mask(P_VPU_SW_RESET, 1<<8);
++		aml_clr_reg32_mask(P_VPU_SW_RESET, 1<<8);
++		if(index == OSD1){
++			aml_set_reg32_mask(P_VIU2_SW_RESET, 1<<0);
++			aml_clr_reg32_mask(P_VIU2_SW_RESET, 1<<0);
++			memcpy(&osd_ext_hw.dispdata[index],&save_disp_data,sizeof(dispdata_t));
++		}else{
++			aml_set_reg32_mask(P_VIU2_SW_RESET, 1<<1);
++			aml_clr_reg32_mask(P_VIU2_SW_RESET, 1<<1);
++			memcpy(&osd_ext_hw.dispdata[index],&save_disp_data2,sizeof(dispdata_t));
++		}
++	}
++	add_to_update_list(index,OSD_COLOR_MODE);
++	add_to_update_list(index, DISP_GEOMETRY);
++	add_to_update_list(index, DISP_OSD_ROTATE);
++	osd_ext_wait_vsync_hw();
++}
++
++void osd_ext_get_osd_ext_rotate_on_hw(u32 index,u32 *on_off)
++{
++	*on_off = osd_ext_hw.rotate[index].on_off;
++}
++
++
++void osd_ext_set_prot_canvas_hw(u32 index, s32 x_start, s32 y_start, s32 x_end, s32 y_end)
++{
++	osd_ext_hw.rotation_pandata[index].x_start = x_start;
++	osd_ext_hw.rotation_pandata[index].y_start = y_start;
++	osd_ext_hw.rotation_pandata[index].x_end = x_end;
++	osd_ext_hw.rotation_pandata[index].y_end = y_end;
++
++	if (osd_ext_hw.rotate[index].on_off && osd_ext_hw.rotate[index].angle > 0) {
++		g_rotation_width = osd_ext_hw.rotation_pandata[index].x_end-osd_ext_hw.rotation_pandata[index].x_start;
++		g_rotation_height = osd_ext_hw.rotation_pandata[index].y_end-osd_ext_hw.rotation_pandata[index].y_start;
++		osd_ext_hw.dispdata[index].x_end = osd_ext_hw.dispdata[OSD1].x_start+g_rotation_height;
++		osd_ext_hw.dispdata[index].y_end = osd_ext_hw.dispdata[OSD1].y_start+g_rotation_width;
++
++		add_to_update_list(index, DISP_GEOMETRY);
++		add_to_update_list(index, OSD_COLOR_MODE);
++	}
++}
++
++void osd_ext_get_prot_canvas_hw(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end)
++{
++	*x_start = osd_ext_hw.rotation_pandata[index].x_start;
++	*y_start = osd_ext_hw.rotation_pandata[index].y_start;
++	*x_end = osd_ext_hw.rotation_pandata[index].x_end;
++	*y_end = osd_ext_hw.rotation_pandata[index].y_end;
++}
+ void osd_ext_pan_display_hw(unsigned int xoffset, unsigned int yoffset, int index)
+ {
+ 	long diff_x, diff_y;
+@@ -760,14 +1057,256 @@ static void osd2_update_disp_scale_enable(void)
+ 
+ }
+ 
++static  void  osd1_update_disp_freescale_enable(void)
++{
++	int hf_phase_step, vf_phase_step;
++	int dst_w, dst_h;
++	int vsc_ini_rcv_num, vsc_ini_rpt_p0_num;
++	int hsc_ini_rcv_num, hsc_ini_rpt_p0_num;
++
++	int hf_bank_len = 4;
++	int vf_bank_len = 4;
++
++	hsc_ini_rcv_num = hf_bank_len;
++	vsc_ini_rcv_num = vf_bank_len;
++	hsc_ini_rpt_p0_num = (hf_bank_len/2 - 1) > 0 ?  (hf_bank_len/2 - 1): 0;
++	vsc_ini_rpt_p0_num = (vf_bank_len/2 - 1) > 0 ?  (vf_bank_len/2 - 1): 0;
++
++	dst_w = osd_ext_hw.free_dst_data[OSD1].x_end -osd_ext_hw.free_dst_data[OSD1].x_start+1;
++	hf_phase_step = ((osd_ext_hw.free_scale_width[OSD1]+1)<< 18) / dst_w;
++	hf_phase_step = (hf_phase_step << 6);
++
++	dst_h = osd_ext_hw.free_dst_data[OSD1].y_end - osd_ext_hw.free_dst_data[OSD1].y_start+1;
++	vf_phase_step = ((osd_ext_hw.free_scale_height[OSD1]+1) << 20) / dst_h;
++	vf_phase_step = (vf_phase_step << 4);
++
++	aml_set_reg32_bits(P_VPP2_OSD_SC_DUMMY_DATA, 0x00808000, 0, 32);
++
++	if (osd_ext_hw.free_scale_enable[OSD1]){
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, 1, 3, 1);
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, OSD1, 0, 2);
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, 0, 4, 8);
++	}else{
++		aml_clr_reg32_mask(P_VPP2_OSD_SC_CTRL0, 1<<3);
++	}
++
++	if (osd_ext_hw.free_scale_enable[OSD1]){
++		aml_set_reg32_bits(P_VPP2_OSD_SCI_WH_M1, osd_ext_hw.free_scale_width[OSD1], 16, 13);
++		aml_set_reg32_bits(P_VPP2_OSD_SCI_WH_M1, osd_ext_hw.free_scale_height[OSD1], 0,  13);
++
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_H_START_END, osd_ext_hw.free_dst_data[OSD1].x_start, 16, 12);
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_H_START_END, osd_ext_hw.free_dst_data[OSD1].x_end, 0, 12);
++
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_V_START_END, osd_ext_hw.free_dst_data[OSD1].y_start, 16, 12);
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_V_START_END, osd_ext_hw.free_dst_data[OSD1].y_end, 0, 12);
++	}
++
++	if (osd_ext_hw.free_scale[OSD1].vfs_enable){
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vf_bank_len, 0, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vsc_ini_rcv_num, 3, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vsc_ini_rpt_p0_num, 8, 2);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, 1, 24, 1);
++	}else{
++		aml_clr_reg32_mask(P_VPP2_OSD_VSC_CTRL0, 1<<24);
++	}
++
++	if (osd_ext_hw.free_scale[OSD1].hfs_enable){
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hf_bank_len, 0, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hsc_ini_rcv_num, 3, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hsc_ini_rpt_p0_num, 8, 2);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, 1, 22, 1);
++	}else{
++		aml_clr_reg32_mask(P_VPP2_OSD_HSC_CTRL0, 1<<22);
++	}
++
++	if (osd_ext_hw.free_scale_enable[OSD1]){
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_PHASE_STEP, hf_phase_step, 0, 28);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_INI_PHASE, 0, 0, 16);
++
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_PHASE_STEP, vf_phase_step, 0, 28);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_INI_PHASE, 0, 0, 16);
++	}
++
++	remove_from_update_list(OSD1,DISP_FREESCALE_ENABLE);
++}
++
++static void osd1_update_coef(void)
++{
++	int i;
++	int hf_coef_idx = 0;
++	int hf_coef_wren = 1;
++
++	int vf_coef_idx = 0;
++	int vf_coef_wren = 1;
++	int *hf_coef, *vf_coef;
++
++	if (vf_coef_idx == 0){
++		vf_coef = filt_coef0;
++	}else if (vf_coef_idx == 1){
++		vf_coef = filt_coef1;
++	}else if (vf_coef_idx == 2){
++		vf_coef = filt_coef2;
++	}else{
++		vf_coef = filt_coef0;
++	}
++
++	if (vf_coef_wren) {
++		aml_set_reg32_bits(P_VPP2_OSD_SCALE_COEF_IDX, 0x0000, 0, 9);
++		for (i = 0; i < 33; i++)
++		{
++			aml_write_reg32(P_VPP2_OSD_SCALE_COEF, vf_coef[i]);
++		}
++	}
++
++	if (hf_coef_idx == 0){
++		hf_coef = filt_coef0;
++	}else if (hf_coef_idx == 1){
++		hf_coef = filt_coef1;
++	}else if (hf_coef_idx == 2){
++		hf_coef = filt_coef2;
++	}else{
++		hf_coef = filt_coef0;
++	}
++
++	if (hf_coef_wren) {
++		aml_set_reg32_bits(P_VPP2_OSD_SCALE_COEF_IDX, 0x0100, 0, 9);
++		for (i = 0; i < 33; i++)
++		{
++			aml_write_reg32(P_VPP2_OSD_SCALE_COEF, hf_coef[i]);
++		}
++	}
++	remove_from_update_list(OSD1,OSD_FREESCALE_COEF);
++}
++
++static  void  osd2_update_disp_freescale_enable(void)
++{
++	int hf_phase_step, vf_phase_step;
++	int dst_w, dst_h;
++	int vsc_ini_rcv_num, vsc_ini_rpt_p0_num;
++	int hsc_ini_rcv_num, hsc_ini_rpt_p0_num;
++
++	int hf_bank_len = 4;
++	int vf_bank_len = 4;
++
++	hsc_ini_rcv_num = hf_bank_len;
++	vsc_ini_rcv_num = vf_bank_len;
++	hsc_ini_rpt_p0_num = (hf_bank_len/2 - 1) > 0 ?  (hf_bank_len/2 - 1): 0;
++	vsc_ini_rpt_p0_num = (vf_bank_len/2 - 1) > 0 ?  (vf_bank_len/2 - 1): 0;
++
++	dst_w = osd_ext_hw.free_dst_data[OSD2].x_end -osd_ext_hw.free_dst_data[OSD2].x_start+1;
++	hf_phase_step = ((osd_ext_hw.free_scale_width[OSD2]+1)<< 18) / dst_w;
++	hf_phase_step = (hf_phase_step << 6);
++
++	dst_h = osd_ext_hw.free_dst_data[OSD2].y_end - osd_ext_hw.free_dst_data[OSD2].y_start+1;
++	vf_phase_step = ((osd_ext_hw.free_scale_height[OSD2]+1) << 20) / dst_h;
++	vf_phase_step = (vf_phase_step << 4);
++
++	aml_set_reg32_bits(P_VPP2_OSD_SC_DUMMY_DATA, 0x00808000, 0, 32);
++
++	if (osd_ext_hw.free_scale_enable[OSD2]){
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, 1, 3, 1);
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, OSD2, 0, 2);
++		aml_set_reg32_bits (P_VPP2_OSD_SC_CTRL0, 0, 4, 8);
++	}else{
++		aml_clr_reg32_mask (P_VPP2_OSD_SC_CTRL0, 1<<3);
++	}
++
++	if (osd_ext_hw.free_scale_enable[OSD2]){
++		aml_set_reg32_bits(P_VPP2_OSD_SCI_WH_M1, osd_ext_hw.free_scale_width[OSD2], 16, 13);
++		aml_set_reg32_bits(P_VPP2_OSD_SCI_WH_M1, osd_ext_hw.free_scale_height[OSD2], 0, 13);
++
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_H_START_END, osd_ext_hw.free_dst_data[OSD2].x_start, 16, 12);
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_H_START_END, osd_ext_hw.free_dst_data[OSD2].x_end, 0, 12);
++
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_V_START_END, osd_ext_hw.free_dst_data[OSD2].y_start, 16, 12);
++		aml_set_reg32_bits(P_VPP2_OSD_SCO_V_START_END, osd_ext_hw.free_dst_data[OSD2].y_end, 0, 12);
++	}
++
++	if (osd_ext_hw.free_scale[OSD2].hfs_enable){
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hf_bank_len, 0, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hsc_ini_rcv_num, 3, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, hsc_ini_rpt_p0_num, 8, 2);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_CTRL0, 1, 22, 1);
++	}else{
++		aml_clr_reg32_mask(P_VPP2_OSD_HSC_CTRL0, 1<<22);
++	}
++
++	if (osd_ext_hw.free_scale[OSD2].vfs_enable){
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vf_bank_len, 0, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vsc_ini_rcv_num, 3, 3);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, vsc_ini_rpt_p0_num, 8, 2);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_CTRL0, 1, 24, 1);
++	}else{
++		aml_clr_reg32_mask(P_VPP2_OSD_VSC_CTRL0, 1<<24);
++	}
++
++	if (osd_ext_hw.free_scale_enable[OSD2]){
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_PHASE_STEP, hf_phase_step, 0, 28);
++		aml_set_reg32_bits(P_VPP2_OSD_HSC_INI_PHASE, 0, 0, 16);
++
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_PHASE_STEP, vf_phase_step, 0, 28);
++		aml_set_reg32_bits(P_VPP2_OSD_VSC_INI_PHASE, 0, 0, 16);
++	}
++	remove_from_update_list(OSD2,DISP_FREESCALE_ENABLE);
++}
++
++static void osd2_update_coef(void)
++{
++	int i;
++	int hf_coef_idx = 0;
++	int hf_coef_wren = 1;
++
++	int vf_coef_idx = 0;
++	int vf_coef_wren = 1;
++	int *hf_coef, *vf_coef;
++
++	if (vf_coef_idx == 0){
++		vf_coef = filt_coef0;
++	}else if (vf_coef_idx == 1){
++		vf_coef = filt_coef1;
++	}else if (vf_coef_idx == 2){
++		vf_coef = filt_coef2;
++	}else{
++		vf_coef = filt_coef0;
++	}
++
++	if (vf_coef_wren) {
++		aml_set_reg32_bits (P_VPP2_OSD_SCALE_COEF_IDX, 0x0000, 0, 9);
++		for (i = 0; i < 33; i++)
++		{
++			aml_write_reg32(P_VPP2_OSD_SCALE_COEF, vf_coef[i]);
++		}
++	}
++
++	if (hf_coef_idx == 0){
++		hf_coef = filt_coef0;
++	}else if (hf_coef_idx == 1){
++		hf_coef = filt_coef1;
++	}else if (hf_coef_idx == 2){
++		hf_coef = filt_coef2;
++	}else{
++		hf_coef = filt_coef0;
++	}
++
++	if (hf_coef_wren) {
++		aml_set_reg32_bits (P_VPP2_OSD_SCALE_COEF_IDX, 0x0100, 0, 9);
++		for (i = 0; i < 33; i++)
++		{
++			aml_write_reg32(P_VPP2_OSD_SCALE_COEF, hf_coef[i]);
++		}
++	}
++	remove_from_update_list(OSD2,OSD_FREESCALE_COEF);
++}
++
+ static void osd1_update_color_mode(void)
+ {
+-	u32 data32;
++	u32 data32 = 0;
+ 
+ 	if (osd_ext_hw.color_info[OSD1] != NULL) {
+ 		data32 = (osd_ext_hw.scan_mode == SCAN_MODE_INTERLACE) ? 2 : 0;
+-		data32 |= aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W0) & 0x7040;
++		data32 |= aml_read_reg32(P_VIU2_OSD1_BLK0_CFG_W0)&0x30007040;
+ 		data32 |= osd_ext_hw.fb_gem[OSD1].canvas_idx << 16;
++		if(!osd_ext_hw.rotate[OSD1].on_off)
+ 		data32 |= OSD_DATA_LITTLE_ENDIAN << 15;
+ 		data32 |= osd_ext_hw.color_info[OSD1]->hw_colormat << 2;
+ 		if (osd_ext_hw.color_info[OSD1]->color_index < COLOR_INDEX_YUV_422)
+@@ -783,11 +1322,12 @@ static void osd1_update_color_mode(void)
+ 
+ static void osd2_update_color_mode(void)
+ {
+-	u32 data32;
++	u32 data32 = 0;
+ 	if (osd_ext_hw.color_info[OSD2] != NULL) {
+ 		data32 = (osd_ext_hw.scan_mode == SCAN_MODE_INTERLACE) ? 2 : 0;
+-		data32 |= aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W0) & 0x7040;
++		data32 |= aml_read_reg32(P_VIU2_OSD2_BLK0_CFG_W0)&0x30007040;
+ 		data32 |= osd_ext_hw.fb_gem[OSD2].canvas_idx << 16;
++		if(!osd_ext_hw.rotate[OSD1].on_off)
+ 		data32 |= OSD_DATA_LITTLE_ENDIAN << 15;
+ 		data32 |= osd_ext_hw.color_info[OSD2]->hw_colormat << 2;
+ 		if (osd_ext_hw.color_info[OSD2]->color_index < COLOR_INDEX_YUV_422)
+@@ -800,28 +1340,37 @@ static void osd2_update_color_mode(void)
+ 
+ static void osd1_update_enable(void)
+ {
+-	u32 video_enable;
+-
+-	video_enable = aml_read_reg32(P_VPP2_MISC) & VPP_VD1_PREBLEND;
+-	if (osd_ext_hw.enable[OSD1] == ENABLE) {
+-		if (osd_ext_hw.free_scale_enable[OSD1]) {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_PREBLEND_EN);
+-		} else {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
+-			if (!video_enable) {
+-				aml_clr_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
+-			}
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
++	if (osd_ext_hw.free_scale_mode[OSD1]){
++		if (osd_ext_hw.enable[OSD1] == ENABLE){
++			aml_set_reg32_mask(P_VPP_MISC,VPP_OSD1_POSTBLEND);
++			aml_set_reg32_mask(P_VPP_MISC,VPP_POSTBLEND_EN);
++		}else{
++			aml_clr_reg32_mask(P_VPP_MISC,VPP_OSD1_POSTBLEND);
+ 		}
++	}else{
++		u32 video_enable;
++
++		video_enable |= aml_read_reg32(P_VPP2_MISC) & VPP_VD1_PREBLEND;
++		if (osd_ext_hw.enable[OSD1] == ENABLE) {
++			if (osd_ext_hw.free_scale_enable[OSD1]) {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_PREBLEND_EN);
++			} else {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
++				if (!video_enable) {
++					aml_clr_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
++				}
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
++			}
+ 
+-	} else {
+-		if (osd_ext_hw.free_scale_enable[OSD1]) {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
+ 		} else {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
++			if (osd_ext_hw.free_scale_enable[OSD1]) {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_PREBLEND);
++			} else {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD1_POSTBLEND);
++			}
+ 		}
+ 	}
+ 	remove_from_update_list(OSD1, OSD_ENABLE);
+@@ -829,32 +1378,184 @@ static void osd1_update_enable(void)
+ 
+ static void osd2_update_enable(void)
+ {
+-	u32 video_enable;
+-
+-	video_enable = aml_read_reg32(P_VPP2_MISC) & VPP_VD1_PREBLEND;
+-	if (osd_ext_hw.enable[OSD2] == ENABLE) {
+-		if (osd_ext_hw.free_scale_enable[OSD2]) {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
+-		} else {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
+-			if (!video_enable) {
+-				aml_clr_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
+-			}
+-			aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
++	if (osd_ext_hw.free_scale_mode[OSD2]){
++		if (osd_ext_hw.enable[OSD1] == ENABLE){
++			aml_set_reg32_mask(P_VPP_MISC,VPP_OSD2_POSTBLEND);
++			aml_set_reg32_mask(P_VPP_MISC,VPP_POSTBLEND_EN);
++		}else{
++			aml_clr_reg32_mask(P_VPP_MISC,VPP_OSD2_POSTBLEND);
+ 		}
++	}else{
++		u32 video_enable;
++
++		video_enable |= aml_read_reg32(P_VPP2_MISC) & VPP_VD1_PREBLEND;
++		if (osd_ext_hw.enable[OSD2] == ENABLE) {
++			if (osd_ext_hw.free_scale_enable[OSD2]) {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
++			} else {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
++				if (!video_enable) {
++					aml_clr_reg32_mask(P_VPP2_MISC, VPP_VD1_POSTBLEND);
++				}
++				aml_set_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
++			}
+ 
+-	} else {
+-		if (osd_ext_hw.free_scale_enable[OSD2]) {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
+ 		} else {
+-			aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
++			if (osd_ext_hw.free_scale_enable[OSD2]) {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_PREBLEND);
++			} else {
++				aml_clr_reg32_mask(P_VPP2_MISC, VPP_OSD2_POSTBLEND);
++			}
+ 		}
+ 	}
+ 	remove_from_update_list(OSD2, OSD_ENABLE);
+ }
+ 
++static void osd1_update_disp_osd_rotate(void)
++{
++	unsigned char 	x_rev=0,y_rev=0;
++	unsigned char 	bpp=32;
++	unsigned int	x_start;
++	unsigned int	x_end;
++	unsigned int	y_start;
++	unsigned int	y_end;
++	unsigned int	y_len_m1;
++
++	if( osd_ext_hw.color_info[OSD1]->color_index <=COLOR_INDEX_08_PAL256){
++		bpp=8;
++	}else if( osd_ext_hw.color_info[OSD1]->color_index <= COLOR_INDEX_16_565){
++		bpp=16;
++	}else if( osd_ext_hw.color_info[OSD1]->color_index <= COLOR_INDEX_24_RGB){
++		bpp=24;
++	}else if( osd_ext_hw.color_info[OSD1]->color_index <= COLOR_INDEX_32_ARGB){
++		bpp=32;
++	}
++
++	switch(osd_ext_hw.rotate[OSD1].angle)
++	{
++	  case 0://clockwise H flip (dst )
++	  x_rev=0;
++	  y_rev=0;
++	  break;//clockwise
++	  case 1:
++	  y_rev=1;
++	  break;
++	  case 2://anti-clockwise
++	  x_rev=1;
++	  break;
++	  case 3://anti-clockwise H flip(dst)
++	  x_rev=1;
++	  y_rev=1;
++	  break;
++	}
++
++	x_start = osd_ext_hw.rotation_pandata[OSD1].x_start;
++	x_end = osd_ext_hw.rotation_pandata[OSD1].x_end;
++	y_start = osd_ext_hw.rotation_pandata[OSD1].y_start;
++	y_end = osd_ext_hw.rotation_pandata[OSD1].y_end;
++	y_len_m1 = y_end-y_start;
++
++	osd_ext_set_prot(
++                x_rev,
++                y_rev,
++                (bpp>>3)-1,				//unsigned char   bytes_per_pixel,
++                0,				//unsigned char   conv_422to444,
++                OSD_DATA_LITTLE_ENDIAN,		//unsigned char   little_endian,
++                HOLD_LINES,			//unsigned int    hold_lines,
++                x_start,
++                x_end,
++                y_start,
++                y_end,
++                y_len_m1,
++                Y_STEP,
++                PAT_START_PTR,
++                PAT_END_PTR,
++                PAT_VAL,
++                osd_ext_hw.fb_gem[OSD1].canvas_idx,
++                CID_VALUE,
++                CID_MODE,
++                CUGT,				//urgent bit
++                REQ_ONOFF_EN,
++                REQ_ON_MAX,
++                REQ_OFF_MIN,
++                OSD1,
++                osd_ext_hw.rotate[OSD1].on_off);
++	remove_from_update_list(OSD1, DISP_OSD_ROTATE);
++}
++
++static void osd2_update_disp_osd_rotate(void)
++{
++	unsigned char 	x_rev=0,y_rev=0;
++	unsigned char 	bpp=32;
++	unsigned int	x_start;
++	unsigned int	x_end;
++	unsigned int	y_start;
++	unsigned int	y_end;
++	unsigned int	y_len_m1;
++
++	if( osd_ext_hw.color_info[OSD2]->color_index <=COLOR_INDEX_08_PAL256){
++		bpp=8;
++	}else if( osd_ext_hw.color_info[OSD2]->color_index <= COLOR_INDEX_16_565){
++		bpp=16;
++	}else if( osd_ext_hw.color_info[OSD2]->color_index <= COLOR_INDEX_24_RGB){
++		bpp=24;
++	}else if( osd_ext_hw.color_info[OSD2]->color_index <= COLOR_INDEX_32_ARGB){
++		bpp=32;
++	}
++	switch(osd_ext_hw.rotate[OSD2].angle)
++	{
++	  case 0://clockwise H flip (dst )
++	  x_rev=0;
++	  y_rev=0;
++	  break;//clockwise
++	  case 1:
++	  y_rev=1;
++	  break;
++	  case 2://anti-clockwise
++	  x_rev=1;
++      break;
++	  case 3://anti-clockwise H flip(dst)
++	  x_rev=1;
++	  y_rev=1;
++	  break;
++	}
++
++	x_start = osd_ext_hw.rotation_pandata[OSD2].x_start;
++	x_end = osd_ext_hw.rotation_pandata[OSD2].x_end;
++	y_start = osd_ext_hw.rotation_pandata[OSD2].y_start;
++	y_end = osd_ext_hw.rotation_pandata[OSD2].y_end;
++	y_len_m1 = y_end-y_start;
++
++	osd_ext_set_prot(
++                x_rev,
++                y_rev,
++                (bpp>>3)-1,				//unsigned char   bytes_per_pixel,
++                0,				//unsigned char   conv_422to444,
++                OSD_DATA_LITTLE_ENDIAN,		//unsigned char   little_endian,
++                HOLD_LINES,			//unsigned int    hold_lines,
++                x_start,
++                x_end,
++                y_start,
++                y_end,
++                y_len_m1,
++                Y_STEP,
++                PAT_START_PTR,
++                PAT_END_PTR,
++                PAT_VAL,
++                osd_ext_hw.fb_gem[OSD2].canvas_idx,
++                CID_VALUE,
++                CID_MODE,
++                CUGT,				//urgent bit
++                REQ_ONOFF_EN,
++                REQ_ON_MAX,
++                REQ_OFF_MIN,
++                OSD2,
++                osd_ext_hw.rotate[OSD2].on_off);
++    remove_from_update_list(OSD2, DISP_OSD_ROTATE);
++}
++
+ static void osd1_update_color_key(void)
+ {
+ 	aml_write_reg32(P_VIU2_OSD1_TCOLOR_AG0, osd_ext_hw.color_key[OSD1]);
+@@ -1095,14 +1796,11 @@ static void osd1_update_disp_geometry(void)
+ 		data32 = (osd_ext_hw.dispdata[OSD1].x_start & 0xfff) | (osd_ext_hw.dispdata[OSD1].x_end & 0xfff) << 16;
+ 		aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W3, data32);
+ 		if (osd_ext_hw.scan_mode == SCAN_MODE_INTERLACE) {
+-			data32 =
+-			    ((osd_ext_hw.dispdata[OSD1].
+-			      y_start >> 1) & 0xfff) | ((((osd_ext_hw.dispdata[OSD1].y_end + 1) >> 1) -
+-							 1) & 0xfff) << 16;
++			data32 = ((osd_ext_hw.dispdata[OSD1].y_start >> 1) & 0xfff) | ((((osd_ext_hw.dispdata[OSD1].y_end + 1) >> 1) -1) & 0xfff) << 16;
+ 		} else {
+ 			data32 =
+-			    (osd_ext_hw.dispdata[OSD1].y_start & 0xfff) | (osd_ext_hw.dispdata[OSD1].
+-									   y_end & 0xfff) << 16;
++			    (osd_ext_hw.dispdata[OSD1].y_start & 0xfff) | (
++					osd_ext_hw.dispdata[OSD1].y_end & 0xfff) << 16;
+ 		}
+ 		aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W4, data32);
+ 
+@@ -1117,19 +1815,16 @@ static void osd1_update_disp_geometry(void)
+ 			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W2, data32);
+ 			/* adjust display x-axis */
+ 			if (osd_ext_hw.scale[OSD1].h_enable) {
+-				data32 = (osd_ext_hw.dispdata[OSD1].x_start & 0xfff)
+-				    |
++				data32 = (osd_ext_hw.dispdata[OSD1].x_start & 0xfff)|
+ 				    ((osd_ext_hw.dispdata[OSD1].x_start +
+-				      (osd_ext_hw.scaledata[OSD1].x_end - osd_ext_hw.scaledata[OSD1].x_start) * 2 +
+-				      1) & 0xfff) << 16;
++				      (osd_ext_hw.scaledata[OSD1].x_end - osd_ext_hw.scaledata[OSD1].x_start) * 2 + 1) & 0xfff) << 16;
+ 				aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W3, data32);
+ 			}
+ 
+ 			/* adjust display y-axis */
+ 			if (osd_ext_hw.scale[OSD1].v_enable) {
+ 				if (osd_ext_hw.scan_mode == SCAN_MODE_INTERLACE) {
+-					data32 = ((osd_ext_hw.dispdata[OSD1].y_start >> 1) & 0xfff)
+-					    |
++					data32 = ((osd_ext_hw.dispdata[OSD1].y_start >> 1) & 0xfff)|
+ 					    (((((osd_ext_hw.dispdata[OSD1].y_start +
+ 						 (osd_ext_hw.scaledata[OSD1].y_end -
+ 						  osd_ext_hw.scaledata[OSD1].y_start) * 2) + 1) >> 1) -
+@@ -1147,24 +1842,35 @@ static void osd1_update_disp_geometry(void)
+ 			   && (osd_ext_hw.free_scale_data[OSD1].x_end > 0)
+ 			   && (osd_ext_hw.free_scale_data[OSD1].y_end > 0)) {
+ 			/* enable osd free scale */
+-			data32 =
+-			    (osd_ext_hw.free_scale_data[OSD1].x_start & 0x1fff) | (osd_ext_hw.free_scale_data[OSD1].
+-										   x_end & 0x1fff) << 16;
++			data32 = (osd_ext_hw.free_scale_data[OSD1].x_start & 0x1fff) |
++						(osd_ext_hw.free_scale_data[OSD1].x_end & 0x1fff) << 16;
+ 			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W1, data32);
+-			data32 =
+-			    ((osd_ext_hw.free_scale_data[OSD1].y_start + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff)
+-			    | ((osd_ext_hw.free_scale_data[OSD1].y_end + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff) <<
+-			    16;
++			data32 = ((osd_ext_hw.free_scale_data[OSD1].y_start + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff)
++					| ((osd_ext_hw.free_scale_data[OSD1].y_end + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff) << 16;
+ 			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W2, data32);
+-		} else {
++		} else if (osd_ext_hw.rotate[OSD1].on_off > 0
++				&& osd_ext_hw.rotate[OSD1].angle > 0){
++			/* enable osd rotation */
++			data32 = (osd_ext_hw.rotation_pandata[OSD1].x_start & 0x1fff) | (osd_ext_hw.rotation_pandata[OSD1].x_end & 0x1fff) << 16;
++			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W1,data32);
++			data32 = ((osd_ext_hw.rotation_pandata[OSD1].y_start + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff)
++					| ((osd_ext_hw.rotation_pandata[OSD1].y_end  + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff) << 16 ;
++			aml_write_reg32(P_VPU_PROT1_Y_START_END, data32);
++			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W2,data32);
++		}else if (osd_hw.rotate[OSD1].on_off > 0
++				&& osd_hw.rotate[OSD1].angle > 0){
++			data32 = (osd_ext_hw.rotation_pandata[OSD1].x_start & 0x1fff) | (osd_ext_hw.rotation_pandata[OSD1].x_end & 0x1fff) << 16;
++			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W1,data32);
++			data32 = ((osd_ext_hw.rotation_pandata[OSD1].y_start + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff)
++					| ((osd_ext_hw.rotation_pandata[OSD1].y_end  + osd_ext_hw.pandata[OSD1].y_start) & 0x1fff) << 16 ;
++			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W2,data32);
++		}else{
+ 			/* normal mode */
+ 			data32 =
+-			    (osd_ext_hw.pandata[OSD1].x_start & 0x1fff) | (osd_ext_hw.pandata[OSD1].
+-									   x_end & 0x1fff) << 16;
++			    (osd_ext_hw.pandata[OSD1].x_start & 0x1fff) | (osd_ext_hw.pandata[OSD1].x_end & 0x1fff) << 16;
+ 			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W1, data32);
+ 			data32 =
+-			    (osd_ext_hw.pandata[OSD1].y_start & 0x1fff) | (osd_ext_hw.pandata[OSD1].
+-									   y_end & 0x1fff) << 16;
++			    (osd_ext_hw.pandata[OSD1].y_start & 0x1fff) | (osd_ext_hw.pandata[OSD1].y_end & 0x1fff) << 16;
+ 			aml_write_reg32(P_VIU2_OSD1_BLK0_CFG_W2, data32);
+ 		}
+ 		data32 = aml_read_reg32(P_VIU2_OSD1_CTRL_STAT);
+@@ -1293,6 +1999,9 @@ void osd_ext_init_hw(u32 logo_loaded)
+ 	osd_ext_hw.scale[OSD2].h_enable = osd_ext_hw.scale[OSD2].v_enable = 0;
+ 	osd_ext_hw.mode_3d[OSD2].enable = osd_ext_hw.mode_3d[OSD1].enable = 0;
+ 	osd_ext_hw.block_mode[OSD1] = osd_ext_hw.block_mode[OSD2] = 0;
++	osd_ext_hw.rotation_pandata[OSD1].x_start = osd_ext_hw.rotation_pandata[OSD1].y_start = 0;
++	osd_ext_hw.rotation_pandata[OSD2].x_start = osd_ext_hw.rotation_pandata[OSD2].y_start = 0;
++	memset(osd_ext_hw.rotate,0,sizeof(osd_rotate_t));
+ 
+ #ifdef FIQ_VSYNC
+ 	osd_ext_hw.fiq_handle_item.handle = vsync_isr;
+@@ -1420,11 +2129,55 @@ void osd_ext_resume_hw(void)
+ void osd_ext_clone_pan(u32 index)
+ {
+ 	s32 offset = 0;
++	s32 height_osd0 = 0;
++	s32 height_osd2 = 0;
++
++	height_osd0 = osd_hw.pandata[index].y_end - osd_hw.pandata[index].y_start + 1;
++	height_osd2 = osd_ext_hw.pandata[index].y_end - osd_ext_hw.pandata[index].y_start + 1;
++
+ 	if (osd_ext_hw.clone[index]) {
+-		if (osd_ext_hw.pandata[index].y_start > osd_hw.pandata[index].y_start) {
+-			offset -= osd_ext_hw.pandata[index].y_end - osd_ext_hw.pandata[index].y_start + 1;
+-		} else if (osd_ext_hw.pandata[index].y_start < osd_hw.pandata[index].y_start) {
+-			offset += osd_ext_hw.pandata[index].y_end - osd_ext_hw.pandata[index].y_start + 1;
++		if (osd_ext_hw.rotate[index].on_off > 0 && osd_ext_hw.rotate[index].angle > 0){
++			if (osd_hw.pandata[index].y_start < height_osd0){
++				if (osd_ext_hw.pandata[index].y_start >= height_osd2){
++					offset -= g_rotation_height + 1;
++				}else{
++					offset = 0;
++				}
++			}else{
++				if (osd_ext_hw.pandata[index].y_start < height_osd2){
++					offset += g_rotation_height + 1;
++				}else{
++					offset = 0;
++				}
++			}
++		}else if (osd_hw.rotate[index].on_off > 0 && osd_hw.rotate[index].angle > 0){
++			if (osd_hw.pandata[index].y_start < height_osd0) {
++				if (osd_ext_hw.pandata[index].y_start >= height_osd2){
++					offset -= osd_hw.pandata[index].y_end - osd_hw.pandata[index].y_start + 1;
++				}else{
++					offset = 0;
++				}
++			} else{
++				if (osd_ext_hw.pandata[index].y_start < height_osd2){
++					offset += osd_hw.pandata[index].y_end - osd_hw.pandata[index].y_start + 1;
++				}else{
++					offset = 0;
++				}
++			}
++		}else{
++			if (osd_hw.pandata[index].y_start < height_osd0){
++				if (osd_ext_hw.pandata[index].y_start >= height_osd2){
++					offset -= osd_ext_hw.pandata[index].y_end - osd_ext_hw.pandata[index].y_start + 1;
++				}else{
++					offset = 0;
++				}
++			}else{
++				if (osd_ext_hw.pandata[index].y_start < height_osd2){
++					offset += osd_ext_hw.pandata[index].y_end - osd_ext_hw.pandata[index].y_start + 1;
++				}else{
++					offset = 0;
++				}
++			}
+ 		}
+ 		osd_ext_hw.pandata[index].y_start += offset;
+ 		osd_ext_hw.pandata[index].y_end += offset;
+@@ -1488,26 +2241,14 @@ void osd_ext_set_clone_hw(u32 index, u32 clone)
+ 			color_info[index] = osd_ext_hw.color_info[index];
+ 			osd_ext_hw.color_info[index] = osd_hw.color_info[index];
+ 			memcpy(&pandata, &osd_ext_hw.pandata[index], sizeof(pandata_t));
+-#if 0
+-			canvas_config(osd_ext_hw.fb_gem[index].canvas_idx, osd_hw.fb_gem[index].addr,
+-					  osd_hw.fb_gem[index].width, osd_hw.fb_gem[index].height,
+-					  CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-#else
+ 			canvas_update_addr(osd_ext_hw.fb_gem[index].canvas_idx, osd_hw.fb_gem[index].addr);
+-#endif
+ 		}
+ 	} else {
+ 		if (osd_ext_hw.angle[index]) {
+ 			osd_clone_task_stop();
+ 		} else {
+ 			color_info[index] = osd_ext_hw.color_info[index];
+-#if 0
+-			canvas_config(osd_ext_hw.fb_gem[index].canvas_idx, osd_ext_hw.fb_gem[index].addr,
+-					  osd_ext_hw.fb_gem[index].width, osd_ext_hw.fb_gem[index].height,
+-					  CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-#else
+ 			canvas_update_addr(osd_ext_hw.fb_gem[index].canvas_idx, osd_ext_hw.fb_gem[index].addr);
+-#endif
+ 			osd_ext_hw.color_info[index] = color_info[index];
+ 			memcpy(&osd_ext_hw.pandata[index], &pandata, sizeof(pandata_t));
+ 		}
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw.h b/drivers/amlogic/display/osd_ext/osd_hw.h
+index 7ec0c15309e9..627248a93f87 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw.h
++++ b/drivers/amlogic/display/osd_ext/osd_hw.h
+@@ -23,8 +23,11 @@ typedef enum {
+ 	OSD_COLOR_KEY_ENABLE,
+ 	OSD_GBL_ALPHA,
+ 	OSD_CHANGE_ORDER,
++	OSD_FREESCALE_COEF,
+ 	DISP_GEOMETRY,
+ 	DISP_SCALE_ENABLE,
++	DISP_FREESCALE_ENABLE,
++	DISP_OSD_ROTATE,
+ 	HW_REG_INDEX_MAX
+ } hw_reg_index;
+ 
+@@ -61,7 +64,7 @@ extern void osd_ext_setup(struct osd_ctl_s *osd_ext_ctl,
+ 	u32 fbmem,
+ 	const color_bit_define_t *color,
+ 	int index);
+-extern void osd_ext_update_disp_axis_hw(
++extern void osddev_ext_update_disp_axis_hw(
+ 	u32 display_h_start,
+ 	u32 display_h_end,
+ 	u32 display_v_start,
+@@ -82,6 +85,10 @@ extern void osd_ext_get_free_scale_axis_hw(u32 index, s32 *x0, s32 *y0, s32 *x1,
+ extern void osd_ext_set_free_scale_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
+ extern void osd_ext_get_scale_axis_hw(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1);
+ extern void osd_ext_set_scale_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
++extern void osd_ext_get_window_axis_hw(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1);
++extern void osd_ext_set_window_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
++extern void osd_ext_get_free_scale_mode_hw(u32 index, u32 *freescale_mode);
++extern void osd_ext_free_scale_mode_hw(u32 index,u32 freescale_mode);
+ extern void osd_ext_get_osd_ext_info_hw(u32 index, s32(*posdval)[4], u32(*posdreq)[5], s32 info_flag);
+ extern void osd_ext_get_block_windows_hw(u32 index, u32 *windows);
+ extern void osd_ext_set_block_windows_hw(u32 index, u32 *windows);
+@@ -89,6 +96,12 @@ extern void osd_ext_get_block_mode_hw(u32 index, u32 *mode);
+ extern void osd_ext_set_block_mode_hw(u32 index, u32 mode);
+ extern void osd_ext_enable_3d_mode_hw(int index, int enable);
+ extern void osd_ext_set_2x_scale_hw(u32 index, u16 h_scale_enable, u16 v_scale_enable);
++extern void osd_ext_set_osd_ext_rotate_on_hw(u32 index, u32 on_off);
++extern void osd_ext_get_osd_ext_rotate_on_hw(u32 index, u32 *on_off);
++extern void osd_ext_set_osd_ext_rotate_angle_hw(u32 index, u32 angle);
++extern void osd_ext_get_osd_ext_rotate_angle_hw(u32 index, u32 *angle);
++extern void osd_ext_get_prot_canvas_hw(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end);
++extern void osd_ext_set_prot_canvas_hw(u32 index, s32 x_start, s32 y_start, s32 x_end, s32 y_end);
+ extern void osd_ext_setpal_hw(unsigned regno, unsigned red, unsigned green, unsigned blue, unsigned transp, int index);
+ extern void osd_ext_enable_hw(int enable, int index);
+ extern void osd_ext_pan_display_hw(unsigned int xoffset, unsigned int yoffset, int index);
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw_def.h b/drivers/amlogic/display/osd_ext/osd_hw_def.h
+index d7d70c0a8d82..156d9c21cd5d 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw_def.h
++++ b/drivers/amlogic/display/osd_ext/osd_hw_def.h
+@@ -110,6 +110,11 @@ typedef struct {
+ 	u16 r_end;
+ } osd_ext_3d_mode_t;
+ 
++typedef struct{
++	u32  on_off;
++	u32  angle;
++}osd_rotate_t;
++
+ typedef pandata_t dispdata_t;
+ 
+ typedef struct {
+@@ -135,12 +140,13 @@ typedef struct {
+ 	u32             osd_ext_order;
+ 	osd_ext_3d_mode_t mode_3d[HW_OSD_COUNT];
+ 	u32             updated[HW_OSD_COUNT];
+-	hw_list_t       reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+ 	u32             block_windows[HW_OSD_COUNT][HW_OSD_BLOCK_REG_COUNT];
+ 	u32             block_mode[HW_OSD_COUNT];
+ 	u32		free_scale_mode[HW_OSD_COUNT];
+ 	u32		osd_reverse[HW_OSD_COUNT];
+-	u32             canvas_conf[HW_OSD_COUNT];
++	osd_rotate_t	rotate[HW_OSD_COUNT];
++	pandata_t		rotation_pandata[HW_OSD_COUNT];
++	hw_list_t       reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+ 	u32             clone[HW_OSD_COUNT];
+ 	u32             angle[HW_OSD_COUNT];
+ } hw_para_t;
+@@ -156,7 +162,10 @@ static void osd1_update_color_key(void);
+ static void osd1_update_color_key_enable(void);
+ static void osd1_update_gbl_alpha(void);
+ static void osd1_update_order(void);
++static void osd1_update_coef(void);
+ static void osd1_update_disp_geometry(void);
++static void osd1_update_disp_freescale_enable(void);
++static void osd1_update_disp_osd_rotate(void);
+ static void osd1_update_disp_scale_enable(void);
+ static void osd1_update_disp_3d_mode(void);
+ 
+@@ -166,7 +175,10 @@ static void osd2_update_color_key_enable(void);
+ static void osd2_update_color_key(void);
+ static void osd2_update_gbl_alpha(void);
+ static void osd2_update_order(void);
++static void osd2_update_coef(void);
+ static void osd2_update_disp_geometry(void);
++static void osd2_update_disp_freescale_enable(void);
++static void osd2_update_disp_osd_rotate(void);
+ static void osd2_update_disp_scale_enable(void);
+ static void osd2_update_disp_3d_mode(void);
+ 
+@@ -190,8 +202,11 @@ static update_func_t hw_func_array[HW_OSD_COUNT][HW_REG_INDEX_MAX] = {
+ 		osd1_update_color_key_enable,
+ 		osd1_update_gbl_alpha,
+ 		osd1_update_order,
++		osd1_update_coef,
+ 		osd1_update_disp_geometry,
+ 		osd1_update_disp_scale_enable,
++		osd1_update_disp_freescale_enable,
++		osd1_update_disp_osd_rotate,
+ 	},
+ 	{
+ 		osd2_update_color_mode,
+@@ -200,8 +215,11 @@ static update_func_t hw_func_array[HW_OSD_COUNT][HW_REG_INDEX_MAX] = {
+ 		osd2_update_color_key_enable,
+ 		osd2_update_gbl_alpha,
+ 		osd2_update_order,
++		osd2_update_coef,
+ 		osd2_update_disp_geometry,
+ 		osd2_update_disp_scale_enable,
++		osd2_update_disp_freescale_enable,
++		osd2_update_disp_osd_rotate,
+ 	},
+ };
+ 
+diff --git a/drivers/amlogic/display/osd_ext/osd_main.c b/drivers/amlogic/display/osd_ext/osd_main.c
+index 1bdffc05c038..7216b6c9aab5 100755
+--- a/drivers/amlogic/display/osd_ext/osd_main.c
++++ b/drivers/amlogic/display/osd_ext/osd_main.c
+@@ -262,6 +262,7 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	u32 gbl_alpha;
+ 	u32 osd_ext_order;
+ 	s32 osd_ext_axis[4] = {0};
++	s32 osd_ext_dst_axis[4] = {0};
+ 	u32 block_windows[8] = {0};
+ 	u32 block_mode;
+ 	unsigned long ret;
+@@ -286,11 +287,15 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	case FBIOPUT_OSD_2X_SCALE:
+ 	case FBIOPUT_OSD_ENABLE_3D_MODE:
+ 	case FBIOPUT_OSD_FREE_SCALE_ENABLE:
++	case FBIOPUT_OSD_FREE_SCALE_MODE:
+ 	case FBIOPUT_OSD_FREE_SCALE_WIDTH:
+ 	case FBIOPUT_OSD_FREE_SCALE_HEIGHT:
+ 	case FBIOGET_OSD_BLOCK_WINDOWS:
+ 	case FBIOGET_OSD_BLOCK_MODE:
+ 	case FBIOGET_OSD_FREE_SCALE_AXIS:
++	case FBIOGET_OSD_WINDOW_AXIS:
++	case FBIOPUT_OSD_ROTATE_ON:
++	case FBIOPUT_OSD_ROTATE_ANGLE:
+ 		break;
+ 	case FBIOPUT_OSD_BLOCK_MODE:
+ 		block_mode = (u32)argp;
+@@ -301,6 +306,9 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	case FBIOPUT_OSD_FREE_SCALE_AXIS:
+ 		ret = copy_from_user(&osd_ext_axis, argp, 4 * sizeof(s32));
+ 		break;
++	case FBIOPUT_OSD_WINDOW_AXIS:
++		ret=copy_from_user(&osd_ext_dst_axis, argp, 4 * sizeof(s32));
++		break;
+ 	default :
+ 		amlog_mask_level(LOG_MASK_IOCTL, LOG_LEVEL_HIGH, "command not supported\r\n ");
+ 		return -1;
+@@ -324,12 +332,21 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	case FBIOPUT_OSD_FREE_SCALE_ENABLE:
+ 		osddev_ext_free_scale_enable(info->node, arg);
+ 		break;
++	case FBIOPUT_OSD_FREE_SCALE_MODE:
++		osddev_ext_free_scale_mode(info->node, arg);
++		break;
+ 	case FBIOPUT_OSD_ENABLE_3D_MODE:
+ 		osddev_ext_enable_3d_mode(info->node, arg);
+ 		break;
+ 	case FBIOPUT_OSD_2X_SCALE: //arg :higher 16 bit h_scale_enable, lower 16 bit v_scale_enable
+ 		osddev_ext_set_2x_scale(info->node, arg & 0xffff0000 ? 1 : 0, arg & 0xffff ? 1 : 0);
+ 		break;
++	case FBIOPUT_OSD_ROTATE_ON:
++		osddev_ext_set_osd_ext_rotate_on(info->node, arg);
++		break;
++	case FBIOPUT_OSD_ROTATE_ANGLE:
++		osddev_ext_set_osd_ext_rotate_angle(info->node, arg);
++		break;
+ 	case FBIOPUT_OSD_SRCCOLORKEY:
+ 		switch (fbdev->color->color_index) {
+ 		case COLOR_INDEX_16_655:
+@@ -403,9 +420,16 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 		osddev_ext_get_free_scale_axis(info->node, &osd_ext_axis[0], &osd_ext_axis[1], &osd_ext_axis[2], &osd_ext_axis[3]);
+ 		ret = copy_to_user(argp, &osd_ext_axis, 4 * sizeof(s32));
+ 		break;
++	case FBIOGET_OSD_WINDOW_AXIS:
++		osddev_ext_get_window_axis(info->node, &osd_ext_dst_axis[0], &osd_ext_dst_axis[1], &osd_ext_dst_axis[2], &osd_ext_dst_axis[3]);
++		ret=copy_to_user(argp, &osd_ext_dst_axis, 4 * sizeof(s32));
++		break;
+ 	case FBIOPUT_OSD_FREE_SCALE_AXIS:
+ 		osddev_ext_set_free_scale_axis(info->node, osd_ext_axis[0], osd_ext_axis[1], osd_ext_axis[2], osd_ext_axis[3]);
+ 		break;
++	case FBIOPUT_OSD_WINDOW_AXIS:
++		osddev_ext_set_window_axis(info->node, osd_ext_dst_axis[0], osd_ext_dst_axis[1], osd_ext_dst_axis[2], osd_ext_dst_axis[3]);
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -908,7 +932,7 @@ static ssize_t show_free_scale(struct device *device, struct device_attribute *a
+ 	unsigned int free_scale_enable = 0;
+ 
+ 	osddev_ext_get_free_scale_enable(fb_info->node, &free_scale_enable);
+-	return snprintf(buf, PAGE_SIZE, "free_scale_enalbe:[0x%x]\n", free_scale_enable);
++	return snprintf(buf, PAGE_SIZE, "free_scale_enable:[0x%x]\n",free_scale_enable);
+ }
+ 
+ static ssize_t store_scale(struct device *device, struct device_attribute *attr,
+@@ -1072,6 +1096,55 @@ static ssize_t store_block_mode(struct device *device, struct device_attribute *
+ 	return count;
+ }
+ 
++static ssize_t store_freescale_mode(struct device *device, struct device_attribute *attr,
++			 const char *buf, size_t count)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	unsigned int free_scale_mode=0;
++	int err;
++	free_scale_mode= simple_strtoul(buf, NULL, 0);
++	if ((err = osd_ext_ioctl(fb_info,FBIOPUT_OSD_FREE_SCALE_MODE,free_scale_mode)))
++		return err;
++	return count;
++}
++
++static ssize_t show_freescale_mode(struct device *device, struct device_attribute *attr,
++			 char *buf)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	unsigned int free_scale_mode=0;
++
++	osddev_ext_get_free_scale_mode(fb_info->node, &free_scale_mode);
++
++	return snprintf(buf, PAGE_SIZE, "free_scale_mode:%s\n",free_scale_mode?"new":"default");
++}
++
++static ssize_t show_window_axis(struct device *device, struct device_attribute *attr,
++			char *buf)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	int x0, y0, x1, y1;
++
++	osddev_ext_get_window_axis(fb_info->node, &x0, &y0, &x1, &y1);
++
++	return snprintf(buf, PAGE_SIZE, "window axis is [%d %d %d %d]\n", x0, y0, x1, y1);
++}
++
++static ssize_t store_window_axis(struct device *device, struct device_attribute *attr,
++			 const char *buf, size_t count)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	s32 parsed[4];
++
++	if (likely(parse_para(buf, 4, parsed) == 4)) {
++		osddev_ext_set_window_axis(fb_info->node, parsed[0], parsed[1], parsed[2], parsed[3]);
++	} else {
++		amlog_level(LOG_LEVEL_HIGH, "set window axis error\n");
++	}
++
++	return count;
++}
++
+ static ssize_t show_clone(struct device *device, struct device_attribute *attr,
+ 			 char *buf)
+ {
+@@ -1118,13 +1191,82 @@ static ssize_t store_angle(struct device *device, struct device_attribute *attr,
+ 	return count;
+ }
+ 
++static ssize_t show_rotate_on(struct device *device, struct device_attribute *attr,
++                        char *buf)
++{
++        struct fb_info *fb_info = dev_get_drvdata(device);
++        unsigned int osd_ext_rotate = 0;
++
++        osddev_ext_get_osd_ext_rotate_on(fb_info->node, &osd_ext_rotate);
++        return snprintf(buf, PAGE_SIZE, "osd_ext_rotate:[%s]\n", osd_ext_rotate?"ON":"OFF");
++}
++
++static ssize_t store_rotate_on(struct device *device, struct device_attribute *attr,
++                         const char *buf, size_t count)
++{
++        struct fb_info *fb_info = dev_get_drvdata(device);
++        unsigned int osd_ext_rotate = 0;
++        int err;
++        osd_ext_rotate = simple_strtoul(buf, NULL, 0);
++        if ((err = osd_ext_ioctl(fb_info,FBIOPUT_OSD_ROTATE_ON,osd_ext_rotate)))
++                return err;
++        return count;
++}
++
++static ssize_t show_rotate_angle(struct device *device, struct device_attribute *attr,
++                        char *buf)
++{
++        struct fb_info *fb_info = dev_get_drvdata(device);
++        unsigned int osd_ext_rotate_angle = 0;
++
++        osddev_ext_get_osd_ext_rotate_angle(fb_info->node, &osd_ext_rotate_angle);
++        return snprintf(buf, PAGE_SIZE, "osd_ext_rotate:%d\n", osd_ext_rotate_angle);
++}
++
++static ssize_t store_rotate_angle(struct device *device, struct device_attribute *attr,
++                         const char *buf, size_t count)
++{
++        struct fb_info *fb_info = dev_get_drvdata(device);
++        unsigned int osd_ext_rotate_angle = 0;
++        int err;
++        osd_ext_rotate_angle = simple_strtoul(buf, NULL, 0);
++        if ((err = osd_ext_ioctl(fb_info,FBIOPUT_OSD_ROTATE_ANGLE,osd_ext_rotate_angle)))
++                return err;
++        return count;
++}
++
++static ssize_t show_prot_canvas(struct device *device, struct device_attribute *attr,
++			char *buf)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	int x_start, y_start, x_end, y_end;
++
++	osddev_ext_get_prot_canvas(fb_info->node, &x_start, &y_start, &x_end, &y_end);
++
++	return snprintf(buf, PAGE_SIZE, "%d %d %d %d\n", x_start, y_start, x_end, y_end);
++}
++
++static ssize_t store_prot_canvas(struct device *device, struct device_attribute *attr,
++                         const char *buf, size_t count)
++{
++	struct fb_info *fb_info = dev_get_drvdata(device);
++	int parsed[4];
++
++	if (likely(parse_para(buf, 4, parsed) == 4)) {
++		osddev_ext_set_prot_canvas(fb_info->node, parsed[0], parsed[1], parsed[2], parsed[3]);
++	} else {
++		amlog_level(LOG_LEVEL_HIGH, "set prot canvas error\n");
++	}
++
++	return count;
++}
+ static struct device_attribute osd_ext_attrs[] = {
+ 	__ATTR(scale, S_IRUGO | S_IWUSR, show_scale, store_scale),
+ 	__ATTR(order, S_IRUGO | S_IWUSR, show_order, store_order),
+ 	__ATTR(enable_3d, S_IRUGO | S_IWUSR, show_enable_3d, store_enable_3d),
+ 	__ATTR(preblend_enable, S_IRUGO | S_IWUSR, show_preblend_enable, store_preblend_enable),
+ 	__ATTR(free_scale, S_IRUGO | S_IWUSR, show_free_scale, store_free_scale),
+-	__ATTR(scale_axis, S_IRUGO | S_IWUSR | S_IWGRP, show_scale_axis, store_scale_axis),
++	__ATTR(scale_axis, S_IRUGO|S_IWUSR, show_scale_axis, store_scale_axis),
+ 	__ATTR(scale_width, S_IRUGO | S_IWUSR, show_scale_width, store_scale_width),
+ 	__ATTR(scale_height, S_IRUGO | S_IWUSR, show_scale_height, store_scale_height),
+ 	__ATTR(color_key, S_IRUGO | S_IWUSR, show_color_key, store_color_key),
+@@ -1133,11 +1275,16 @@ static struct device_attribute osd_ext_attrs[] = {
+ 	__ATTR(block_windows, S_IRUGO | S_IWUSR, show_block_windows, store_block_windows),
+ 	__ATTR(block_mode, S_IRUGO | S_IWUSR, show_block_mode, store_block_mode),
+ 	__ATTR(free_scale_axis, S_IRUGO | S_IWUSR, show_free_scale_axis, store_free_scale_axis),
++	__ATTR(request2XScale, S_IRUGO|S_IWUSR, show_request_2xscale, store__request_2xscale),
+ 	__ATTR(osd_info_msg, S_IRUGO | S_IWUSR, NULL, store_osd_info),
+-	__ATTR(request2XScale, S_IRUGO | S_IWUSR, show_request_2xscale, store__request_2xscale),
+ 	__ATTR(video_hole, S_IRUGO | S_IWUSR, show_video_hole, store__video_hole),
++	__ATTR(window_axis, S_IRUGO|S_IWUSR, show_window_axis, store_window_axis),
++	__ATTR(freescale_mode, S_IRUGO|S_IWUSR, show_freescale_mode, store_freescale_mode),
+ 	__ATTR(clone, S_IRUGO|S_IWUSR, show_clone, store_clone),
+ 	__ATTR(angle, S_IRUGO|S_IWUSR, show_angle, store_angle),
++	__ATTR(prot_on, S_IRUGO|S_IWUSR, show_rotate_on, store_rotate_on),
++	__ATTR(prot_angle, S_IRUGO|S_IWUSR, show_rotate_angle, store_rotate_angle),
++	__ATTR(prot_canvas, S_IRUGO|S_IWUSR, show_prot_canvas, store_prot_canvas),
+ };
+ 
+ #ifdef CONFIG_PM
+@@ -1153,15 +1300,15 @@ static int osd_ext_suspend(struct platform_device *pdev, pm_message_t state)
+ 
+ static int osd_ext_resume(struct platform_device * dev)
+ {
+-#ifdef CONFIG_HAS_EARLYSUSPEND
+-    if (early_suspend_flag)
+-        return 0;
+-#endif
+ #ifdef CONFIG_SCREEN_ON_EARLY
+ 	if (early_resume_flag) {
+ 		early_resume_flag = 0;
+ 		return 0;
+ 	}
++#endif
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    if (early_suspend_flag)
++        return 0;
+ #endif
+ 	osddev_ext_resume();
+ 	return 0;
+@@ -1174,7 +1321,7 @@ static void osd_ext_early_suspend(struct early_suspend *h)
+ 	if (early_suspend_flag) {
+ 		return;
+ 	}
+-	osd_ext_suspend((struct platform_device *)h->param, PMSG_SUSPEND);
++	osddev_ext_suspend();
+ 	early_suspend_flag = 1;
+ }
+ 
+@@ -1184,7 +1331,7 @@ static void osd_ext_late_resume(struct early_suspend *h)
+ 		return;
+ 	}
+ 	early_suspend_flag = 0;
+-	osd_ext_resume((struct platform_device *)h->param);
++	osddev_ext_resume();
+ }
+ #endif
+ 
+@@ -1350,7 +1497,6 @@ osd_ext_probe(struct platform_device *pdev)
+ 	early_suspend.level = EARLY_SUSPEND_LEVEL_STOP_DRAWING;
+ 	early_suspend.suspend = osd_ext_early_suspend;
+ 	early_suspend.resume = osd_ext_late_resume;
+-	early_suspend.param = pdev;
+ 	register_early_suspend(&early_suspend);
+ #endif
+ 
+@@ -1434,7 +1580,8 @@ static const struct of_device_id meson_fbext_dt_match[]={
+ 	{},
+ };
+ 
+-static struct platform_driver osd_ext_driver = {
++static struct platform_driver
++osd_ext_driver = {
+ 	.probe      = osd_ext_probe,
+ 	.remove     = osd_ext_remove,
+ #ifdef CONFIG_PM
+@@ -1463,7 +1610,7 @@ osd_ext_init_module(void)
+ #endif
+ 
+ 	if (platform_driver_register(&osd_ext_driver)) {
+-		amlog_level(LOG_LEVEL_HIGH, "failed to register osd driver\n");
++		amlog_level(LOG_LEVEL_HIGH, "failed to register osd ext driver\n");
+ 		return -ENODEV;
+ 	}
+ 
+diff --git a/drivers/amlogic/display/osd_ext/osd_main.h b/drivers/amlogic/display/osd_ext/osd_main.h
+index bfea23cb813e..45d27b192155 100755
+--- a/drivers/amlogic/display/osd_ext/osd_main.h
++++ b/drivers/amlogic/display/osd_ext/osd_main.h
+@@ -153,5 +153,10 @@ typedef struct {
+ #define FBIOPUT_OSD_BLOCK_MODE          0x450e
+ #define FBIOGET_OSD_FREE_SCALE_AXIS     0x450f
+ #define FBIOPUT_OSD_FREE_SCALE_AXIS     0x4510
++#define FBIOPUT_OSD_FREE_SCALE_MODE  0x4511
++#define  FBIOGET_OSD_WINDOW_AXIS  	0x4512
++#define  FBIOPUT_OSD_WINDOW_AXIS  	0x4513
++#define FBIOPUT_OSD_ROTATE_ON   	0x4516
++#define FBIOPUT_OSD_ROTATE_ANGLE	0x4517
+ 
+ #endif /* OSD_MAIN_H */
+diff --git a/drivers/amlogic/display/osd_ext/osd_prot.c b/drivers/amlogic/display/osd_ext/osd_prot.c
+new file mode 100755
+index 000000000000..6fec94747c1f
+--- /dev/null
++++ b/drivers/amlogic/display/osd_ext/osd_prot.c
+@@ -0,0 +1,132 @@
++/*
++ * Amlogic Meson
++ * frame buffer driver
++ *
++ * Copyright (C) 2009 Amlogic, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the named License,
++ * or any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA
++ *
++ * Author:  Amlogic Platform Group
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/spinlock.h>
++#include <plat/regops.h>
++#include <mach/am_regs.h>
++#include <linux/irqreturn.h>
++#include <linux/errno.h>
++#include <linux/irq.h>
++#include <linux/slab.h>
++#include <linux/interrupt.h>
++#include <linux/amlogic/osd/osd.h>
++#include <linux/amlogic/vout/vout_notify.h>
++#include <linux/amlogic/amports/canvas.h>
++#include "osd_log.h"
++#include <linux/amlogic/amlog.h>
++#include "osd_prot.h"
++
++
++
++int osd_ext_set_prot(unsigned char   x_rev,
++                unsigned char   y_rev,
++                unsigned char   bytes_per_pixel,
++                unsigned char   conv_422to444,
++                unsigned char   little_endian,
++                unsigned int    hold_lines,
++                unsigned int    x_start,
++                unsigned int    x_end,
++                unsigned int    y_start,
++                unsigned int    y_end,
++                unsigned int    y_len_m1,
++                unsigned char   y_step,
++                unsigned char   pat_start_ptr,
++                unsigned char   pat_end_ptr,
++                unsigned long   pat_val,
++                unsigned int    canv_addr,
++                unsigned int    cid_val,
++                unsigned char   cid_mode,
++                unsigned char   cugt,
++                unsigned char   req_onoff_en,
++                unsigned int    req_on_max,
++                unsigned int    req_off_min,
++                unsigned char   osd_index,
++                unsigned char   on)
++{
++	unsigned long   data32;
++	if(!on){
++		aml_clr_reg32_mask(P_VPU_PROT1_MMC_CTRL,0xf<<12);  //no one use prot1.
++		aml_clr_reg32_mask(P_VPU_PROT1_CLK_GATE, 1<<0);
++		if(osd_index==OSD1){
++			aml_set_reg32_bits(P_VIU2_OSD1_BLK0_CFG_W0, 1, 15, 1);//switch back to little endian
++			aml_write_reg32(P_VIU2_OSD1_PROT_CTRL,0);
++		}else if(osd_index==OSD2){
++			aml_set_reg32_bits(P_VIU2_OSD2_BLK0_CFG_W0, 1, 15, 1);//switch back to little endian
++			aml_write_reg32(P_VIU2_OSD2_PROT_CTRL,0);
++		}
++		
++		return 0;
++	}
++	if(osd_index==OSD1){
++		aml_set_reg32_bits(P_VPU_PROT1_MMC_CTRL, 4, 12, 4);//bit[12..15] OSD1 OSD2 OSD3 OSD4
++		aml_write_reg32(P_VIU2_OSD1_PROT_CTRL,1<<15|y_len_m1);
++		aml_clr_reg32_mask(P_VIU2_OSD1_BLK0_CFG_W0, 1<<15); //before rotate set big endian
++	}else if(osd_index==OSD2){
++		aml_set_reg32_bits(P_VPU_PROT1_MMC_CTRL, 8, 12, 4);//bit[12..15] OSD1 OSD2 OSD3 OSD4
++		aml_write_reg32(P_VIU2_OSD2_PROT_CTRL,1<<15|y_len_m1);
++		aml_clr_reg32_mask(P_VIU2_OSD2_BLK0_CFG_W0, 1<<15); //before rotate set big endian
++	}
++
++    data32  = (x_end    << 16)  |
++              (x_start  << 0);
++    aml_write_reg32(P_VPU_PROT1_X_START_END,  data32);
++
++    data32  = (y_end    << 16)  |
++              (y_start  << 0);
++    aml_write_reg32(P_VPU_PROT1_Y_START_END,  data32);
++
++    data32  = (y_step   << 16)  |
++              (y_len_m1 << 0);
++    aml_write_reg32(P_VPU_PROT1_Y_LEN_STEP,   data32);
++
++    data32  = (pat_start_ptr    << 4)   |
++              (pat_end_ptr      << 0);
++    aml_write_reg32(P_VPU_PROT1_RPT_LOOP,     data32);
++
++    aml_write_reg32(P_VPU_PROT1_RPT_PAT,      pat_val);
++
++    data32  = (cugt         << 20)  |
++              (cid_mode     << 16)  |
++              (cid_val      << 8)   |
++              (canv_addr    << 0);
++    aml_write_reg32(P_VPU_PROT1_DDR,          data32);
++
++    data32  = (hold_lines       << 8)   |
++              (little_endian    << 7)   |
++              (conv_422to444    << 6)   |
++              (bytes_per_pixel  << 4)   |
++              (y_rev            << 3)   |
++              (x_rev            << 2)   |
++              (1                << 0);      // [1:0] req_en: 0=Idle; 1=Rotate mode; 2=FIFO mode.
++    aml_write_reg32(P_VPU_PROT1_GEN_CNTL,     data32);
++
++    data32  = (req_onoff_en << 31)  |
++              (req_off_min  << 16)  |
++              (req_on_max   << 0);
++    aml_write_reg32(P_VPU_PROT1_REQ_ONOFF,    data32);
++    aml_write_reg32(P_VPU_PROT1_CLK_GATE, 1); // Enable clock
++    return 0;
++}   
++
+diff --git a/drivers/amlogic/display/osd_ext/osd_prot.h b/drivers/amlogic/display/osd_ext/osd_prot.h
+new file mode 100755
+index 000000000000..8e7fe670c0a4
+--- /dev/null
++++ b/drivers/amlogic/display/osd_ext/osd_prot.h
+@@ -0,0 +1,41 @@
++#ifndef  _OSD_PROT_H
++#define _OSD_PROT_H
++#include "osd_hw.h"
++
++#define  CUGT		0
++#define  CID_VALUE  	161
++#define  CID_MODE 	6
++#define  REQ_ONOFF_EN	0
++#define  REQ_ON_MAX	0
++#define  REQ_OFF_MIN	0
++#define  PAT_VAL	0x00000000
++#define  PAT_START_PTR  1
++#define  PAT_END_PTR	1
++#define  HOLD_LINES	14
++#define  Y_STEP		0
++
++extern int osd_ext_set_prot(unsigned char   x_rev,
++                unsigned char   y_rev,
++                unsigned char   bytes_per_pixel,
++                unsigned char   conv_422to444,
++                unsigned char   little_endian,
++                unsigned int    hold_lines,
++                unsigned int    x_start,
++                unsigned int    x_end,
++                unsigned int    y_start,
++                unsigned int    y_end,
++                unsigned int    y_len_m1,
++                unsigned char   y_step,
++                unsigned char   pat_start_ptr,
++                unsigned char   pat_end_ptr,
++                unsigned long   pat_val,
++                unsigned int    canv_addr,
++                unsigned int    cid_val,
++                unsigned char   cid_mode,
++                unsigned char   cugt,
++                unsigned char   req_onoff_en,
++                unsigned int    req_on_max,
++                unsigned int    req_off_min,
++                unsigned char	osd_index,
++                unsigned char 	on_off);
++#endif
+diff --git a/drivers/amlogic/display/vout/enc_clk_config.c b/drivers/amlogic/display/vout/enc_clk_config.c
+index f51d9c0aabaf..dc483af68858 100755
+--- a/drivers/amlogic/display/vout/enc_clk_config.c
++++ b/drivers/amlogic/display/vout/enc_clk_config.c
+@@ -138,19 +138,7 @@ int set_viu_path(unsigned viu_channel_sel, viu_type_e viu_type_sel)
+ {
+     if((viu_channel_sel > 2) || (viu_channel_sel == 0))
+         return -1;
+-#ifdef CONFIG_ARCH_MESON6
+-    printk("VPU_VIU_VENC_MUX_CTRL: 0x%x\n", READ_CBUS_REG(VPU_VIU_VENC_MUX_CTRL));
+-    if(viu_channel_sel == 1){
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, viu_type_sel, 0, 2);
+-        printk("viu chan = 1\n");
+-    }
+-    else{
+-        //viu_channel_sel ==2
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, viu_type_sel, 2, 2);
+-        printk("viu chan = 2\n");
+-    }
+-    printk("VPU_VIU_VENC_MUX_CTRL: 0x%x\n", READ_CBUS_REG(VPU_VIU_VENC_MUX_CTRL));
+-#endif
++
+ #ifdef CONFIG_ARCH_MESON8
+     printk("VPU_VIU_VENC_MUX_CTRL: 0x%x\n", aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL));
+     if(viu_channel_sel == 1){
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index 8b6d745b0d50..7fa1e7836922 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -285,9 +285,9 @@ int tvoutc_setmode(tvmode_t mode)
+ 		case TVMODE_480CVBS:
+ 		case TVMODE_576I:
+ 		case TVMODE_576CVBS:
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 1, 0, 2); //reg0x271a, select ENCI to VIU1
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 1, 4, 4); //reg0x271a, Select encI clock to VDIN            
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 1, 8, 4); //reg0x271a,Enable VIU of ENC_I domain to VDIN;
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 1, 0, 2); //reg0x271a, select ENCI to VIU1
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 1, 4, 4); //reg0x271a, Select encI clock to VDIN
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 1, 8, 4); //reg0x271a,Enable VIU of ENC_I domain to VDIN;
+ 			  break;
+ 		case TVMODE_480P:
+ 		case TVMODE_576P:
+@@ -302,9 +302,9 @@ int tvoutc_setmode(tvmode_t mode)
+         case TVMODE_4K2K_25HZ:
+         case TVMODE_4K2K_24HZ:
+         case TVMODE_4K2K_SMPTE:
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 0, 2); //reg0x271a, select ENCP to VIU1
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 4, 4); //reg0x271a, Select encP clock to VDIN            
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 8, 4); //reg0x271a,Enable VIU of ENC_P domain to VDIN;
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 0, 2); //reg0x271a, select ENCP to VIU1
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 4, 4); //reg0x271a, Select encP clock to VDIN
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 8, 4); //reg0x271a,Enable VIU of ENC_P domain to VDIN;
+         break;		    
+ 		default:
+ 			printk(KERN_ERR "unsupport tv mode,video clk is not set!!\n");	
+diff --git a/drivers/amlogic/display/vout2/nulldisp.c b/drivers/amlogic/display/vout2/nulldisp.c
+index 0c4ff887eac1..af04ec83a674 100755
+--- a/drivers/amlogic/display/vout2/nulldisp.c
++++ b/drivers/amlogic/display/vout2/nulldisp.c
+@@ -74,11 +74,11 @@ static const vinfo_t *get_valid_vinfo(char  *mode)
+ static vmode_t nulldisp_validate_vmode(char *mode)
+ {
+     const vinfo_t *info = get_valid_vinfo(mode);
+-    int viu1_select = READ_MPEG_REG(VPU_VIU_VENC_MUX_CTRL)&0x3;
++    int viu1_select = aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0x3;
+     
+ 	DisableVideoLayer();
+ 	
+-    WRITE_MPEG_REG_BITS (VPU_VIU_VENC_MUX_CTRL, (viu1_select+1)&0x3, 2, 2); //viu2_select should be different from viu1_select (to fix viu1 video smooth problem)
++    aml_set_reg32_bits (P_VPU_VIU_VENC_MUX_CTRL, (viu1_select+1)&0x3, 2, 2); //viu2_select should be different from viu1_select (to fix viu1 video smooth problem)
+ 
+     if (info)
+         return info->mode;
+diff --git a/drivers/amlogic/display/vout2/tvoutc2.c b/drivers/amlogic/display/vout2/tvoutc2.c
+index 850176b39daf..a97c315a4989 100755
+--- a/drivers/amlogic/display/vout2/tvoutc2.c
++++ b/drivers/amlogic/display/vout2/tvoutc2.c
+@@ -268,10 +268,10 @@ int tvoutc_setmode2(tvmode_t mode)
+     
+         //WRITE_MPEG_REG(HHI_VIID_CLK_CNTL, 0x8001f); //reg 0x104b, select vid_pll_clk as source of v2_clk_divN
+         //WRITE_MPEG_REG(HHI_VID_CLK_DIV, (READ_MPEG_REG(HHI_VID_CLK_DIV)&(~(0xff<<24)))|(0x88<<24)); // reg 0x1059, select cts_encp_clk and cts_enci_clk from v2_clk_div1
+-        WRITE_CBUS_REG_BITS(VPU_VIU_VENC_MUX_CTRL, 2, 2, 2); //reg0x271a, select ENCP to VIU2
++        aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 2, 2, 2); //reg0x271a, select ENCP to VIU2
+ 
+     
+-    WRITE_MPEG_REG(VPP2_POSTBLEND_H_SIZE, tvinfoTab[mode].xres);
++    aml_write_reg32(P_VPP2_POSTBLEND_H_SIZE, tvinfoTab[mode].xres);
+     
+ // For debug only
+ #if 0
+diff --git a/drivers/amlogic/display/vout2/tvregs.h b/drivers/amlogic/display/vout2/tvregs.h
+index 7efd28924ac3..21bf1e73d225 100755
+--- a/drivers/amlogic/display/vout2/tvregs.h
++++ b/drivers/amlogic/display/vout2/tvregs.h
+@@ -49,560 +49,625 @@ typedef struct tvinfo_s {
+ 25M
+ */
+ static const  reg_t tvreg_vclk_sd[]={
+-	{HHI_VID_PLL_CNTL,VIDEO_CLOCK_SD_24},//SD.24
+-    {HHI_VID_PLL_CNTL,VIDEO_CLOCK_SD_25},//SD,25  
++	{P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_SD_24},//SD.24
++    {P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_SD_25},//SD,25
+ };
+ 
+ static const  reg_t tvreg_vclk_hd[]={
+-    {HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_24},//HD,24
+-    {HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_25},//HD,25    
++    {P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_24},//HD,24
++    {P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_25},//HD,25
+ };
+ 
+ static const  reg_t tvregs_720p[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {HHI_VID_CLK_CNTL,           0x0,},
++    {P_HHI_VID_CLK_CNTL,           0x0,},
+ #endif
+-    {HHI_VID_PLL_CNTL2,          0x00040003},
+-    {HHI_VID_PLL_CNTL3,          0x40e8},
+-    {HHI_HDMI_AFC_CNTL,          0x8c0000c3},
+-    {HHI_VID_PLL_CNTL,           0x0001043e,},
+-    {HHI_VID_DIVIDER_CNTL,       0x00010843,},
++    {P_HHI_VID_PLL_CNTL2,          0x00040003},
++    {P_HHI_VID_PLL_CNTL3,          0x40e8},
++    {P_HHI_HDMI_AFC_CNTL,          0x8c0000c3},
++    {P_HHI_VID_PLL_CNTL,           0x0001043e,},
++    {P_HHI_VID_DIVIDER_CNTL,       0x00010843,},
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {HHI_VID_CLK_DIV,            0x100},
+-
+-    {HHI_VID_CLK_CNTL,           0x80000,},
+-    {HHI_VID_CLK_CNTL,           0x88001,},
+-    {HHI_VID_CLK_CNTL,           0x80003,},
+-
+-    {HHI_VIID_CLK_DIV,           0x00000101,},
++    {P_HHI_VID_CLK_DIV,            0x100},
++    {P_HHI_VID_CLK_CNTL,           0x80000,},
++    {P_HHI_VID_CLK_CNTL,           0x88001,},
++    {P_HHI_VID_CLK_CNTL,           0x80003,},
++    {P_HHI_VIID_CLK_DIV,           0x00000101,},
+ #endif
+ 
+-    {ENCP_VIDEO_FILT_CTRL,       0x0052,},
+-    {VENC_DVI_SETTING,           0x2029,},
+-    {ENCP_VIDEO_MODE,            0x0040,},
+-    {ENCP_VIDEO_MODE_ADV,        0x0019,},
+-    {ENCP_VIDEO_YFP1_HTIME,      648,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      3207,  },
+-    {ENCP_VIDEO_MAX_PXCNT,       3299,  },
+-    {ENCP_VIDEO_HSPULS_BEGIN,    80,    },
+-    {ENCP_VIDEO_HSPULS_END,      240,   },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   80,    },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    688,   },
+-    {ENCP_VIDEO_VSPULS_END,      3248,  },
+-    {ENCP_VIDEO_VSPULS_BLINE,    4,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    8,     },
+-    {ENCP_VIDEO_EQPULS_BLINE,    4,     },
+-    {ENCP_VIDEO_EQPULS_ELINE,    8,     },
+-    {ENCP_VIDEO_HAVON_BEGIN,     648,   },
+-    {ENCP_VIDEO_HAVON_END,       3207,  },
+-    {ENCP_VIDEO_VAVON_BLINE,     29,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     748,   },
+-    {ENCP_VIDEO_HSO_BEGIN,       256    },
+-    {ENCP_VIDEO_HSO_END,         168,   },
+-    {ENCP_VIDEO_VSO_BEGIN,       168,   },
+-    {ENCP_VIDEO_VSO_END,         256,   },
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
+-    {ENCP_VIDEO_MAX_LNCNT,       749,   },
+-    {VENC_VIDEO_PROG_MODE,       0x100, },
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {VENC_UPSAMPLE_CTRL0,        0x9061,},
+-    {VENC_UPSAMPLE_CTRL1,        0xa061,},
+-    {VENC_UPSAMPLE_CTRL2,        0xb061,},
+-    {VENC_VDAC_DACSEL0,          0x0001,},
+-    {VENC_VDAC_DACSEL1,          0x0001,},
+-    {VENC_VDAC_DACSEL2,          0x0001,},
+-    {VENC_VDAC_DACSEL3,          0x0001,},
+-    {VENC_VDAC_DACSEL4,          0x0001,},
+-    {VENC_VDAC_DACSEL5,          0x0001,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x0052,},
++    {P_VENC_DVI_SETTING,           0x2029,},
++    {P_ENCP_VIDEO_MODE,            0x0040,},
++    {P_ENCP_VIDEO_MODE_ADV,        0x0019,},
++    {P_ENCP_VIDEO_YFP1_HTIME,      648,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      3207,  },
++    {P_ENCP_VIDEO_MAX_PXCNT,       3299,  },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    80,    },
++    {P_ENCP_VIDEO_HSPULS_END,      240,   },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   80,    },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    688,   },
++    {P_ENCP_VIDEO_VSPULS_END,      3248,  },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    4,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    8,     },
++    {P_ENCP_VIDEO_EQPULS_BLINE,    4,     },
++    {P_ENCP_VIDEO_EQPULS_ELINE,    8,     },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     648,   },
++    {P_ENCP_VIDEO_HAVON_END,       3207,  },
++    {P_ENCP_VIDEO_VAVON_BLINE,     29,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     748,   },
++    {P_ENCP_VIDEO_HSO_BEGIN,       256    },
++    {P_ENCP_VIDEO_HSO_END,         168,   },
++    {P_ENCP_VIDEO_VSO_BEGIN,       168,   },
++    {P_ENCP_VIDEO_VSO_END,         256,   },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_MAX_LNCNT,       749,   },
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,          0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,        0x9061,},
++    {P_VENC_UPSAMPLE_CTRL1,        0xa061,},
++    {P_VENC_UPSAMPLE_CTRL2,        0xb061,},
++    {P_VENC_VDAC_DACSEL0,          0x0001,},
++    {P_VENC_VDAC_DACSEL1,          0x0001,},
++    {P_VENC_VDAC_DACSEL2,          0x0001,},
++    {P_VENC_VDAC_DACSEL3,          0x0001,},
++    {P_VENC_VDAC_DACSEL4,          0x0001,},
++    {P_VENC_VDAC_DACSEL5,          0x0001,},
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {VPU_VIU_VENC_MUX_CTRL,      0x000a,},
++    {P_VPU_VIU_VENC_MUX_CTRL,      0x000a,},
+ #endif
+-    {VENC_VDAC_FIFO_CTRL,        0x1000,},
+-    {ENCP_DACSEL_0,              0x3210,},
+-    {ENCP_DACSEL_1,              0x0054,},
+-    {ENCP_VIDEO_EN,              1,     },
+-    {ENCI_VIDEO_EN,              0,     },
++    {P_VENC_VDAC_FIFO_CTRL,        0x1000,},
++    {P_ENCP_DACSEL_0,              0x3210,},
++    {P_ENCP_DACSEL_1,              0x0054,},
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const  reg_t tvregs_720p_50hz[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
+-	{HHI_VID_CLK_DIV,			 1		},
+-    {HHI_VID_CLK_CNTL,        	 0x0421,},
+-    {ENCP_VIDEO_FILT_CTRL,       0x0052,},
++    {P_VENC_VDAC_SETTING,          0xff,  },
++	{P_HHI_VID_CLK_DIV,			 1		},
++    {P_HHI_VID_CLK_CNTL,         0x0421,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x0052,},
+ 
+-    {VENC_DVI_SETTING,           0x202d,},
+-    {ENCP_VIDEO_MAX_PXCNT,       3959,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       749,   },
++    {P_VENC_DVI_SETTING,           0x202d,},
++    {P_ENCP_VIDEO_MAX_PXCNT,       3959,  },
++    {P_ENCP_VIDEO_MAX_LNCNT,       749,   },
+ 
+      //analog vidoe position in horizontal
+-    {ENCP_VIDEO_HSPULS_BEGIN,    80,    },
+-    {ENCP_VIDEO_HSPULS_END,      240,   },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   80,    },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    80,    },
++    {P_ENCP_VIDEO_HSPULS_END,      240,   },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   80,    },
+ 
+     //DE position in horizontal
+-    {ENCP_VIDEO_HAVON_BEGIN,     648,   },
+-    {ENCP_VIDEO_HAVON_END,       3207,  },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     648,   },
++    {P_ENCP_VIDEO_HAVON_END,       3207,  },
+ 
+     //ditital hsync positon in horizontal
+-    {ENCP_VIDEO_HSO_BEGIN,       128 ,},
+-    {ENCP_VIDEO_HSO_END,         208 , },
++    {P_ENCP_VIDEO_HSO_BEGIN,       128 ,},
++    {P_ENCP_VIDEO_HSO_END,         208 , },
+ 
+     /* vsync horizontal timing */
+-    {ENCP_VIDEO_VSPULS_BEGIN,    688,   },
+-    {ENCP_VIDEO_VSPULS_END,      3248,  },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    688,   },
++    {P_ENCP_VIDEO_VSPULS_END,      3248,  },
+ 
+     /* vertical timing settings */
+-    {ENCP_VIDEO_VSPULS_BLINE,    4,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    8,     },
+-    {ENCP_VIDEO_EQPULS_BLINE,    4,     },
+-    {ENCP_VIDEO_EQPULS_ELINE,    8,     },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    4,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    8,     },
++    {P_ENCP_VIDEO_EQPULS_BLINE,    4,     },
++    {P_ENCP_VIDEO_EQPULS_ELINE,    8,     },
+ 
+     //DE position in vertical
+-    {ENCP_VIDEO_VAVON_BLINE,     29,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     748,   },
++    {P_ENCP_VIDEO_VAVON_BLINE,     29,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     748,   },
+ 
+     //adjust the vsync start point and end point
+-    {ENCP_VIDEO_VSO_BEGIN,       128,},  //168,   },
+-    {ENCP_VIDEO_VSO_END,         128, },  //256,   },
++    {P_ENCP_VIDEO_VSO_BEGIN,       128,},  //168,   },
++    {P_ENCP_VIDEO_VSO_END,         128, },  //256,   },
+ 
+     //adjust the vsync start line and end line
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
+ 
+     /* filter & misc settings */
+-    {ENCP_VIDEO_YFP1_HTIME,      648,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      3207,  },
++    {P_ENCP_VIDEO_YFP1_HTIME,      648,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      3207,  },
+ 
+ 
+-    {VENC_VIDEO_PROG_MODE,       0x100, },
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },
+     {ENCP_VIDEO_MODE,            0x0040,},  //Enable Hsync and equalization pulse switch in center
+-    {ENCP_VIDEO_MODE_ADV,        0x0019,},//bit6:swap PbPr; bit4:YPBPR gain as HDTV type;
++    {P_ENCP_VIDEO_MODE_ADV,        0x0019,},//bit6:swap PbPr; bit4:YPBPR gain as HDTV type;
+                                                  //bit3:Data input from VFIFO;bit[2}0]:repreat pixel a time
+ 
+-     {ENCP_VIDEO_SYNC_MODE,       0x407,  },//Video input Synchronization mode ( bit[7:0] -- 4:Slave mode, 7:Master mode)
++     {P_ENCP_VIDEO_SYNC_MODE,       0x407,  },//Video input Synchronization mode ( bit[7:0] -- 4:Slave mode, 7:Master mode)
+                                                  //bit[15:6] -- adjust the vsync vertical position
+-    {ENCP_VIDEO_YC_DLY,          0,     },      //Y/Cb/Cr delay
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCP_VIDEO_EN,              1,     },
+-    {ENCI_VIDEO_EN,              0,     },
++    {P_ENCP_VIDEO_YC_DLY,          0,     },      //Y/Cb/Cr delay
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_480i[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
+-    {HHI_VID_CLK_DIV,            4,     },
+-    {HHI_VID_CLK_CNTL,        	 0x05a1,},
+-    {ENCI_CFILT_CTRL,            0x0810,},
+-    {VENC_DVI_SETTING,           0,     },
+-    {ENCI_SYNC_HSO_BEGIN,        5,     },
+-    {ENCI_SYNC_HSO_END,          129,   },
+-    {ENCI_SYNC_VSO_EVNLN,        0x0003 },
+-    {ENCI_SYNC_VSO_ODDLN,        0x0104 },
+-    {ENCI_MACV_MAX_AMP,          0x810b },
+-    {VENC_VIDEO_PROG_MODE,       0xff   },
+-    {ENCI_VIDEO_MODE,            0x08   },
+-    {ENCI_VIDEO_MODE_ADV,        0x26,  },
+-    {ENCI_VIDEO_SCH,             0x20,  },
+-    {ENCI_SYNC_MODE,             0x07,  },
+-    {ENCI_YC_DELAY,              0x341, },
+-    {ENCP_VFIFO2VD_PIXEL_START,       0x00f3 },
+-    {ENCP_VFIFO2VD_PIXEL_END,         0x0693 },
+-    {ENCP_VFIFO2VD_LINE_TOP_START,    0x0012 },
+-    {ENCP_VFIFO2VD_LINE_TOP_END,      0x0102 },
+-    {ENCP_VFIFO2VD_LINE_BOT_START,    0x0013 },
+-    {ENCP_VFIFO2VD_LINE_BOT_END,      0x0103 },
+-    {ENCP_VFIFO2VD_CTL,              0x4e01, },
+-    {ENCI_DBG_PX_RST,            0,     },
+-    {VENC_INTCTRL,               0x2,   },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCP_VIDEO_EN,              0,     },
+-    {ENCI_VIDEO_EN,              1,     },
+-    {MREG_END_MARKER,            0      }
++    {P_VENC_VDAC_SETTING,            0xff,  },
++    {P_ENCI_CFILT_CTRL,              0x12,},
++    {P_ENCI_CFILT_CTRL2,              0x12,},
++    {P_VENC_DVI_SETTING,             0,     },
++    {P_ENCI_VIDEO_MODE,              0,     },
++    {P_ENCI_VIDEO_MODE_ADV,          0,     },
++    {P_ENCI_SYNC_HSO_BEGIN,          5,     },
++    {P_ENCI_SYNC_HSO_END,            129,   },
++    {P_ENCI_SYNC_VSO_EVNLN,          0x0003 },
++    {P_ENCI_SYNC_VSO_ODDLN,          0x0104 },
++    {P_ENCI_MACV_MAX_AMP,            0x810b },
++    {P_VENC_VIDEO_PROG_MODE,         0xf0   },
++    {P_ENCI_VIDEO_MODE,              0x08   },
++    {P_ENCI_VIDEO_MODE_ADV,          0x26,  },
++    {P_ENCI_VIDEO_SCH,               0x20,  },
++    {P_ENCI_SYNC_MODE,               0x07,  },
++    {P_ENCI_YC_DELAY,                0x333, },
++    {P_ENCI_VFIFO2VD_PIXEL_START,    0xf3,  },
++    {P_ENCI_VFIFO2VD_PIXEL_END,      0x0693,},
++    {P_ENCI_VFIFO2VD_LINE_TOP_START, 0x12,  },
++    {P_ENCI_VFIFO2VD_LINE_TOP_END,   0x102, },
++    {P_ENCI_VFIFO2VD_LINE_BOT_START, 0x13,  },
++    {P_ENCI_VFIFO2VD_LINE_BOT_END,   0x103, },
++    {P_VENC_SYNC_ROUTE,              0,     },
++    {P_ENCI_DBG_PX_RST,              0,     },
++    {P_VENC_INTCTRL,                 0x2,   },
++    {P_ENCI_VFIFO2VD_CTL,            0x4e01,},
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,          0x0061,},
++    {P_VENC_UPSAMPLE_CTRL1,          0x4061,},
++    {P_VENC_UPSAMPLE_CTRL2,          0x5061,},
++    {P_VENC_VDAC_DACSEL0,            0x0000,},
++    {P_VENC_VDAC_DACSEL1,            0x0000,},
++    {P_VENC_VDAC_DACSEL2,            0x0000,},
++    {P_VENC_VDAC_DACSEL3,            0x0000,},
++    {P_VENC_VDAC_DACSEL4,            0x0000,},
++    {P_VENC_VDAC_DACSEL5,            0x0000,},
++    {P_VENC_VDAC_FIFO_CTRL,          0x2000,},
++    {P_ENCI_DACSEL_0,                0x0011 },
++    {P_ENCI_DACSEL_1,                0x87   },
++    {P_ENCI_VIDEO_EN,                1,     },
++    {P_HHI_VDAC_CNTL0,               0x650001   },
++    {P_HHI_VDAC_CNTL1,               0x1        },
++    {P_ENCI_VIDEO_SAT,               0x7        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL0,    0x1        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,    0xfc48     },
++    {MREG_END_MARKER,              0      }
+ };
+ 
+ static const reg_t tvregs_480cvbs[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
+-    {HHI_VID_CLK_DIV,            4,     },
+-    {HHI_VID_CLK_CNTL,        	 0x05a1,},
+-    {ENCI_CFILT_CTRL,            0x0810,},
+-    {VENC_DVI_SETTING,           0,     },
+-    {ENCI_SYNC_HSO_BEGIN,        5,     },
+-    {ENCI_SYNC_HSO_END,          129,   },
+-    {ENCI_SYNC_VSO_EVNLN,        0x0003 },
+-    {ENCI_SYNC_VSO_ODDLN,        0x0104 },
+-    {ENCI_MACV_MAX_AMP,          0x810b },
+-    {VENC_VIDEO_PROG_MODE,       0xff   },
+-    {ENCI_VIDEO_MODE,            0x08   },
+-    {ENCI_VIDEO_MODE_ADV,        0x26,  },
+-    {ENCI_VIDEO_SCH,             0x20,  },
+-    {ENCI_SYNC_MODE,             0x07,  },
+-    {ENCI_YC_DELAY,              0x341, },
+-    {ENCP_VFIFO2VD_PIXEL_START,       0x00f3 },
+-    {ENCP_VFIFO2VD_PIXEL_END,         0x0693 },
+-    {ENCP_VFIFO2VD_LINE_TOP_START,    0x0012 },
+-    {ENCP_VFIFO2VD_LINE_TOP_END,      0x0102 },
+-    {ENCP_VFIFO2VD_LINE_BOT_START,    0x0013 },
+-    {ENCP_VFIFO2VD_LINE_BOT_END,      0x0103 },
+-    {ENCP_VFIFO2VD_CTL,              0x4e01, },
+-    {ENCI_DBG_PX_RST,            0,     },
+-    {VENC_INTCTRL,               0x2,   },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCP_VIDEO_EN,              0,     },
+-    {ENCI_VIDEO_EN,              1,     },
+-    {MREG_END_MARKER,            0      }
++     {P_VENC_VDAC_SETTING,            0xff,  },
++    {P_ENCI_CFILT_CTRL,              0x12,},
++    {P_ENCI_CFILT_CTRL2,              0x12,},
++    {P_VENC_DVI_SETTING,             0,     },
++    {P_ENCI_VIDEO_MODE,              0,     },
++    {P_ENCI_VIDEO_MODE_ADV,          0,     },
++    {P_ENCI_SYNC_HSO_BEGIN,          5,     },
++    {P_ENCI_SYNC_HSO_END,            129,   },
++    {P_ENCI_SYNC_VSO_EVNLN,          0x0003 },
++    {P_ENCI_SYNC_VSO_ODDLN,          0x0104 },
++    {P_ENCI_MACV_MAX_AMP,            0x810b },
++    {P_VENC_VIDEO_PROG_MODE,         0xf0   },
++    {P_ENCI_VIDEO_MODE,              0x08   },
++    {P_ENCI_VIDEO_MODE_ADV,          0x26,  },
++    {P_ENCI_VIDEO_SCH,               0x20,  },
++    {P_ENCI_SYNC_MODE,               0x07,  },
++    {P_ENCI_YC_DELAY,                0x333, },
++    {P_ENCI_VFIFO2VD_PIXEL_START,    0xf3,  },
++    {P_ENCI_VFIFO2VD_PIXEL_END,      0x0693,},
++    {P_ENCI_VFIFO2VD_LINE_TOP_START, 0x12,  },
++    {P_ENCI_VFIFO2VD_LINE_TOP_END,   0x102, },
++    {P_ENCI_VFIFO2VD_LINE_BOT_START, 0x13,  },
++    {P_ENCI_VFIFO2VD_LINE_BOT_END,   0x103, },
++    {P_VENC_SYNC_ROUTE,              0,     },
++    {P_ENCI_DBG_PX_RST,              0,     },
++    {P_VENC_INTCTRL,                 0x2,   },
++    {P_ENCI_VFIFO2VD_CTL,            0x4e01,},
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,          0x0061,},
++    {P_VENC_UPSAMPLE_CTRL1,          0x4061,},
++    {P_VENC_UPSAMPLE_CTRL2,          0x5061,},
++    {P_VENC_VDAC_DACSEL0,            0x0000,},
++    {P_VENC_VDAC_DACSEL1,            0x0000,},
++    {P_VENC_VDAC_DACSEL2,            0x0000,},
++    {P_VENC_VDAC_DACSEL3,            0x0000,},
++    {P_VENC_VDAC_DACSEL4,            0x0000,},
++    {P_VENC_VDAC_DACSEL5,            0x0000,},
++    {P_VENC_VDAC_FIFO_CTRL,          0x2000,},
++    {P_ENCI_DACSEL_0,                0x0011 },
++    {P_ENCI_DACSEL_1,                0x11   },
++    {P_ENCI_VIDEO_EN,                1,     },
++    {P_HHI_VDAC_CNTL0,               0x650001   },
++    {P_HHI_VDAC_CNTL1,               0x1        },
++    {P_ENCI_VIDEO_SAT,               0x7        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL0,    0x1        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,    0xfc48     },
++    {MREG_END_MARKER,              0      }
+ };
+ 
+ static const reg_t tvregs_480p[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {HHI_VID_CLK_CNTL,           0x0,},
++    {P_HHI_VID_CLK_CNTL,           0x0,       },
+ #endif
+-    {HHI_VID_PLL_CNTL2,          0x00040003},
+-    {HHI_VID_PLL_CNTL3,          0x40e8},
+-    {HHI_HDMI_AFC_CNTL,          0x8c0000c3},
+-    {HHI_VID_PLL_CNTL,           0x0001042d,},
+-    {HHI_VID_DIVIDER_CNTL,       0x00010843,},
++    {P_HHI_VID_PLL_CNTL2,          0x00040003},
++    {P_HHI_VID_PLL_CNTL3,          0x40e8},
++    {P_HHI_HDMI_AFC_CNTL,          0x8c0000c3},
++    {P_HHI_VID_PLL_CNTL,           0x0001042d,},
++    {P_HHI_VID_DIVIDER_CNTL,       0x00010843,},
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {HHI_VID_CLK_DIV,            0x100},
++    {P_HHI_VID_CLK_DIV,            0x100},
+ 
+-    {HHI_VID_CLK_CNTL,           0x88001,},
+-    {HHI_VID_CLK_CNTL,           0x80001,},
++    {P_HHI_VID_CLK_CNTL,           0x88001,},
++    {P_HHI_VID_CLK_CNTL,           0x80001,},
+ 
+-    {HHI_VID_CLK_DIV,            0x01000100,},
++    {P_HHI_VID_CLK_DIV,            0x01000100,},
+ #endif
+-    {ENCP_VIDEO_FILT_CTRL,       0x2052,},
+-    {VENC_DVI_SETTING,           0x21,  },
+-    {ENCP_VIDEO_MODE,            0,     },
+-    {ENCP_VIDEO_MODE_ADV,        9,     },
+-    {ENCP_VIDEO_YFP1_HTIME,      244,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      1630,  },
+-    {ENCP_VIDEO_YC_DLY,          0,     },
+-    {ENCP_VIDEO_MAX_PXCNT,       1715,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       524,   },
+-    {ENCP_VIDEO_HSPULS_BEGIN,    0x22,  },
+-    {ENCP_VIDEO_HSPULS_END,      0xa0,  },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   88,    },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    0,     },
+-    {ENCP_VIDEO_VSPULS_END,      1589   },
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    5,     },
+-    {ENCP_VIDEO_HAVON_BEGIN,     249,   },
+-    {ENCP_VIDEO_HAVON_END,       1689,  },
+-    {ENCP_VIDEO_VAVON_BLINE,     42,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     521,   },
+-    {ENCP_VIDEO_SYNC_MODE,       0x07,  },
+-    {VENC_VIDEO_PROG_MODE,       0x0,   },
+-    {VENC_VIDEO_EXSRC,           0x0,   },
+-    {ENCP_VIDEO_HSO_BEGIN,       0x3,   },
+-    {ENCP_VIDEO_HSO_END,         0x5,   },
+-    {ENCP_VIDEO_VSO_BEGIN,       0x3,   },
+-    {ENCP_VIDEO_VSO_END,         0x5,   },
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },  //added by JZD. Switch Panel to 480p first time, movie video flicks if not set this to 0
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {VENC_UPSAMPLE_CTRL0,        0x9061,},
+-    {VENC_UPSAMPLE_CTRL1,        0xa061,},
+-    {VENC_UPSAMPLE_CTRL2,        0xb061,},
+-    {VENC_VDAC_DACSEL0,          0xf003,},
+-    {VENC_VDAC_DACSEL1,          0xf003,},
+-    {VENC_VDAC_DACSEL2,          0xf003,},
+-    {VENC_VDAC_DACSEL3,          0xf003,},
+-    {VENC_VDAC_DACSEL4,          0xf003,},
+-    {VENC_VDAC_DACSEL5,          0xf003,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x2052,},
++    {P_VENC_DVI_SETTING,           0x21,  },
++    {P_ENCP_VIDEO_MODE,            0,     },
++    {P_ENCP_VIDEO_MODE_ADV,        9,     },
++    {P_ENCP_VIDEO_YFP1_HTIME,      244,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      1630,  },
++    {P_ENCP_VIDEO_YC_DLY,          0,     },
++    {P_ENCP_VIDEO_MAX_PXCNT,       1715,  },
++    {P_ENCP_VIDEO_MAX_LNCNT,       524,   },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    0x22,  },
++    {P_ENCP_VIDEO_HSPULS_END,      0xa0,  },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   88,    },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    0,     },
++    {P_ENCP_VIDEO_VSPULS_END,      1589   },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    5,     },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     249,   },
++    {P_ENCP_VIDEO_HAVON_END,       1689,  },
++    {P_ENCP_VIDEO_VAVON_BLINE,     42,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     521,   },
++    {P_ENCP_VIDEO_SYNC_MODE,       0x07,  },
++    {P_VENC_VIDEO_PROG_MODE,       0x0,   },
++    {P_VENC_VIDEO_EXSRC,           0x0,   },
++    {P_ENCP_VIDEO_HSO_BEGIN,       0x3,   },
++    {P_ENCP_VIDEO_HSO_END,         0x5,   },
++    {P_ENCP_VIDEO_VSO_BEGIN,       0x3,   },
++    {P_ENCP_VIDEO_VSO_END,         0x5,   },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },  //added by JZD. Switch Panel to 480p first time, movie video flicks if not set this to 0
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,        0x9061,},
++    {P_VENC_UPSAMPLE_CTRL1,        0xa061,},
++    {P_VENC_UPSAMPLE_CTRL2,        0xb061,},
++    {P_VENC_VDAC_DACSEL0,          0xf003,},
++    {P_VENC_VDAC_DACSEL1,          0xf003,},
++    {P_VENC_VDAC_DACSEL2,          0xf003,},
++    {P_VENC_VDAC_DACSEL3,          0xf003,},
++    {P_VENC_VDAC_DACSEL4,          0xf003,},
++    {P_VENC_VDAC_DACSEL5,          0xf003,},
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {VPU_VIU_VENC_MUX_CTRL,      0x000a,},
++    {P_VPU_VIU_VENC_MUX_CTRL,      0x000a,},
+ #endif
+-    {VENC_VDAC_FIFO_CTRL,        0x1fc0,},
+-    {ENCP_DACSEL_0,              0x3210,},
+-    {ENCP_DACSEL_1,              0x0054,},
+-    {ENCI_VIDEO_EN,              0      },
+-    {ENCP_VIDEO_EN,              1      },
++    {P_VENC_VDAC_FIFO_CTRL,        0x1fc0,},
++    {P_ENCP_DACSEL_0,              0x3210,},
++    {P_ENCP_DACSEL_1,              0x0054,},
++    {P_ENCI_VIDEO_EN,              0      },
++    {P_ENCP_VIDEO_EN,              1      },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_576i[] = {
+     {VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_SD},
+-	{HHI_VID_CLK_DIV,			 4,		},
+-    {HHI_VID_CLK_CNTL,        	 0x05a1,},
+-    {ENCI_CFILT_CTRL,            0x0810,},
+-    {VENC_DVI_SETTING,           0,     },
+-    {ENCI_SYNC_HSO_BEGIN,        3,     },
+-    {ENCI_SYNC_HSO_END,          129,   },
+-    {ENCI_SYNC_VSO_EVNLN,        0x0003 },
+-    {ENCI_SYNC_VSO_ODDLN,        0x0104 },
+-    {ENCI_MACV_MAX_AMP,          0x8107 },
+-    {VENC_VIDEO_PROG_MODE,       0xff   },
+-    {ENCI_VIDEO_MODE,            0x13   },
+-    {ENCI_VIDEO_MODE_ADV,        0x26,  },
+-    {ENCI_VIDEO_SCH,             0x28,  },
+-    {ENCI_SYNC_MODE,             0x07,  },
+-    {ENCI_YC_DELAY,              0x341, },
+-    {ENCP_VFIFO2VD_PIXEL_START,       0x010b },
+-    {ENCP_VFIFO2VD_PIXEL_END,             0x06ab },
+-    {ENCP_VFIFO2VD_LINE_TOP_START,    0x0016 },
+-    {ENCP_VFIFO2VD_LINE_TOP_END,      0x0136 },
+-    {ENCP_VFIFO2VD_LINE_BOT_START,    0x0017 },
+-    {ENCP_VFIFO2VD_LINE_BOT_END,      0x0137 },
+-    {ENCP_VFIFO2VD_CTL,              0x4e01, },
+-    {ENCI_DBG_PX_RST,            0,     },
+-    {VENC_INTCTRL,               0x2,   },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCP_VIDEO_EN,              0,     },
+-    {ENCI_VIDEO_EN,              1,     },
++    {P_ENCI_CFILT_CTRL,                 0x12,    },
++    {P_ENCI_CFILT_CTRL2,                 0x12,    },
++    {P_VENC_DVI_SETTING,                0,         },
++    {P_ENCI_VIDEO_MODE,                 0,         },
++    {P_ENCI_VIDEO_MODE_ADV,             0,         },
++    {P_ENCI_SYNC_HSO_BEGIN,             3,         },
++    {P_ENCI_SYNC_HSO_END,               129,       },
++    {P_ENCI_SYNC_VSO_EVNLN,             0x0003     },
++    {P_ENCI_SYNC_VSO_ODDLN,             0x0104     },
++    {P_ENCI_MACV_MAX_AMP,               0x8107     },
++    {P_VENC_VIDEO_PROG_MODE,            0xff       },
++    {P_ENCI_VIDEO_MODE,                 0x13       },
++    {P_ENCI_VIDEO_MODE_ADV,             0x26,      },
++    {P_ENCI_VIDEO_SCH,                  0x28,      },
++    {P_ENCI_SYNC_MODE,                  0x07,      },
++    {P_ENCI_YC_DELAY,                   0x333,     },
++    {P_ENCI_VFIFO2VD_PIXEL_START,       0x010b     },
++    {P_ENCI_VFIFO2VD_PIXEL_END,         0x06ab     },
++    {P_ENCI_VFIFO2VD_LINE_TOP_START,    0x0016     },
++    {P_ENCI_VFIFO2VD_LINE_TOP_END,      0x0136     },
++    {P_ENCI_VFIFO2VD_LINE_BOT_START,    0x0017     },
++    {P_ENCI_VFIFO2VD_LINE_BOT_END,      0x0137     },
++    {P_VENC_SYNC_ROUTE,                 0,         },
++    {P_ENCI_DBG_PX_RST,                 0,         },
++    {P_VENC_INTCTRL,                    0x2,       },
++    {P_ENCI_VFIFO2VD_CTL,               0x4e01,    },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,             0x0061,    },
++    {P_VENC_UPSAMPLE_CTRL1,             0x4061,    },
++    {P_VENC_UPSAMPLE_CTRL2,             0x5061,    },
++    {P_VENC_VDAC_DACSEL0,               0x0000,    },
++    {P_VENC_VDAC_DACSEL1,               0x0000,    },
++    {P_VENC_VDAC_DACSEL2,               0x0000,    },
++    {P_VENC_VDAC_DACSEL3,               0x0000,    },
++    {P_VENC_VDAC_DACSEL4,               0x0000,    },
++    {P_VENC_VDAC_DACSEL5,               0x0000,    },
++    {P_VENC_VDAC_FIFO_CTRL,             0x2000,    },
++    {P_ENCI_DACSEL_0,                   0x0011     },
++    {P_ENCI_DACSEL_1,                   0x87       },
++    {P_ENCI_VIDEO_EN,                   1,         },
++    {P_HHI_VDAC_CNTL0,                  0x650001   },
++    {P_HHI_VDAC_CNTL1,                  0x1        },
++    {P_ENCI_VIDEO_SAT,                  0x7        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL0,       0x1        },
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,       0xfc48     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_576cvbs[] = {
+     {VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_SD},
+-	{HHI_VID_CLK_DIV,			 4,		},
+-    {HHI_VID_CLK_CNTL,        	 0x05a1,},
+-    {ENCI_CFILT_CTRL,            0x0810,},
+-    {VENC_DVI_SETTING,           0,     },
+-    {ENCI_SYNC_HSO_BEGIN,        3,     },
+-    {ENCI_SYNC_HSO_END,          129,   },
+-    {ENCI_SYNC_VSO_EVNLN,        0x0003 },
+-    {ENCI_SYNC_VSO_ODDLN,        0x0104 },
+-    {ENCI_MACV_MAX_AMP,          0x8107 },
+-    {VENC_VIDEO_PROG_MODE,       0xff   },
+-    {ENCI_VIDEO_MODE,            0x13   },
+-    {ENCI_VIDEO_MODE_ADV,        0x26,  },
+-    {ENCI_VIDEO_SCH,             0x28,  },
+-    {ENCI_SYNC_MODE,             0x07,  },
+-    {ENCI_YC_DELAY,              0x341, },
+-    {ENCP_VFIFO2VD_PIXEL_START,       0x010b },
+-    {ENCP_VFIFO2VD_PIXEL_END,             0x06ab },
+-    {ENCP_VFIFO2VD_LINE_TOP_START,    0x0016 },
+-    {ENCP_VFIFO2VD_LINE_TOP_END,      0x0136 },
+-    {ENCP_VFIFO2VD_LINE_BOT_START,    0x0017 },
+-    {ENCP_VFIFO2VD_LINE_BOT_END,      0x0137 },
+-    {ENCP_VFIFO2VD_CTL,              0x4e01, },
+-    {ENCI_DBG_PX_RST,            0,     },
+-    {VENC_INTCTRL,               0x2,   },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCP_VIDEO_EN,              0,     },
+-    {ENCI_VIDEO_EN,              1,     },
++    {P_ENCI_CFILT_CTRL,                 0x12,    },
++    {P_ENCI_CFILT_CTRL2,                 0x12,    },
++    {P_VENC_DVI_SETTING,                0,         },
++    {P_ENCI_VIDEO_MODE,                 0,         },
++    {P_ENCI_VIDEO_MODE_ADV,             0,         },
++    {P_ENCI_SYNC_HSO_BEGIN,             3,         },
++    {P_ENCI_SYNC_HSO_END,               129,       },
++    {P_ENCI_SYNC_VSO_EVNLN,             0x0003     },
++    {P_ENCI_SYNC_VSO_ODDLN,             0x0104     },
++    {P_ENCI_MACV_MAX_AMP,               0x8107     },
++    {P_VENC_VIDEO_PROG_MODE,            0xff       },
++    {P_ENCI_VIDEO_MODE,                 0x13       },
++    {P_ENCI_VIDEO_MODE_ADV,             0x26,      },
++    {P_ENCI_VIDEO_SCH,                  0x28,      },
++    {P_ENCI_SYNC_MODE,                  0x07,      },
++    {P_ENCI_YC_DELAY,                   0x333,     },
++    {P_ENCI_VFIFO2VD_PIXEL_START,       0x010b     },
++    {P_ENCI_VFIFO2VD_PIXEL_END,         0x06ab     },
++    {P_ENCI_VFIFO2VD_LINE_TOP_START,    0x0016     },
++    {P_ENCI_VFIFO2VD_LINE_TOP_END,      0x0136     },
++    {P_ENCI_VFIFO2VD_LINE_BOT_START,    0x0017     },
++    {P_ENCI_VFIFO2VD_LINE_BOT_END,      0x0137     },
++    {P_VENC_SYNC_ROUTE,                 0,         },
++    {P_ENCI_DBG_PX_RST,                 0,         },
++    {P_VENC_INTCTRL,                    0x2,       },
++    {P_ENCI_VFIFO2VD_CTL,               0x4e01,    },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_VENC_UPSAMPLE_CTRL0,             0x0061,    },
++    {P_VENC_UPSAMPLE_CTRL1,             0x4061,    },
++    {P_VENC_UPSAMPLE_CTRL2,             0x5061,    },
++    {P_VENC_VDAC_DACSEL0,               0x0000,    },
++    {P_VENC_VDAC_DACSEL1,               0x0000,    },
++    {P_VENC_VDAC_DACSEL2,               0x0000,    },
++    {P_VENC_VDAC_DACSEL3,               0x0000,    },
++    {P_VENC_VDAC_DACSEL4,               0x0000,    },
++    {P_VENC_VDAC_DACSEL5,               0x0000,    },
++    {P_VENC_VDAC_FIFO_CTRL,             0x2000,    },
++    {P_ENCI_DACSEL_0,                   0x0011     },
++    {P_ENCI_DACSEL_1,                   0x11       },
++    {P_ENCI_VIDEO_EN,                   1,         },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_576p[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_SD},
+-	{HHI_VID_CLK_DIV,			 4,		},
+-    {HHI_VID_CLK_CNTL,        	 0x0561,},
+-    {ENCP_VIDEO_FILT_CTRL,       0x52,  },
+-    {VENC_DVI_SETTING,           0x21,  },
+-    {ENCP_VIDEO_MODE,            0,     },
+-    {ENCP_VIDEO_MODE_ADV,        9,     },
+-    {ENCP_VIDEO_YFP1_HTIME,      235,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      1674,  },
+-    {ENCP_VIDEO_YC_DLY,          0xf,   },
+-    {ENCP_VIDEO_MAX_PXCNT,       1727,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       624,   },
+-    {ENCP_VIDEO_HSPULS_BEGIN,    0,     },
+-    {ENCP_VIDEO_HSPULS_END,      0x80,  },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    0,     },
+-    {ENCP_VIDEO_VSPULS_END,      1599   },
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    4,     },
+-    {ENCP_VIDEO_HAVON_BEGIN,     235,   },
+-    {ENCP_VIDEO_HAVON_END,       1674,  },
+-    {ENCP_VIDEO_VAVON_BLINE,     44,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     619,   },
+-    {ENCP_VIDEO_SYNC_MODE,       0x07,  },
+-    {VENC_VIDEO_PROG_MODE,       0x0,   },
+-    {VENC_VIDEO_EXSRC,           0x0,   },
+-    {ENCP_VIDEO_HSO_BEGIN,       0x80,  },
+-    {ENCP_VIDEO_HSO_END,         0x0,   },
+-    {ENCP_VIDEO_VSO_BEGIN,       0x0,   },
+-    {ENCP_VIDEO_VSO_END,         0x5,   },
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCI_VIDEO_EN,              0      },
+-    {ENCP_VIDEO_EN,              1      },
++	{P_HHI_VID_CLK_DIV,			 4,		},
++    {P_HHI_VID_CLK_CNTL,        	 0x0561,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x52,      },
++    {P_VENC_DVI_SETTING,           0x21,      },
++    {P_ENCP_VIDEO_MODE,            0,     },
++    {P_ENCP_VIDEO_MODE_ADV,        9,         },
++    {P_ENCP_VIDEO_YFP1_HTIME,      235,       },
++    {P_ENCP_VIDEO_YFP2_HTIME,      1674,      },
++    {P_ENCP_VIDEO_YC_DLY,          0xf,       },
++    {P_ENCP_VIDEO_MAX_PXCNT,       1727,      },
++    {P_ENCP_VIDEO_MAX_LNCNT,       624,       },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    0,         },
++    {P_ENCP_VIDEO_HSPULS_END,      0x80,      },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    0,         },
++    {P_ENCP_VIDEO_VSPULS_END,      1599       },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,         },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    4,         },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     235,       },
++    {P_ENCP_VIDEO_HAVON_END,       1674,      },
++    {P_ENCP_VIDEO_VAVON_BLINE,     44,        },
++    {P_ENCP_VIDEO_VAVON_ELINE,     619,       },
++    {P_ENCP_VIDEO_SYNC_MODE,       0x07,      },
++    {P_VENC_VIDEO_PROG_MODE,       0x0,       },
++    {P_VENC_VIDEO_EXSRC,           0x0,       },
++    {P_ENCP_VIDEO_HSO_BEGIN,       0x80,      },
++    {P_ENCP_VIDEO_HSO_END,         0x0,       },
++    {P_ENCP_VIDEO_VSO_BEGIN,       0x0,       },
++    {P_ENCP_VIDEO_VSO_END,         0x5,       },
++    {P_VENC_SYNC_ROUTE,            0,         },
++    {P_VENC_INTCTRL,               0x200,     },
++    {P_ENCP_VFIFO2VD_CTL,               0,         },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCI_VIDEO_EN,              0          },
++    {P_ENCP_VIDEO_EN,              1          },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_1080i[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_HD},
+-	{HHI_VID_CLK_DIV,			 1		},
+-    {HHI_VID_CLK_CNTL,        	 0x0421,},
+-    {ENCP_VIDEO_FILT_CTRL,       0x0052,},
+-    {VENC_DVI_SETTING,           0x2029,},
+-    {ENCP_VIDEO_MAX_PXCNT,       4399,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       1124,  },
+-    {ENCP_VIDEO_HSPULS_BEGIN,    88,    },
+-    {ENCP_VIDEO_HSPULS_END,      264,   },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   88,    },
+-    {ENCP_VIDEO_HAVON_BEGIN,     516,   },
+-    {ENCP_VIDEO_HAVON_END,       4355,  },
+-    {ENCP_VIDEO_HSO_BEGIN,       264,   },
+-    {ENCP_VIDEO_HSO_END,         176,   },
+-    {ENCP_VIDEO_EQPULS_BEGIN,    2288,  },
+-    {ENCP_VIDEO_EQPULS_END,      2464,  },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    440,   },
+-    {ENCP_VIDEO_VSPULS_END,      2200,  },
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    4,     },
+-    {ENCP_VIDEO_EQPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_EQPULS_ELINE,    4,     },
+-    {ENCP_VIDEO_VAVON_BLINE,     20,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     559,   },
+-    {ENCP_VIDEO_VSO_BEGIN,       88,    },
+-    {ENCP_VIDEO_VSO_END,         88,    },
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
+-    {ENCP_VIDEO_YFP1_HTIME,      516,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      4355,  },
+-    {VENC_VIDEO_PROG_MODE,       0x100, },
+-    {ENCP_VIDEO_OFLD_VOAV_OFST,  0x11   },
+-    {ENCP_VIDEO_MODE,            0x1ffc,},
+-    {ENCP_VIDEO_MODE_ADV,        0x0019,},
+-    {ENCP_VIDEO_SYNC_MODE,       0x207, },
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCI_VIDEO_EN,              0,     },
+-    {ENCP_VIDEO_EN,              1,     },
++	{P_HHI_VID_CLK_DIV,			 1		},
++    {P_HHI_VID_CLK_CNTL,        	 0x0421,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x0052,},
++    {P_VENC_DVI_SETTING,           0x2029,},
++    {P_ENCP_VIDEO_MAX_PXCNT,       4399,  },
++    {P_ENCP_VIDEO_MAX_LNCNT,       1124,  },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    88,    },
++    {P_ENCP_VIDEO_HSPULS_END,      264,   },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   88,    },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     516,   },
++    {P_ENCP_VIDEO_HAVON_END,       4355,  },
++    {P_ENCP_VIDEO_HSO_BEGIN,       264,   },
++    {P_ENCP_VIDEO_HSO_END,         176,   },
++    {P_ENCP_VIDEO_EQPULS_BEGIN,    2288,  },
++    {P_ENCP_VIDEO_EQPULS_END,      2464,  },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    440,   },
++    {P_ENCP_VIDEO_VSPULS_END,      2200,  },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    4,     },
++    {P_ENCP_VIDEO_EQPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_EQPULS_ELINE,    4,     },
++    {P_ENCP_VIDEO_VAVON_BLINE,     20,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     559,   },
++    {P_ENCP_VIDEO_VSO_BEGIN,       88,    },
++    {P_ENCP_VIDEO_VSO_END,         88,    },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_YFP1_HTIME,      516,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      4355,  },
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },
++    {P_ENCP_VIDEO_OFLD_VOAV_OFST,  0x11   },
++    {P_ENCP_VIDEO_MODE,            0x1ffc,},
++    {P_ENCP_VIDEO_MODE_ADV,        0x0019,},
++    {P_ENCP_VIDEO_SYNC_MODE,       0x207, },
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {P_ENCP_VIDEO_EN,              1,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_1080i_50hz[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_HD},
+-	{HHI_VID_CLK_DIV,			 1		},
+-    {HHI_VID_CLK_CNTL,        	 0x0421,},
+-    {ENCP_VIDEO_FILT_CTRL,       0x0052,},
++	{P_HHI_VID_CLK_DIV,			 1		},
++    {P_HHI_VID_CLK_CNTL,        	 0x0421,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x0052,},
+ 
+-    {VENC_DVI_SETTING,           0x202d,},
+-    {ENCP_VIDEO_MAX_PXCNT,       5279,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       1124,  },
++    {P_VENC_DVI_SETTING,           0x202d,},
++    {P_ENCP_VIDEO_MAX_PXCNT,       5279,  },
++    {P_ENCP_VIDEO_MAX_LNCNT,       1124,  },
+ 
+     //analog vidoe position in horizontal
+-    {ENCP_VIDEO_HSPULS_BEGIN,    88,    },
+-    {ENCP_VIDEO_HSPULS_END,      264,   },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   88,    },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    88,    },
++    {P_ENCP_VIDEO_HSPULS_END,      264,   },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   88,    },
+ 
+     //DE position in horizontal
+-    {ENCP_VIDEO_HAVON_BEGIN,     526,   },
+-    {ENCP_VIDEO_HAVON_END,       4365,  },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     526,   },
++    {P_ENCP_VIDEO_HAVON_END,       4365,  },
+ 
+     //ditital hsync positon in horizontal
+-    {ENCP_VIDEO_HSO_BEGIN,       142,   },
+-    {ENCP_VIDEO_HSO_END,         230,   },
++    {P_ENCP_VIDEO_HSO_BEGIN,       142,   },
++    {P_ENCP_VIDEO_HSO_END,         230,   },
+ 
+     /* vsync horizontal timing */
+-    {ENCP_VIDEO_EQPULS_BEGIN,    2728,  },
+-    {ENCP_VIDEO_EQPULS_END,      2904,  },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    440,   },
+-    {ENCP_VIDEO_VSPULS_END,      2200,  },
++    {P_ENCP_VIDEO_EQPULS_BEGIN,    2728,  },
++    {P_ENCP_VIDEO_EQPULS_END,      2904,  },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    440,   },
++    {P_ENCP_VIDEO_VSPULS_END,      2200,  },
+ 
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    4,     },
+-    {ENCP_VIDEO_EQPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_EQPULS_ELINE,    4,     },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    4,     },
++    {P_ENCP_VIDEO_EQPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_EQPULS_ELINE,    4,     },
+ 
+     //DE position in vertical
+-    {ENCP_VIDEO_VAVON_BLINE,     20,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     559,   },
++    {P_ENCP_VIDEO_VAVON_BLINE,     20,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     559,   },
+ 
+     //adjust vsync start point and end point
+-    {ENCP_VIDEO_VSO_BEGIN,       142,    },
+-    {ENCP_VIDEO_VSO_END,         142,    },
++    {P_ENCP_VIDEO_VSO_BEGIN,       142,    },
++    {P_ENCP_VIDEO_VSO_END,         142,    },
+ 
+     //adjust the vsync start line and end line
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
+ 
+     /* filter & misc settings */
+-    {ENCP_VIDEO_YFP1_HTIME,      526,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      4365,  },
++    {P_ENCP_VIDEO_YFP1_HTIME,      526,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      4365,  },
+ 
+-    {VENC_VIDEO_PROG_MODE,       0x100, },  // Select clk108 as DAC clock, progressive mode
+-    {ENCP_VIDEO_OFLD_VOAV_OFST,  0x11   },//bit[15:12]: Odd field VSO  offset begin,
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },  // Select clk108 as DAC clock, progressive mode
++    {P_ENCP_VIDEO_OFLD_VOAV_OFST,  0x11   },//bit[15:12]: Odd field VSO  offset begin,
+                                                         //bit[11:8]: Odd field VSO  offset end,
+                                                         //bit[7:4]: Odd field VAVON offset begin,
+                                                         //bit[3:0]: Odd field VAVON offset end,
+-    {ENCP_VIDEO_MODE,            0x1ffc,},//Enable Hsync and equalization pulse switch in center
+-    {ENCP_VIDEO_MODE_ADV,        0x0019,}, //bit6:swap PbPr; bit4:YPBPR gain as HDTV type;
++    {P_ENCP_VIDEO_MODE,            0x1ffc,},//Enable Hsync and equalization pulse switch in center
++    {P_ENCP_VIDEO_MODE_ADV,        0x0019,}, //bit6:swap PbPr; bit4:YPBPR gain as HDTV type;
+                                                  //bit3:Data input from VFIFO;bit[2}0]:repreat pixel a time
+-    {ENCP_VIDEO_SYNC_MODE,       0x7, }, //bit[15:8] -- adjust the vsync vertical position
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCI_VIDEO_EN,              0,     },
+-    {ENCP_VIDEO_EN,              1,     },
++    {P_ENCP_VIDEO_SYNC_MODE,       0x7, }, //bit[15:8] -- adjust the vsync vertical position
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {P_ENCP_VIDEO_EN,              1,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_1080p[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_HD},
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-	{HHI_VID_CLK_DIV,			 1		},
+-    {HHI_VID_CLK_CNTL,        	 0x0421,},
++    {P_HHI_VID_CLK_DIV,			 1		},
++    {P_HHI_VID_CLK_CNTL,        	 0x0421,},
+ #endif
+-    {ENCP_VIDEO_FILT_CTRL,       0x1052,},
+-    {VENC_DVI_SETTING,           0x0001,},
+-    {ENCP_VIDEO_MODE,            0x0040,},
+-    {ENCP_VIDEO_MODE_ADV,        0x0018,},
+-    {ENCP_VIDEO_YFP1_HTIME,      140,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      2060,  },
+-    {ENCP_VIDEO_MAX_PXCNT,       2199,  },
+-    {ENCP_VIDEO_HSPULS_BEGIN,    2156,  },//1980
+-    {ENCP_VIDEO_HSPULS_END,      44,    },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   44,    },
+-    {ENCP_VIDEO_VSPULS_BEGIN,    140,   },
+-    {ENCP_VIDEO_VSPULS_END,      2059,  },
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    4,     },//35
+-    {ENCP_VIDEO_HAVON_BEGIN,     148,   },
+-    {ENCP_VIDEO_HAVON_END,       2067,  },
+-    {ENCP_VIDEO_VAVON_BLINE,     41,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     1120,  },
+-    {ENCP_VIDEO_HSO_BEGIN,       44,    },
+-    {ENCP_VIDEO_HSO_END,         2156,  },
+-    {ENCP_VIDEO_VSO_BEGIN,       2100,  },
+-    {ENCP_VIDEO_VSO_END,         2164,  },
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
+-    {ENCP_VIDEO_MAX_LNCNT,       1124,  },
++    {P_ENCP_VIDEO_FILT_CTRL,       0x1052,},
++    {P_VENC_DVI_SETTING,           0x0001,},
++    {P_ENCP_VIDEO_MODE,            0x0040,},
++    {P_ENCP_VIDEO_MODE_ADV,        0x0018,},
++    {P_ENCP_VIDEO_YFP1_HTIME,      140,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      2060,  },
++    {P_ENCP_VIDEO_MAX_PXCNT,       2199,  },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    2156,  },//1980
++    {P_ENCP_VIDEO_HSPULS_END,      44,    },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   44,    },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    140,   },
++    {P_ENCP_VIDEO_VSPULS_END,      2059,  },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    4,     },//35
++    {P_ENCP_VIDEO_HAVON_BEGIN,     148,   },
++    {P_ENCP_VIDEO_HAVON_END,       2067,  },
++    {P_ENCP_VIDEO_VAVON_BLINE,     41,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     1120,  },
++    {P_ENCP_VIDEO_HSO_BEGIN,       44,    },
++    {P_ENCP_VIDEO_HSO_END,         2156,  },
++    {P_ENCP_VIDEO_VSO_BEGIN,       2100,  },
++    {P_ENCP_VIDEO_VSO_END,         2164,  },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_MAX_LNCNT,       1124,  },
+ #ifndef CONFIG_AM_TV_OUTPUT2
+-    {VPU_VIU_VENC_MUX_CTRL,      0x000a,},      //New Add. If not set, when system boots up, switch panel to HDMI 1080P, nothing on TV.
++    {P_VPU_VIU_VENC_MUX_CTRL,      0x000a,},      //New Add. If not set, when system boots up, switch panel to HDMI 1080P, nothing on TV.
+ #endif
+-    {VENC_VIDEO_PROG_MODE,       0x100, },
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCI_VIDEO_EN,              0,     },
+-    {ENCP_VIDEO_EN,              1,     },
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {P_ENCP_VIDEO_EN,              1,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+ static const reg_t tvregs_1080p_50hz[] = {
+-    {VENC_VDAC_SETTING,          0xff,  },
++    {P_VENC_VDAC_SETTING,          0xff,  },
+ //	{VCLK_HD},
+-	{HHI_VID_CLK_DIV,			 1		},
+-    {HHI_VID_CLK_CNTL,        	 0x0421,},
+-    {ENCP_VIDEO_FILT_CTRL,       0x1052,},
++	{P_HHI_VID_CLK_DIV,			 1		},
++    {P_HHI_VID_CLK_CNTL,        	 0x0421,},
++    {P_ENCP_VIDEO_FILT_CTRL,       0x1052,},
+ 
+     // bit 13    1          (delayed prog_vs)
+     // bit 5:4:  2          (pixel[0])
+@@ -610,60 +675,60 @@ static const reg_t tvregs_1080p_50hz[] = {
+     // bit 2:    1          invert hsync or not
+     // bit1:     1          (select viu sync)
+     // bit0:     1          (progressive)
+-    {VENC_DVI_SETTING,           0x000d,},
+-    {ENCP_VIDEO_MAX_PXCNT,       2639,  },
+-    {ENCP_VIDEO_MAX_LNCNT,       1124,  },
++    {P_VENC_DVI_SETTING,           0x000d,},
++    {P_ENCP_VIDEO_MAX_PXCNT,       2639,  },
++    {P_ENCP_VIDEO_MAX_LNCNT,       1124,  },
+     /* horizontal timing settings */
+-    {ENCP_VIDEO_HSPULS_BEGIN,    44,  },//1980
+-    {ENCP_VIDEO_HSPULS_END,      132,    },
+-    {ENCP_VIDEO_HSPULS_SWITCH,   44,    },
++    {P_ENCP_VIDEO_HSPULS_BEGIN,    44,  },//1980
++    {P_ENCP_VIDEO_HSPULS_END,      132,    },
++    {P_ENCP_VIDEO_HSPULS_SWITCH,   44,    },
+ 
+     //DE position in horizontal
+-    {ENCP_VIDEO_HAVON_BEGIN,     271,   },
+-    {ENCP_VIDEO_HAVON_END,       2190,  },
++    {P_ENCP_VIDEO_HAVON_BEGIN,     271,   },
++    {P_ENCP_VIDEO_HAVON_END,       2190,  },
+ 
+     //ditital hsync positon in horizontal
+-    {ENCP_VIDEO_HSO_BEGIN,       79 ,    },
+-    {ENCP_VIDEO_HSO_END,         123,  },
++    {P_ENCP_VIDEO_HSO_BEGIN,       79 ,    },
++    {P_ENCP_VIDEO_HSO_END,         123,  },
+ 
+     /* vsync horizontal timing */
+-    {ENCP_VIDEO_VSPULS_BEGIN,    220,   },
+-    {ENCP_VIDEO_VSPULS_END,      2140,  },
++    {P_ENCP_VIDEO_VSPULS_BEGIN,    220,   },
++    {P_ENCP_VIDEO_VSPULS_END,      2140,  },
+ 
+     /* vertical timing settings */
+-    {ENCP_VIDEO_VSPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_VSPULS_ELINE,    4,     },//35
+-    {ENCP_VIDEO_EQPULS_BLINE,    0,     },
+-    {ENCP_VIDEO_EQPULS_ELINE,    4,     },//35
+-    {ENCP_VIDEO_VAVON_BLINE,     41,    },
+-    {ENCP_VIDEO_VAVON_ELINE,     1120,  },
++    {P_ENCP_VIDEO_VSPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_VSPULS_ELINE,    4,     },//35
++    {P_ENCP_VIDEO_EQPULS_BLINE,    0,     },
++    {P_ENCP_VIDEO_EQPULS_ELINE,    4,     },//35
++    {P_ENCP_VIDEO_VAVON_BLINE,     41,    },
++    {P_ENCP_VIDEO_VAVON_ELINE,     1120,  },
+ 
+     //adjust the hsync & vsync start point and end point
+-    {ENCP_VIDEO_VSO_BEGIN,       79,  },
+-    {ENCP_VIDEO_VSO_END,         79,  },
++    {P_ENCP_VIDEO_VSO_BEGIN,       79,  },
++    {P_ENCP_VIDEO_VSO_END,         79,  },
+ 
+     //adjust the vsync start line and end line
+-    {ENCP_VIDEO_VSO_BLINE,       0,     },
+-    {ENCP_VIDEO_VSO_ELINE,       5,     },
++    {P_ENCP_VIDEO_VSO_BLINE,       0,     },
++    {P_ENCP_VIDEO_VSO_ELINE,       5,     },
+ 
+-    {ENCP_VIDEO_YFP1_HTIME,      271,   },
+-    {ENCP_VIDEO_YFP2_HTIME,      2190,  },
+-    {VENC_VIDEO_PROG_MODE,       0x100, },
+-    {ENCP_VIDEO_MODE,            0x0040,},
+-    {ENCP_VIDEO_MODE_ADV,        0x0018,},
++    {P_ENCP_VIDEO_YFP1_HTIME,      271,   },
++    {P_ENCP_VIDEO_YFP2_HTIME,      2190,  },
++    {P_VENC_VIDEO_PROG_MODE,       0x100, },
++    {P_ENCP_VIDEO_MODE,            0x0040,},
++    {P_ENCP_VIDEO_MODE_ADV,        0x0018,},
+ 
+-    {ENCP_VIDEO_SYNC_MODE,       0x7, }, //bit[15:8] -- adjust the vsync vertical position
++    {P_ENCP_VIDEO_SYNC_MODE,       0x7, }, //bit[15:8] -- adjust the vsync vertical position
+ 
+-    {ENCP_VIDEO_YC_DLY,          0,     },      //Y/Cb/Cr delay
++    {P_ENCP_VIDEO_YC_DLY,          0,     },      //Y/Cb/Cr delay
+ 
+-    {ENCP_VIDEO_RGB_CTRL, 2,},       // enable sync on B
++    {P_ENCP_VIDEO_RGB_CTRL, 2,},       // enable sync on B
+ 
+-    {VENC_SYNC_ROUTE,            0,     },
+-    {VENC_INTCTRL,               0x200, },
+-    {ENCP_VFIFO2VD_CTL,               0,     },
+-    {VENC_VDAC_SETTING,          0,     },
+-    {ENCI_VIDEO_EN,              0,     },
+-    {ENCP_VIDEO_EN,              1,     },
++    {P_VENC_SYNC_ROUTE,            0,     },
++    {P_VENC_INTCTRL,               0x200, },
++    {P_ENCP_VFIFO2VD_CTL,               0,     },
++    {P_VENC_VDAC_SETTING,          0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {P_ENCP_VIDEO_EN,              1,     },
+     {MREG_END_MARKER,            0      }
+ };
+ 
+@@ -681,7 +746,7 @@ static const reg_t *tvregsTab[] = {
+     tvregs_1080p,
+     tvregs_720p_50hz,
+     tvregs_1080i_50hz,
+-    tvregs_1080p_50hz,
++    tvregs_1080p_50hz
+ };
+ 
+ static const tvinfo_t tvinfoTab[] = {
+@@ -692,16 +757,16 @@ static const tvinfo_t tvinfoTab[] = {
+     {.xres =  720, .yres =  576, .id = "576cvbs"},
+     {.xres =  720, .yres =  576, .id = "576p"},
+     {.xres = 1280, .yres =  720, .id = "720p"},
+-    {.xres = 1280, .yres =  720, .id = "720p50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080i"},
+-    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080p"},
++    {.xres = 1280, .yres =  720, .id = "720p50hz"},
++    {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080p50hz"}
+ };
+ 
+ static inline void setreg(const reg_t *r)
+ {
+-    WRITE_MPEG_REG(r->reg, r->val);
++    aml_write_reg32(r->reg, r->val);
+     
+ // For debug only. 
+ #if 0 
+diff --git a/drivers/amlogic/display/vout2/vout2_serve.c b/drivers/amlogic/display/vout2/vout2_serve.c
+index 4334fd98441c..e7917d8abdd5 100755
+--- a/drivers/amlogic/display/vout2/vout2_serve.c
++++ b/drivers/amlogic/display/vout2/vout2_serve.c
+@@ -171,7 +171,8 @@ static void  set_vout_window(char *para)
+ static const char *venc_mux_help = {
+ 	"venc_mux:\n"
+ 	"    0. single display, viu1->panel, viu2->null\n"
+-	"    2. dual display, viu1->hdmi, viu1->panel\n"
++	"    2. dual display, viu1->hdmi, viu2->panel\n"
++	"    8. dual display, viu1->panel, viu2->hdmi\n"
+ };
+ 
+ static ssize_t venc_mux_show(struct class *class, struct class_attribute *attr, char *buf)
+@@ -181,22 +182,29 @@ static ssize_t venc_mux_show(struct class *class, struct class_attribute *attr,
+ 
+ static ssize_t venc_mux_store(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
+ {
++	unsigned int mux_type = 0;
+ 	unsigned int mux = 0;
+ 
+ 	mux = simple_strtoul(buf, NULL, 0);
+-	printk("set venc_mux: %d->%d\n", s_venc_mux, mux);
+ 	switch (mux) {
+ 	case 0x0:
++		mux_type = s_venc_mux;
++		aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, mux_type, 0, 4);
++		break;
+ 	case 0x2:
++		mux_type = mux |(s_venc_mux<<2);
++		aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, mux_type, 0, 4);
++		break;
+ 	case 0x8:
+-	case 0xa:
+-		s_venc_mux = mux;
+-		aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, mux, 0, 4);
++		mux_type = (0x2<<2) |s_venc_mux;
++		aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, mux_type, 0, 4);
+ 		break;
+ 	default:
+ 		printk("set venc_mux error\n");
++		break;
+ 	}
+ 
++	printk("set venc_mux mux_type is %d\n", mux_type);
+ 	return count;
+ }
+ 
+@@ -301,6 +309,7 @@ static int
+ #endif
+ 
+ 	ret =create_vout_attr();
++	s_venc_mux = aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL) & 0x3;
+ 	if(ret==0)
+ 	{
+ 		amlog_mask_level(LOG_MASK_INIT,LOG_LEVEL_HIGH,"create  vout2 attribute ok \r\n");
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index fff9c7434cdc..85f5ab468bb8 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -202,8 +202,8 @@ return value: 1, vout; 2, vout2;
+ //         0=No connection, 1=ENCI, 2=ENCP, 3=ENCT.
+ // [ 1: 0] cntl_viu1_sel_venc. Select which one of the encI/P/T that VIU1 connects to:
+ //         0=No connection, 1=ENCI, 2=ENCP, 3=ENCT.
+-        int viu2_sel = (READ_MPEG_REG(VPU_VIU_VENC_MUX_CTRL)>>2)&0x3;
+-        int viu1_sel = READ_MPEG_REG(VPU_VIU_VENC_MUX_CTRL)&0x3;
++        int viu2_sel = (aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)>>2)&0x3;
++        int viu1_sel = aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0x3;
+         if(((viu2_sel==1)||(viu2_sel==2))&&
+             (viu1_sel!=1)&&(viu1_sel!=2)){
+             vout_index = 2;    
+diff --git a/include/linux/amlogic/osd/osd_main.h b/include/linux/amlogic/osd/osd_main.h
+index 95cb38339b80..6346df3970a9 100755
+--- a/include/linux/amlogic/osd/osd_main.h
++++ b/include/linux/amlogic/osd/osd_main.h
+@@ -159,7 +159,7 @@ typedef  struct {
+ #define  FBIOGET_OSD_FLUSH_RATE	0x4514
+ #define  FBIOPUT_OSD_REVERSE		0x4515
+ #define  FBIOPUT_OSD_ROTATE_ON   	0x4516
+-#define	 FBIOPUT_OSD_ROTATE_ANGLE	0x4517
++#define  FBIOPUT_OSD_ROTATE_ANGLE	0x4517
+ 
+ #define  OSD_INVALID_INFO   		0xffffffff
+ 
+-- 
+2.19.0
+

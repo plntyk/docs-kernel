@@ -1,0 +1,59 @@
+From b0105800e449daa3cfba9540da81792a88292167 Mon Sep 17 00:00:00 2001
+From: "jian.xu" <jian.xu@amlogic.com>
+Date: Tue, 20 May 2014 09:41:28 +0800
+Subject: [PATCH 4193/5965] PD #90253:more check to avoid the risk of zero
+ playback mode happens
+
+Conflicts:
+
+	drivers/amlogic/amaudio/amaudio.c
+---
+ drivers/amlogic/amaudio/amaudio.c | 9 ++++++++-
+ sound/soc/aml/m8/aml_spdif_dai.c  | 4 ++--
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/amaudio/amaudio.c b/drivers/amlogic/amaudio/amaudio.c
+index 75bf11572587..081a3726b3ff 100755
+--- a/drivers/amlogic/amaudio/amaudio.c
++++ b/drivers/amlogic/amaudio/amaudio.c
+@@ -1912,7 +1912,14 @@ static ssize_t dac_mute_const_store(struct class* class, struct class_attribute*
+ static ssize_t output_enable_show(struct class* class, struct class_attribute* attr,
+ 	char* buf)
+ {
+-     return sprintf(buf, "%d\n", if_audio_out_enable()); 
++//why limit this condition of iec958 buffer size bigger than 128,
++//because we begin to use a 128 bytes zero playback mode of 958 output when alsa driver is not called by user space to
++//  avoid some noise.This mode should must seperate this case with normal playback case to avoid one risk:
++// when EOF,the last three seconds this is no audio pcm decoder to output.the zero playback mode is triggered,
++//this cause the player has no chance to  trigger the exit condition
++     unsigned iec958_size = READ_MPEG_REG(AIU_MEM_IEC958_END_PTR)-READ_MPEG_REG(AIU_MEM_IEC958_START_PTR);
++     iec958_size += 64;	 
++     return sprintf(buf, "%d\n", if_audio_out_enable()||(if_958_audio_out_enable()&&iec958_size > 128)); 
+ }
+ extern unsigned audioin_mode;
+ enum {
+diff --git a/sound/soc/aml/m8/aml_spdif_dai.c b/sound/soc/aml/m8/aml_spdif_dai.c
+index aa96e66377be..6a52ec64514f 100755
+--- a/sound/soc/aml/m8/aml_spdif_dai.c
++++ b/sound/soc/aml/m8/aml_spdif_dai.c
+@@ -42,7 +42,7 @@ static unsigned last_iec_clock =  -1;
+ extern int aout_notifier_call_chain(unsigned long val, void *v);
+ //static  unsigned  playback_substream_handle = 0 ;
+ extern unsigned int IEC958_mode_codec;
+-static int iec958buf[4096+16];
++static int iec958buf[32+16];
+ static void  aml_spdif_play()
+ {
+    	 _aiu_958_raw_setting_t set;
+@@ -69,7 +69,7 @@ static void  aml_spdif_play()
+ 	}	
+ 	audio_util_set_dac_958_format(AUDIO_ALGOUT_DAC_FORMAT_DSP);
+ 	memset(iec958buf,0,sizeof(iec958buf));
+-	audio_set_958outbuf((virt_to_phys(iec958buf)+63)&(~63),16*1024,0);
++	audio_set_958outbuf((virt_to_phys(iec958buf)+63)&(~63),128,0); //128 bytes as dma buffer 
+ 	audio_set_958_mode(AIU_958_MODE_PCM16, &set);	
+ #if OVERCLOCK == 1 || IEC958_OVERCLOCK == 1	
+ 	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 3, 4, 2);//512fs divide 4 == 128fs
+-- 
+2.19.0
+

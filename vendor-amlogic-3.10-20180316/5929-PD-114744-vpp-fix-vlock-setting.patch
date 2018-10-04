@@ -1,0 +1,230 @@
+From ff7c9eda9e61f73918e2bd105288ec26aca4de29 Mon Sep 17 00:00:00 2001
+From: MingLiang Dong <mingliang.dong@amlogic.com>
+Date: Fri, 4 Dec 2015 19:14:35 +0800
+Subject: [PATCH 5929/5965] PD#114744: vpp: fix vlock setting
+
+Change-Id: Ia28c1df6673a03e33ff292c65135cbd21430d334
+---
+ drivers/amlogic/amports/video.c              |  7 +-
+ drivers/amlogic/amvecm/amvecm.c              | 83 +++++++++-----------
+ drivers/amlogic/amvecm/amvecm_vlock_regmap.h |  4 +-
+ include/linux/amlogic/aml_common.h           |  3 +-
+ 4 files changed, 41 insertions(+), 56 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/amvecm/amvecm.c
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index f5d2216cdd64..a2e581ee8ea9 100644
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -3059,7 +3059,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #endif
+ 
+ #if defined(CONFIG_AM_VECM)
+-    amvecm_on_vs(vf);
++    amvecm_on_vs();
+ #endif
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+@@ -3242,7 +3242,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             amlog_mask_if(toggle_cnt > 0, LOG_MASK_FRAMESKIP, "skipped\n");
+ 
+ #if defined(CONFIG_AM_VECM)
+-            amvecm_on_vs(vf);
++            refresh_on_vs(vf);
+ #endif
+ 
+             vf = video_vf_get();
+@@ -3356,9 +3356,6 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                         vsync_toggle_frame(cur_dispbuf);
+                     }
+                 }
+-#if defined(CONFIG_AM_VECM)
+-            amvecm_on_vs(vf);
+-#endif
+             break;
+         }
+ 
+diff --git a/drivers/amlogic/amvecm/amvecm.c b/drivers/amlogic/amvecm/amvecm.c
+old mode 100755
+new mode 100644
+index 1f10d0ffdaff..ebacb06c462a
+--- a/drivers/amlogic/amvecm/amvecm.c
++++ b/drivers/amlogic/amvecm/amvecm.c
+@@ -75,6 +75,8 @@ MODULE_PARM_DESC(vecm_latch_flag, "\n vecm_latch_flag \n");
+ #if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
+ #define VLOCK_MODE_ENC          0
+ #define VLOCK_MODE_PLL         	1
++#define XTAL_VLOCK_CLOCK        24000000         //vlock use xtal clock
++
+ 
+ unsigned int vlock_mode = VLOCK_MODE_PLL;//0:enc;1:pll
+ module_param(vlock_mode, uint, 0664);
+@@ -104,7 +106,6 @@ static unsigned int pre_input_freq = 0;
+ static unsigned int pre_output_freq = 0;
+ static unsigned int vlock_dis_cnt = 0;
+ 
+-
+ unsigned int sync_3d_h_start = 0;
+ module_param(sync_3d_h_start, uint, 0664);
+ MODULE_PARM_DESC(sync_3d_h_start, "\n sync_3d_h_start \n");
+@@ -410,49 +411,21 @@ static void amvecm_bricon_process(void)
+ static unsigned int amvecm_vlock_check_input_hz(vframe_t *vf)
+ {
+ 	unsigned int ret_hz = 0;
+-	if((vf->source_type != VFRAME_SOURCE_TYPE_TUNER)&&
+-		(vf->source_type != VFRAME_SOURCE_TYPE_CVBS)&&
++	unsigned int duration = vf->duration;
++
++	if ((vf->source_type != VFRAME_SOURCE_TYPE_TUNER) &&
++		(vf->source_type != VFRAME_SOURCE_TYPE_CVBS) &&
+ 		(vf->source_type != VFRAME_SOURCE_TYPE_HDMI))
+ 		ret_hz = 0;
+-	else if(vf->source_type == VFRAME_SOURCE_TYPE_HDMI){
+-		if(((vf->sig_fmt >= TVIN_SIG_FMT_HDMI_640X480P_60HZ)&&
+-			(vf->sig_fmt <= TVIN_SIG_FMT_HDMI_1920X1080P_60HZ))||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_2880X480P_60HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_2880X576P_60HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_60HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080I_60HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080I_60HZ_ALTERNATIVE)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_720X480P_60HZ_FRAME_PACKING))
+-			ret_hz = 60;
+-		else if(((vf->sig_fmt >= TVIN_SIG_FMT_HDMI_720X576P_50HZ)&&
+-			(vf->sig_fmt <= TVIN_SIG_FMT_HDMI_1920X1080P_50HZ))||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080I_50HZ_B)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_50HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080I_50HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080I_50HZ_ALTERNATIVE)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_720X576P_50HZ_FRAME_PACKING))
+-			ret_hz = 50;
+-		else if((vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_24HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_24HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_24HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_24HZ_ALTERNATIVE))
+-			ret_hz = 24;
+-		else if((vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_30HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_30HZ)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1280X720P_30HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_30HZ_FRAME_PACKING)||
+-			(vf->sig_fmt == TVIN_SIG_FMT_HDMI_1920X1080P_30HZ_ALTERNATIVE))
+-			ret_hz = 30;
+-		else
+-			ret_hz = 0;
+-	}
+-	else if((vf->source_type == VFRAME_SOURCE_TYPE_TUNER)||
+-		(vf->source_type == VFRAME_SOURCE_TYPE_CVBS)){
+-		if(vf->source_mode== VFRAME_SOURCE_MODE_NTSC)
++	else if (vf->source_type == VFRAME_SOURCE_TYPE_HDMI) {
++		if (duration != 0)
++			ret_hz = (96000 + duration/2)/duration;
++	} else if ((vf->source_type == VFRAME_SOURCE_TYPE_TUNER) ||
++		(vf->source_type == VFRAME_SOURCE_TYPE_CVBS)) {
++		if (vf->source_mode == VFRAME_SOURCE_MODE_NTSC)
+ 			ret_hz = 60;
+-		else if((vf->source_mode== VFRAME_SOURCE_MODE_PAL)||
+-			(vf->source_mode== VFRAME_SOURCE_MODE_SECAM))
++		else if ((vf->source_mode == VFRAME_SOURCE_MODE_PAL) ||
++			(vf->source_mode == VFRAME_SOURCE_MODE_SECAM))
+ 			ret_hz = 50;
+ 		else
+ 			ret_hz = 0;
+@@ -544,6 +517,9 @@ static void amvecm_vlock_setting(vframe_t *vf,unsigned int input_hz,unsigned int
+ 		WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,0,30,1);//disable to adjust pll
+ 		WRITE_CBUS_REG_BITS(HHI_HDMI_PLL_CNTL6,1,20,1);//VLOCK_CNTL_EN enable
+ 		WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,1,29,1);//enable to adjust pll
++
++		WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,1,2,1);//clear accum1 value
++		WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,1,5,1);//clear accum0 value
+ 	}
+ 	if((vf->source_type == VFRAME_SOURCE_TYPE_TUNER)||(vf->source_type == VFRAME_SOURCE_TYPE_CVBS))
+ 		WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,1,16,3);//Input Vsync source select from tv-decoder
+@@ -584,11 +560,16 @@ static void amvecm_vlock_process(vframe_t *vf)
+ 		if(vlock_sync_limit_flag < 5){
+ 			vlock_sync_limit_flag++;
+ 			if(vlock_sync_limit_flag == 5){
+-				input_vs_cnt = READ_VPP_REG_BITS(VPU_VLOCK_RO_VS_I_DIST,0,28);
+-				WRITE_VPP_REG(VPU_VLOCK_LOOP1_IMISSYNC_MAX,input_vs_cnt*103/100);
+-				WRITE_VPP_REG(VPU_VLOCK_LOOP1_IMISSYNC_MIN,input_vs_cnt*97/100);
++				input_vs_cnt = XTAL_VLOCK_CLOCK/input_hz;
++				//input_vs_cnt = READ_VPP_REG_BITS(VPU_VLOCK_RO_VS_I_DIST,0,28);
++				WRITE_VPP_REG(VPU_VLOCK_LOOP1_IMISSYNC_MAX,input_vs_cnt*125/100);
++				WRITE_VPP_REG(VPU_VLOCK_LOOP1_IMISSYNC_MIN,input_vs_cnt*70/100);
++
++				WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,0,2,1);//cal accum1 value
++				WRITE_VPP_REG_BITS(VPU_VLOCK_CTRL,0,5,1);//cal accum0 value
+ 			}
+ 		}
++
+ 		return;
+ 	}
+ 	if(vlock_dis_cnt > 0){
+@@ -838,7 +819,7 @@ void pq_enable_disable(void)
+ 
+ }
+ 
+-void amvecm_video_latch(vframe_t *vf)
++void amvecm_video_latch(void)
+ {
+ 	//if (pq_load_en == 0)
+ 	//	return;
+@@ -853,18 +834,24 @@ void amvecm_video_latch(vframe_t *vf)
+ 	amvecm_3d_black_process();
+ #endif
+ }
+-void amvecm_on_vs(vframe_t *vf)
++void amvecm_on_vs(void)
++{
++	amvecm_video_latch();
++	pq_enable_disable();
++}
++
++void refresh_on_vs(vframe_t *vf)
+ {
+-	amvecm_video_latch(vf);
+ 	if (vf != NULL) {
+ #if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
+ 		amvecm_vlock_process(vf);
+ #endif
+ 		ve_on_vs(vf);
+ 	}
+-	pq_enable_disable();
+ }
++
+ EXPORT_SYMBOL(amvecm_on_vs);
++EXPORT_SYMBOL(refresh_on_vs);
+ 
+ static int amvecm_open(struct inode *inode, struct file *file)
+ {
+diff --git a/drivers/amlogic/amvecm/amvecm_vlock_regmap.h b/drivers/amlogic/amvecm/amvecm_vlock_regmap.h
+index 6c7f680bd51f..e31f1c1465a0 100755
+--- a/drivers/amlogic/amvecm/amvecm_vlock_regmap.h
++++ b/drivers/amlogic/amvecm/amvecm_vlock_regmap.h
+@@ -51,8 +51,8 @@ static am_regs_t vlock_pll_in50hz_out60hz={
+ {REG_TYPE_VCBUS, 0x3000,     0xffffffff, 0x07f13f1b   },
+ {REG_TYPE_VCBUS, 0x3001,     0xffffffff, 0x04053c32   },
+ {REG_TYPE_VCBUS, 0x3002,     0xffffffff, 0x06000000   },
+-{REG_TYPE_VCBUS, 0x3003,     0xffffffff, 0x40210280   },
+-{REG_TYPE_VCBUS, 0x3004,     0xffffffff, 0x00210280   },
++{REG_TYPE_VCBUS, 0x3003,     0xffffffff, 0x2065c65c   },
++{REG_TYPE_VCBUS, 0x3004,     0xffffffff, 0x0065c65c   },
+ {REG_TYPE_VCBUS, 0x3005,     0xffffffff, 0x00080000   },
+ {REG_TYPE_VCBUS, 0x3006,     0xffffffff, 0x00070000   },
+ {REG_TYPE_VCBUS, 0x3007,     0xffffffff, 0x00000000   },
+diff --git a/include/linux/amlogic/aml_common.h b/include/linux/amlogic/aml_common.h
+index 90461756feee..5f2b3ba3348e 100755
+--- a/include/linux/amlogic/aml_common.h
++++ b/include/linux/amlogic/aml_common.h
+@@ -63,7 +63,8 @@ extern void set_foreign_affairs(enum foreign_affairs_e foreign_affairs);
+ extern void rst_foreign_affairs(enum foreign_affairs_e foreign_affairs);
+ 
+ #if defined(CONFIG_AM_VECM)
+-extern void amvecm_on_vs(vframe_t *vf);
++extern void amvecm_on_vs(void);
++extern void refresh_on_vs(vframe_t *vf);
+ #endif
+ 
+ #endif /* __AML_COMMON_H */
+-- 
+2.19.0
+

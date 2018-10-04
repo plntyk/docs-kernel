@@ -1,0 +1,160 @@
+From 3150985197569cd71e619411efca39bf7c69c0ae Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Fri, 3 Jan 2014 21:55:11 +0800
+Subject: [PATCH 2891/5965] sync from pd-00002 by niewei
+
+---
+ arch/arm/boot/dts/amlogic/meson6_g18.dtd     |  1 +
+ arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd |  1 +
+ drivers/amlogic/display/osd/osd_hw.c         |  3 ++
+ drivers/amlogic/display/osd/osd_main.c       |  7 ++++
+ drivers/amlogic/display/vout/tvoutc.c        | 44 +++++++++++++++++++-
+ 5 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6_g18.dtd b/arch/arm/boot/dts/amlogic/meson6_g18.dtd
+index 261bf742bef4..28b4e6fec82a 100755
+--- a/arch/arm/boot/dts/amlogic/meson6_g18.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6_g18.dtd
+@@ -83,6 +83,7 @@
+ 		reg = <0x84100000 0x01000000
+ 	   	 		0x85100000 0x00100000>;
+ 	  vmode = <2>; /*0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P*/
++	  scale_mode = <0>; /*0:default 1:new*/
+ 	  display_size_default = <1920 1080 1920 2160 32>;
+ 	};
+ 				
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+index 96aa66ff35ad..48871cfd7aa0 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+@@ -125,6 +125,7 @@ void root_func(){
+ 	   	reserve-memory = <0x01000000  0x00100000>;
+ 	   	reserve-iomap = "true";
+         vmode = <3>; /**0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P 3:VMODE_1080P*/
++		scale_mode = <1>; /*0:default 1:new*/
+  		display_size_default = <1920 1080 1920 2160 32>;
+ 	};
+ 	
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index e41c1b4b10eb..6843fa48cebb 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -700,6 +700,7 @@ void osd_free_scale_enable_hw(u32 index,u32 enable)
+ #endif
+ 
+ 		amlog_level(LOG_LEVEL_HIGH,"osd%d free scale %s\r\n",index,enable?"ENABLE":"DISABLE");
++		enable = (enable&0xffff?1:0);
+ 		osd_hw.free_scale_enable[index]=enable;
+ 		if (index==OSD1)
+ 		{
+@@ -2046,7 +2047,9 @@ static void osd1_update_disp_geometry(void)
+ 			data32 = ((osd_hw.rotation_pandata[OSD1].y_start + osd_hw.pandata[OSD1].y_start) & 0x1fff)
+ 					| ((osd_hw.rotation_pandata[OSD1].y_end  + osd_hw.pandata[OSD1].y_start) & 0x1fff) << 16 ;
+ 			VSYNCOSD_WR_MPEG_REG(VIU_OSD1_BLK0_CFG_W2,data32);
++#ifdef CONFIG_ARCH_MESON8
+ 			VSYNCOSD_WR_MPEG_REG(VPU_PROT1_Y_START_END,data32);
++#endif
+ 		}else if (osd_hw.rotate[OSD1].on_off
+ 				&& osd_hw.rotate[OSD1].angle > 0){
+ 			/* enable osd rotation */
+diff --git a/drivers/amlogic/display/osd/osd_main.c b/drivers/amlogic/display/osd/osd_main.c
+index 31c43de341cc..499f96e9d111 100755
+--- a/drivers/amlogic/display/osd/osd_main.c
++++ b/drivers/amlogic/display/osd/osd_main.c
+@@ -1520,6 +1520,13 @@ osd_probe(struct platform_device *pdev)
+ 	}
+ #endif
+ 
++	{
++		prop = of_get_property(pdev->dev.of_node, "scale_mode", NULL);
++		if(prop){
++			prop_idx = of_read_ulong(prop, 1);
++		}
++		osddev_free_scale_mode(OSD0, prop_idx);
++	}
+    	if (NULL==init_logo_obj )
+     	{
+     		prop = of_get_property(pdev->dev.of_node, "vmode", NULL);
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index 7fa1e7836922..52878f3d2dc3 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -25,7 +25,7 @@
+ #include <linux/errno.h>
+ #include <linux/kernel.h>
+ #include <linux/delay.h>
+-
++#include <linux/utils.h>
+ #include <mach/am_regs.h>
+ 
+ #include <linux/amlogic/vout/vinfo.h>
+@@ -245,9 +245,40 @@ static void set_tvmode_misc(tvmode_t mode)
+     set_vmode_clk(mode);
+ }
+ 
++/*
++ * uboot_display_already() uses to judge whether display has already
++ * be set in uboot.
++ * Here, first read the value of reg P_ENCP_VIDEO_MAX_PXCNT and
++ * P_ENCP_VIDEO_MAX_LNCNT, then compare with value of tvregsTab[mode]
++ */
++static int uboot_display_already(tvmode_t mode)
++{
++    const  reg_t *s = tvregsTab[mode];
++    unsigned int pxcnt_tab = 0;
++    unsigned int lncnt_tab = 0;
++
++    while(s->reg != MREG_END_MARKER) {
++        if(s->reg == P_ENCP_VIDEO_MAX_PXCNT) {
++            pxcnt_tab = s->val;
++        }
++        if(s->reg == P_ENCP_VIDEO_MAX_LNCNT) {
++            lncnt_tab = s->val;
++        }
++        s++;
++    }
++
++    if((pxcnt_tab == aml_read_reg32(P_ENCP_VIDEO_MAX_PXCNT)) &&
++       (lncnt_tab == aml_read_reg32(P_ENCP_VIDEO_MAX_LNCNT))) {
++        return 1;
++    } else {
++        return 0;
++    }
++}
++
+ int tvoutc_setmode(tvmode_t mode)
+ {
+     const  reg_t *s;
++    static int uboot_display_flag = 1;
+ 
+     if (mode >= TVMODE_MAX) {
+         printk(KERN_ERR "Invalid video output modes.\n");
+@@ -262,7 +293,14 @@ int tvoutc_setmode(tvmode_t mode)
+     printk("TV mode %s selected.\n", tvinfoTab[mode].id);
+    
+     s = tvregsTab[mode];
+-			
++
++    if(uboot_display_flag) {
++        uboot_display_flag = 0;
++        if(uboot_display_already(mode)) {
++            printk("already display in uboot\n");
++            return 0;
++        }
++    }
+     while (MREG_END_MARKER != s->reg)
+         setreg(s++);
+     printk("%s[%d]\n", __func__, __LINE__);
+@@ -272,7 +310,9 @@ int tvoutc_setmode(tvmode_t mode)
+     }else{
+ 	aml_write_reg32(P_PERIPHS_PIN_MUX_0,aml_read_reg32(P_PERIPHS_PIN_MUX_0)&(~(3<<20)));
+     }
++#if 0       //todo
+     set_tvmode_misc(mode);
++#endif
+ #ifdef CONFIG_ARCH_MESON1
+ 	tvoutc_setclk(mode);
+     printk("%s[%d]\n", __func__, __LINE__);
+-- 
+2.19.0
+

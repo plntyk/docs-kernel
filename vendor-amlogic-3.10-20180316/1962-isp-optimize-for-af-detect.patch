@@ -1,0 +1,197 @@
+From 0db5276b744270ef55909ba4f7be8c124b736438 Mon Sep 17 00:00:00 2001
+From: "dezhi.kong" <dezhi.kong@amlogic.com>
+Date: Sun, 17 Nov 2013 18:59:54 +0800
+Subject: [PATCH 1962/5965] isp optimize for af detect
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c     |  4 +--
+ drivers/amlogic/tvin/isp/isp_drv.h     |  3 ++-
+ drivers/amlogic/tvin/isp/isp_sm.c      | 34 ++++++++++++++++++++++++--
+ drivers/amlogic/tvin/isp/isp_sm.h      |  3 +++
+ include/linux/amlogic/tvin/tvin_v4l2.h |  2 +-
+ 5 files changed, 40 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 9017d7735e9e..7c19161e90a7 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -833,7 +833,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->isp_af_parm->detect_step_cnt = 16;
+ 		devp->isp_af_parm->enter_move_ratio = 55;
+ 		devp->isp_af_parm->enter_static_ratio = 35;
+-		devp->isp_af_parm->ave_vdc_thr = 100;
++		devp->isp_af_parm->ave_vdc_thr = 200;
+ 		devp->isp_af_parm->delta_fv_ratio = 0;
+ 		devp->isp_af_parm->af_duration_time = 1;//0.5s
+ 		/*window for full scan & detect*/
+@@ -983,7 +983,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			if(ioctl_debug)
+ 				pr_info("focus win: center(%u,%u) left(%u %u) right(%u,%u).\n",devp->isp_af_parm->x,
+ 					devp->isp_af_parm->y,x0,y0,x1,y1);
+-			isp_set_blenr_stat(x0,y0,x1,y1);
++			//isp_set_blenr_stat(x0,y0,x1,y1);
+ 			devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			af_sm_init(devp);
+ 		        break;
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 61e903e840a6..c66a854a5bc5 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.17a"
++#define ISP_VER					"2013.11.17b"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -111,6 +111,7 @@ typedef struct isp_af_info_s {
+ 	unsigned int great_step;
+ 	unsigned int last_great_step;
+ 	unsigned int cur_step;
++	unsigned int capture_step;
+ 	unsigned int af_retry_cnt;
+ 	unsigned long long fv_aft_af;
+ 	unsigned long long fv_bf_af;
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 084ef45899d8..cc57b236ebfc 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -164,12 +164,19 @@ void isp_sm_init(isp_dev_t *devp)
+ void af_sm_init(isp_dev_t *devp)
+ {
+ 	unsigned int tmp = 0 ;
++	struct isp_af_info_s *af_info = &devp->af_info;
+ 	/*init for af*/
+ 	if(sm_state.af_state)
+ 		devp->flag |= devp->af_info.flag_bk;
+ 	if(devp->flag & ISP_AF_SM_MASK){
+     	        sm_state.af_state = AF_INIT;
+ 	}
++	if(devp->flag & ISP_FLAG_CAPTURE){
++		af_info->cur_step = af_info->capture_step;
++		atomic_set(&af_info->writeable,1);
++		devp->flag |= ISP_FLAG_AF;
++		sm_state.af_state = AF_CAPTURE_START;
++	}
+ 	devp->af_info.fv_aft_af = 0;
+ 	devp->af_info.fv_bf_af = 0;
+ 	devp->af_info.adj_duration_cnt = 0;
+@@ -1318,6 +1325,8 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
++					if(devp->flag & ISP_FLAG_TOUCH_AF)
++						devp->flag &= (~ISP_FLAG_TOUCH_AF);
+ 					if(devp->flag & ISP_FLAG_AF)
+ 						sm_state.af_state = AF_DETECT_INIT;
+ 					else
+@@ -1333,6 +1342,8 @@ void isp_af_sm(isp_dev_t *devp)
+ 					if(af_sm_dg&0x1)
+ 						pr_info("[af_sm..]:af_info->final_step:%d.\n",af_info->cur_step);
+ 					atomic_set(&af_info->writeable,1);
++					if(devp->flag & ISP_FLAG_TOUCH_AF)
++						devp->flag &= (~ISP_FLAG_TOUCH_AF);
+ 					if(devp->flag & ISP_FLAG_AF)
+ 						sm_state.af_state = AF_DETECT_INIT;
+ 					else
+@@ -1341,10 +1352,26 @@ void isp_af_sm(isp_dev_t *devp)
+ 				}
+ 			}
+ 			break;
++		case AF_CAPTURE_START:
++			if(af_delay >= 2)
++				sm_state.af_state = AF_CAPTURE_OK;
+ 		default:
+ 			break;
+ 	}
+ }
++void isp_af_save_current_para(isp_dev_t *devp)
++{
++	struct isp_af_info_s *af_info = &devp->af_info;
++	af_info->af_retry_cnt = 0;
++	af_info->adj_duration_cnt = 0;
++	af_info->last_move = false;
++	sm_state.af_state = AF_NULL;
++	if(sm_state.af_state < AF_INIT)
++		af_info->capture_step = af_info->cur_step;
++	else
++		af_info->capture_step = 0;
++	pr_info("[isp]%s:save step:%d\n",__func__,af_info->capture_step);
++}
+ #define FLASH_OFF         0
+ #define FLASH_ON	  1
+ #define FLASH_TORCH       2
+@@ -1376,7 +1403,7 @@ void capture_sm_init(isp_dev_t *devp)
+ 	devp->capture_parm->sigle_count = 0;
+ 	devp->capture_parm->skip_step = 0;
+ 	devp->capture_parm->multi_capture_num = 0;
+-	devp->capture_parm->af_mode = CAM_SCANMODE_NULL;
++	devp->capture_parm->af_mode = CAM_SCANMODE_FULL;
+ 	devp->capture_parm->eyetime = 0;
+ 	devp->capture_parm->pretime = 0;
+ 	devp->capture_parm->postime = 0;		
+@@ -1390,6 +1417,8 @@ void capture_sm_init(isp_dev_t *devp)
+ 		cap_sm->capture_state = CAPTURE_INIT;
+ 	else
+ 		cap_sm->capture_state = CAPTURE_TUNE_AE;
++
++	af_sm_init(devp);
+ }
+ int isp_capture_sm(isp_dev_t *devp)
+ {
+@@ -1500,7 +1529,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case CAPTURE_TUNE_AF:
+-			if(sm_state.af_state == AF_SUCCESS){
++			if(sm_state.af_state == AF_CAPTURE_OK){
+ 				devp->flag &=(~ISP_FLAG_AF);
+ 				if(cap_sm->flash_on){
+ 					devp->flag |= ISP_FLAG_AE;
+@@ -1891,6 +1920,7 @@ void isp_sm_uninit(isp_dev_t *devp)
+ {
+     isp_ae_save_current_para(devp);
+     isp_awb_save_current_para(devp);
++    isp_af_save_current_para(devp);
+ }
+ 
+ module_param(best_step_debug,uint,0664);
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.h b/drivers/amlogic/tvin/isp/isp_sm.h
+index 8eb9e4c479c2..06dcb0cd834e 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.h
++++ b/drivers/amlogic/tvin/isp/isp_sm.h
+@@ -91,6 +91,8 @@ typedef enum af_state_e {
+ 	AF_CLIMBING,
+ 	AF_FINE,
+ 	AF_SUCCESS,
++	AF_CAPTURE_START,
++	AF_CAPTURE_OK,
+ } af_state_t;
+ typedef enum isp_capture_state_e {
+ 	CAPTURE_INIT,
+@@ -229,6 +231,7 @@ extern void isp_af_sm(isp_dev_t *devp);
+ extern void isp_af_detect(isp_dev_t *devp);
+ extern int isp_capture_sm(isp_dev_t *devp);
+ extern unsigned long long div64(unsigned long long n, unsigned long long d);
++extern void isp_af_save_current_para(isp_dev_t *devp);
+ #endif
+ 
+ 
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index cdf28283fe20..1c3915cedfcc 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -417,7 +417,7 @@ typedef struct xml_algorithm_awb_s {
+         unsigned int           thr_v[20];       // 0 ~ 255
+ } xml_algorithm_awb_t;
+ 
+-#define AF_PARM_NUM			17
++#define AF_PARM_NUM			19
+ 
+ #define FOCUS_GRIDS 16
+ 
+-- 
+2.19.0
+

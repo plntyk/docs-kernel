@@ -1,0 +1,51 @@
+From f8da12fa870df0d4304a3661352d721d90bd0929 Mon Sep 17 00:00:00 2001
+From: UCHINO Satoshi <satoshi.uchino@toshiba.co.jp>
+Date: Thu, 23 May 2013 11:10:11 +0900
+Subject: [PATCH 0419/5965] usb: gadget: f_mass_storage: add missing memory
+ barrier for thread_wakeup_needed
+
+commit d68c277b501889b3a50c179d1c3d704db7947b83 upstream.
+
+Without this memory barrier, the file-storage thread may fail to
+escape from the following while loop, because it may observe new
+common->thread_wakeup_needed and old bh->state which are updated by
+the callback functions.
+
+	/* Wait for the CBW to arrive */
+	while (bh->state != BUF_STATE_FULL) {
+		rc = sleep_thread(common);
+		if (rc)
+			return rc;
+	}
+
+Signed-off-by: UCHINO Satoshi <satoshi.uchino@toshiba.co.jp>
+Acked-by: Michal Nazarewicz <mina86@mina86.com>
+Signed-off-by: Felipe Balbi <balbi@ti.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/gadget/f_mass_storage.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/usb/gadget/f_mass_storage.c b/drivers/usb/gadget/f_mass_storage.c
+index 97666e8b1b95..c35a9ecc576b 100644
+--- a/drivers/usb/gadget/f_mass_storage.c
++++ b/drivers/usb/gadget/f_mass_storage.c
+@@ -413,6 +413,7 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
+ /* Caller must hold fsg->lock */
+ static void wakeup_thread(struct fsg_common *common)
+ {
++	smp_wmb();	/* ensure the write of bh->state is complete */
+ 	/* Tell the main thread that something has happened */
+ 	common->thread_wakeup_needed = 1;
+ 	if (common->thread_task)
+@@ -632,6 +633,7 @@ static int sleep_thread(struct fsg_common *common)
+ 	}
+ 	__set_current_state(TASK_RUNNING);
+ 	common->thread_wakeup_needed = 0;
++	smp_rmb();	/* ensure the latest bh->state is visible */
+ 	return rc;
+ }
+ 
+-- 
+2.19.0
+

@@ -1,0 +1,207 @@
+From e97d1f3cfbd100e0a126b1f19e63c822c77ccd08 Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Mon, 9 Jun 2014 13:46:45 +0800
+Subject: [PATCH 4346/5965] PD#92931:mm: optimize memory management for low
+ memory
+
+---
+ drivers/gpu/ion/ion_system_heap.c |  5 +++--
+ include/linux/compaction.h        |  2 +-
+ include/linux/swap.h              |  2 +-
+ mm/compaction.c                   |  4 ++--
+ mm/page_alloc.c                   |  9 ++++-----
+ mm/vmscan.c                       | 22 +++++++++++++++++++---
+ mm/vmstat.c                       |  1 +
+ 7 files changed, 31 insertions(+), 14 deletions(-)
+ mode change 100644 => 100755 include/linux/compaction.h
+ mode change 100644 => 100755 mm/compaction.c
+ mode change 100644 => 100755 mm/page_alloc.c
+ mode change 100644 => 100755 mm/vmscan.c
+ mode change 100644 => 100755 mm/vmstat.c
+
+diff --git a/drivers/gpu/ion/ion_system_heap.c b/drivers/gpu/ion/ion_system_heap.c
+index 24f909daf76f..3aea57c5f46d 100644
+--- a/drivers/gpu/ion/ion_system_heap.c
++++ b/drivers/gpu/ion/ion_system_heap.c
+@@ -76,7 +76,7 @@ static struct page *alloc_buffer_page(struct ion_system_heap *heap,
+ 	} else {
+ 		gfp_t gfp_flags = low_order_gfp_flags;
+ 
+-		if (order > 4)
++		if (order > 2)
+ 			gfp_flags = high_order_gfp_flags;
+ 		page = alloc_pages(gfp_flags, order);
+ 		if (!page)
+@@ -140,6 +140,7 @@ static struct page_info *alloc_largest_available(struct ion_system_heap *heap,
+ 			continue;
+ 		}
+ 
++
+ 		if (size < order_to_size(orders[i]))
+ 			continue;
+ 		if (max_order < orders[i])
+@@ -357,7 +358,7 @@ struct ion_heap *ion_system_heap_create(struct ion_platform_heap *unused)
+ 		struct ion_page_pool *pool;
+ 		gfp_t gfp_flags = low_order_gfp_flags;
+ 
+-		if (orders[i] > 4)
++		if (orders[i] > 2)
+ 			gfp_flags = high_order_gfp_flags;
+ 		pool = ion_page_pool_create(gfp_flags, orders[i]);
+ 		if (!pool)
+diff --git a/include/linux/compaction.h b/include/linux/compaction.h
+old mode 100644
+new mode 100755
+index 091d72e70d8a..28d7e186ba7a
+--- a/include/linux/compaction.h
++++ b/include/linux/compaction.h
+@@ -28,7 +28,7 @@ extern void reset_isolation_suitable(pg_data_t *pgdat);
+ extern unsigned long compaction_suitable(struct zone *zone, int order);
+ 
+ /* Do not skip compaction more than 64 times */
+-#define COMPACT_MAX_DEFER_SHIFT 6
++#define COMPACT_MAX_DEFER_SHIFT 0
+ 
+ /*
+  * Compaction is deferred when compaction fails to result in a page
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index 1701ce4be746..08a0aed28795 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -265,7 +265,7 @@ static inline void lru_cache_add_file(struct page *page)
+ /* linux/mm/vmscan.c */
+ extern unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
+ 					gfp_t gfp_mask, nodemask_t *mask);
+-extern int __isolate_lru_page(struct page *page, isolate_mode_t mode);
++extern int __isolate_lru_page(struct page *page, isolate_mode_t mode, gfp_t gfp_mask);
+ extern unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *mem,
+ 						  gfp_t gfp_mask, bool noswap);
+ extern unsigned long mem_cgroup_shrink_node_zone(struct mem_cgroup *mem,
+diff --git a/mm/compaction.c b/mm/compaction.c
+old mode 100644
+new mode 100755
+index 9a3e351da29b..06b1cbaa14ca
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -597,7 +597,7 @@ isolate_migratepages_range(struct zone *zone, struct compact_control *cc,
+ 		lruvec = mem_cgroup_page_lruvec(page, zone);
+ 
+ 		/* Try isolate the page */
+-		if (__isolate_lru_page(page, mode) != 0)
++		if (__isolate_lru_page(page, mode, cc->migratetype) != 0)
+ 			continue;
+ 
+ 		VM_BUG_ON(PageTransCompound(page));
+@@ -1037,7 +1037,7 @@ static unsigned long compact_zone_order(struct zone *zone,
+ 	return ret;
+ }
+ 
+-int sysctl_extfrag_threshold = 500;
++int sysctl_extfrag_threshold = 200;
+ 
+ /**
+  * try_to_compact_pages - Direct compact to satisfy a high-order allocation
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+old mode 100644
+new mode 100755
+index ef4f0e577e60..b14297a58414
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -922,7 +922,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
+ 		rmv_page_order(page);
+ 		area->nr_free--;
+ 		if(is_migrate_cma(migratetype))
+-			area[order].nr_free_cma--;
++			area->nr_free_cma--;
+ 		expand(zone, page, order, current_order, area, migratetype);
+ 		return page;
+ 	}
+@@ -1058,7 +1058,7 @@ __rmqueue_fallback(struct zone *zone, int order, int start_migratetype)
+ 					struct page, lru);
+ 			area->nr_free--;
+ 			if(is_migrate_cma(migratetype))
+-				area[order].nr_free_cma--;
++				area->nr_free_cma--;
+ 
+ 			/*
+ 			 * If breaking a large block of pages, move all free
+@@ -1685,7 +1685,6 @@ static bool __zone_watermark_ok(struct zone *z, int order, unsigned long mark,
+ 		if (free_pages <= min)
+ 			return false;
+ 	}
+-
+ 	return true;
+ }
+ 
+@@ -6186,8 +6185,8 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
+ 		list_del(&page->lru);
+ 		rmv_page_order(page);
+ 		zone->free_area[order].nr_free--;
+-		//if(is_migrate_cma(migratetype))
+-		//	zone->free_area[order].nr_free_cma++;
++		if(is_migrate_cma(get_pageblock_migratetype(page)))
++			zone->free_area[order].nr_free_cma--;
+ #ifdef CONFIG_HIGHMEM
+ 		if (PageHighMem(page))
+ 			totalhigh_pages -= 1 << order;
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+old mode 100644
+new mode 100755
+index 357025e0c244..3d1e36a05d9a
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -1048,9 +1048,26 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
+  *
+  * returns 0 on success, -ve errno on failure.
+  */
+-int __isolate_lru_page(struct page *page, isolate_mode_t mode)
++int __isolate_lru_page(struct page *page, isolate_mode_t mode, gfp_t gfp_mask)
+ {
+ 	int ret = -EINVAL;
++	unsigned long free_cma, total_free;
++
++#if 1
++	free_cma = global_page_state(NR_FREE_CMA_PAGES);
++	free_cma += free_cma << 1;
++	total_free = global_page_state(NR_FREE_PAGES);
++	if(page){
++		if((free_cma > total_free) && is_migrate_cma(get_pageblock_migratetype(page))){
++			return -EBUSY;
++		}
++	}
++#endif
++
++	if((allocflags_to_migratetype(gfp_mask) & MIGRATE_MOVABLE == 0) \
++		&& is_migrate_cma(get_pageblock_migratetype(page))){
++		return -EBUSY;
++	}
+ 
+ 	/* Only take pages on the LRU. */
+ 	if (!PageLRU(page))
+@@ -1149,8 +1166,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
+ 		prefetchw_prev_lru_page(page, src, flags);
+ 
+ 		VM_BUG_ON(!PageLRU(page));
+-
+-		switch (__isolate_lru_page(page, mode)) {
++		switch (__isolate_lru_page(page, mode, sc->gfp_mask)) {
+ 		case 0:
+ 			nr_pages = hpage_nr_pages(page);
+ 			mem_cgroup_update_lru_size(lruvec, lru, -nr_pages);
+diff --git a/mm/vmstat.c b/mm/vmstat.c
+old mode 100644
+new mode 100755
+index 10bbb5427a6d..66ed1d0ff7c3
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -569,6 +569,7 @@ static void fill_contig_page_info(struct zone *zone,
+ 
+ 		/* Count number of free blocks */
+ 		blocks = zone->free_area[order].nr_free;
++		//blocks -= zone->free_area[order].nr_free_cma;
+ 		info->free_blocks_total += blocks;
+ 
+ 		/* Count free base pages */
+-- 
+2.19.0
+

@@ -1,0 +1,135 @@
+From b1f1395e1d49fc2ef19e26b00d8aa258f5c56da4 Mon Sep 17 00:00:00 2001
+From: Shijie Rong <shijie.rong@amlogic.com>
+Date: Tue, 20 Oct 2015 11:43:23 +0800
+Subject: [PATCH 5883/5965] PD#114036: dvb: fix 722mhz no signal
+
+Change-Id: Iae39ce422e33c0f1a84914d746af924fb263bc34
+---
+ drivers/amlogic/dvb_tv/amldemod/demod_func.c | 42 +++++++++++++++-----
+ drivers/amlogic/dvb_tv/amldemod/demod_func.h |  2 +-
+ 2 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.c b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+index 436e29eba942..db6429885cc1 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+@@ -24,6 +24,12 @@ MODULE_PARM_DESC(debug_demod, "\n\t\t Enable frontend debug information");
+ static int debug_demod = 0;
+ module_param(debug_demod, int, 0644);
+ 
++
++MODULE_PARM_DESC(mobile_demod, "\n\t\t Enable mobile demod");
++static int mobile_demod = 1;
++module_param(mobile_demod, int, 0644);
++static int enable_mc_thresh=0;
++
+ //8vsb
+ static atsc_cfg_t list_8vsb[22] = {
+ 	{0x0733, 0x00, 0},
+@@ -1127,14 +1133,25 @@ void dtmb_all_reset(void)
+ 	dtmb_write_reg(0x6b,0x7810c0f);
+ 	dtmb_write_reg(0x46,0x1000000);
+ 	dtmb_write_reg(0x2e,0x131a747d);
+-	dtmb_write_reg(0x11,0x10137); //improve agc wave
++	dtmb_write_reg(0x11,0x10127); //improve agc wave
++	dtmb_write_reg(0x4f,0x380205df); //722 snr down 20151019
++	if (enable_mc_thresh == 1) {
++		dtmb_write_reg(0x45,0xa83080ff); //INCREASE MC THRESHOLD time 20151019  0xac3080ff
++	}
+ }
+ 
+ void dtmb_initial(struct aml_demod_sta *demod_sta)
+ {
+ //	dtmb_write_reg(0x049, memstart);		//only for init
++	if (demod_sta->ch_freq == 482000) {
++		enable_mc_thresh=1;
++		pr_dbg("482 case in\n");
++	} else {
++		enable_mc_thresh=0;
++	}
+ 	dtmb_register_reset();
+ 	dtmb_all_reset();
++
+ #if 0
+ 	int i;
+ 	  for (i=0; list_dtmb_v1[i].adr != 0; i++) {
+@@ -1185,7 +1202,8 @@ void dtmb_mobile_mode_set(int mode)
+ 		  dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9) + (1 << 1)); // set mobile mode
+ 		  #ifdef dtmb_mobile_mode
+ 		  dtmb_write_reg(0x50, 0x1241);	//180m mobile mode
+-		  dtmb_write_reg(0x4f, 0x303f05df);// set belta byhand
++		//  dtmb_write_reg(0x4f, 0x303f05df);// set belta byhand
++		  dtmb_write_reg(0x4f, 0x383f05df);// set belta byhand for skyworth
+ 		  #endif
+ 	  }else if(mode==disable_mobile){
+ 		  dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9)); // set static mode
+@@ -1194,8 +1212,6 @@ void dtmb_mobile_mode_set(int mode)
+ 		  dtmb_write_reg(0x4f, 0x1f0205df);// set belta byhand
+ 		  #endif
+ 	}
+-	  
+-
+ }
+ 
+ void dtmb_time_eq_mode_set(int mode)
+@@ -1297,7 +1313,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 			time_eq = (dtmb_read_reg(0x46) >> 16) & 0x1;
+ 			fec_ldpc_it_avg = dtmb_read_reg(0xdd) & 0xffff;
+ 			mobi_det_power = (dtmb_read_reg(0xf1)>>8) & 0x7ffff;
+-#if 1
++		if (mobile_demod) {
+ 			if ((mobi_det_power > MOBILE_DET_POWER) && (time_eq == 0)) {  //modify for r840 tuner(agc problem) 20150721
+ 				mobile_times = 8;//8;
+ 				dtmb_mobile_mode_set(enable_mobile);
+@@ -1309,7 +1325,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 					mobile_times = 0;
+ 					}
+ 				}
+-#endif
++		}
+ 			if ((fbe_in_num > 360) && (pm_change == 0)) {// two path mode, test distance.
+ 				dtmb_write_reg(0x42, 0x03030202);
+ 				dtmb_write_reg(0x5c, 0x00000000);
+@@ -1361,15 +1377,23 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 				front_cci0_count=(dtmb_read_reg(0xe9) >> 22) & 0xff;
+ 					constell = (dtmb_read_reg(0xe5) >> 16) & 0x3;
+ 				pr_dbg("*************** local_state = %d ************ ,front_cci0_count is %d\n", local_state,front_cci0_count);
++				//for skyworth mxl tuner (mode 7 has bch add)
++				if ((constell == 3) && (SC_mode == 1)) {
++						pr_dbg("[debug]64qam MC mode set 0x42 0x43 0x4f\n");
++						dtmb_write_reg(0x42,0x11111010);
++							dtmb_write_reg(0x43,0x5e4a0a14);
++						dtmb_write_reg(0x4f,0x380205df);
++				}
++				//
+ 				//for skyworth mxl tuner (mode 6 has bch add)
+ 				if (fec_lock == 1) {
+ 					fec_bch_add = dtmb_read_reg(0xdf);
+ 					pr_dbg("[debug]fec lock,fec_bch_add is %d\n",fec_bch_add);
+ 					msleep(100);
+ 					if (((dtmb_read_reg(0xdf))-fec_bch_add) >= 50) {
+-						printk("[debug]fec lock,but bch add ,need reset\n");
+-						dtmb_reset();
+-						dtmb_all_reset();
++						printk("[debug]fec lock,but bch add ,need reset,wait not to reset\n");
++					//	dtmb_reset();
++					//	dtmb_all_reset();
+ 					}
+ 				}
+ 				//for 4qam-nr 20150921
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.h b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+index b1c8c08ff503..444927f0fcde 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.h
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+@@ -20,7 +20,7 @@
+ #if (defined CONFIG_AM_R840)
+ #define MOBILE_DET_POWER 20
+ #else
+-#define MOBILE_DET_POWER 10
++#define MOBILE_DET_POWER 20
+ #endif
+ 
+ 
+-- 
+2.19.0
+

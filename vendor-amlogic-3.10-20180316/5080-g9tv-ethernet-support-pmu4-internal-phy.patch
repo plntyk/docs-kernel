@@ -1,0 +1,681 @@
+From ae54e0f6d31e34df1c84eb2734f85a7ba9a7cd3b Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Mon, 27 Oct 2014 09:47:28 +0800
+Subject: [PATCH 5080/5965] g9tv: ethernet support pmu4 internal phy
+
+this phy used iic & smi control.
+
+Change-Id: I1d5baa19e101cd04c7cc52bf64f5701133584159
+---
+ drivers/amlogic/ethernet/am_mdio.c         |  72 +++++--
+ drivers/amlogic/ethernet/am_net8218.c      | 210 +++++++++++++++++++-
+ drivers/amlogic/ethernet/am_net8218.h      |   1 +
+ drivers/amlogic/ethernet/phy/am_internal.c | 218 +++++++++++++++++++++
+ 4 files changed, 478 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/amlogic/ethernet/am_mdio.c b/drivers/amlogic/ethernet/am_mdio.c
+index 56ab2625d2e9..ebea836c684b 100755
+--- a/drivers/amlogic/ethernet/am_mdio.c
++++ b/drivers/amlogic/ethernet/am_mdio.c
+@@ -7,39 +7,57 @@
+ #define MII_BUSY 0x00000001
+ #define MII_WRITE 0x00000002
+ 
++extern int aml1220_read(int add, uint8_t *val);
++extern int aml1220_write(int32_t add, uint8_t val);
++
+ static int mdio_read(struct mii_bus *bus, int phyaddr, int phyreg)
+ {
+-	struct net_device *ndev = bus->priv;
+-        struct am_net_private *priv = netdev_priv(ndev);
+-        unsigned int mii_address = ETH_MAC_4_GMII_Addr;
+-        unsigned int mii_data = ETH_MAC_5_GMII_Data;
+-
+-        int data;
+-        u16 regValue = (((phyaddr << 11) & (0x0000F800)) |
++	int data;
++	struct net_device *ndev;
++	struct am_net_private *priv;
++	unsigned int mii_address;
++	unsigned int mii_data;
++	unsigned regValue;
++#if CONFIG_AML1220
++	int data1;
++	uint8_t data_lo;
++	uint8_t data_hi;
++	if (phyaddr != 8)
++		return 0;
++	aml1220_write(0xa6, phyreg);
++	aml1220_read(0xa7,&data_lo);
++	aml1220_read(0xa8,&data_hi);
++	data1 = (data_hi<<8)|data_lo;
++#endif
++	ndev = bus->priv;
++        priv = netdev_priv(ndev);
++        mii_address = ETH_MAC_4_GMII_Addr;
++        mii_data = ETH_MAC_5_GMII_Data;
++        regValue = (((phyaddr << 11) & (0x0000F800)) |
+                         ((phyreg << 6) & (0x000007C0)));
+         regValue |= MII_BUSY | MDCCLK;
+-
+         do {} while (((readl((void*)(priv->base_addr + mii_address))) & MII_BUSY) == 1);
+         writel(regValue, (void*)(priv->base_addr + mii_address));
+         do {} while (((readl((void*)(priv->base_addr + mii_address))) & MII_BUSY) == 1);
+-
+         /* Read the data from the MII data register */
+         data = (int)readl((void*)(priv->base_addr + mii_data));
+-
+-        return data;
++#if CONFIG_AML1220
++        return data1;
++#else
++	return data;
++#endif
+ }
+ 
+ static int mdio_write(struct mii_bus *bus, int phyaddr, int phyreg, u16 phydata)
+ {
++
+         struct net_device *ndev = bus->priv;
+         struct am_net_private *priv = netdev_priv(ndev);
+ 
+         unsigned int mii_address = ETH_MAC_4_GMII_Addr;
+         unsigned int mii_data = ETH_MAC_5_GMII_Data;
+-
+         u16 value = (((phyaddr << 11) & (0x0000F800)) | ((phyreg << 6) & (0x000007C0))) | MII_WRITE;
+         value |= MII_BUSY | MDCCLK;
+-
+         do {} while (((readl((void*)(priv->base_addr + mii_address))) & MII_BUSY) == 1);
+         writel(phydata, (void*)(priv->base_addr + mii_data));
+ 
+@@ -96,6 +114,33 @@ int aml_mdio_register(struct net_device *ndev)
+         priv->mii = new_bus;
+ 
+         found = 0;
++#if CONFIG_AML1220
++for (addr = 8; addr == 8; addr++) {
++	struct phy_device *phydev = new_bus->phy_map[addr];
++	if (phydev) {
++		priv->phydev = phydev;
++		if (priv->phy_addr == -1) {
++			priv->phy_addr = addr;
++			phydev->irq = PHY_POLL;
++			irqlist[addr] = PHY_POLL;
++		}
++		if (phydev->phy_id	!= 0) {
++			//priv->phydev->addr = addr;
++			if (!((phydev->phy_id  == 0x001cc916)&& (addr == 0)))
++			{
++				priv->phy_addr = addr;
++				phydev->irq = PHY_POLL;
++				irqlist[addr] = PHY_POLL;
++			}
++		}
++		pr_info("%s: PHY ID %08x at %d IRQ %d (%s)%s\n",
++				ndev->name, phydev->phy_id, addr,
++				phydev->irq, dev_name(&phydev->dev),
++				(addr == priv->phy_addr) ? " active" : "");
++		found = 1;
++	}
++}
++#else
+ 	for (addr = 0; addr < 32; addr++) {
+ 		struct phy_device *phydev = new_bus->phy_map[addr];
+ 		if (phydev) {
+@@ -121,6 +166,7 @@ int aml_mdio_register(struct net_device *ndev)
+ 			found = 1;
+ 		}
+ 	}
++#endif
+ 
+ 	if (!found)
+ 		pr_warning("%s: No PHY found\n", ndev->name);
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index aec2980c1b9a..111792a1d909 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -48,7 +48,9 @@
+ #include <linux/kthread.h>
+ #include "am_net8218.h"
+ #include <mach/mod_gate.h>
+-
++#ifdef CONFIG_AML1220
++#include <linux/amlogic/aml_pmu.h>
++#endif
+ #define MODULE_NAME "ethernet"
+ #define DRIVER_NAME "ethernet"
+ 
+@@ -65,7 +67,7 @@ MODULE_DESCRIPTION("Amlogic Ethernet Driver");
+ MODULE_AUTHOR("Platform-BJ@amlogic.com>");
+ MODULE_LICENSE("GPL");
+ MODULE_VERSION(DRV_VERSION);
+-
++int aml1220_write(int32_t add, uint8_t val);
+ // >0 basic init and remove info;
+ // >1 further setup info;
+ // >2 rx data dump
+@@ -81,6 +83,7 @@ static int g_mdcclk = 2;
+ static int g_rxnum = 64;
+ static int g_txnum = 64;
+ static int new_maclogic = 0;
++static int used_pmu4_phy = 0;
+ static unsigned int ethbaseaddr = ETHBASE;
+ static unsigned int savepowermode = 0;
+ static int interruptnum = ETH_INTERRUPT;
+@@ -979,6 +982,24 @@ static void aml_adjust_link(struct net_device *dev)
+ 		val = (8<<27)|(7 << 24)|(1<<16)|(1<<15)|(1 << 13)|(1 << 12)|(4 << 4)|(0 << 1);
+ 		PERIPHS_SET_BITS(P_PREG_ETHERNET_ADDR0, val);
+ 	}
++#ifdef CONFIG_AML1220
++	if(phydev->phy_id == PMU4_PHY_ID){
++		aml1220_write(0x98,0x47);
++/*
++eth_cfg_57	0x99	7:6	R/W	0	co_st_miimode[1:0]
++		5	R/W	0	co_smii_source_sync
++		4	R/W	0	co_st_pllbp
++		3	R/W	0	co_st_adcbp
++		2	R/W	0	co_st_fxmode
++		1	R/W	0	co_en_high
++		0	R/W	0	co_automdix_en
++*/
++		aml1220_write(0x99,0x40);
++
++		aml1220_write(0x9a,0x07);
++	}
++#endif
++
+ 	if (phydev->link) {
+ 		u32 ctrl = readl((void*)(priv->base_addr + ETH_MAC_0_Configuration));
+ 
+@@ -1028,6 +1049,23 @@ static void aml_adjust_link(struct net_device *dev)
+ 						val =0x4100b040;
+ 						WRITE_CBUS_REG(P_PREG_ETHERNET_ADDR0, val);
+ 					}
++#ifdef CONFIG_AML1220
++					if(phydev->phy_id == PMU4_PHY_ID){
++						aml1220_write(0x98,0x41);
++/*
++eth_cfg_57	0x99	7:6	R/W	0	co_st_miimode[1:0]
++		5	R/W	0	co_smii_source_sync
++		4	R/W	0	co_st_pllbp
++		3	R/W	0	co_st_adcbp
++		2	R/W	0	co_st_fxmode
++		1	R/W	0	co_en_high
++		0	R/W	0	co_automdix_en	
++*/
++						aml1220_write(0x99,0x40);
++
++						aml1220_write(0x9a,0x07);
++					}
++#endif
+ 					break;
+ 				default:
+ 					printk("%s: Speed (%d) is not 10"
+@@ -1149,7 +1187,7 @@ static int reset_mac(struct net_device *dev)
+ 	int res;
+ 	unsigned long flags;
+ 	int tmp;
+-
++	printk("----> reset_mac\n");
+ 	spin_lock_irqsave(&np->lock, flags);
+ 	res = alloc_ringdesc(dev);
+ 	spin_unlock_irqrestore(&np->lock, flags);
+@@ -2898,6 +2936,156 @@ static int ethernet_late_resume(struct early_suspend *dev)
+ 	return 0;
+ }
+ #endif
++
++#ifdef CONFIG_AML1220
++//#define EXT_CLK
++/* --------------------------------------------------------------------------*/
++/**
++ * @brief PMU4_PHY-CONFIG
++ *
++ * @param void
++ *
++ * @return void
++ */
++/* --------------------------------------------------------------------------*/
++void pmu4_phy_conifg(void){
++		int i;
++		uint8_t value;
++		int data;
++		uint8_t data_lo;
++		uint8_t data_hi;
++		// eth ldo
++//		aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_9, 0xf00000c0);
++//		aml_set_reg32_mask(P_PERIPHS_PIN_MUX_10, 0xc000);
++		aml1220_write(0x04,0x01);
++		aml1220_write(0x05,0x01);
++		mdelay(10);
++		// pinmux
++	/*	8a---33
++2c---51
++2d---41
++20---0
++21---3*/
++		aml1220_write(0x2c,0x51);
++		aml1220_write(0x2d,0x41);
++		aml1220_write(0x20,0x0);
++		aml1220_write(0x21,0x3);
++#ifdef EXT_CLK
++		aml1220_write(0x14,0x01);
++#else
++		aml1220_write(0x14,0x00);
++#endif
++
++		aml1220_write(0x15,0x3f);
++
++		// pll
++		aml1220_write(0x78,0x06);
++		aml1220_write(0x79,0x05);
++		aml1220_write(0x7a,0xa1);
++		aml1220_write(0x7b,0xac);
++		aml1220_write(0x7c,0x5b);
++		aml1220_write(0x7d,0xa0);
++		aml1220_write(0x7e,0x20);
++		aml1220_write(0x7f,0x49);
++		aml1220_write(0x80,0xd6);
++		aml1220_write(0x81,0x0b);
++		aml1220_write(0x82,0xd1);
++		aml1220_write(0x83,0x00);
++		aml1220_write(0x84,0x00);
++		aml1220_write(0x85,0x00);
++		/*cfg4- --- cfg 45*/
++		aml1220_write(0x88,0x0);
++		aml1220_write(0x89,0x0);
++		aml1220_write(0x8A,0x33);
++		aml1220_write(0x8B,0x01);
++		aml1220_write(0x8C,0xd0);
++
++		aml1220_write(0x8D,0x01);
++		//aml1220_write(0x8C,0x01);
++		//aml1220_write(0x8D,0xc0);
++		aml1220_write(0x8E,0x00);
++
++/* pmu4 phyid = 20142014*/
++		aml1220_write(0x94,0x14);
++		aml1220_write(0x95,0x20);
++
++		aml1220_write(0x96,0x14);
++		aml1220_write(0x97,0x20);
++
++/*phyadd & mode
++eth_cfg_56	0x98	7:3	R/W	0	co_st_phyadd[4:0]
++		2:0	R/W	0	co_st_mode[2:0]
++		eth_phy_co_st_mode
++    //           000 - 10Base-T Half Duplex, auto neg disabled
++    //           001 - 10Base-T Full Duplex, auto neg disabled
++    //           010 - 100Base-TX Half Duplex, auto neg disabled
++    //           011 - 100Base-TX Full Duplex, auto neg disabled
++    //           100 - 100Base-TX Half Duplex, auto neg enabled
++    //           101 - Repeater mode, auto neg enabled
++    //           110 - Power Down Mode
++    //           111 - All capable, auto neg enabled, automdix enabled
++
++*/
++#ifdef EXT_CLK
++		aml1220_write(0x98,0x73);
++#else
++		aml1220_write(0x98,0x47);
++#endif
++/*
++0x99	7:6	R/W	0	co_st_miimode[1:0]
++	5	R/W	0	co_smii_source_sync
++	4	R/W	0	co_st_pllbp
++	3	R/W	0	co_st_adcbp
++	2	R/W	0	co_st_fxmode
++	1	R/W	0	co_en_high
++	0	R/W	0	co_automdix_en
++0x9A	7			reserved
++	6	R/W	0	co_pwruprst_byp
++	5	R/W	0	co_clk_ext
++	4	R/W	0	co_st_scan
++	3	R/W	0	co_rxclk_inv
++	2	R/W	0	co_phy_enb
++	1	R/W	0	co_clkfreq
++	0	R/W	0	eth_clk_enable
++*/
++		aml1220_write(0x99,0x61);
++/*
++eth_cfg_58	0x9a
++*/
++		aml1220_write(0x9a,0x07);
++/*
++eth_cfg_59	0x9b
++*/
++//		aml1220_write(0x75,0x04);
++//		aml1220_write(0x63,0x22);
++		aml1220_write(0x04,0x01);
++		aml1220_write(0x05,0x01);
++		value = 0;
++		printk("--------> read 0x9c\n");
++		#if 0
++		while((value&0x01) == 0)
++			aml1220_read(0x9c,&value);
++		#endif
++		printk("----2----> read 0x9c over!\n");
++		aml1220_write(0x9b,0x00);
++		aml1220_write(0x9b,0x80);
++		aml1220_write(0x9b,0x00);
++		mdelay(4);
++		printk("phy init though i2c done\n");
++		for (i=0;i<0xb0;i++){
++			aml1220_read(i, &value);
++			printk("  i2c[%x]=0x%x\n",i,value);
++		}
++		printk("phy reg dump though i2c:\n");
++		for (i=0;i<0x20;i++){
++				aml1220_write(0xa6, i);
++				aml1220_read(0xa7,&data_lo);
++				aml1220_read(0xa8,&data_hi);
++			  data = (data_hi<<8)|data_lo;
++				printk("  phy[%x]=0x%x\n", i, data);
++		}
++}
++#endif
+ /* --------------------------------------------------------------------------*/
+ /**
+  * @brief ethernet_probe
+@@ -2956,7 +3144,15 @@ static int ethernet_probe(struct platform_device *pdev)
+ 		reset_pin_num = amlogic_gpio_name_map_num(reset_pin);
+ 		amlogic_gpio_request(reset_pin_num, OWNER_NAME);
+ 	}
+-
++#ifdef CONFIG_AML1220
++	ret = of_property_read_u32(pdev->dev.of_node,"used_pmu4_phy",&used_pmu4_phy);
++	if (ret) {
++		printk("Please config used_pmu4_phy.\n");
++	}
++	if(used_pmu4_phy){
++		pmu4_phy_conifg();
++	}
++#endif
+ #endif
+ 	printk(DRV_NAME "init(dbg[%p]=%d)\n", (&g_debug), g_debug);
+ 	switch_mod_gate_by_name("ethernet",1);
+@@ -2982,12 +3178,6 @@ static int ethernet_probe(struct platform_device *pdev)
+ 	np = netdev_priv(my_ndev);
+ 	if(np->phydev && savepowermode)
+ 		np->phydev->drv->suspend(np->phydev);
+-	//switch_mod_gate_by_name("ethernet",0);
+-
+-	//if (!eth_pdata) {
+-	//	printk("\nethernet pm ops resource undefined.\n");
+-	//	return -EFAULT;
+-	//}
+ 
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/ethernet/am_net8218.h b/drivers/amlogic/ethernet/am_net8218.h
+index f87dd3431154..61366086df5a 100755
+--- a/drivers/amlogic/ethernet/am_net8218.h
++++ b/drivers/amlogic/ethernet/am_net8218.h
+@@ -69,6 +69,7 @@
+ #define RX_INTR_EN  1<<6
+ #define EARLY_RX_INTR_EN 1<<14
+ #define INTERNALPHY_ID 79898963
++#define PMU4_PHY_ID 20142014
+ enum mii_reg_bits {
+ 	MDIO_ShiftClk = 0x10000, MDIO_DataIn = 0x80000, MDIO_DataOut = 0x20000,
+ 	MDIO_EnbOutput = 0x40000, MDIO_EnbIn = 0x00000,
+diff --git a/drivers/amlogic/ethernet/phy/am_internal.c b/drivers/amlogic/ethernet/phy/am_internal.c
+index ff4ef313dfa2..045fa786c70e 100755
+--- a/drivers/amlogic/ethernet/phy/am_internal.c
++++ b/drivers/amlogic/ethernet/phy/am_internal.c
+@@ -172,6 +172,123 @@ void init_internal_phy_100B(struct phy_device *phydev)
+ 	closeTSTMODE(phydev);
+ }
+ 
++/*
++
++0x00	1354		1354	0000	9354
++0x13	3600		3400	3410	3400
++0x14	5100		7900	7900	7900
++0x15	441c		3404	3404	3404
++0x16	8406		8646	0246	8446
++0x18	0003		0003	0003	0003
++0x1b	00a0		40a0	40a4	40a6
++0x1d	0a00		0200	0200	0200
++
++
++
++*/
++static void init_pmu4_phy(struct phy_device *phydev)
++{
++        initTSTMODE(phydev);
++        // write tstcntl addr val
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x1354);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR);//write addr 0
++        /* 
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++  
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
++        */
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x3400);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x7900);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x3404);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x2636);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A5CFG);//write addr 0x16
++        phy_write(phydev,SMI_ADDR_TSTWRITE,3);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0108);
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b	
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x200);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A11CFG);//write addr 0x1d
++	closeTSTMODE(phydev);
++}
++
++
++void init_pmu4_phy_10B(struct phy_device *phydev)
++{
++
++	initTSTMODE(phydev);
++	// write tstcntl addr val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0000);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR);//write addr 0
++	/*
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
++	*/
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3410);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x7900);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3404);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x246);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A5CFG);//write addr 0x16
++	phy_write(phydev,SMI_ADDR_TSTWRITE,3);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x40a4);//write val by chandle (2)
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x200);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A11CFG);//write addr 0x1d
++	closeTSTMODE(phydev);
++}
++/*
++
++0x00	1354		1354	0000	9354
++0x13	3600		3400	3410	3400
++0x14	5100		7900	7900	7900
++0x15	441c		3404	3404	3404
++0x16	8406		8646	0246	8446
++0x18	0003		0003	0003	0003
++0x1b	00a0		40a0	40a4	40a6
++0x1d	0a00		0200	0200	0200
++
++
++
++*/
++void init_pmu4_phy_100B(struct phy_device *phydev)
++{
++	initTSTMODE(phydev);
++	// write tstcntl addr val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x9354);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|0x00);//write addr 0x00
++	/*
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
++	*/
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3000);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0xb902);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3404);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x8446);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A5CFG);//write addr 0x16
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0003);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x40a6);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x200);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A11CFG);//write addr 0x1d
++	closeTSTMODE(phydev);
++}
++
+ static int amlogic_phy_config_intr(struct phy_device *phydev)
+ {
+ 	int rc = phy_write (phydev, MII_INTERNAL_IM,
+@@ -227,6 +344,46 @@ static int amlogic_phy_config_init(struct phy_device *phydev)
+ 
+ 	return amlogic_phy_ack_interrupt (phydev);
+ }
++static int pmu4_phy_config_init(struct phy_device *phydev)
++{
++	int rc = phy_read(phydev, MII_INTERNAL_SPECIAL_MODES);
++	if (rc < 0)
++		return rc;
++	printk("----[ETHERNET]---------pmu4 phy init start-------------\n");
++	init_pmu4_phy(phydev);
++	/* If the AML PHY is in power down mode, then set it
++	 * in all capable mode before using it.
++	 */
++
++	if ((rc & MII_INTERNAL_MODE_MASK) == MII_INTERNAL_MODE_POWERDOWN) {
++		int timeout = 50000;
++
++		/* set "all capable" mode and reset the phy */
++		rc |= MII_INTERNAL_MODE_ALL;
++		phy_write(phydev, MII_INTERNAL_SPECIAL_MODES, rc);
++		phy_write(phydev, MII_BMCR, BMCR_RESET);
++
++		/* wait end of reset (max 500 ms) */
++		do {
++			udelay(10);
++			if (timeout-- == 0)
++				return -1;
++			rc = phy_read(phydev, MII_BMCR);
++		} while (rc & BMCR_RESET);
++	}
++
++	rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
++	if (rc < 0)
++		return rc;
++
++	// Enable energy detect mode for this AML Transceivers
++	rc = phy_write(phydev, MII_INTERNAL_CTRL_STATUS,
++		       rc & ~MII_INTERNAL_EDPWRDOWN);
++	if (rc < 0)
++		return rc;
++	// phy_write(phydev,0,0x8000);
++	return amlogic_phy_ack_interrupt (phydev);
++}
+ 
+ /*
+  * This workaround will manually toggle the PHY on/off upon calls to read_status
+@@ -271,6 +428,43 @@ static int internal_read_status(struct phy_device *phydev)
+ 	}
+ 	return err;
+ }
++static int pmu4_read_status(struct phy_device *phydev)
++{
++	int err = genphy_read_status(phydev);
++	if(phydev->speed == SPEED_10){
++		init_pmu4_phy_10B(phydev);
++	}
++	if(phydev->speed == SPEED_100){
++		init_pmu4_phy_100B(phydev);
++	}
++	if (!(AUTONEG_ENABLE == phydev->autoneg)){
++		if (!phydev->link) {
++			/* Disable EDPD to wake up PHY */
++			int rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
++			if (rc < 0)
++				return rc;
++
++			rc = phy_write(phydev, MII_INTERNAL_CTRL_STATUS,
++					rc & ~MII_INTERNAL_EDPWRDOWN);
++			if (rc < 0)
++				return rc;
++
++			/* Sleep 64 ms to allow ~5 link test pulses to be sent */
++			msleep(64);
++
++			/* Re-enable EDPD */
++			rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
++			if (rc < 0)
++				return rc;
++
++			rc = phy_write(phydev, MII_INTERNAL_CTRL_STATUS,
++					rc | MII_INTERNAL_EDPWRDOWN);
++			if (rc < 0)
++				return rc;
++		}
++	}
++	return err;
++}
+ 
+ 
+ int amlogic_phy_config_aneg(struct phy_device *phydev){
+@@ -299,6 +493,29 @@ static struct phy_driver amlogic_phy_driver[] = {
+ 		.suspend	= genphy_suspend,
+ 		.resume		= genphy_resume,
+ 
++		.driver		= { .owner = THIS_MODULE, }
++	},
++	{
++		.phy_id		= 0x20142014,
++		.phy_id_mask	= 0xffffffff,
++		.name		= "AMLOGIC pmu4 phy",
++
++		.features	= (PHY_BASIC_FEATURES | SUPPORTED_Pause
++				| SUPPORTED_Asym_Pause),
++		.flags		= PHY_HAS_INTERRUPT | PHY_HAS_MAGICANEG,
++
++		/* basic functions */
++		.config_aneg	= &amlogic_phy_config_aneg,
++		.read_status	= &pmu4_read_status,
++		.config_init	= &pmu4_phy_config_init,
++
++		/* IRQ related */
++		.ack_interrupt	= &amlogic_phy_ack_interrupt,
++		.config_intr	= &amlogic_phy_config_intr,
++
++		.suspend	= genphy_suspend,
++		.resume		= genphy_resume,
++
+ 		.driver		= { .owner = THIS_MODULE, }
+ 	} };
+ 
+@@ -323,6 +540,7 @@ module_exit(amlogic_exit);
+ 
+ static struct mdio_device_id __maybe_unused amlogic_tbl[] = {
+ 	{ 0x79898963, 0xffffffff },
++	{ 0x20142014, 0xffffffff },
+ 	{ }
+ };
+ 
+-- 
+2.19.0
+

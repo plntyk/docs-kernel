@@ -1,0 +1,140 @@
+From aab6e1af812e7face815f21d57f89f2afc583d06 Mon Sep 17 00:00:00 2001
+From: jiwei chen <jiwei.chen@amlogic.com>
+Date: Fri, 29 Nov 2013 21:58:44 +0800
+Subject: [PATCH 2174/5965] PD #83581: isp,improve the sm logic.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c | 15 +++++----------
+ drivers/amlogic/tvin/isp/isp_drv.h |  1 +
+ drivers/amlogic/tvin/isp/isp_sm.c  | 17 ++++++++++-------
+ 3 files changed, 16 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index d66f8ea618a6..86b22b89a9d3 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -760,18 +760,13 @@ static int isp_thread(isp_dev_t *devp) {
+ 		if(func&&func->set_aet_new_step)
+ 		func->set_aet_new_step(newstep,true,true);		
+ 	}
+-	if(ae_sens.send)
++	if(atomic_read(&devp->ae_info.writeable)&&func&&func->set_aet_new_step)
+ 	{
+ 		if(isp_debug)
+-		    printk("[isp] set new step:%d \n",ae_sens.new_step);
+-		if(func&&func->set_aet_new_step)
+-		{
+-			if(ae_adjust_enable)
+-				func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);	
+-			ae_sens.send = 0;
+-		}
+-		else
+-		printk("set_aet_new_step fail!!!!!!!!!!!!!!\n");
++			printk("[isp] set new step:%d \n",ae_sens.new_step);
++		if(ae_adjust_enable)
++			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);	
++		atomic_set(&devp->ae_info.writeable,0);
+ 	}
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+ 		af_stat(devp->af_dbg,func);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index ac7e3fb4dab4..4ef9e09f9e93 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -82,6 +82,7 @@ typedef struct flash_property_s {
+ /*parameters used for ae in sm or driver*/
+ typedef struct isp_ae_info_s {
+ 	int manul_level;//each step 2db
++	atomic_t writeable;
+ } isp_ae_info_t;
+ 
+ /*for af debug*/
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 8a93433413b8..e2df10d83229 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -319,6 +319,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 	struct isp_ae_sm_s *aepa = &sm_state.isp_ae_parm;
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 	struct vframe_prop_s *ph = devp->frontend.private_data;
++	struct isp_ae_info_s *ae_info = &devp->ae_info;
+ 	u8  sub_avg[16] = {0};
+ 	unsigned int avg_sum = 0;
+ 	unsigned int avg_env_sum = 0;
+@@ -388,10 +389,11 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			newstep = find_step(func,0,aepa->max_step,aepa->pre_gain);
+ 			if(aep->ae_skip[1] == 0x1)
+ 			{
+-				ae_sens.send = 1;
++				//ae_sens.send = 1;
+ 				ae_sens.new_step = newstep;
+ 				ae_sens.shutter = 1;
+ 				ae_sens.gain = 1;
++				atomic_set(&ae_info->writeable,1);
+ 				//printk("ae_sens.send \n");
+ 				sm_state.status = ISP_AE_STATUS_UNSTABLE;
+ 				if(ae_debug&0x10)
+@@ -401,10 +403,11 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			}
+ 			else
+ 			{
+-				ae_sens.send = 1;
++				//ae_sens.send = 1;
+ 				ae_sens.new_step = newstep;
+ 				ae_sens.shutter = 1;
+ 				ae_sens.gain = 0;
++				atomic_set(&ae_info->writeable,1);
+ 				//printk("ae_sens.send \n");
+ 				sm_state.status = ISP_AE_STATUS_UNSTABLE;
+ 				if(ae_debug&0x10)
+@@ -634,10 +637,10 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 					case AE_SET_NEWSTEP:
+ 						if(aep->ae_skip[1] == 0x1)
+ 						{
+-							ae_sens.send = 1;
+ 							ae_sens.new_step = newstep;
+ 							ae_sens.shutter = 1;
+ 							ae_sens.gain = 1;
++							atomic_set(&ae_info->writeable,1);
+ 							//printk("ae_sens.send \n");
+ 							sm_state.status = ISP_AE_STATUS_UNSTABLE;
+ 							if(ae_debug&0x10)
+@@ -648,10 +651,10 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 						}
+ 						else
+ 						{
+-							ae_sens.send = 1;
+ 							ae_sens.new_step = newstep;
+ 							ae_sens.shutter = 1;
+ 							ae_sens.gain = 0;
++							atomic_set(&ae_info->writeable,1);
+ 							//printk("ae_sens.send \n");
+ 							sm_state.status = ISP_AE_STATUS_UNSTABLE;
+ 							if(ae_debug&0x10)
+@@ -684,12 +687,12 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AE_GAIN_ADJUST:
+-			if(ae_sens.send == 0)
++			if(atomic_read(&ae_info->writeable) <= 0)
+ 			{
+-				ae_sens.send = 1;
+ 				ae_sens.new_step = newstep;
+ 				ae_sens.shutter = 0;
+ 				ae_sens.gain = 1;
++				atomic_set(&ae_info->writeable,1);
+ 
+ 				//if(func&&func->set_aet_new_step)
+ 				//func->set_aet_new_step(newstep,false,true);
+@@ -698,7 +701,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_REST:
+ 			sm_state.ae_down = true;
+-			if(ae_sens.send == 0)
++			if(atomic_read(&ae_info->writeable) <= 0)
+ 				k++;
+ 			//printk("func->check_mains_freq =%x\n",func->check_mains_freq);
+ 			//if(func->check_mains_freq)
+-- 
+2.19.0
+

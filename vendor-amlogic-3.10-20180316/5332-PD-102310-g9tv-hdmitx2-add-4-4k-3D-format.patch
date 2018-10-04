@@ -1,0 +1,842 @@
+From a4311affe919064d58bc78f78e3f2517c4d46534 Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Tue, 13 Jan 2015 21:44:14 +0800
+Subject: [PATCH 5332/5965] PD #102310: g9tv: hdmitx2: add 4 4k 3D format
+
+echo 3DMODE > /sys/class/display/mode
+3DMODE can be one of below:
+  4k1k100hz420
+  4k1k120hz420
+  4k05k200hz420
+  4k05k240hz420
+Here, 4k05k means 4k0.5k.
+---
+ arch/arm/mach-mesong9tv/enc_clk_config.c      |  11 +-
+ .../mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c |  92 +++++++++++++
+ arch/arm/mach-mesong9tv/include/mach/tvregs.h | 120 +++++++++++++++++
+ drivers/amlogic/display/vout/tvconf.c         | 124 +++++++++++++++---
+ drivers/amlogic/display/vout2/tvoutc2.c       |   2 +-
+ .../hdmi/hdmi_common/hdmi_parameters.c        | 124 ++++++++++++++++++
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c |   8 ++
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c |   8 ++
+ .../amlogic/hdmi/hdmi_tx_2/hdmi_tx_video.c    |  44 +++++++
+ include/linux/amlogic/hdmi_tx/hdmi_common.h   |   4 +
+ include/linux/amlogic/vout/vinfo.h            |  17 +++
+ 11 files changed, 535 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm/mach-mesong9tv/enc_clk_config.c b/arch/arm/mach-mesong9tv/enc_clk_config.c
+index b5c530c1123d..8dfa81d877a6 100755
+--- a/arch/arm/mach-mesong9tv/enc_clk_config.c
++++ b/arch/arm/mach-mesong9tv/enc_clk_config.c
+@@ -390,6 +390,14 @@ static hw_enc_clk_val_t setting_enc_clk_val[] = {
+     {VMODE_4K2K_50HZ,      1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
+     {VMODE_4K2K_FAKE_5G,   1, VIU_ENCP, 2448, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
+     {VMODE_4K2K_5G,        1, VIU_ENCP, 2448, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K1K_100HZ,     1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K1K_100HZ_Y420,1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 2, 1, -1, -1, -1},
++    {VMODE_4K1K_120HZ,     1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K1K_120HZ_Y420,1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 2, 1, -1, -1, -1},
++    {VMODE_4K05K_200HZ,    1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K05K_200HZ_Y420,1,VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 2, 1, -1, -1, -1},
++    {VMODE_4K05K_240HZ,    1, VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 1, 1, -1, -1, -1},
++    {VMODE_4K05K_240HZ_Y420,1,VIU_ENCP, 2970, 1, 1, 1, CLK_UTIL_VID_PLL_DIV_5, 1, 2, 1, -1, -1, -1},
+ };
+ 
+ void set_vmode_clk(vmode_t mode)
+@@ -459,8 +467,7 @@ void set_vmode_clk(vmode_t mode)
+ 		return;
+ 	}
+     p_enc=&setting_enc_clk_val[0];
+-    i = sizeof(setting_enc_clk_val) / sizeof(enc_clk_val_t);
+-
++    i = ARRAY_SIZE(setting_enc_clk_val);
+     for (j = 0; j < i; j++){
+         if(mode == p_enc[j].mode)
+             break;
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+index 6d148e1bd547..e343b3596c4e 100755
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_hw.c
+@@ -1121,6 +1121,70 @@ static void hdmi_tvenc_set(Hdmi_tx_video_para_t *param)
+     unsigned long vso_begin_evn = 0, vso_begin_odd = 0;
+ 
+     switch(param->VIC) {
++    case HDMI_3840x1080p120hz:
++        INTERLACE_MODE     = 0;
++        PIXEL_REPEAT_VENC  = 0;
++        PIXEL_REPEAT_HDMI  = 0;
++        ACTIVE_PIXELS      = 3840;
++        ACTIVE_LINES       = 1080;
++        LINES_F0           = 1125;
++        LINES_F1           = 1125;
++        FRONT_PORCH        = 176;
++        HSYNC_PIXELS       = 88;
++        BACK_PORCH         = 296;
++        EOF_LINES          = 4;
++        VSYNC_LINES        = 5;
++        SOF_LINES          = 36;
++        TOTAL_FRAMES       = 0;
++        break;
++    case HDMI_3840x1080p100hz:
++        INTERLACE_MODE     = 0;
++        PIXEL_REPEAT_VENC  = 0;
++        PIXEL_REPEAT_HDMI  = 0;
++        ACTIVE_PIXELS      = 3840;
++        ACTIVE_LINES       = 1080;
++        LINES_F0           = 1125;
++        LINES_F1           = 1125;
++        FRONT_PORCH        = 1056;
++        HSYNC_PIXELS       = 88;
++        BACK_PORCH         = 296;
++        EOF_LINES          = 4;
++        VSYNC_LINES        = 5;
++        SOF_LINES          = 36;
++        TOTAL_FRAMES       = 0;
++        break;
++    case HDMI_3840x540p240hz:
++        INTERLACE_MODE     = 0;
++        PIXEL_REPEAT_VENC  = 0;
++        PIXEL_REPEAT_HDMI  = 0;
++        ACTIVE_PIXELS      = 3840;
++        ACTIVE_LINES       = 1080;
++        LINES_F0           = 562;
++        LINES_F1           = 562;
++        FRONT_PORCH        = 176;
++        HSYNC_PIXELS       = 88;
++        BACK_PORCH         = 296;
++        EOF_LINES          = 2;
++        VSYNC_LINES        = 2;
++        SOF_LINES          = 18;
++        TOTAL_FRAMES       = 0;
++        break;
++    case HDMI_3840x540p200hz:
++        INTERLACE_MODE     = 0;
++        PIXEL_REPEAT_VENC  = 0;
++        PIXEL_REPEAT_HDMI  = 0;
++        ACTIVE_PIXELS      = 3840;
++        ACTIVE_LINES       = 1080;
++        LINES_F0           = 562;
++        LINES_F1           = 562;
++        FRONT_PORCH        = 1056;
++        HSYNC_PIXELS       = 88;
++        BACK_PORCH         = 296;
++        EOF_LINES          = 2;
++        VSYNC_LINES        = 2;
++        SOF_LINES          = 18;
++        TOTAL_FRAMES       = 0;
++        break;
+     case HDMI_480p60:
+     case HDMI_480p60_16x9:
+     case HDMI_480p60_16x9_rpt:
+@@ -1305,9 +1369,17 @@ static void hdmi_tvenc_set(Hdmi_tx_video_para_t *param)
+         aml_write_reg32(P_ENCP_DVI_VSO_BEGIN_ODD, vso_begin_odd);
+         aml_write_reg32(P_ENCP_DVI_VSO_END_ODD,   vso_begin_odd);
+     }
++    if((param->VIC == HDMI_3840x540p240hz) || (param->VIC == HDMI_3840x540p200hz))
++        aml_write_reg32(P_ENCP_DE_V_END_EVEN, 0x230);
+     // Annie 01Sep2011: Remove the following line as register VENC_DVI_SETTING_MORE is no long valid, use VPU_HDMI_SETTING instead.
+     //Wr(VENC_DVI_SETTING_MORE, (TX_INPUT_COLOR_FORMAT==0)? 1 : 0); // [0] 0=Map data pins from Venc to Hdmi Tx as CrYCb mode;
+     switch(param->VIC) {
++    case HDMI_3840x1080p120hz:
++    case HDMI_3840x1080p100hz:
++    case HDMI_3840x540p240hz:
++    case HDMI_3840x540p200hz:
++        aml_write_reg32(P_VPU_HDMI_SETTING, 0x8e);
++        break;
+     case HDMI_480i60:
+     case HDMI_480i60_16x9:
+     case HDMI_576i50:
+@@ -1644,6 +1716,22 @@ static void hdmitx_set_pll(hdmitx_dev_t *hdev)
+                 set_vmode_clk(VMODE_4K2K_50HZ);
+             };
+             break;
++        case HDMI_3840x1080p100hz:
++        case HDMI_3840x1080p120hz:
++            if (hdev->mode420 == 1) {
++                set_vmode_clk(VMODE_4K1K_100HZ_Y420);
++            } else {
++                set_vmode_clk(VMODE_4K1K_100HZ);
++            }
++            break;
++        case HDMI_3840x540p200hz:
++        case HDMI_3840x540p240hz:
++            if (hdev->mode420 == 1) {
++                set_vmode_clk(VMODE_4K05K_200HZ_Y420);
++            } else {
++                set_vmode_clk(VMODE_4K05K_200HZ);
++            }
++            break;
+         default:
+             break;
+     }
+@@ -1659,6 +1747,10 @@ static void hdmitx_set_phy(hdmitx_dev_t* hdmitx_device)
+     case HDMI_3840x2160p60_16x9:
+     case HDMI_4096x2160p50_256x135:
+     case HDMI_4096x2160p60_256x135:
++    case HDMI_3840x1080p100hz:
++    case HDMI_3840x1080p120hz:
++    case HDMI_3840x540p200hz:
++    case HDMI_3840x540p240hz:
+         aml_write_reg32(P_HHI_HDMI_PHY_CNTL0, 0x33b544ab);
+         aml_write_reg32(P_HHI_HDMI_PHY_CNTL3, 0x303e0003);
+         if(hdmitx_device->mode420 == 1){
+diff --git a/arch/arm/mach-mesong9tv/include/mach/tvregs.h b/arch/arm/mach-mesong9tv/include/mach/tvregs.h
+index 62a909036873..891fa3530650 100644
+--- a/arch/arm/mach-mesong9tv/include/mach/tvregs.h
++++ b/arch/arm/mach-mesong9tv/include/mach/tvregs.h
+@@ -1179,6 +1179,110 @@ static const reg_t tvregs_xga_1024x768[] = {
+ 
+ };
+ 
++static const reg_t tvregs_3840x1080p120hz[] = {
++    {P_VENC_VDAC_SETTING,          0xff,  },
++
++    {P_ENCP_VIDEO_EN,              0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++
++    {P_ENCP_VIDEO_MODE, 0x4040,},
++    {P_ENCP_VIDEO_MODE_ADV, 0x18,},
++    {P_ENCP_VIDEO_MAX_PXCNT, 0x112F,},
++    {P_ENCP_VIDEO_MAX_LNCNT, 0x464,},
++    {P_ENCP_VIDEO_HAVON_BEGIN, 0x180,},
++    {P_ENCP_VIDEO_HAVON_END, 0x107F,},
++    {P_ENCP_VIDEO_VAVON_BLINE, 0x29,},
++    {P_ENCP_VIDEO_VAVON_ELINE, 0x460,},
++    {P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
++    {P_ENCP_VIDEO_HSO_END, 0x58,},
++    {P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
++    {P_ENCP_VIDEO_VSO_END, 0x32,},
++    {P_ENCP_VIDEO_VSO_BLINE, 0x0,},
++    {P_ENCP_VIDEO_VSO_ELINE, 0x5,},
++
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {MREG_END_MARKER,            0      }
++};
++
++static const reg_t tvregs_3840x1080p100hz[] = {
++    {P_VENC_VDAC_SETTING,          0xff,  },
++
++    {P_ENCP_VIDEO_EN,              0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++
++    {P_ENCP_VIDEO_MODE, 0x4040,},
++    {P_ENCP_VIDEO_MODE_ADV, 0x18,},
++    {P_ENCP_VIDEO_MAX_PXCNT, 0x149F,},
++    {P_ENCP_VIDEO_MAX_LNCNT, 0x464,},
++    {P_ENCP_VIDEO_HAVON_BEGIN, 0x180,},
++    {P_ENCP_VIDEO_HAVON_END, 0x107F,},
++    {P_ENCP_VIDEO_VAVON_BLINE, 0x29,},
++    {P_ENCP_VIDEO_VAVON_ELINE, 0x460,},
++    {P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
++    {P_ENCP_VIDEO_HSO_END, 0x58,},
++    {P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
++    {P_ENCP_VIDEO_VSO_END, 0x32,},
++    {P_ENCP_VIDEO_VSO_BLINE, 0x0,},
++    {P_ENCP_VIDEO_VSO_ELINE, 0x5,},
++
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {MREG_END_MARKER,            0      }
++};
++
++static const reg_t tvregs_3840x540p240hz[] = {
++    {P_VENC_VDAC_SETTING,          0xff,  },
++
++    {P_ENCP_VIDEO_EN,              0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++
++    {P_ENCP_VIDEO_MODE, 0x4040,},
++    {P_ENCP_VIDEO_MODE_ADV, 0x18,},
++    {P_ENCP_VIDEO_MAX_PXCNT, 0x112F,},
++    {P_ENCP_VIDEO_MAX_LNCNT, 0x231,},
++    {P_ENCP_VIDEO_HAVON_BEGIN, 0x180,},
++    {P_ENCP_VIDEO_HAVON_END, 0x107F,},
++    {P_ENCP_VIDEO_VAVON_BLINE, 0x14,},
++    {P_ENCP_VIDEO_VAVON_ELINE, 0x22F,},
++    {P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
++    {P_ENCP_VIDEO_HSO_END, 0x58,},
++    {P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
++    {P_ENCP_VIDEO_VSO_END, 0x32,},
++    {P_ENCP_VIDEO_VSO_BLINE, 0x0,},
++    {P_ENCP_VIDEO_VSO_ELINE, 0x2,},
++
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {MREG_END_MARKER,            0      }
++};
++
++static const reg_t tvregs_3840x540p200hz[] = {
++    {P_VENC_VDAC_SETTING,          0xff,  },
++
++    {P_ENCP_VIDEO_EN,              0,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++
++    {P_ENCP_VIDEO_MODE, 0x4040,},
++    {P_ENCP_VIDEO_MODE_ADV, 0x18,},
++    {P_ENCP_VIDEO_MAX_PXCNT, 0x149F,},
++    {P_ENCP_VIDEO_MAX_LNCNT, 0x231,},
++    {P_ENCP_VIDEO_HAVON_BEGIN, 0x180,},
++    {P_ENCP_VIDEO_HAVON_END, 0x107F,},
++    {P_ENCP_VIDEO_VAVON_BLINE, 0x14,},
++    {P_ENCP_VIDEO_VAVON_ELINE, 0x22F,},
++    {P_ENCP_VIDEO_HSO_BEGIN, 0x0,},
++    {P_ENCP_VIDEO_HSO_END, 0x58,},
++    {P_ENCP_VIDEO_VSO_BEGIN, 0x1E,},
++    {P_ENCP_VIDEO_VSO_END, 0x32,},
++    {P_ENCP_VIDEO_VSO_BLINE, 0x0,},
++    {P_ENCP_VIDEO_VSO_ELINE, 0x2,},
++
++    {P_ENCP_VIDEO_EN,              1,     },
++    {P_ENCI_VIDEO_EN,              0,     },
++    {MREG_END_MARKER,            0      }
++};
++
+ // Using tvmode as index
+ static struct tvregs_set_t tvregsTab[] = {
+     {TVMODE_480I, tvregs_480i,        },
+@@ -1206,6 +1310,14 @@ static struct tvregs_set_t tvregsTab[] = {
+     {TVMODE_4K2K_60HZ, tvregs_4k2k_30hz,   },      // 4k2k60hz
+     {TVMODE_4K2K_60HZ_Y420, tvregs_4k2k_30hz,   },      // 4k2k60hz YCbCr420 mode
+     {TVMODE_4K2K_50HZ_Y420, tvregs_4k2k_25hz, },
++    {TVMODE_4K1K_120HZ, tvregs_3840x1080p120hz},
++    {TVMODE_4K1K_120HZ_Y420, tvregs_3840x1080p120hz},
++    {TVMODE_4K1K_100HZ, tvregs_3840x1080p100hz},
++    {TVMODE_4K1K_100HZ_Y420, tvregs_3840x1080p100hz},
++    {TVMODE_4K05K_240HZ, tvregs_3840x540p240hz},
++    {TVMODE_4K05K_240HZ_Y420, tvregs_3840x540p240hz},
++    {TVMODE_4K05K_200HZ, tvregs_3840x540p200hz},
++    {TVMODE_4K05K_200HZ_Y420, tvregs_3840x540p200hz},
+     {TVMODE_VGA, tvregs_vga_640x480, },
+     {TVMODE_SVGA, tvregs_svga_800x600,},
+     {TVMODE_XGA, tvregs_xga_1024x768,},
+@@ -1237,6 +1349,14 @@ static const tvinfo_t tvinfoTab[] = {
+     {.tvmode = TVMODE_4K2K_60HZ_Y420, .xres = 3840, .yres = 2160, .id = "4k2k60hz420"},
+     {.tvmode = TVMODE_4K2K_50HZ_Y420, .xres = 3840, .yres = 2160, .id = "4k2k50hz420"},
+     {.tvmode = TVMODE_4K2K_60HZ, .xres = 3840, .yres = 2160, .id = "4k2k60hz"},
++    {.tvmode = TVMODE_4K1K_100HZ, .xres = 3840, .yres = 1080, .id = "4k1k100hz"},
++    {.tvmode = TVMODE_4K1K_100HZ_Y420, .xres = 3840, .yres = 1080, .id = "4k1k100hz420"},
++    {.tvmode = TVMODE_4K1K_120HZ, .xres = 3840, .yres = 1080, .id = "4k1k120hz"},
++    {.tvmode = TVMODE_4K1K_120HZ_Y420, .xres = 3840, .yres = 1080, .id = "4k1k120hz420"},
++    {.tvmode = TVMODE_4K05K_200HZ, .xres = 3840, .yres = 540, .id = "4k05k200hz"},
++    {.tvmode = TVMODE_4K05K_200HZ_Y420, .xres = 3840, .yres = 540, .id = "4k05k200hz420"},
++    {.tvmode = TVMODE_4K05K_240HZ, .xres = 3840, .yres = 540, .id = "4k05k240hz"},
++    {.tvmode = TVMODE_4K05K_240HZ_Y420, .xres = 3840, .yres = 540, .id = "4k05k240hz420"},
+     {.tvmode = TVMODE_VGA, .xres = 640, .yres = 480, .id = "vga"},
+     {.tvmode = TVMODE_SVGA, .xres = 800, .yres = 600, .id = "svga"},
+     {.tvmode = TVMODE_XGA, .xres = 1024, .yres = 768, .id = "xga"},
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 5d55cba3f9cd..a9873634c779 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -129,6 +129,14 @@ static struct vmode_tvmode_tab_t mode_tab[] = {
+     {TVMODE_4K2K_29HZ, VMODE_4K2K_29HZ}, // for 4k2k 29.97hz
+     {TVMODE_4K2K_23HZ, VMODE_4K2K_23HZ}, // for 4k2k 23.97hz
+ #endif
++    {TVMODE_4K1K_100HZ, VMODE_4K1K_100HZ},
++    {TVMODE_4K1K_100HZ_Y420, VMODE_4K1K_100HZ_Y420},
++    {TVMODE_4K1K_120HZ, VMODE_4K1K_120HZ},
++    {TVMODE_4K1K_120HZ_Y420, VMODE_4K1K_120HZ_Y420},
++    {TVMODE_4K05K_200HZ, VMODE_4K05K_200HZ},
++    {TVMODE_4K05K_200HZ_Y420, VMODE_4K05K_200HZ_Y420},
++    {TVMODE_4K05K_240HZ, VMODE_4K05K_240HZ},
++    {TVMODE_4K05K_240HZ_Y420, VMODE_4K05K_240HZ_Y420},
+ };
+ 
+ static const tvmode_t vmode_tvmode_map(vmode_t mode)
+@@ -420,7 +428,7 @@ static const vinfo_t tv_info[] =
+ #endif
+     { /* VMODE_4K2K_30HZ */
+         .name              = "4k2k30hz",
+-        .mode              = TVMODE_4K2K_30HZ,
++        .mode              = VMODE_4K2K_30HZ,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -433,7 +441,7 @@ static const vinfo_t tv_info[] =
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+ 	{ /* VMODE_4K2K_29HZ */
+ 		.name			   = "4k2k29hz",
+-		.mode			   = TVMODE_4K2K_29HZ,
++		.mode			   = VMODE_4K2K_29HZ,
+ 		.width			   = 3840,
+ 		.height 		   = 2160,
+ 		.field_height	   = 2160,
+@@ -446,7 +454,7 @@ static const vinfo_t tv_info[] =
+ #endif
+     { /* VMODE_4K2K_25HZ */
+         .name              = "4k2k25hz",
+-        .mode              = TVMODE_4K2K_25HZ,
++        .mode              = VMODE_4K2K_25HZ,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -458,7 +466,7 @@ static const vinfo_t tv_info[] =
+     },
+     { /* VMODE_4K2K_24HZ */
+         .name              = "4k2k24hz",
+-        .mode              = TVMODE_4K2K_24HZ,
++        .mode              = VMODE_4K2K_24HZ,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -471,7 +479,7 @@ static const vinfo_t tv_info[] =
+ #ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
+ 	{ /* VMODE_4K2K_23HZ */
+ 		.name			   = "4k2k23hz",
+-		.mode			   = TVMODE_4K2K_23HZ,
++		.mode			   = VMODE_4K2K_23HZ,
+ 		.width			   = 3840,
+ 		.height 		   = 2160,
+ 		.field_height	   = 2160,
+@@ -484,7 +492,7 @@ static const vinfo_t tv_info[] =
+ #endif
+     { /* VMODE_4K2K_SMPTE */
+         .name              = "4k2ksmpte",
+-        .mode              = TVMODE_4K2K_SMPTE,
++        .mode              = VMODE_4K2K_SMPTE,
+         .width             = 4096,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -496,7 +504,7 @@ static const vinfo_t tv_info[] =
+     },
+     { /* VMODE_4K2K_FAKE_5G */
+         .name              = "4k2k5g",
+-        .mode              = TVMODE_4K2K_FAKE_5G,
++        .mode              = VMODE_4K2K_FAKE_5G,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -508,7 +516,7 @@ static const vinfo_t tv_info[] =
+     },
+     { /* VMODE_4K2K_60HZ_Y420 */
+         .name              = "4k2k60hz420",
+-        .mode              = TVMODE_4K2K_60HZ_Y420,
++        .mode              = VMODE_4K2K_60HZ_Y420,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -520,7 +528,7 @@ static const vinfo_t tv_info[] =
+     },
+     { /* VMODE_4K2K_60HZ */
+         .name              = "4k2k60hz",
+-        .mode              = TVMODE_4K2K_60HZ,
++        .mode              = VMODE_4K2K_60HZ,
+         .width             = 3840,
+         .height            = 2160,
+         .field_height      = 2160,
+@@ -530,15 +538,99 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 594000000,
+     },
+-    { /* VMODE_4K2K_50HZ_Y420 */
+-        .name              = "4k2k50hz420",
+-        .mode              = TVMODE_4K2K_50HZ_Y420,
++    { /* VMODE_4K1K_100HZ_Y420 */
++        .name              = "4k1k100hz420",
++        .mode              = VMODE_4K1K_100HZ_Y420,
+         .width             = 3840,
+-        .height            = 2160,
+-        .field_height      = 2160,
+-        .aspect_ratio_num  = 16,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 32,
+         .aspect_ratio_den  = 9,
+-        .sync_duration_num = 50,
++        .sync_duration_num = 100,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K1K_100HZ */
++        .name              = "4k1k100hz",
++        .mode              = VMODE_4K1K_100HZ,
++        .width             = 3840,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 32,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 100,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K1K_120HZ_Y420 */
++        .name              = "4k1k120hz420",
++        .mode              = VMODE_4K1K_120HZ_Y420,
++        .width             = 3840,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 32,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 120,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K1K_120HZ */
++        .name              = "4k1k120hz",
++        .mode              = VMODE_4K1K_120HZ,
++        .width             = 3840,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 32,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 120,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K05K_200HZ_Y420 */
++        .name              = "4k05k200hz420",
++        .mode              = VMODE_4K05K_200HZ_Y420,
++        .width             = 3840,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 64,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 200,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K05K_200HZ */
++        .name              = "4k05k200hz",
++        .mode              = VMODE_4K05K_200HZ,
++        .width             = 3840,
++        .height            = 540,
++        .field_height      = 540,
++        .aspect_ratio_num  = 64,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 200,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K05K_240HZ_Y420 */
++        .name              = "4k05k240hz420",
++        .mode              = VMODE_4K05K_240HZ_Y420,
++        .width             = 3840,
++        .height            = 540,
++        .field_height      = 540,
++        .aspect_ratio_num  = 64,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 240,
++        .sync_duration_den = 1,
++        .video_clk         = 594000000,
++    },
++    { /* VMODE_4K05K_240HZ */
++        .name              = "4k05k240hz",
++        .mode              = VMODE_4K05K_240HZ,
++        .width             = 3840,
++        .height            = 1080,
++        .field_height      = 1080,
++        .aspect_ratio_num  = 64,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 240,
+         .sync_duration_den = 1,
+         .video_clk         = 594000000,
+     },
+diff --git a/drivers/amlogic/display/vout2/tvoutc2.c b/drivers/amlogic/display/vout2/tvoutc2.c
+index 4b77e2ec52ae..377fb7654686 100755
+--- a/drivers/amlogic/display/vout2/tvoutc2.c
++++ b/drivers/amlogic/display/vout2/tvoutc2.c
+@@ -269,7 +269,7 @@ int tvoutc_setmode2(tvmode_t mode)
+ 
+     s = tvregs_setting_mode(mode);
+     if(!s) {
+-        printk("display mode %d regs setting failed\n", mode);
++        printk("display2 mode %d regs setting failed\n", mode);
+         return 0;
+     }
+     //s = tvregsTab[mode];
+diff --git a/drivers/amlogic/hdmi/hdmi_common/hdmi_parameters.c b/drivers/amlogic/hdmi/hdmi_common/hdmi_parameters.c
+index 1d682b8afde2..1e7d1828fadd 100644
+--- a/drivers/amlogic/hdmi/hdmi_common/hdmi_parameters.c
++++ b/drivers/amlogic/hdmi/hdmi_common/hdmi_parameters.c
+@@ -511,6 +511,126 @@ static struct hdmi_format_para fmt_para_720x576i50_16x9 = {
+     },
+ };
+ 
++static struct hdmi_format_para fmt_para_3840x1080p120_16x9 = {
++    .vic = HDMI_3840x1080p120hz,
++    .name = "3840x1080p120hz",
++    .pixel_repetition_factor = 0,
++    .progress_mode = 1,
++    .scrambler_en = 1,
++    .tmds_clk_div40 = 1,
++    .tmds_clk = 594000,
++    .timing = {
++        .pixel_freq = 594000,
++        .h_freq = 135000,
++        .v_freq = 120000,
++        .vsync_polarity = 1,
++        .hsync_polarity = 1,
++        .h_active = 3840,
++        .h_total = 4400,
++        .h_blank = 560,
++        .h_front = 176,
++        .h_sync = 88,
++        .h_back = 296,
++        .v_active = 1080,
++        .v_total = 1125,
++        .v_blank = 45,
++        .v_front = 4,
++        .v_sync = 5,
++        .v_back = 36,
++        .v_sync_ln = 1,
++    },
++};
++
++static struct hdmi_format_para fmt_para_3840x1080p100_16x9 = {
++    .vic = HDMI_3840x1080p100hz,
++    .name = "3840x1080p100hz",
++    .pixel_repetition_factor = 0,
++    .progress_mode = 1,
++    .scrambler_en = 1,
++    .tmds_clk_div40 = 1,
++    .tmds_clk = 594000,
++    .timing = {
++        .pixel_freq = 594000,
++        .h_freq = 112500,
++        .v_freq = 50000,
++        .vsync_polarity = 1,
++        .hsync_polarity = 1,
++        .h_active = 3840,
++        .h_total = 5280,
++        .h_blank = 1440,
++        .h_front = 1056,
++        .h_sync = 88,
++        .h_back = 296,
++        .v_active = 1080,
++        .v_total = 1125,
++        .v_blank = 45,
++        .v_front = 4,
++        .v_sync = 5,
++        .v_back = 36,
++        .v_sync_ln = 1,
++    },
++};
++
++static struct hdmi_format_para fmt_para_3840x540p240_16x9 = {
++    .vic = HDMI_3840x540p240hz,
++    .name = "3840x540p240hz",
++    .pixel_repetition_factor = 0,
++    .progress_mode = 1,
++    .scrambler_en = 1,
++    .tmds_clk_div40 = 1,
++    .tmds_clk = 594000,
++    .timing = {
++        .pixel_freq = 594000,
++        .h_freq = 135000,
++        .v_freq = 120000,
++        .vsync_polarity = 1,
++        .hsync_polarity = 1,
++        .h_active = 3840,
++        .h_total = 4400,
++        .h_blank = 560,
++        .h_front = 176,
++        .h_sync = 88,
++        .h_back = 296,
++        .v_active = 540,
++        .v_total = 562,
++        .v_blank = 22,
++        .v_front = 2,
++        .v_sync = 2,
++        .v_back = 18,
++        .v_sync_ln = 1,
++    },
++};
++
++static struct hdmi_format_para fmt_para_3840x540p200_16x9 = {
++    .vic = HDMI_3840x1080p100hz,
++    .name = "3840x1080p200hz",
++    .pixel_repetition_factor = 0,
++    .progress_mode = 1,
++    .scrambler_en = 1,
++    .tmds_clk_div40 = 1,
++    .tmds_clk = 594000,
++    .timing = {
++        .pixel_freq = 594000,
++        .h_freq = 112500,
++        .v_freq = 50000,
++        .vsync_polarity = 1,
++        .hsync_polarity = 1,
++        .h_active = 3840,
++        .h_total = 5280,
++        .h_blank = 1440,
++        .h_front = 1056,
++        .h_sync = 88,
++        .h_back = 296,
++        .v_active = 540,
++        .v_total = 562,
++        .v_blank = 22,
++        .v_front = 2,
++        .v_sync = 2,
++        .v_back = 18,
++        .v_sync_ln = 1,
++    },
++};
++
+ static struct hdmi_format_para *all_fmt_paras[] = {
+     &fmt_para_3840x2160p60_16x9,
+     &fmt_para_3840x2160p50_16x9,
+@@ -529,6 +649,10 @@ static struct hdmi_format_para *all_fmt_paras[] = {
+     &fmt_para_720x480i60_16x9,
+     &fmt_para_720x576p50_16x9,
+     &fmt_para_720x576i50_16x9,
++    &fmt_para_3840x1080p100_16x9,
++    &fmt_para_3840x1080p120_16x9,
++    &fmt_para_3840x540p200_16x9,
++    &fmt_para_3840x540p240_16x9,
+ };
+ 
+ struct hdmi_format_para * hdmi_get_fmt_paras(HDMI_Video_Codes_t vic)
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
+index 4c3cf2c52919..7e0bb8c2752a 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_edid.c
+@@ -1311,6 +1311,14 @@ static dispmode_vic_t dispmode_VIC_tab[]=
+     {"4k2k5g",    HDMI_3840x2160p50_16x9},
+     {"4k2k60hz420", HDMI_3840x2160p60_16x9},
+     {"4k2k60hz",  HDMI_3840x2160p60_16x9},
++    {"4k1k100hz", HDMI_3840x1080p100hz},
++    {"4k1k100hz420", HDMI_3840x1080p100hz},
++    {"4k1k120hz", HDMI_3840x1080p120hz},
++    {"4k1k120hz420", HDMI_3840x1080p120hz},
++    {"4k05k200hz", HDMI_3840x540p200hz},
++    {"4k05k200hz420", HDMI_3840x540p200hz},
++    {"4k05k240hz", HDMI_3840x540p240hz},
++    {"4k05k240hz420", HDMI_3840x540p240hz},
+ };
+ 
+ int hdmitx_edid_VIC_support(HDMI_Video_Codes_t vic)
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+index 721e32f2c082..d53ced764bc5 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+@@ -416,6 +416,10 @@ static int set_disp_mode_auto(void)
+         // Currently, only below formats support 420 mode
+         case HDMI_3840x2160p60_16x9:
+         case HDMI_3840x2160p50_16x9:
++        case HDMI_3840x1080p100hz:
++        case HDMI_3840x1080p120hz:
++        case HDMI_3840x540p200hz:
++        case HDMI_3840x540p240hz:
+             printk("configure mode420, VIC = %d\n", hdmitx_device.cur_VIC);
+             hdmitx_device.HWOp.CntlMisc(&hdmitx_device, MISC_CONF_MODE420, hdmitx_device.mode420);
+             break;
+@@ -722,6 +726,10 @@ const char* disp_mode_t[]={
+     "4k2k25hz",
+     "4k2k24hz",
+     "4k2ksmpte",
++    "4k1k120hz",
++    "4k1k100hz",
++    "4k05k240hz",
++    "4k05k200hz",
+     NULL
+ };
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_video.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_video.c
+index de006a7b41f2..a0ba8e097603 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_video.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_video.c
+@@ -348,6 +348,50 @@ static Hdmi_tx_video_para_t hdmi_tx_video_params[] =
+         .ss             = SS_SCAN_UNDER,
+         .sc             = SC_SCALE_HORIZ_VERT,
+     },
++    {
++        .VIC            = HDMI_3840x1080p100hz,
++        .color_prefer   = COLOR_SPACE_RGB444,
++        .color_depth    = COLOR_24BIT,
++        .bar_info       = B_BAR_VERT_HORIZ,
++        .repeat_time    = NO_REPEAT,
++        .aspect_ratio   = TV_ASPECT_RATIO_16_9,
++        .cc             = CC_ITU709,
++        .ss             = SS_SCAN_UNDER,
++        .sc             = SC_SCALE_HORIZ_VERT,
++    },
++    {
++        .VIC            = HDMI_3840x1080p120hz,
++        .color_prefer   = COLOR_SPACE_RGB444,
++        .color_depth    = COLOR_24BIT,
++        .bar_info       = B_BAR_VERT_HORIZ,
++        .repeat_time    = NO_REPEAT,
++        .aspect_ratio   = TV_ASPECT_RATIO_16_9,
++        .cc             = CC_ITU709,
++        .ss             = SS_SCAN_UNDER,
++        .sc             = SC_SCALE_HORIZ_VERT,
++    },
++    {
++        .VIC            = HDMI_3840x540p240hz,
++        .color_prefer   = COLOR_SPACE_RGB444,
++        .color_depth    = COLOR_24BIT,
++        .bar_info       = B_BAR_VERT_HORIZ,
++        .repeat_time    = NO_REPEAT,
++        .aspect_ratio   = TV_ASPECT_RATIO_16_9,
++        .cc             = CC_ITU709,
++        .ss             = SS_SCAN_UNDER,
++        .sc             = SC_SCALE_HORIZ_VERT,
++    },
++    {
++        .VIC            = HDMI_3840x540p200hz,
++        .color_prefer   = COLOR_SPACE_RGB444,
++        .color_depth    = COLOR_24BIT,
++        .bar_info       = B_BAR_VERT_HORIZ,
++        .repeat_time    = NO_REPEAT,
++        .aspect_ratio   = TV_ASPECT_RATIO_16_9,
++        .cc             = CC_ITU709,
++        .ss             = SS_SCAN_UNDER,
++        .sc             = SC_SCALE_HORIZ_VERT,
++    },
+ };
+ 
+ static Hdmi_tx_video_para_t *hdmi_get_video_param(HDMI_Video_Codes_t VideoCode)
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_common.h b/include/linux/amlogic/hdmi_tx/hdmi_common.h
+index a3df636432b9..3bccdd781bec 100644
+--- a/include/linux/amlogic/hdmi_tx/hdmi_common.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_common.h
+@@ -114,6 +114,10 @@ typedef enum HDMI_Video_Type_ {
+     HDMI_3840x2160p50_64x27 = 106,
+     HDMI_3840x2160p60_64x27 = 107,
+     HDMI_RESERVED = 108,
++    HDMI_3840x1080p120hz = 109,
++    HDMI_3840x1080p100hz,
++    HDMI_3840x540p240hz,
++    HDMI_3840x540p200hz,
+ } HDMI_Video_Codes_t;
+ 
+ // Compliance with old definitions
+diff --git a/include/linux/amlogic/vout/vinfo.h b/include/linux/amlogic/vout/vinfo.h
+index f61f416c8a5f..7f4b130c4cfa 100755
+--- a/include/linux/amlogic/vout/vinfo.h
++++ b/include/linux/amlogic/vout/vinfo.h
+@@ -80,6 +80,14 @@ typedef enum {
+     VMODE_4K2K_50HZ,	  // timing same as 4k2k25hz, Vsync from 25hz to 50hz
+     VMODE_4K2K_50HZ_Y420,
+     VMODE_4K2K_5G,
++    VMODE_4K1K_120HZ,
++    VMODE_4K1K_120HZ_Y420,
++    VMODE_4K1K_100HZ,
++    VMODE_4K1K_100HZ_Y420,
++    VMODE_4K05K_240HZ,
++    VMODE_4K05K_240HZ_Y420,
++    VMODE_4K05K_200HZ,
++    VMODE_4K05K_200HZ_Y420,
+     VMODE_VGA,
+     VMODE_SVGA,
+     VMODE_XGA,
+@@ -144,6 +152,15 @@ typedef enum {
+     TVMODE_4K2K_60HZ_Y420,
+     TVMODE_4K2K_50HZ ,
+     TVMODE_4K2K_50HZ_Y420,
++    TVMODE_4K2K_5G,
++    TVMODE_4K1K_120HZ,
++    TVMODE_4K1K_120HZ_Y420,
++    TVMODE_4K1K_100HZ,
++    TVMODE_4K1K_100HZ_Y420,
++    TVMODE_4K05K_240HZ,
++    TVMODE_4K05K_240HZ_Y420,
++    TVMODE_4K05K_200HZ,
++    TVMODE_4K05K_200HZ_Y420,
+     TVMODE_VGA ,
+     TVMODE_SVGA,
+     TVMODE_XGA,
+-- 
+2.19.0
+

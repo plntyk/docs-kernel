@@ -1,0 +1,2138 @@
+From df30334e9a8329e8a11dd1ac5e7b9f500c6d0fc3 Mon Sep 17 00:00:00 2001
+From: "jiyu.yang" <jiyu.yang@amlogic.com>
+Date: Sun, 10 Nov 2013 14:07:39 +0800
+Subject: [PATCH 1801/5965] PD#82122 add csi support.
+
+change ov5647's interface to mipi can see the result int
+arch/arm/boot/dts/amlogic/meson8_skt.dtd
+now for 5647 720p@60fps, 1080p@30fps with default myconfig
+---
+ arch/arm/boot/dts/amlogic/meson8_skt.dtd      |   4 +
+ arch/arm/configs/meson8_defconfig             |   1 +
+ .../mach-meson8/include/mach/mipi_phy_reg.h   | 190 ++++++
+ drivers/amlogic/camera/common/cam_prober.c    |  56 +-
+ drivers/amlogic/camera/hi2056.c               |  41 +-
+ drivers/amlogic/camera/ov5647.c               | 488 +++++++++++++++-
+ drivers/amlogic/tvin/Kconfig                  |   1 +
+ drivers/amlogic/tvin/Makefile                 |   1 +
+ drivers/amlogic/tvin/csi/Kconfig              |  11 +
+ drivers/amlogic/tvin/csi/Makefile             |   2 +
+ drivers/amlogic/tvin/csi/csi.c                | 552 ++++++++++++++++++
+ drivers/amlogic/tvin/csi/csi.h                |  40 ++
+ drivers/amlogic/tvin/csi/mipi_hw.c            | 208 +++++++
+ include/linux/amlogic/camera/aml_cam_info.h   |   2 +
+ include/linux/amlogic/mipi/am_mipi_csi2.h     |  74 ++-
+ include/linux/amlogic/tvin/tvin_v4l2.h        |  30 +-
+ 16 files changed, 1627 insertions(+), 74 deletions(-)
+ create mode 100755 arch/arm/mach-meson8/include/mach/mipi_phy_reg.h
+ create mode 100755 drivers/amlogic/tvin/csi/Kconfig
+ create mode 100755 drivers/amlogic/tvin/csi/Makefile
+ create mode 100755 drivers/amlogic/tvin/csi/csi.c
+ create mode 100755 drivers/amlogic/tvin/csi/csi.h
+ create mode 100755 drivers/amlogic/tvin/csi/mipi_hw.c
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_skt.dtd b/arch/arm/boot/dts/amlogic/meson8_skt.dtd
+index effe33d830cf..c7f013ca4ba9 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_skt.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_skt.dtd
+@@ -997,6 +997,8 @@ void root_func(){
+ //$$ L2 PROP_U32 = "mirror_flip"
+ //$$ L2 PROP_U32 = "vertical_flip"
+ //$$ L2 PROP_STR = "bt_path"
++//$$ L2 PROP_STR = "interface"
++//$$ L2 PROP_STR = "clk_channel"
+ 		cam_1{
+ 			cam_name = "ov5647";
+ 			front_back = <0>;
+@@ -1007,6 +1009,8 @@ void root_func(){
+ 			vertical_flip = <0>;	
+ 			config_path = "/system/etc/myconfig";
+ 			bt_path = "csi";
++			interface = "dvp";
++			clk_channel = "b";
+ 			status = "okay";
+ 		};
+ 	};	
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index d339e171f8bd..dbf36011bcc2 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -319,6 +319,7 @@ CONFIG_VIDEO_AMLOGIC_CAPTURE_OV5640=y
+ CONFIG_VIDEO_AMLOGIC_CAPTURE_OV5647=y
+ CONFIG_VIDEO_AMLOGIC_CAPTURE_HI253=y
+ CONFIG_TVIN_ISP=y
++CONFIG_TVIN_CSI=y
+ CONFIG_SENSOR_DEVICES=y
+ CONFIG_GRAVITY_BMA250=y
+ CONFIG_GRAVITY_BMA222=y
+diff --git a/arch/arm/mach-meson8/include/mach/mipi_phy_reg.h b/arch/arm/mach-meson8/include/mach/mipi_phy_reg.h
+new file mode 100755
+index 000000000000..fe4cef7f8da2
+--- /dev/null
++++ b/arch/arm/mach-meson8/include/mach/mipi_phy_reg.h
+@@ -0,0 +1,190 @@
++#ifndef MIPI_PHY_REG
++#define MIPI_PHY_REG
++#include <mach/io.h>
++
++#define MIPI_PHY_BASE                  IO_MIPI_PHY_BASE
++#define mipi_phy_reg_wr(addr, data) *(volatile unsigned long *) (MIPI_PHY_BASE + (addr << 2) )=data
++#define mipi_phy_reg_rd(addr) *(volatile unsigned long *) (MIPI_PHY_BASE + (addr << 2) )
++
++#define MIPI_PHY_CTRL    		0x00
++  //31:   soft reset.  set 1 will reset the MIPI phy cil_scnn and cil_sfen modules.
++          // set 0 will release the reset.  it's level signal.
++  //20:   if set, all analog control signals will directly from the related register bit.
++  //19:18  mipi hs clock to pad selection.
++           //2'b00 :  no output.
++           //2'b01 :  output /2 clock.
++           //2'b10 :  output /4 clock.
++           //2'b11 :  output /8 clock.
++  //17:15  mipi analog signal to pad selection.
++           //3'b000: no output.
++           //3'b001:  clock lane.
++           //3'b010:  data lane 0.
++           //3'b011:  data lane 1.
++           //3'b100:  data lane 2.
++           //3'b101:  data lane 3.
++  //13     ddr to reg.   enalbe this bit the 8 interface DFFs result will be latch to
++           // MIPI_PHY_DDR_STS registers.
++  //12     enable this bit : all analog output signal will be latched to
++           // MIPI_PHY_ANA_STS   registers.
++  //11     not used. reserved for future..
++  //10     force analog MBIAS enable.
++  // 9:5    mipi_chpu  to analog.
++  // 4      shut down digital clock lane.
++  // 3      Shut down digital data lane 3.
++  // 2      Shut down digital data lane 2.
++  // 1      Shut down digital data lane 1.
++  // 0      Shut down digital data lane 0.
++
++#define MIPI_PHY_CLK_LANE_CTRL		0x01
++  //11     force clock lane TH check enable.
++  //10     force clock lane LP enable.
++  //9      force clock lane HS RECEIVER enable  this signal is not used by analog.
++  //8      force clock lane terminator enable
++  //7       if set, will dislabe clock lane LPEN if clock lane is in HS mode.
++            // if not set,  the LPEN is always enabled until in ULPS state.
++  //6       force clock TCLK_ZERO check when in clock lane HS mode.
++  //5:3     TCLK_ZERO timing check. check with the hs clock counter.
++          //  000:  hs clock itself.
++          //  001:   hs clock /2
++          //  010:   hs clock /4
++          //  011:   hs clock /8
++          //  100:   hs clock /16
++  // 1      force clock lane come out of ulps
++  // 0      force clock lane enter ULPS state.
++
++
++
++#define MIPI_PHY_DATA_LANE_CTRL		0x02
++  //15 :   force data lane 3 THEN  enable.
++  //14 :   force data lane 3 LP receiver enable.
++  //13 :   force data lane 3 HS receiver enable.
++  //12  :  force data lane 3 terminator enable.
++  //11 :   force data lane 2 THEN  enable.
++  //10 :   force data lane 2 LP receiver enable.
++  //9 :    force data lane 2 HS receiver enable.
++  //8 :    force data lane 2 terminator enable.
++  //7 :    force data lane 1 THEN  enable.
++  //6 :    force data lane 1 LP receiver enable.
++  //5 :    force data lane 1 HS receiver enable.
++  //4 :    force data lane 1 terminator enable.
++  //3 :    force data lane 0 THEN  enable.
++  //2 :    force data lane 0 LP receiver enable.
++  //1 :    force data lane 0 HS receiver enable. // this bit is not used to control analog.
++  //0 :    force data lane 0 terminator enable.
++
++#define MIPI_PHY_DATA_LANE_CTRL1	0x03
++   //12  LP data bit order.
++   //11:10. HS data bit order.  2'b00.  low bit input early.
++   //9:7    data pipe sel. output data use with pipe line data.
++   //6:2.   these addition 5 pipe line to same the high speed data.
++           //each bit for one pipe line.
++   // 1    if set enable the hs_sync error bit check.
++   // 0:   for CSI2, only ULPS command accepted. if set this bit, all other command will insert the            //ErrEsc signal.
++
++#define MIPI_PHY_TCLK_MISS		0x04
++#define MIPI_PHY_TCLK_SETTLE		0x05
++#define MIPI_PHY_THS_EXIT		0x06
++#define MIPI_PHY_THS_SKIP		0x07
++#define MIPI_PHY_THS_SETTLE		0x08
++#define MIPI_PHY_TINIT			0x09
++#define MIPI_PHY_TULPS_C		0x0a
++#define MIPI_PHY_TULPS_S		0x0b
++#define MIPI_PHY_TMBIAS		        0x0c
++   // how many cycles need to wait for analog MBIAS stable after MIPI_MBIAS_EN is inserted.
++#define MIPI_PHY_TLP_EN_W		0x0d
++   // how many cycles need to wait for analog LP receiver stable output after LPEN is inserted.
++#define MIPI_PHY_TLPOK    		0x0e
++   // how many cycles need to wait for analog LP receiver stable output after LPEN is inserted.
++#define MIPI_PHY_TWD_INIT               0x0f
++   // watch dog for init.
++#define MIPI_PHY_TWD_HS                 0x10
++   // watch dog for hs speed transfer.
++#define MIPI_PHY_AN_CTRL0		0x11
++#define MIPI_PHY_AN_CTRL1		0x12
++#define MIPI_PHY_AN_CTRL2		0x13
++#define MIPI_PHY_CLK_LANE_STS		0x14
++  //3:0 clock lane states.
++       // 4'h0 : Power_down state.
++       // 4'h1 : POWER_UP state. //waiting for TINIT and MBIAS ready.
++       // 4'h2 : INIT state  //waiting the input to STOP.
++       // 4'h3 : STOP state.
++       // 4'h4 : ULPS request state. after receiver the ulps request, waiting everything setlled.
++       // 4'h5 : ULPS state.
++       // 4'h6 : ULPS exit state. checked ULPS exit request and waiting for input in STOP.
++       // 4'h7 : HS data transfer request state. LP = 2'b01:
++       // 4'h8 : HS bridge state.     LP = 2'b00:
++       // 4'h9 : HS CLK ZERO state.   enable the HS reciever in this stage the input clock is zero.
++       // 4'ha : HS transfer state.
++       // 4'hb : HS TRAIL state.  if detected no clock edge , the state machine will try to go to stop state.
++
++#define MIPI_PHY_DATA_LANE0_STS		0x15
++   //6:4 : data lane 0 HS sub state.  because this is across clock domain state. this is only for static debug.
++   //3:0  data lane 0 state.
++         //4'h0 : POWER_DOWN State.
++         //4'h1 : POWER UP state.
++         //4'h2 : INIT state.
++         //4'h3 : STOP state.
++         //4'h4 : HS REQUST state.
++         //4'h5 : HS PREPARE state.
++         //4'h6 : HS transfer state.
++         //4'h7 : HS exit state.
++         //4'h8 : ESC request state.
++         //4'h9 : ESC bridge 0 state.
++         //4'ha : ESC bridge 1 state.
++         //4'hb : ESC command state.
++         //4'hc : ESC EXIT state.
++         //4'hd : LP data transfer state.
++         //4'he : ULPS state.
++         //4'hf : ULPS exit state.
++#define MIPI_PHY_DATA_LANE1_STS		0x16
++   //6:4 : data lane 0 HS sub state.  because this is across clock domain state. this is only for static debug.
++   //3:0 : data lane 0 state.
++
++#define MIPI_PHY_DATA_LANE2_STS		0x17
++#define MIPI_PHY_DATA_LANE3_STS		0x18
++#define MIPI_PHY_ESC_CMD		0x19
++#define MIPI_PHY_INT_CTRL		0x1a
++   //24:  read to clear the INT_STS.  when this bit is set, read MIPI_PHY_INT_STS will clean all interupt status bits.
++   //18:0  each bit to enable related interrupt generate. if this bit is set, it will generate a interrupt to cpu when the interrupt source is triggered..
++          // otherwise only change the status bit.
++#define MIPI_PHY_INT_STS		0x1b
++   //18    clock lane ulps exit interupt
++   //17    clock lane ulps enter interrupt
++   //16    clock lane initilization watch dog interrupt.
++   //15    data  lane 3 initiliaztion watch dog interrupt.
++   //14    data  lane 2 initiliaztion watch dog interrupt.
++   //13    data  lane 1 initiliaztion watch dog interrupt.
++   //12    data  lane 0 initiliaztion watch dog interrupt.
++   //11    data  lane 3 HS transfer watch dog interrupt.
++   //10    data  lane 2 HS transfer watch dog interrupt.
++   //9     data  lane 1 HS transfer watch dog interrupt.
++   //8     data  lane 0 HS transfer watch dog interrupt.
++   //7     data  lane 3 HS transfer sync error interrupt.
++   //6     data  lane 2 HS transfer sync error interrupt.
++   //5     data  lane 1 HS transfer sync error interrupt.
++   //4     data  lane 0 HS transfer sync error interrupt.
++   //3     data  lane 3 ESC command ready interrupt.
++   //2     data  lane 2 ESC command ready interrupt.
++   //1     data  lane 1 ESC command ready interrupt.
++   //0     data  lane 0 ESC command ready interrupt.
++
++#define MIPI_PHY_ANA_STS                0x1c
++#define MIPI_PHY_DDR_STS                0x1d
++
++// MIPI-CSI2 host registers
++#define MIPI_CSI2_HOST_VERSION          (0x000)
++#define MIPI_CSI2_HOST_N_LANES          (0x001)
++#define MIPI_CSI2_HOST_PHY_SHUTDOWNZ    (0x002)
++#define MIPI_CSI2_HOST_DPHY_RSTZ        (0x003)
++#define MIPI_CSI2_HOST_CSI2_RESETN      (0x004)
++#define MIPI_CSI2_HOST_PHY_STATE        (0x005)
++#define MIPI_CSI2_HOST_DATA_IDS_1       (0x006)
++#define MIPI_CSI2_HOST_DATA_IDS_2       (0x007)
++#define MIPI_CSI2_HOST_ERR1             (0x008)
++#define MIPI_CSI2_HOST_ERR2             (0x009)
++#define MIPI_CSI2_HOST_MASK1            (0x00A)
++#define MIPI_CSI2_HOST_MASK2            (0x00B)
++#define MIPI_CSI2_HOST_PHY_TST_CTRL0    (0x00C)
++#define MIPI_CSI2_HOST_PHY_TST_CTRL1    (0x00D)
++
++#endif
+diff --git a/drivers/amlogic/camera/common/cam_prober.c b/drivers/amlogic/camera/common/cam_prober.c
+index 028e541159ec..f8ab90f5dee4 100755
+--- a/drivers/amlogic/camera/common/cam_prober.c
++++ b/drivers/amlogic/camera/common/cam_prober.c
+@@ -340,10 +340,11 @@ int hm5065_v4l2_probe(struct i2c_adapter *adapter)
+ int hi2056_v4l2_probe(struct i2c_adapter *adapter)
+ {
+ 	int ret = 0;
+-	unsigned char reg;   
+-	reg = aml_i2c_get_byte_add8(adapter, 0x24, 0x00);
+-	printk("reg=%x\n", reg);
+-	//if (reg == 0x9b)//need test
++	unsigned char reg[2];
++	reg[0] = aml_i2c_get_byte(adapter, 0x24, 0x0001);
++	reg[1] = aml_i2c_get_byte(adapter, 0x24, 0x0002);
++        printk("reg[0]=%x, reg[1]=%x\n", reg[0], reg[1]);
++	if (reg[0] == 0x20 && reg[1] == 0x56)
+ 		ret = 1;
+ 	return ret;
+ }
+@@ -356,7 +357,7 @@ int ov5647_v4l2_probe(struct i2c_adapter *adapter)
+ 	unsigned char reg[2];  
+ 	reg[0] = aml_i2c_get_byte(adapter, 0x36, 0x300a);
+ 	reg[1] = aml_i2c_get_byte(adapter, 0x36, 0x300b);
+-	printk("reg[0]:%d,reg[1]:%d\n",reg[0],reg[1]);
++	printk("reg[0]:%x,reg[1]:%x\n",reg[0],reg[1]);
+ 	if (reg[0] == 0x56 && reg[1] == 0x47)
+ 		ret = 1;
+ 	return ret;
+@@ -528,7 +529,7 @@ static aml_cam_dev_info_t cam_devs[] = {
+ #endif
+ #ifdef CONFIG_VIDEO_AMLOGIC_CAPTURE_HI2056
+ 	{
+-		.addr = 0x48,
++		.addr = 0x24,
+ 		.name = "mipi-hi2056",
+ 		.pwdn = 1,
+ 		.max_cap_size = SIZE_1600X1200,
+@@ -719,6 +720,29 @@ static struct list_head cam_head = LIST_HEAD_INIT(cam_head);
+ 
+ #define DEBUG_DUMP_CAM_INFO
+ 
++static int fill_csi_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
++{
++	const char* str;
++	int ret = 0;
++	aml_cam_dev_info_t* cam_info = NULL;
++	struct i2c_adapter *adapter;
++
++	ret = of_property_read_string(p_node, "clk_channel", &str);
++	if (ret) {
++		printk("failed to read clock channel, \"a or b\"\n");
++		cam_dev->clk_channel = CLK_CHANNEL_A;
++	} else {
++		printk("clock channel:clk %s\n", str);
++		if (strncmp("a", str, 1) == 0){
++                        cam_dev->clk_channel = CLK_CHANNEL_A;
++                }else{
++                        cam_dev->clk_channel = CLK_CHANNEL_B;
++                }
++	}
++
++    return ret;
++
++}
+ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+ {
+ 	const char* str;
+@@ -832,7 +856,25 @@ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+ 		else
+ 			cam_dev->bt_path = BT_PATH_GPIO;
+ 	}
+-	
++
++	ret = of_property_read_string(p_node, "interface", &str);
++	if (ret) {
++		printk("failed to read camera interface \"mipi or dvp\"\n");
++		cam_dev->interface = CAM_DVP;
++	} else {
++		printk("camera interface:%s\n", str);
++		if (strncmp("dvp", str, 1) == 0){
++                        cam_dev->interface = CAM_DVP;
++                }else{
++                        cam_dev->interface = CAM_MIPI;
++                }
++	}
++        if( CAM_MIPI == cam_dev->interface ){
++		ret = fill_csi_dev( p_node, cam_dev);
++                if ( ret < 0 )
++                        goto err_out;
++        }
++
+ 	ret = of_property_read_string(p_node, "config_path", &cam_dev->config);
+ 	// cam_dev->config = "/system/etc/myconfig";
+ 	//ret = 0;
+diff --git a/drivers/amlogic/camera/hi2056.c b/drivers/amlogic/camera/hi2056.c
+index 63f5ae0feb25..015d8d2109f5 100755
+--- a/drivers/amlogic/camera/hi2056.c
++++ b/drivers/amlogic/camera/hi2056.c
+@@ -36,6 +36,7 @@
+ 
+ #include <linux/i2c.h>
+ #include <media/v4l2-chip-ident.h>
++#include <media/amlogic/aml_camera.h>
+ #include <linux/amlogic/mipi/am_mipi_csi2.h>
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+ #include <mach/am_regs.h>
+@@ -337,7 +338,7 @@ struct hi2056_device {
+ 	int			   input;
+ 
+ 	/* platform device data from board initting. */
+-	aml_plat_cam_data_t platform_dev_data;
++    aml_cam_info_t  cam_info;
+ 	
+ 	/* wake lock */
+ 	struct wake_lock	wake_lock;
+@@ -2098,10 +2099,7 @@ static int hi2056_open(struct file *file)
+ 	switch_mod_gate_by_name("ge2d", 1);
+ 	switch_mod_gate_by_name("mipi", 1);
+ #endif
+-	if(dev->platform_dev_data.device_init) {
+-		dev->platform_dev_data.device_init();
+-		printk("+++found a init function, and run it..\n");
+-	}
++	aml_cam_init(&dev->cam_info);
+ 	hi2056_h_active=0;
+  	hi2056_v_active=0;
+ 	hi2056_h_output=0;
+@@ -2225,10 +2223,7 @@ static int hi2056_close(struct file *file)
+ 	power_down_hi2056(dev);
+ 
+ 	msleep(10);
+-	if(dev->platform_dev_data.device_uninit) {
+-		dev->platform_dev_data.device_uninit();
+-		printk("+++found a uninit function, and run it..\n");
+-	}
++    aml_cam_uninit(&dev->cam_info);
+ 
+ 	msleep(10);
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+@@ -2326,7 +2321,7 @@ static int hi2056_probe(struct i2c_client *client,
+ 	int err;
+ 	struct hi2056_device *t;
+ 	struct v4l2_subdev *sd;
+-	aml_plat_cam_data_t* plat_dat;
++    aml_cam_info_t* plat_dat;
+ 	v4l_info(client, "chip found @ 0x%x (%s)\n",
+ 			client->addr << 1, client->adapter->name);
+ 	t = kzalloc(sizeof(*t), GFP_KERNEL);
+@@ -2334,6 +2329,7 @@ static int hi2056_probe(struct i2c_client *client,
+ 		return -ENOMEM;
+ 	sd = &t->sd;
+ 	v4l2_i2c_subdev_init(sd, client, &hi2056_ops);
++    plat_dat = (aml_cam_info_t*)client->dev.platform_data;
+ 	mutex_init(&t->mutex);
+ 
+ 	/* Now create a video4linux device */
+@@ -2350,13 +2346,16 @@ static int hi2056_probe(struct i2c_client *client,
+ 	wake_lock_init(&(t->wake_lock),WAKE_LOCK_SUSPEND, "hi2056");
+ 
+ 	/* Register it */
+-	plat_dat= (aml_plat_cam_data_t*)client->dev.platform_data;
+ 	if (plat_dat) {
+-		t->platform_dev_data.device_init=plat_dat->device_init;
+-		t->platform_dev_data.device_uninit=plat_dat->device_uninit;
+-		t->platform_dev_data.device_disable=plat_dat->device_disable;
+-		if(plat_dat->video_nr>=0)  video_nr=plat_dat->video_nr;
+-	}
++    	memcpy(&t->cam_info, plat_dat, sizeof(aml_cam_info_t));
++        if (plat_dat->front_back >=0)  
++        	video_nr = plat_dat->front_back;
++    } else {
++    	printk("camera hi2056: have no platform data\n");
++        kfree(t);
++        kfree(client);
++        return -1;
++    }
+ 	err = video_register_device(t->vdev, VFL_TYPE_GRABBER, video_nr);
+ 	if (err < 0) {
+ 		video_device_release(t->vdev);
+@@ -2380,19 +2379,15 @@ static int hi2056_remove(struct i2c_client *client)
+ }
+ 
+ static const struct i2c_device_id hi2056_id[] = {
+-	{ "hi2056", 0 },
++	{ "mipi-hi2056", 0 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(i2c, hi2056_id);
+ 
+-static struct i2c_driver hi2056_i2c_driver = {
+-	.driver = {
+-		.name = "mipi-hi2056",
+-	},
++static struct v4l2_i2c_driver_data v4l2_i2c_data = {
++	.name = "mipi-hi2056",
+ 	.probe = hi2056_probe,
+ 	.remove = hi2056_remove,
+ 	.id_table = hi2056_id,
+ };
+ 
+-module_i2c_driver(hi2056_i2c_driver);
+-
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 2104dd7c4b8f..d082522ac2aa 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -37,6 +37,7 @@
+ #include <linux/i2c.h>
+ #include <media/v4l2-chip-ident.h>
+ 
++#include <linux/amlogic/mipi/am_mipi_csi2.h>
+ #include <linux/amlogic/camera/aml_cam_info.h>
+ 
+ #include <mach/am_regs.h>
+@@ -535,7 +536,7 @@ typedef struct resolution_param {
+ 	struct v4l2_frmsize_discrete active_frmsize;
+ 	int active_fps;
+ 	resulution_size_type_t size_type;
+-	struct aml_camera_i2c_fig_s* reg_script;
++	struct aml_camera_i2c_fig_s *reg_script[2]; //0:dvp, 1:mipi
+ } resolution_param_t;
+ 
+ static LIST_HEAD(ov5647_devicelist);
+@@ -611,6 +612,105 @@ static struct aml_camera_i2c_fig_s OV5647_script[] = {
+ 	{0xffff, 0xff}
+ };
+ 
++struct aml_camera_i2c_fig_s OV5647_VGA_script_mipi[] = {
++          {0x4800, 0x24},
++          {0x0100, 0x00},
++          {0x0103, 0x01},
++          {0x3035, 0x11},
++          {0x3036, 0x46},
++          {0x303c, 0x11},
++          {0x3821, 0x07},
++          {0x3820, 0x41},
++          {0x370c, 0x0f},
++          {0x3612, 0x59},
++          {0x3618, 0x00},
++          {0x5000, 0x06},
++
++          {0x5000, 0x86},
++          {0x5001, 0x00},
++          {0x5002, 0x41},
++          {0x5003, 0x08},
++          {0x5a00, 0x08},
++          {0x3000, 0xff},
++          {0x3001, 0xff},
++          {0x3002, 0xff},
++          {0x301d, 0xf0},
++          {0x3a18, 0x00},
++          {0x3a19, 0xf8},
++          {0x3c01, 0x80},
++          {0x3b07, 0x0c},
++          {0x380c, 0x07},
++          {0x380d, 0x3c},
++          {0x380e, 0x03},
++          {0x380f, 0xf0},
++          {0x3814, 0x71},
++          {0x3815, 0x71},
++          {0x3708, 0x64},
++          {0x3709, 0x52},
++          {0x3808, 0x02},
++          {0x3809, 0x80},
++          {0x380a, 0x01},
++          {0x380b, 0xe0},
++          {0x3800, 0x00},
++          {0x3801, 0x10},
++          {0x3802, 0x00},
++          {0x3803, 0x00},
++          {0x3804, 0x0a},
++          {0x3805, 0x2f},
++          {0x3806, 0x07},
++          {0x3807, 0x9f},
++          {0x3630, 0x2e},
++          {0x3632, 0xe2},
++          {0x3633, 0x23},
++          {0x3634, 0x44},
++          {0x3620, 0x64},
++          {0x3621, 0xe0},
++          {0x3600, 0x37},
++          {0x3704, 0xa0},
++          {0x3703, 0x5a},
++          {0x3715, 0x78},
++          {0x3717, 0x01},
++          {0x3731, 0x02},
++          {0x370b, 0x60},
++          {0x3705, 0x1a},
++          {0x3f05, 0x02},
++          {0x3f06, 0x10},
++          {0x3f01, 0x0a},
++          {0x3503, 0x03},
++          {0x3a08, 0x01},
++          {0x3a09, 0x2e},
++          {0x3a0a, 0x00},
++          {0x3a0b, 0xfb},
++          {0x3a0d, 0x02},
++          {0x3a0e, 0x01},
++          {0x3a0f, 0x58},
++          {0x3a10, 0x50},
++          {0x3a1b, 0x58},
++          {0x3a1e, 0x50},
++          {0x3a11, 0x60},
++          {0x3a1f, 0x28},
++          {0x4001, 0x02},
++          {0x4004, 0x02},
++          {0x4000, 0x09},
++          {0x4050, 0x6e},
++          {0x4051, 0x8f},
++          {0x0100, 0x01},
++          {0x3000, 0x00},
++          {0x3001, 0x00},
++          {0x3002, 0x00},
++          {0x3017, 0xe0},
++          {0x301c, 0xfc},
++          {0x3636, 0x06},
++          {0x3016, 0x08},
++          {0x3827, 0xec},
++          {0x4800, 0x24},
++          {0x3018, 0x44},
++          {0x3035, 0x21},
++          {0x3106, 0xf5},
++          {0x3034, 0x1a},
++          {0x301c, 0xf8},
++          {0xffff, 0xff},
++};
+ struct aml_camera_i2c_fig_s OV5647_preview_VGA_script[] = {
+ 	{0x0100,0x00},
+ 	{0x0103,0x01},
+@@ -773,6 +873,106 @@ struct aml_camera_i2c_fig_s OV5647_preview_VGA_script[] = {
+ 	{0xffff,0xff},  
+ };
+ 
++struct aml_camera_i2c_fig_s OV5647_720P_script_mipi[] = {
++          {0x4800, 0x24},
++          {0x0100, 0x00},
++          {0x0103, 0x01},
++          {0x3035, 0x11},
++          {0x3036, 0x64},
++          {0x303c, 0x11},
++          {0x3821, 0x07},
++          {0x3820, 0x41},
++          {0x370c, 0x0f},
++          {0x3612, 0x59},
++          {0x3618, 0x00},
++          {0x5000, 0x06},
++
++          {0x5000, 0x86},
++          {0x5001, 0x00},
++          {0x5002, 0x41},
++
++          {0x5003, 0x08},
++          {0x5a00, 0x08},
++          {0x3000, 0xff},
++          {0x3001, 0xff},
++          {0x3002, 0xff},
++          {0x301d, 0xf0},
++          {0x3a18, 0x00},
++          {0x3a19, 0xf8},
++          {0x3c01, 0x80},
++          {0x3b07, 0x0c},
++          {0x380c, 0x07},
++          {0x380d, 0x00},
++          {0x380e, 0x05},
++          {0x380f, 0xd0},
++          {0x3814, 0x31},
++          {0x3815, 0x31},
++          {0x3708, 0x64},
++          {0x3709, 0x52},
++          {0x3808, 0x05},
++          {0x3809, 0x00},
++          {0x380a, 0x02},
++          {0x380b, 0xd0},
++          {0x3800, 0x00},
++          {0x3801, 0x18},
++          {0x3802, 0x00},
++          {0x3803, 0xf8},
++          {0x3804, 0x0a},
++          {0x3805, 0x27},
++          {0x3806, 0x06},
++          {0x3807, 0xa7},
++          {0x3630, 0x2e},
++          {0x3632, 0xe2},
++          {0x3633, 0x23},
++          {0x3634, 0x44},
++          {0x3620, 0x64},
++          {0x3621, 0xe0},
++          {0x3600, 0x37},
++          {0x3704, 0xa0},
++          {0x3703, 0x5a},
++          {0x3715, 0x78},
++          {0x3717, 0x01},
++          {0x3731, 0x02},
++          {0x370b, 0x60},
++          {0x3705, 0x1a},
++          {0x3f05, 0x02},
++          {0x3f06, 0x10},
++          {0x3f01, 0x0a},
++          {0x3503, 0x03},
++          {0x3a08, 0x01},
++          {0x3a09, 0xbe},
++          {0x3a0a, 0x01},
++          {0x3a0b, 0x74},
++          {0x3a0d, 0x02},
++          {0x3a0e, 0x01},
++          {0x3a0f, 0x58},
++          {0x3a10, 0x50},
++          {0x3a1b, 0x58},
++          {0x3a1e, 0x50},
++          {0x3a11, 0x60},
++          {0x3a1f, 0x28},
++          {0x4001, 0x02},
++          {0x4004, 0x02},
++          {0x4000, 0x09},
++          {0x4050, 0x6e},
++          {0x4051, 0x8f},
++          {0x0100, 0x01},
++          {0x3000, 0x00},
++          {0x3001, 0x00},
++          {0x3002, 0x00},
++          {0x3017, 0xe0},
++          {0x301c, 0xfc},
++          {0x3636, 0x06},
++          {0x3016, 0x08},
++          {0x3827, 0xec},
++          {0x4800, 0x24},
++          {0x3018, 0x44},
++          {0x3035, 0x21},
++          {0x3106, 0xf5},
++          {0x3034, 0x1a},
++          {0x301c, 0xf8},
++	  {0xffff, 0xff},
++};
+ struct aml_camera_i2c_fig_s OV5647_preview_720P_script[] = {
+ 	{0x0100,0x00},
+ 	{0x0103,0x01},
+@@ -935,6 +1135,10 @@ struct aml_camera_i2c_fig_s OV5647_preview_720P_script[] = {
+ 	{0xffff, 0xff},
+ };
+ 
++struct aml_camera_i2c_fig_s OV5647_960P_script_mipi[] = {
++        {0x4800, 0x24},
++	{0xffff, 0xff},
++};
+ struct aml_camera_i2c_fig_s OV5647_preview_960P_script[] = {
+ 	{0x0100,0x00},  
+ 	{0x0103,0x01},  
+@@ -1088,6 +1292,107 @@ struct aml_camera_i2c_fig_s OV5647_preview_960P_script[] = {
+ 	{0xffff, 0xff},
+ };
+ 
++struct aml_camera_i2c_fig_s OV5647_1080P_script_mipi[] = {
++          {0x4800, 0x24},
++          {0x0100, 0x00},
++          {0x0103, 0x01},
++          {0x3035, 0x11},
++          {0x3036, 0x64},
++          {0x303c, 0x11},
++          {0x3821, 0x06},
++          {0x3820, 0x00},
++          {0x370c, 0x0f},
++          {0x3612, 0x5b},
++          {0x3618, 0x04},
++          {0x5000, 0x06},
++
++          {0x5000, 0x86},
++          {0x5001, 0x00},
++          {0x5002, 0x41},
++
++          {0x5003, 0x08},
++          {0x5a00, 0x08},
++          {0x3000, 0xff},
++          {0x3001, 0xff},
++          {0x3002, 0xff},
++          {0x301d, 0xf0},
++          {0x3a18, 0x00},
++          {0x3a19, 0xf8},
++          {0x3c01, 0x80},
++          {0x3b07, 0x0c},
++          {0x380c, 0x09},
++          {0x380d, 0x70},
++          {0x380e, 0x04},
++          {0x380f, 0x50},
++          {0x3814, 0x11},
++          {0x3815, 0x11},
++          {0x3708, 0x64},
++          {0x3709, 0x12},
++          {0x3808, 0x07},
++          {0x3809, 0x80},
++          {0x380a, 0x04},
++          {0x380b, 0x38},
++          {0x3800, 0x01},
++          {0x3801, 0x5c},
++          {0x3802, 0x01},
++          {0x3803, 0xb2},
++          {0x3804, 0x08},
++          {0x3805, 0xe3},
++          {0x3806, 0x05},
++          {0x3807, 0xf1},
++          {0x3630, 0x2e},
++          {0x3632, 0xe2},
++          {0x3633, 0x23},
++          {0x3634, 0x44},
++          {0x3620, 0x64},
++          {0x3621, 0xe0},
++          {0x3600, 0x37},
++          {0x3704, 0xa0},
++          {0x3703, 0x5a},
++          {0x3715, 0x78},
++          {0x3717, 0x01},
++          {0x3731, 0x02},
++          {0x370b, 0x60},
++          {0x3705, 0x1a},
++          {0x3f05, 0x02},
++          {0x3f06, 0x10},
++          {0x3f01, 0x0a},
++          {0x3503, 0x03},
++          {0x3a08, 0x01},
++          {0x3a09, 0x4b},
++          {0x3a0a, 0x01},
++          {0x3a0b, 0x13},
++          {0x3a0d, 0x04},
++          {0x3a0e, 0x03},
++          {0x3a0f, 0x58},
++          {0x3a10, 0x50},
++          {0x3a1b, 0x58},
++          {0x3a1e, 0x50},
++          {0x3a11, 0x60},
++          {0x3a1f, 0x28},
++          {0x4001, 0x02},
++          {0x4004, 0x04},
++          {0x4000, 0x09},
++          {0x4050, 0x6e},
++          {0x4051, 0x8f},
++          {0x0100, 0x01},
++          {0x3000, 0x00},
++          {0x3001, 0x00},
++          {0x3002, 0x00},
++          {0x3017, 0xe0},
++          {0x301c, 0xfc},
++          {0x3636, 0x06},
++          {0x3016, 0x08},
++          {0x3827, 0xec},
++          {0x4800, 0x24},
++          {0x3018, 0x44},
++          {0x3035, 0x21},
++          {0x3106, 0xf5},
++          {0x3034, 0x1a},
++          {0x301c, 0xf8},
++
++	  {0xffff, 0xff},
++};
+ struct aml_camera_i2c_fig_s OV5647_preview_1080P_script[] = {
+ 	{0x0100,0x00},
+ 	{0x0103,0x01},
+@@ -1250,6 +1555,104 @@ struct aml_camera_i2c_fig_s OV5647_preview_1080P_script[] = {
+ 	{0xffff, 0xff},
+ };
+ 
++struct aml_camera_i2c_fig_s OV5647_5M_script_mipi[] = {
++          {0x0100, 0x00},
++          {0x0103, 0x01},
++          {0x3035, 0x11},
++          {0x3036, 0x64},
++          {0x303c, 0x11},
++          {0x3821, 0x06},
++          {0x3820, 0x00},
++          {0x370c, 0x0f},
++          {0x3612, 0x5b},
++          {0x3618, 0x04},
++          {0x5000, 0x06},
++
++          {0x5000, 0x86},
++          {0x5001, 0x00},
++          {0x5002, 0x41},
++          {0x5003, 0x08},
++          {0x5a00, 0x08},
++          {0x3000, 0xff},
++          {0x3001, 0xff},
++          {0x3002, 0xff},
++          {0x301d, 0xf0},
++          {0x3a18, 0x00},
++          {0x3a19, 0xf8},
++          {0x3c01, 0x80},
++          {0x3b07, 0x0c},
++          {0x380c, 0x0a},
++          {0x380d, 0x8c},
++          {0x380e, 0x07},
++          {0x380f, 0xb6},
++          {0x3814, 0x11},
++          {0x3815, 0x11},
++          {0x3708, 0x64},
++          {0x3709, 0x12},
++          {0x3808, 0x0a},
++          {0x3809, 0x20},
++          {0x380a, 0x07},
++          {0x380b, 0x98},
++          {0x3800, 0x00},
++          {0x3801, 0x0c},
++          {0x3802, 0x00},
++          {0x3803, 0x04},
++          {0x3804, 0x0a},
++          {0x3805, 0x33},
++          {0x3806, 0x07},
++          {0x3807, 0xa3},
++          {0x3630, 0x2e},
++          {0x3632, 0xe2},
++          {0x3633, 0x23},
++          {0x3634, 0x44},
++          {0x3620, 0x64},
++          {0x3621, 0xe0},
++          {0x3600, 0x37},
++          {0x3704, 0xa0},
++          {0x3703, 0x5a},
++          {0x3715, 0x78},
++          {0x3717, 0x01},
++          {0x3731, 0x02},
++          {0x370b, 0x60},
++          {0x3705, 0x1a},
++          {0x3f05, 0x02},
++          {0x3f06, 0x10},
++          {0x3f01, 0x0a},
++          {0x3503, 0x03},
++          {0x3a08, 0x01},
++          {0x3a09, 0x28},
++          {0x3a0a, 0x00},
++          {0x3a0b, 0xf6},
++          {0x3a0d, 0x08},
++          {0x3a0e, 0x06},
++          {0x3a0f, 0x58},
++          {0x3a10, 0x50},
++          {0x3a1b, 0x58},
++          {0x3a1e, 0x50},
++          {0x3a11, 0x60},
++          {0x3a1f, 0x28},
++          {0x4001, 0x02},
++          {0x4004, 0x04},
++          {0x4000, 0x09},
++          {0x4050, 0x6e},
++          {0x4051, 0x8f},
++          {0x0100, 0x01},
++          {0x3000, 0x00},
++          {0x3001, 0x00},
++          {0x3002, 0x00},
++          {0x3017, 0xe0},
++          {0x301c, 0xfc},
++          {0x3636, 0x06},
++          {0x3016, 0x08},
++          {0x3827, 0xec},
++          {0x4800, 0x24},
++          {0x3018, 0x44},
++          {0x3035, 0x21},
++          {0x3106, 0xf5},
++          {0x3034, 0x1a},
++          {0x301c, 0xf8},
++	  {0xffff, 0xff},
++};
+ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+   {0x0100,0x00},
+ 	{0x0103,0x01},
+@@ -1418,37 +1821,42 @@ static resolution_param_t  prev_resolution_array[] = {
+ 		.active_frmsize		= {352, 288},
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_CIF_352X288,
+-		.reg_script			= OV5647_preview_VGA_script,
++		.reg_script[0]			= OV5647_preview_VGA_script,
++		.reg_script[1]			= OV5647_VGA_script_mipi,
+ 	}, {
+ 		.frmsize			= {640, 480},
+ 		.active_frmsize		= {640, 480},
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_VGA_640X480,
+-		.reg_script			= OV5647_preview_VGA_script,
++		.reg_script[0]			= OV5647_preview_VGA_script,
++		.reg_script[1]			= OV5647_VGA_script_mipi,
+ 	}, {
+ 		.frmsize			= {1280, 720},
+ 		.active_frmsize		= {1280, 720},
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_720P_1280X720,
+-		.reg_script			= OV5647_preview_720P_script,
++		.reg_script[0]			= OV5647_preview_720P_script,
++		.reg_script[1]			= OV5647_720P_script_mipi,
+ 	}, {
+ 		.frmsize			= {1280, 960},
+ 		.active_frmsize		= {1280, 960},
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_960P_1280X960,
+-		.reg_script			= OV5647_preview_960P_script,
++		.reg_script[0]			= OV5647_preview_960P_script,
++		.reg_script[1]			=  OV5647_720P_script_mipi,//OV5647_960P_script_mipi,
+ 	}, {
+ 		.frmsize			= {1920, 1080},
+ 		.active_frmsize		= {1920, 1080},
+ 		.active_fps			= 15,
+ 		.size_type			= SIZE_1080P_1920X1080,
+-		.reg_script			= OV5647_preview_1080P_script,
++		.reg_script[0]			= OV5647_preview_1080P_script,
++		.reg_script[1]			= OV5647_1080P_script_mipi,
+ 	},{
+ 		.frmsize			= {2592, 1944},
+ 		.active_frmsize		        = {2592, 1944},
+ 		.active_fps			= 7.5,
+-		.size_type			= SIZE_H1080P_2592X1944,
+-		.reg_script			= OV5647_capture_5M_script,
++		.reg_script[0]			= OV5647_capture_5M_script,
++		.reg_script[1]			= OV5647_5M_script_mipi,
+ 	},
+ };
+ 	
+@@ -1459,7 +1867,8 @@ static resolution_param_t  capture_resolution_array[] = {
+ 		.active_frmsize		= {2592, 1944},
+ 		.active_fps			= 7.5,
+ 		.size_type			= SIZE_H1080P_2592X1944,
+-		.reg_script			= OV5647_capture_5M_script,
++		.reg_script[0]			= OV5647_capture_5M_script,
++		.reg_script[1]			= OV5647_5M_script_mipi,
+ 	},
+ };
+ 
+@@ -1672,6 +2081,7 @@ static ssize_t i2c_debug_store(struct class *cls,struct class_attribute *attr, c
+ {
+ 	char cmd;
+ 	int addr,value;
++    int endaddr;
+ 	struct i2c_adapter *adapter;
+ 	char *param[3] = {NULL};
+ 
+@@ -1679,14 +2089,31 @@ static ssize_t i2c_debug_store(struct class *cls,struct class_attribute *attr, c
+ 	sscanf(param[0],"%c",&cmd);
+ 	printk("cmd:%c\n",cmd);
+ 	adapter = i2c_get_adapter(4);
+-	if(cmd == 'w'){
+-		sscanf(param[1],"%x",&addr);
+-		sscanf(param[2],"%x",&value);
+-		my_i2c_put_byte(adapter,0x36,addr,value);
+-	}else{
+-		sscanf(param[1],"%x",&addr);
+-		value = my_i2c_get_byte(adapter,0x36,addr);
+-		printk("reg:%x,value:%x\n",addr,value);
++    switch( cmd ){
++    	case 'w':
++			sscanf(param[1],"%x",&addr);
++			sscanf(param[2],"%x",&value);
++			my_i2c_put_byte(adapter,0x36,addr,value);
++                break;
++
++        case 'r':
++			sscanf(param[1],"%x",&addr);
++			value = my_i2c_get_byte(adapter,0x36,addr);
++			printk("reg:%x,value:%x\n",addr,value);
++                break;
++
++        case 'd':
++			sscanf(param[1],"%x",&addr);
++			sscanf(param[2],"%x",&endaddr);
++                        for( ;addr <= endaddr; addr++)
++                        {
++                                value = my_i2c_get_byte(adapter,0x36,addr);
++                                printk("[0x%04x]=0x%08x\n",addr,value);
++                        }
++                break;
++
++        default :
++                break;
+ 	}
+ 	
+ 	return len;
+@@ -2230,19 +2657,20 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+     struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
+     int rc = -1;
+     int i=0;
++    unsigned char t = dev->cam_info.interface;
+     if(i_index != -1 && is_capture == 0){
+         res_param = &prev_resolution_array[i_index];
+     }
+-    if (!res_param->reg_script) {
++    if (!res_param->reg_script[t]) {
+         printk("error, resolution reg script is NULL\n");
+         return;
+     }
+     while(1){
+-        if (res_param->reg_script[i].val==0xff&&res_param->reg_script[i].addr==0xffff) {
++        if (res_param->reg_script[t][i].val==0xff&&res_param->reg_script[t][i].addr==0xffff) {
+             printk("setting resolutin param complete\n");
+             break;
+         }
+-        if((i2c_put_byte(client,res_param->reg_script[i].addr, res_param->reg_script[i].val)) < 0) {
++        if((i2c_put_byte(client,res_param->reg_script[t][i].addr, res_param->reg_script[t][i].val)) < 0) {
+             printk("fail in setting resolution param. i=%d\n",i);
+             break;
+         }
+@@ -2911,7 +3339,12 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 
+     memset( &para, 0, sizeof( para ));
+     //para.port  = TVIN_PORT_CAMERA;
+-    para.isp_fe_port  = TVIN_PORT_CAMERA;    
++
++    if (CAM_MIPI == dev->cam_info.interface) {
++            para.isp_fe_port  = TVIN_PORT_MIPI;
++    } else {
++            para.isp_fe_port  = TVIN_PORT_CAMERA;
++    }
+     para.port  = TVIN_PORT_ISP;    
+     para.fmt = TVIN_SIG_FMT_MAX;
+     para.frame_rate = ov5647_frmintervals_active.denominator;
+@@ -2945,6 +3378,19 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     dev->cam_para->cam_function.check_mains_freq = OV5647_check_mains_freq;
+     dev->cam_para->cam_function.set_af_new_step = OV5647_set_af_new_step;
+     dev->cam_para->cam_mode = CAMERA_PREVIEW;	
++    if (CAM_MIPI == dev->cam_info.interface)
++    {
++            para.csi_hw_info.lanes = 2;
++            para.csi_hw_info.channel = 1;
++            para.csi_hw_info.mode = 1;
++            para.csi_hw_info.clock_lane_mode = 1; // 0 clock gate 1: always on
++            para.csi_hw_info.active_pixel = ov5647_h_active;
++            para.csi_hw_info.active_line = ov5647_v_active;
++            para.csi_hw_info.frame_size=0;
++            para.csi_hw_info.ui_val = 2; //ns
++            para.csi_hw_info.urgent = 1;
++            para.csi_hw_info.clk_channel = dev->cam_info.clk_channel; //clock channel a or b
++    }
+ 
+     printk("ov5647,h=%d, v=%d, dest_h:%d, dest_v:%d,frame_rate=%d,\n", 
+             ov5647_h_active, ov5647_v_active, para.dest_hactive,para.dest_vactive,ov5647_frmintervals_active.denominator);
+diff --git a/drivers/amlogic/tvin/Kconfig b/drivers/amlogic/tvin/Kconfig
+index 0b18caf61bf5..ccb50bb1738e 100755
+--- a/drivers/amlogic/tvin/Kconfig
++++ b/drivers/amlogic/tvin/Kconfig
+@@ -12,6 +12,7 @@ source "drivers/amlogic/tvin/vdin/Kconfig"
+ source "drivers/amlogic/tvin/tvafe/Kconfig"
+ source "drivers/amlogic/tvin/hdmirx/Kconfig"
+ source "drivers/amlogic/tvin/bt656/Kconfig"
++source "drivers/amlogic/tvin/csi/Kconfig"
+ source "drivers/amlogic/tvin/viu/Kconfig"
+ source "drivers/amlogic/tvin/it660x/Kconfig"
+ source "drivers/amlogic/tvin/isp/Kconfig"
+diff --git a/drivers/amlogic/tvin/Makefile b/drivers/amlogic/tvin/Makefile
+index dcf150cbb812..1f55fb776cd0 100755
+--- a/drivers/amlogic/tvin/Makefile
++++ b/drivers/amlogic/tvin/Makefile
+@@ -9,6 +9,7 @@ obj-$(CONFIG_TVIN_VDIN)	  += vdin/
+ obj-$(CONFIG_TVIN_AFE)	  += tvafe/
+ obj-$(CONFIG_TVIN_HDMI)	  += hdmirx/
+ obj-$(CONFIG_TVIN_BT656)  += bt656/
++obj-$(CONFIG_TVIN_CSI)    += csi/
+ obj-$(CONFIG_VIUIN)	  += viu/
+ obj-$(CONFIG_TVIN_IT660X) += it660x/
+ obj-$(CONFIG_TVIN_ISP)    += isp/
+diff --git a/drivers/amlogic/tvin/csi/Kconfig b/drivers/amlogic/tvin/csi/Kconfig
+new file mode 100755
+index 000000000000..adc934301eab
+--- /dev/null
++++ b/drivers/amlogic/tvin/csi/Kconfig
+@@ -0,0 +1,11 @@
++#
++# CSI Device Driver Configuration
++#
++
++
++config TVIN_CSI
++	tristate "Amlogic CSI device driver"
++	default y
++	help
++	  CSI device driver.
++
+diff --git a/drivers/amlogic/tvin/csi/Makefile b/drivers/amlogic/tvin/csi/Makefile
+new file mode 100755
+index 000000000000..079f51a6ab58
+--- /dev/null
++++ b/drivers/amlogic/tvin/csi/Makefile
+@@ -0,0 +1,2 @@
++obj-$(CONFIG_TVIN_CSI) +=tvin_csi.o
++tvin_csi-objs := csi.o mipi_hw.o
+diff --git a/drivers/amlogic/tvin/csi/csi.c b/drivers/amlogic/tvin/csi/csi.c
+new file mode 100755
+index 000000000000..b91a122c9b0b
+--- /dev/null
++++ b/drivers/amlogic/tvin/csi/csi.c
+@@ -0,0 +1,552 @@
++/*
++ * Amlogic M6 & M8
++ * camera serial input driver  -------CSI
++ * Copyright (C) 2013 Amlogic, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the named License,
++ * or any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/etherdevice.h>
++#include <linux/interrupt.h>
++#include <linux/timer.h>
++#include <linux/platform_device.h>
++#include <linux/workqueue.h>
++#include <linux/dma-mapping.h>
++#include <asm/delay.h>
++#include <asm/atomic.h>
++#include <linux/module.h>
++#include <linux/fs.h>
++
++#include <mach/am_regs.h>
++#include <mach/mod_gate.h>
++
++#include <mach/am_regs.h>
++#include <mach/mipi_phy_reg.h>
++#include <linux/amlogic/mipi/am_mipi_csi2.h>
++
++#include "../tvin_global.h"
++#include "../vdin/vdin_regs.h"
++#include "../vdin/vdin_drv.h"
++#include "../vdin/vdin_ctl.h"
++#include "../tvin_format_table.h"
++#include "../tvin_frontend.h"
++#include "csi.h"
++
++#define DEV_NAME  "amvdec_csi"
++#define DRV_NAME  "amvdec_csi"
++#define CLS_NAME  "amvdec_csi"
++#define MOD_NAME  "amvdec_csi"
++
++#define CSI_MAX_DEVS             1
++
++/* Per-device (per-bank) structure */
++static dev_t amcsi_devno;
++static struct class *amcsi_clsp;
++
++static void init_csi_dec_parameter(struct amcsi_dev_s *devp)
++{
++        enum tvin_sig_fmt_e fmt;
++        const struct tvin_format_s * fmt_info_p;
++        fmt = devp->para.fmt;
++        fmt_info_p = tvin_get_fmt_info(fmt);
++
++        if(!fmt_info_p) {
++                printk("[amcsi..]%s:invaild fmt %d.\n",__func__, fmt);
++                return;
++        }
++
++        if(fmt < TVIN_SIG_FMT_MAX)
++        {
++                devp->para.v_active    = fmt_info_p->v_active;
++                devp->para.h_active    = fmt_info_p->h_active;
++                devp->para.hsync_phase = 0;
++                devp->para.vsync_phase = 0;
++                devp->para.hs_bp       = 0;
++                devp->para.vs_bp       = 0;
++        }
++}
++
++static void reset_btcsi_module(void)
++{
++        printk("%s, %d\n", __func__, __LINE__);
++        return;
++}
++
++/*
++   NTSC or PAL input(interlace mode): CLOCK + D0~D7(with SAV + EAV )
++   */
++static void reinit_csi_dec(struct amcsi_dev_s *devp)
++{
++        printk("%s, %d\n", __func__, __LINE__);
++        return;
++}
++
++static void start_amvdec_csi(struct amcsi_dev_s *devp)
++{
++        enum tvin_port_e port =  devp->para.port;
++        if(devp->dec_status & TVIN_AMCSI_RUNNING){
++                printk("[csi..] %s csi have started alreadly.\n",__func__);
++                return;
++        }
++        devp->dec_status = TVIN_AMCSI_RUNNING;
++        if(port == TVIN_PORT_MIPI){
++                init_csi_dec_parameter(devp);
++                reinit_csi_dec(devp);
++        }
++        else
++        {
++                devp->para.fmt  = TVIN_SIG_FMT_NULL;
++                devp->para.port = TVIN_PORT_NULL;
++                printk("[csi..]%s: input is not selected, please try again. \n",__func__);
++                return;
++        }
++        devp->dec_status = TVIN_AMCSI_RUNNING;
++        return;
++}
++
++static void stop_amvdec_csi(struct amcsi_dev_s *devp)
++{
++        if(devp->dec_status & TVIN_AMCSI_RUNNING){
++                reset_btcsi_module();
++                devp->dec_status = TVIN_AMCSI_STOP;
++        }
++        else{
++                printk("[csi..] %s device is not started yet. \n",__func__);
++        }
++        return;
++}
++
++/*
++   return true when need skip frame otherwise return false
++   */
++static bool amcsi_check_skip_frame(struct tvin_frontend_s * fe)
++{
++        struct amcsi_dev_s * devp =  container_of(fe, amcsi_dev_t, frontend);
++
++        return false;
++        if(devp->csi_parm.skip_frames > 0)
++        {
++                devp->csi_parm.skip_frames--;
++                return true;
++        }
++        else
++                return false;
++}
++int amcsi_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
++{
++        if((port != TVIN_PORT_MIPI)) {
++                printk("error 1\n");
++                return -1;
++        } else {
++                return 0;
++        }
++}
++
++static int amcsi_open(struct inode *node, struct file *file)
++{
++        amcsi_dev_t *csi_devp;
++
++        /* Get the per-device structure that contains this cdev */
++        csi_devp = container_of(node->i_cdev, amcsi_dev_t, cdev);
++        file->private_data = csi_devp;
++
++        return 0;
++
++}
++static int amcsi_release(struct inode *node, struct file *file)
++{
++        file->private_data = NULL;
++        return 0;
++}
++
++static struct file_operations amcsi_fops = {
++        .owner    = THIS_MODULE,
++        .open     = amcsi_open,
++        .release  = amcsi_release,
++};
++/*called by vdin && sever for v4l2 framework*/
++
++void amcsi_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt)
++{
++        struct amcsi_dev_s *csi_devp;
++
++        csi_devp = container_of(fe, amcsi_dev_t, frontend);
++        start_amvdec_csi( csi_devp );
++
++}
++static void amcsi_stop(struct tvin_frontend_s * fe, enum tvin_port_e port)
++{
++        struct amcsi_dev_s *devp = container_of(fe, amcsi_dev_t, frontend);
++        if((port != TVIN_PORT_MIPI)){
++                printk("%s:invaild port %d.\n",__func__, port);
++                return;
++        }
++        stop_amvdec_csi(devp);
++}
++static void amcsi_get_sig_propery(struct tvin_frontend_s *fe, struct tvin_sig_property_s *prop)
++{
++        struct amcsi_dev_s *devp = container_of(fe, amcsi_dev_t, frontend);
++        prop->color_format = devp->para.cfmt;//devp->csi_parm.csi_ofmt;
++        //prop->dest_cfmt = devp->para.cfmt;
++        printk("csi_ofmt=%d, cfmt=%d\n", devp->csi_parm.csi_ofmt, devp->para.cfmt );
++        prop->pixel_repeat = 0;
++}
++
++/*as use the spin_lock,
++ *1--there is no sleep,
++ *2--it is better to shorter the time,
++ */
++int amcsi_isr(struct tvin_frontend_s *fe, unsigned int hcnt)
++{
++        struct amcsi_dev_s *devp = container_of(fe, amcsi_dev_t, frontend);
++        unsigned data1 = 0;
++        unsigned data2 = 0;
++        am_csi2_frame_t frame;
++
++        frame.w = aml_get_reg32_bits( P_CSI2_PIC_SIZE_STAT, 0, 16);
++        frame.h = aml_get_reg32_bits( P_CSI2_PIC_SIZE_STAT, 16,16);
++        frame.err = aml_read_reg32( P_CSI2_ERR_STAT0 );
++        data1 = aml_read_reg32( P_CSI2_DATA_TYPE_IN_MEM);
++        data2 = aml_read_reg32( P_CSI2_GEN_STAT0);
++
++        if(frame.err){
++                mipi_error("%s,error---pixel cnt:%d, line cnt:%d. error state:0x%x.mem type:0x%x, status:0x%x\n",
++                                __func__, frame.w, frame.h, frame.err, data1, data2);
++                devp->overflow_cnt ++;
++                aml_write_reg32( P_CSI2_ERR_STAT0, 0);
++        }
++        if( devp->overflow_cnt > 20){
++                printk("should reset mipi\n");
++                devp->overflow_cnt = 0;
++        }
++
++        return 0;
++}
++
++static ssize_t csi_attr_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++        ssize_t len = 0;
++        struct amcsi_dev_s *csi_devp;
++        int i;
++
++        csi_devp = dev_get_drvdata(dev);
++
++        len += sprintf(buf+len, "csi parameters below\n");
++        len += sprintf(buf+len, "\tlanes=%d, channel=%d, clk_channel=%d\n"
++                        "\tmode=%d, clock_lane_mode=%d, active_pixel=%d\n"
++                        "\tactive_line=%d, frame_size=%d, ui_val=%dns\n"
++                        "\ths_freq=%dhz, urgent=%d\n",
++                        csi_devp->csi_parm.lanes,
++                        csi_devp->csi_parm.channel,
++                        csi_devp->csi_parm.clk_channel,
++                        csi_devp->csi_parm.mode,
++                        csi_devp->csi_parm.clock_lane_mode, // 0 clock gate 1: always on
++                        csi_devp->csi_parm.active_pixel,
++                        csi_devp->csi_parm.active_line,
++                        csi_devp->csi_parm.frame_size,
++                        csi_devp->csi_parm.ui_val, //ns
++                        csi_devp->csi_parm.hs_freq, //hz
++                        csi_devp->csi_parm.urgent);
++
++        len += sprintf(buf+len, "csi adapter register below\n");
++        for( i = CSI_ADPT_START_REG; i <= CSI_ADPT_END_REG; i ++ )
++        {
++                len += sprintf(buf+len, "\t[0x%04x]=0x%08x\n",
++                                i, READ_CSI_ADPT_REG(i));
++        }
++
++        len += sprintf(buf+len, "csi phy register below\n");
++        for( i = CSI_PHY_START_REG; i <= CSI_PHY_END_REG; i ++ )
++        {
++                len += sprintf(buf+len, "\t[0x%04x]=0x%08x\n",
++                                i, READ_CSI_PHY_REG(i));
++        }
++
++        len += sprintf(buf+len, "csi host register below\n");
++        for( i = CSI_HST_START_REG; i <= CSI_HST_END_REG; i ++ )
++        {
++                len += sprintf(buf+len, "\t[0x%04x]=0x%08x\n",
++                                i, READ_CSI_HST_REG(i));
++        }
++
++        return len;
++}
++
++static ssize_t csi_attr_store(struct device *dev,struct device_attribute *attr,const char *buf, size_t len)
++{
++        struct amcsi_dev_s *csi_devp;
++
++        unsigned int n=0, fps=0;
++
++        unsigned char ret=0;
++        char *buf_orig, *ps, *token;
++        char *parm[6] = {NULL};
++
++        if(!buf)
++                return len;
++        buf_orig = kstrdup(buf, GFP_KERNEL);
++        //printk(KERN_INFO "input cmd : %s",buf_orig);
++        csi_devp = dev_get_drvdata(dev);
++
++        ps = buf_orig;
++        while (1) {
++                token = strsep(&ps, " \n");
++                if (token == NULL)
++                        break;
++                if (*token == '\0')
++                        continue;
++                parm[n++] = token;
++        }
++
++        if ( 0 == strcmp(parm[0],"reset")){
++                printk("reset\n");
++                am_mipi_csi2_init(&csi_devp->csi_parm);
++        } else {
++                printk("other\n");
++        }
++
++        kfree(buf_orig);
++        return len;
++}
++
++static DEVICE_ATTR(hw_info, 0664, csi_attr_show, csi_attr_store);
++/*
++ *power on mipi module&init the parameters,such as color fmt...,will be used by vdin
++ */
++static int amcsi_feopen(struct tvin_frontend_s *fe, enum tvin_port_e port)
++{
++        struct amcsi_dev_s *csi_devp = container_of(fe, amcsi_dev_t, frontend);
++        struct vdin_parm_s *parm = fe->private_data;
++
++        if((port != TVIN_PORT_MIPI)){
++                printk("[mipi..]%s:invaild port %d.\n",__func__, port);
++                return -1;
++        }
++        /*copy the param from vdin to csi*/
++        if(!memcpy(&csi_devp->para, parm, sizeof(vdin_parm_t))){
++                printk("[mipi..]%s memcpy error.\n",__func__);
++                return -1;
++        }
++
++        init_am_mipi_csi2_clock();// init mipi csi measure clock
++        csi_devp->para.port = port;
++
++        memcpy( &csi_devp->csi_parm, &parm->csi_hw_info, sizeof( csi_parm_t));
++        csi_devp->csi_parm.skip_frames = parm->skip_count;
++
++        am_mipi_csi2_init(&csi_devp->csi_parm);
++        return 0;
++        //csi_devp->skip_vdin_frame_count = parm->reserved;
++}
++/*
++ *power off the csi module,clear the parameters
++ */
++static void amcsi_feclose(struct tvin_frontend_s *fe)
++{
++        struct amcsi_dev_s *devp = container_of(fe, amcsi_dev_t, frontend);
++        enum tvin_port_e port = devp->para.port;
++
++        if((port != TVIN_PORT_MIPI)){
++                printk("[mipi..]%s:invaild port %d.\n",__func__, port);
++                return;
++        }
++
++        am_mipi_csi2_uninit();
++
++        memset(&devp->para, 0, sizeof(vdin_parm_t));
++}
++static struct tvin_state_machine_ops_s amcsi_machine_ops = {
++        .nosig               = NULL,
++        .fmt_changed         = NULL,
++        .get_fmt             = NULL,
++        .fmt_config          = NULL,
++        .adc_cal             = NULL,
++        .pll_lock            = NULL,
++        .get_sig_propery     = amcsi_get_sig_propery,
++        .vga_set_param       = NULL,
++        .vga_get_param       = NULL,
++        .check_frame_skip    = amcsi_check_skip_frame,
++};
++static struct tvin_decoder_ops_s amcsi_decoder_ops_s = {
++        .support                = amcsi_support,
++        .open                   = amcsi_feopen,
++        .start                  = amcsi_start,
++        .stop                   = amcsi_stop,
++        .close                  = amcsi_feclose,
++        .decode_isr             = amcsi_isr,
++};
++
++static int csi_add_cdev(struct cdev *cdevp,struct file_operations *fops,int minor)
++{
++        int ret;
++        dev_t devno=MKDEV(MAJOR(amcsi_devno),minor);
++        cdev_init(cdevp,fops);
++        cdevp->owner=THIS_MODULE;
++        ret=cdev_add(cdevp,devno,1);
++        return ret;
++}
++
++
++static struct device *csi_create_device(struct device *parent,int minor)
++{
++        dev_t devno = MKDEV(MAJOR(amcsi_devno),minor);
++        return  device_create(amcsi_clsp,parent,devno,NULL,"%s%d",
++                        DEV_NAME,minor);
++}
++
++static void csi_delete_device(int minor)
++{
++        dev_t devno =MKDEV(MAJOR(amcsi_devno),minor);
++        device_destroy(amcsi_clsp,devno);
++}
++
++static int amvdec_csi_probe(struct platform_device *pdev)
++{
++        int ret;
++        struct amcsi_dev_s *devp;
++
++        ret = 0;
++
++        //malloc dev
++        devp = kmalloc(sizeof(struct amcsi_dev_s),GFP_KERNEL);
++        if(!devp){
++                pr_err("%s: failed to allocate memory\n", __func__);
++                goto fail_kmalloc_dev;
++        }
++        memset(devp,0,sizeof(struct amcsi_dev_s));
++
++        //create cdev and register with sysfs
++        ret = csi_add_cdev(&devp->cdev, &amcsi_fops, 0);
++        if (ret) {
++                pr_err("%s: failed to add cdev\n", __func__);
++                goto fail_add_cdev;
++        }
++        devp->dev = csi_create_device(&pdev->dev, 0);
++        if (IS_ERR(devp->dev)) {
++                pr_err("%s: failed to create device\n", __func__);
++                ret = PTR_ERR(devp->dev);
++                goto fail_create_device;
++        }
++        ret = device_create_file(devp->dev,&dev_attr_hw_info);
++
++        /*register frontend */
++        sprintf(devp->frontend.name, "%s", DEV_NAME);
++        tvin_frontend_init(&devp->frontend, &amcsi_decoder_ops_s, &amcsi_machine_ops, pdev->id);
++        tvin_reg_frontend(&devp->frontend);
++        /*set pinmux for ITU601 A and ITU601 B*/
++        /* set drvdata */
++        dev_set_drvdata(devp->dev, devp);
++        platform_set_drvdata(pdev, devp);
++        printk("amvdec_csi probe ok.\n");
++        return ret;
++fail_create_device:
++        cdev_del(&devp->cdev);
++fail_add_cdev:
++        kfree(devp);
++fail_kmalloc_dev:
++        return ret;
++
++}
++
++static int amvdec_csi_remove(struct platform_device *pdev)
++{
++        struct amcsi_dev_s *devp;
++
++        devp = (struct amcsi_dev_s *)platform_get_drvdata(pdev);
++
++        tvin_unreg_frontend(&devp->frontend);
++
++        device_remove_file(devp->dev,&dev_attr_hw_info);
++
++        csi_delete_device(pdev->id);
++        cdev_del(&devp->cdev);
++        kfree((const void *)devp);
++        /* free drvdata */
++        dev_set_drvdata(devp->dev, NULL);
++        platform_set_drvdata(pdev, NULL);
++        return 0;
++}
++
++static struct platform_driver amvdec_csi_driver = {
++        .probe      = amvdec_csi_probe,
++        .remove     = amvdec_csi_remove,
++        .driver     = {
++                .name   = DRV_NAME,
++        }
++};
++
++static int __init amvdec_csi_init_module(void)
++{
++        int ret = 0;
++        struct platform_device *pdev;
++        printk("amvdec_csi module: init.\n");
++        ret=alloc_chrdev_region(&amcsi_devno, 0, CSI_MAX_DEVS, DEV_NAME);
++        if(ret<0){
++                printk("%s:failed to alloc major number\n",__func__);
++                goto fail_alloc_cdev_region;
++        }
++        printk("%s:major %d\n",__func__,MAJOR(amcsi_devno));
++        amcsi_clsp=class_create(THIS_MODULE,CLS_NAME);
++        if(IS_ERR(amcsi_clsp)){
++                ret=PTR_ERR(amcsi_clsp);
++                printk("%s:failed to create class\n",__func__);
++                goto fail_class_create;
++        }
++        pdev = platform_device_alloc(DEV_NAME,0);
++        if(IS_ERR(pdev)){
++                printk("[csi..]%s alloc platform device error.\n", __func__);
++                goto fail_pdev_create;
++        }
++        if(platform_device_add(pdev)){
++                printk("[csi..]%s failed register platform device.\n", __func__);
++                goto fail_pdev_register;
++        }
++        if (0 != platform_driver_register(&amvdec_csi_driver)){
++                printk("failed to register amvdec_csi driver\n");
++                goto fail_pdrv_register;
++        }
++
++        printk("amvdec_csi module: init. ok\n");
++        return 0;
++fail_pdrv_register:
++        platform_device_unregister(pdev);
++fail_pdev_register:
++        platform_device_del(pdev);
++fail_pdev_create:
++        class_destroy(amcsi_clsp);
++fail_class_create:
++        unregister_chrdev_region(amcsi_devno,CSI_MAX_DEVS);
++fail_alloc_cdev_region:
++        printk("amvdec_csi module: init failed, ret=%d\n", ret);
++        return ret;
++
++}
++
++static void __exit amvdec_csi_exit_module(void)
++{
++        printk("amvdec_csi module remove.\n");
++        printk("%s, %d\n", __func__, __LINE__);
++        class_destroy(amcsi_clsp);
++        unregister_chrdev_region(amcsi_devno, CSI_MAX_DEVS);
++        platform_driver_unregister(&amvdec_csi_driver);
++        return ;
++}
++
++module_init(amvdec_csi_init_module);
++module_exit(amvdec_csi_exit_module);
++
++MODULE_DESCRIPTION("AMLOGIC CSI input driver");
++MODULE_LICENSE("GPL");
++MODULE_VERSION("1.0.0");
+diff --git a/drivers/amlogic/tvin/csi/csi.h b/drivers/amlogic/tvin/csi/csi.h
+new file mode 100755
+index 000000000000..03fa853beebe
+--- /dev/null
++++ b/drivers/amlogic/tvin/csi/csi.h
+@@ -0,0 +1,40 @@
++/*
++ * CSI Driver
++ *
++ * Author: Xintan Chen <lin.xu@amlogic.com>
++ *
++ * Copyright (C) 2010 Amlogic Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++
++#ifndef __CSI_INPUT_H
++#define __CSI_INPUT_H
++#include <linux/cdev.h>
++#include <mach/pinmux.h>
++#include <linux/amlogic/tvin/tvin_v4l2.h>
++#include <linux/amlogic/mipi/am_mipi_csi2.h>
++#include "../tvin_frontend.h"
++#include "../tvin_global.h"
++
++enum amcsi_status_e{
++        TVIN_AMCSI_STOP,
++        TVIN_AMCSI_RUNNING,
++        TVIN_AMCSI_START,
++};
++
++typedef struct amcsi_dev_s{
++        int                     index;
++        dev_t                   devt;           
++        struct cdev             cdev;
++        struct device          *dev;
++        unsigned int            overflow_cnt;
++        enum amcsi_status_e     dec_status;
++        struct vdin_parm_s      para;
++        csi_parm_t              csi_parm;
++        struct tvin_frontend_s  frontend; 
++}amcsi_dev_t;
++#endif
+diff --git a/drivers/amlogic/tvin/csi/mipi_hw.c b/drivers/amlogic/tvin/csi/mipi_hw.c
+new file mode 100755
+index 000000000000..b3341df1b6b8
+--- /dev/null
++++ b/drivers/amlogic/tvin/csi/mipi_hw.c
+@@ -0,0 +1,208 @@
++/*******************************************************************
++ *
++ *  Copyright C 2012 by Amlogic, Inc. All Rights Reserved.
++ *
++ *  Description:
++ *
++ *  Author: Amlogic Software
++ *  Created: 2012/3/13   19:46
++ *
++ *******************************************************************/
++
++#include <linux/kernel.h>
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/etherdevice.h>
++#include <linux/interrupt.h>
++#include <linux/timer.h>
++#include <mach/am_regs.h>
++#include <mach/mipi_phy_reg.h>
++#include <linux/amlogic/mipi/am_mipi_csi2.h>
++#include <linux/amlogic/tvin/tvin_v4l2.h>
++
++void init_am_mipi_csi2_clock(void)
++{
++        WRITE_CBUS_REG( HHI_MIPI_PHY_CLK_CNTL,  ((3 << 9)  |   // select 400Mhz (fclk_div5)
++                                (1 << 8)  |   // Enable gated clock
++                                (1 << 0)) );  // Divide output by 2
++        return;
++}
++
++
++static void init_am_mipi_csi2_host(csi_parm_t* info)
++{
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_CSI2_RESETN,    0); // csi2 reset
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_CSI2_RESETN,    0xffffffff); // release csi2 reset
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_DPHY_RSTZ,    0xffffffff); // release DPHY reset
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_N_LANES, (info->lanes-1)&3);  //set lanes
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_PHY_SHUTDOWNZ,    0xffffffff); // enable power
++        return;
++}
++
++static int init_am_mipi_csi2_adapter(csi_parm_t* info)
++{
++        unsigned data32;
++        WRITE_CSI_ADPT_REG(CSI2_CLK_RESET, 1<<CSI2_CFG_SW_RESET); //reset first
++        WRITE_CSI_ADPT_REG(CSI2_CLK_RESET, (0<<CSI2_CFG_SW_RESET)|(0<<CSI2_CFG_CLK_AUTO_GATE_OFF)); // Bring out of reset
++
++        data32  = 0;
++        data32 |= 0<< CSI2_CFG_CLR_WRRSP; 
++        data32 |= 0x3f<< CSI2_CFG_A_BRST_NUM;
++        data32 |= 3<<CSI2_CFG_A_ID;  // ?? why is 3
++        data32 |= info->urgent<<CSI2_CFG_URGENT_EN;
++        data32 |= 0<<CSI2_CFG_DDR_ADDR_LPBK;
++
++        if(info->mode == AM_CSI2_VDIN){
++                data32 |= 1<< CSI2_CFG_DDR_EN;  ///testtest 1
++                data32 |= 1<<CSI2_CFG_BUFFER_PIC_SIZE;
++                data32 |= 0<<CSI2_CFG_422TO444_MODE;///testtest 1
++                data32 |= 0<<CSI2_CFG_INV_FIELD ;
++                data32 |= 0<<CSI2_CFG_INTERLACE_EN; 
++                data32 |= 1<<CSI2_CFG_FORCE_LINE_COUNT;
++                data32 |= 1<<CSI2_CFG_FORCE_PIX_COUNT;
++                data32 |= 1<<CSI2_CFG_COLOR_EXPAND;
++                data32 |= 0<<CSI2_CFG_ALL_TO_MEM;
++        }else{
++                data32 |= 1<< CSI2_CFG_DDR_EN; 
++                data32 |= 0<<CSI2_CFG_BUFFER_PIC_SIZE;
++                data32 |= 0<<CSI2_CFG_422TO444_MODE;
++                data32 |= 0<<CSI2_CFG_INV_FIELD ;
++                data32 |= 0<<CSI2_CFG_INTERLACE_EN; 
++                data32 |= 0<<CSI2_CFG_FORCE_LINE_COUNT;
++                data32 |= 0<<CSI2_CFG_FORCE_PIX_COUNT;
++                data32 |= 0<<CSI2_CFG_COLOR_EXPAND;
++                data32 |= 1<<CSI2_CFG_ALL_TO_MEM;
++        }
++
++        data32 |= info->channel<<CSI2_CFG_VIRTUAL_CHANNEL_EN; //??how to set
++        WRITE_CSI_ADPT_REG(CSI2_GEN_CTRL0, data32);
++
++        if(info->mode == AM_CSI2_VDIN)
++                WRITE_CSI_ADPT_REG(CSI2_FORCE_PIC_SIZE, (info->active_line << CSI2_CFG_LINE_COUNT) | (info->active_pixel<<CSI2_CFG_PIX_COUNT));
++
++#if 0
++        if(info->frame){
++                WRITE_CSI_ADPT_REG(CSI2_DDR_START_ADDR, info->frame->ddr_address);
++                WRITE_CSI_ADPT_REG(CSI2_DDR_END_ADDR, info->frame->ddr_address+info->frame_size);
++        }else{
++                printk("info->frame=%p\n", info->frame);
++        }
++#endif
++
++        if(info->mode == AM_CSI2_ALL_MEM)
++                WRITE_CSI_ADPT_REG(CSI2_INTERRUPT_CTRL_STAT,    1<<CSI2_CFG_VS_FAIL_INTERRUPT);///testtest appear in vdin 2165
++
++        WRITE_CSI_ADPT_REG(CSI2_CLK_RESET,     (0<<CSI2_CFG_SW_RESET) |
++                        (0<<CSI2_CFG_CLK_AUTO_GATE_OFF)|
++                        (1<<CSI2_CFG_CLK_ENABLE)|  // Enable clock
++                        (1<<CSI2_CFG_CLK_ENABLE_DWC));  // Enable host clock
++        return 0;
++}
++
++//mipi phy run by 200MHZ ---1 cycle = 1/200000000.  timing= (reg value+1)*cycle*1000000000 ns
++
++static void init_am_mipi_phy(csi_parm_t* info)
++{
++        u32 data32 = 0x80000000;
++        u32 temp_data;
++        u32 cycle_time = 5;//5 ns
++        u32 settle = (85 + 145 + (16*info->ui_val))/2;
++        settle = settle/cycle_time;
++        printk("(85 + 145 + (16*%d))/2/5.4945 == settle=%d\n", info->ui_val, settle);
++        printk("%s, %d\n", __func__, __LINE__);
++        printk("settle=%d\n", settle);
++        settle = 25;
++        //mipi_dbg("[mipi_hw]:init_am_mipi_phy ---- mipi cycle:%d ns, hs settle:%d ns,\n",cycle_time,(settle*cycle_time));
++
++        //if(info->clock_lane_mode==1){
++        //    //use always on mode
++        //}
++        WRITE_CSI_PHY_REG(MIPI_PHY_CTRL, data32);   //soft reset bit
++        WRITE_CSI_PHY_REG(MIPI_PHY_CTRL,   0);   //release soft reset bit   
++        WRITE_CSI_PHY_REG(MIPI_PHY_CLK_LANE_CTRL ,0xd8);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TCLK_MISS ,0x8);  // clck miss = 50 ns --(x< 60 ns)
++        WRITE_CSI_PHY_REG(MIPI_PHY_TCLK_SETTLE ,0x1c);  // clck settle = 160 ns --(95ns< x < 300 ns)
++        WRITE_CSI_PHY_REG(MIPI_PHY_THS_EXIT ,0x1c);   // hs exit = 160 ns --(x>100ns)
++        WRITE_CSI_PHY_REG(MIPI_PHY_THS_SKIP ,0x9);   // hs skip = 55 ns --(40ns<x<55ns+4*UI)
++        WRITE_CSI_PHY_REG(MIPI_PHY_THS_SETTLE ,settle);   // hs settle = 160 ns --(85 ns + 6*UI<x<145 ns + 10*UI)
++        WRITE_CSI_PHY_REG(MIPI_PHY_TINIT ,0x4e20);  // >100us
++        WRITE_CSI_PHY_REG(MIPI_PHY_TMBIAS ,0x100);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TULPS_C ,0x1000);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TULPS_S ,0x100);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TLP_EN_W ,0x0c);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TLPOK ,0x100);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TWD_INIT ,0x400000);
++        WRITE_CSI_PHY_REG(MIPI_PHY_TWD_HS ,0x400000);
++        WRITE_CSI_PHY_REG(MIPI_PHY_DATA_LANE_CTRL , 0x0);
++        WRITE_CSI_PHY_REG(MIPI_PHY_DATA_LANE_CTRL1 , 0x3 | (0x1f << 2 ) | (0x3 << 7));     // enable data lanes pipe line and hs sync bit err.
++#ifdef CONFIG_ARCH_MESON6
++        WRITE_CSI_PHY_REG(MIPI_PHY_AN_CTRL0,0xa3a9); //MIPI_COMMON<15:0>=<1010,0011,1010,1001>
++        WRITE_CSI_PHY_REG(MIPI_PHY_AN_CTRL1,0xcf25); //MIPI_CHCTL1<15:0>=<1100,1111,0010,0101> 
++        WRITE_CSI_PHY_REG(MIPI_PHY_AN_CTRL2,0x0667); //MIPI_CHCTL2<15:0>=<0000,0110,0110,0111> 
++#else
++        printk("HHI_GCLK_MPEG1=%x, csi2_dig_clkin=%d\n", READ_CBUS_REG(HHI_GCLK_MPEG1), (READ_CBUS_REG(HHI_GCLK_MPEG1) >> 18)&0x1); 
++        WRITE_CBUS_REG(HHI_CSI_PHY_CNTL0, 0xfdc1 << 16 | 0xfd01); 
++        WRITE_CBUS_REG(HHI_CSI_PHY_CNTL1, 0x3f << 16 | 0xffff); 
++        temp_data = READ_CBUS_REG(HHI_CSI_PHY_CNTL2);//
++        //printk("temp_data=%x, == 0x8000 0fc0", temp_data);
++        //printk(" MIPI_CSI2_HOST_BASE_ADDR=%x\n", MIPI_CSI2_HOST_BASE_ADDR);
++#endif
++        //data32 =((~(info->channel))&0xf)|(0 << 4); //enable lanes digital clock
++        //data32 |= ((info->channel)<<5); //mipi_chpu  to analog
++        WRITE_CSI_PHY_REG(MIPI_PHY_CTRL,  info->clk_channel<<21);// data32);
++        return;
++}
++
++
++
++static void reset_am_mipi_csi2_host(void)
++{
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_PHY_SHUTDOWNZ,    0); // enable power
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_DPHY_RSTZ,    0); // release DPHY reset
++        WRITE_CSI_HST_REG(MIPI_CSI2_HOST_CSI2_RESETN,    0); // csi2 reset
++        return;
++}
++
++static void reset_am_mipi_csi2_adapter(void)
++{
++        unsigned data32 = READ_CSI_ADPT_REG(CSI2_GEN_CTRL0);
++        data32 &=((~0xf)<<CSI2_CFG_VIRTUAL_CHANNEL_EN);
++        WRITE_CSI_ADPT_REG(CSI2_GEN_CTRL0,data32);  // disable virtual channel
++        WRITE_CSI_ADPT_REG(CSI2_INTERRUPT_CTRL_STAT,   0x7<<CSI2_CFG_FIELD_DONE_INTERRUPT_CLR); // clear status,disable interrupt
++        WRITE_CSI_ADPT_REG(CSI2_CLK_RESET, (1<<CSI2_CFG_SW_RESET) |
++                        (1<<CSI2_CFG_CLK_AUTO_GATE_OFF)); // disable auto gate and clock
++
++        //WRITE_CBUS_REG_BITS( HHI_MIPI_PHY_CLK_CNTL,  0, 8, 1);    // disable gated clock
++        WRITE_CBUS_REG( HHI_MIPI_PHY_CLK_CNTL,  0);    // disable gated clock
++        return;
++}
++
++static void reset_am_mipi_phy(void)
++{
++        u32 data32;
++        data32 =0x1f; //disable lanes digital clock
++        data32 |= 0x1<<31; //soft reset bit
++        WRITE_CSI_PHY_REG(MIPI_PHY_CTRL,   data32);   
++#if 1
++        WRITE_CBUS_REG(HHI_CSI_PHY_CNTL0, 0xfcc1 << 16 | 0xf780); 
++        WRITE_CBUS_REG(HHI_CSI_PHY_CNTL1, 0x0 << 16 | 0xffff); 
++        WRITE_CBUS_REG(HHI_CSI_PHY_CNTL2, 0x0); 
++#endif
++        return;
++}
++
++void am_mipi_csi2_init(csi_parm_t* info)
++{
++        init_am_mipi_phy(info);
++        init_am_mipi_csi2_host(info);
++        init_am_mipi_csi2_adapter(info);
++        return;
++}
++
++void am_mipi_csi2_uninit(void)
++{
++        reset_am_mipi_phy();
++        reset_am_mipi_csi2_host();
++        reset_am_mipi_csi2_adapter();
++        return;
++}
+diff --git a/include/linux/amlogic/camera/aml_cam_info.h b/include/linux/amlogic/camera/aml_cam_info.h
+index 7cd0af731ca9..85d7bd2571d9 100755
+--- a/include/linux/amlogic/camera/aml_cam_info.h
++++ b/include/linux/amlogic/camera/aml_cam_info.h
+@@ -76,6 +76,8 @@ typedef struct {
+ 	unsigned flash_support;
+ 	unsigned flash_ctrl_level;
+ 	bt_path_t bt_path;
++    cam_interface_t         interface;
++    clk_channel_t           clk_channel;
+ 	gpio_t pwdn_pin;
+ 	gpio_t rst_pin;
+ 	gpio_t flash_ctrl_pin;
+diff --git a/include/linux/amlogic/mipi/am_mipi_csi2.h b/include/linux/amlogic/mipi/am_mipi_csi2.h
+index 9a3d56f5f9e6..02ff69ed8d05 100755
+--- a/include/linux/amlogic/mipi/am_mipi_csi2.h
++++ b/include/linux/amlogic/mipi/am_mipi_csi2.h
+@@ -12,6 +12,8 @@
+ #ifndef AM_MIPI_CSI2
+ #define AM_MIPI_CSI2
+ 
++#include <mach/io.h>
++#include <linux/amlogic/tvin/tvin_v4l2.h>
+ #define CSI2_BUF_POOL_SIZE    6
+ #define CSI2_OUTPUT_BUF_POOL_SIZE   1
+ 
+@@ -124,6 +126,13 @@ typedef struct am_csi2_hw_s {
+ }am_csi2_hw_t;
+ 
+ struct am_csi2_s{
++    char* name;
++
++    enum am_csi2_mode mode;
++    unsigned char lanes;	    /* 0..3 */
++    unsigned char channel;    /* bitmask[3:0] */
++    int vdin_num;
++
+     int id;	
+     struct platform_device *pdev;
+     struct am_csi2_client_config *client;
+@@ -156,31 +165,52 @@ struct am_csi2_s{
+ #endif
+ #define mipi_error(fmt, args...) printk(fmt,## args)
+ 
++#define CSI_ADPT_START_REG      CSI2_CLK_RESET//MIPI CSI2 ADAPTOR Registers
++#define CSI_ADPT_END_REG        CSI2_GEN_CTRL1//
++
++#define CSI_PHY_START_REG      MIPI_PHY_CTRL           //MIPI CSI2 PHY Registers
++#define CSI_PHY_END_REG        MIPI_PHY_DDR_STS        //
++
++#define CSI_HST_START_REG       MIPI_CSI2_HOST_VERSION          //MIPI CSI2 HOST Registers
++#define CSI_HST_END_REG         MIPI_CSI2_HOST_PHY_TST_CTRL1    //
++
++#define CSI_ADPT_REG_BASE_ADDR			IO_VPU_BUS_BASE
++#define CSI_PHY_REG_BASE_ADDR		        IO_MIPI_PHY_BASE
++#define CSI_HST_REG_BASE_ADDR		        IO_MIPI_HOST_BASE
++
++////MIPI CSI2 ADAPTOR Registers
++#define CSI_ADPT_REG_OFFSET(reg)		(reg << 2)
++#define CSI_ADPT_REG_ADDR(reg)			(CSI_ADPT_REG_BASE_ADDR + CSI_ADPT_REG_OFFSET(reg))
++
++#define WRITE_CSI_ADPT_REG(reg, val) 				aml_write_reg32(CSI_ADPT_REG_ADDR(reg), (val))
++#define READ_CSI_ADPT_REG(reg) 					aml_read_reg32(CSI_ADPT_REG_ADDR(reg))
++#define WRITE_CSI_ADPT_REG_BITS(reg, val, start, len) 	        aml_set_reg32_bits(CSI_ADPT_REG_ADDR(reg), (val),start,len)
++#define CLR_CSI_ADPT_REG_MASK(reg, mask)   		        aml_clr_reg32_mask(CSI_ADPT_REG_ADDR(reg), (mask))
++#define SET_CSI_ADPT_REG_MASK(reg, mask)     			aml_set_reg32_mask(CSI_ADPT_REG_ADDR(reg), (mask))
++////MIPI CSI2 PHY Registers
++#define CSI_PHY_REG_OFFSET(reg)		        (reg << 2)
++#define CSI_PHY_REG_ADDR(reg)			(CSI_PHY_REG_BASE_ADDR + CSI_PHY_REG_OFFSET(reg))
++
++#define WRITE_CSI_PHY_REG(reg, val) 				aml_write_reg32(CSI_PHY_REG_ADDR(reg), (val))
++#define READ_CSI_PHY_REG(reg) 					aml_read_reg32(CSI_PHY_REG_ADDR(reg))
++#define WRITE_CSI_PHY_REG_BITS(reg, val, start, len) 	        aml_set_reg32_bits(CSI_PHY_REG_ADDR(reg), (val),start,len)
++#define CLR_CSI_PHY_REG_MASK(reg, mask)   		        aml_clr_reg32_mask(CSI_PHY_REG_ADDR(reg), (mask))
++#define SET_CSI_PHY_REG_MASK(reg, mask)     			aml_set_reg32_mask(CSI_PHY_REG_ADDR(reg), (mask))
++
++////MIPI CSI2 HOST Registers
++#define CSI_HST_REG_OFFSET(reg)		        (reg << 2)
++#define CSI_HST_REG_ADDR(reg)			(CSI_HST_REG_BASE_ADDR + CSI_HST_REG_OFFSET(reg))
++
++#define WRITE_CSI_HST_REG(reg, val) 				aml_write_reg32(CSI_HST_REG_ADDR(reg), (val))
++#define READ_CSI_HST_REG(reg) 					aml_read_reg32(CSI_HST_REG_ADDR(reg))
++#define WRITE_CSI_HST_REG_BITS(reg, val, start, len) 	        aml_set_reg32_bits(CSI_HST_REG_ADDR(reg), (val),start,len)
++#define CLR_CSI_HST_REG_MASK(reg, mask)   		        aml_clr_reg32_mask(CSI_HST_REG_ADDR(reg), (mask))
++#define SET_CSI_HST_REG_MASK(reg, mask)     			aml_set_reg32_mask(CSI_HST_REG_ADDR(reg), (mask))
+ //struct device;
+ //struct v4l2_device;
+ 
+-#define mipi_csi2_wr_reg(addr, data) *((volatile unsigned long *) (addr)) = data;
+-
+-//#define MIPI_CSI2_HOST_BASE_ADDR    0xc8008000
+-#define MIPI_CSI2_HOST_BASE_ADDR    APB_REG_ADDR(0x8000)//0xf3008000
+-
+-// MIPI-CSI2 host registers
+-#define MIPI_CSI2_HOST_VERSION          (MIPI_CSI2_HOST_BASE_ADDR+0x000) 
+-#define MIPI_CSI2_HOST_N_LANES          (MIPI_CSI2_HOST_BASE_ADDR+0x004) 
+-#define MIPI_CSI2_HOST_PHY_SHUTDOWNZ    (MIPI_CSI2_HOST_BASE_ADDR+0x008) 
+-#define MIPI_CSI2_HOST_DPHY_RSTZ        (MIPI_CSI2_HOST_BASE_ADDR+0x00c) 
+-#define MIPI_CSI2_HOST_CSI2_RESETN      (MIPI_CSI2_HOST_BASE_ADDR+0x010) 
+-#define MIPI_CSI2_HOST_PHY_STATE        (MIPI_CSI2_HOST_BASE_ADDR+0x014) 
+-#define MIPI_CSI2_HOST_DATA_IDS_1       (MIPI_CSI2_HOST_BASE_ADDR+0x018) 
+-#define MIPI_CSI2_HOST_DATA_IDS_2       (MIPI_CSI2_HOST_BASE_ADDR+0x01c) 
+-#define MIPI_CSI2_HOST_ERR1             (MIPI_CSI2_HOST_BASE_ADDR+0x020) 
+-#define MIPI_CSI2_HOST_ERR2             (MIPI_CSI2_HOST_BASE_ADDR+0x024) 
+-#define MIPI_CSI2_HOST_MASK1            (MIPI_CSI2_HOST_BASE_ADDR+0x028) 
+-#define MIPI_CSI2_HOST_MASK2            (MIPI_CSI2_HOST_BASE_ADDR+0x02c) 
+-#define MIPI_CSI2_HOST_PHY_TST_CTRL0    (MIPI_CSI2_HOST_BASE_ADDR+0x030) 
+-#define MIPI_CSI2_HOST_PHY_TST_CTRL1    (MIPI_CSI2_HOST_BASE_ADDR+0x034) 
+-
+ //#define CSI2_CLK_RESET                             0x2a00
++#define CSI2_CFG_CLK_ENABLE_DWC         3 
+ #define CSI2_CFG_CLK_AUTO_GATE_OFF     2
+ #define CSI2_CFG_CLK_ENABLE                    1
+ #define CSI2_CFG_SW_RESET                       0
+@@ -216,7 +246,7 @@ struct am_csi2_s{
+ 
+ extern int start_mipi_csi2_service(struct am_csi2_camera_para *para);
+ extern int stop_mipi_csi2_service(struct am_csi2_camera_para *para);
+-extern void am_mipi_csi2_init(am_csi2_hw_t* info);
++extern void am_mipi_csi2_init(csi_parm_t* info);
+ extern void am_mipi_csi2_uninit(void);
+ extern void init_am_mipi_csi2_clock(void);
+ 
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index e1ff608c39b2..201695b8dbfa 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -688,6 +688,16 @@ typedef enum bt_path_e {
+ 	BT_PATH_CSI2,
+ } bt_path_t;
+ 
++typedef enum clk_channel_e {
++	CLK_CHANNEL_A=0,
++	CLK_CHANNEL_B,
++}clk_channel_t;
++
++typedef enum cam_interface_e {
++	CAM_DVP=0,
++	CAM_MIPI,
++}cam_interface_t;
++
+ // ***************************************************************************
+ // *** IOCTL command definitions *****************************************
+ // ***************************************************************************
+@@ -702,7 +712,23 @@ typedef enum bt_path_e {
+ #define CAMERA_IOC_START_CAPTURE_PARA     _IOR(CAMERA_IOC_MAGIC, 0x05, struct camera_info_s)
+ #define CAMERA_IOC_STOP_CAPTURE_PARA     _IOR(CAMERA_IOC_MAGIC, 0x06, struct camera_info_s)
+ 
+-
++typedef struct csi_parm_s {
++        //am_csi2_hw_t            *hw_info;
++        unsigned char lanes;
++        unsigned char channel;
++        unsigned char mode;
++        unsigned char clock_lane_mode; // 0 clock gate 1: always on
++        unsigned active_pixel;
++        unsigned active_line;
++        unsigned frame_size;
++        unsigned ui_val; //ns
++        unsigned hs_freq; //hz
++        unsigned urgent;
++
++        clk_channel_t           clk_channel;
++        unsigned int            skip_frames;
++        tvin_color_fmt_t        csi_ofmt;
++}csi_parm_t;
+ 
+ //add for vdin called by backend driver
+ typedef struct vdin_parm_s {
+@@ -726,6 +752,8 @@ typedef struct vdin_parm_s {
+ 	unsigned short  dest_hactive;//for vdin scale down
+ 	unsigned short  dest_vactive;
+ 	unsigned short	skip_count;//for skip frame
++
++        struct csi_parm_s csi_hw_info;
+ 	/*for reserved*/
+         unsigned int    reserved;
+ } vdin_parm_t;
+-- 
+2.19.0
+

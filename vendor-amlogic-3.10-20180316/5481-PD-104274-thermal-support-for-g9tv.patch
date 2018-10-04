@@ -1,0 +1,178 @@
+From 048f6b728c33d431645590920788e4b35c2202c0 Mon Sep 17 00:00:00 2001
+From: Kieth Liu <kieth.liu@amlogic.com>
+Date: Wed, 18 Mar 2015 12:33:21 +0800
+Subject: [PATCH 5481/5965] PD#104274: thermal: support for g9tv
+
+Change-Id: I28208b7e3c27e609964b95e85e8cf7a2b902ad78
+---
+ arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd | 57 +++++++++++++++++++-
+ arch/arm/configs/mesong9bb_defconfig         |  2 +
+ arch/arm/mach-mesong9bb/thermal.c            |  7 +--
+ drivers/amlogic/efuse/efuse_hw.c             |  4 +-
+ drivers/amlogic/efuse/efuse_regs.h           |  1 +
+ 5 files changed, 65 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+index bcf8ed906e5c..0f5f5b4fbee2 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+@@ -756,7 +756,7 @@
+ 		compatible = "amlogic,vdec";
+ 		dev_name = "vdec.0";
+ 		status = "okay";
+-		reserve-memory = <0x10000000>; // 256M
++		reserve-memory = <0xc000000>; // 64M
+ 		reserve-iomap = "true";
+ 		linux,contiguous-region = <&mem_4k2k_decoder>;
+ 	};
+@@ -1572,7 +1572,60 @@
+ 		pinctrl-0 = <&smc_pins>;
+ 	};*/
+ 
++/// ***************************************************************************************
++///	-	Efuse
++//$$ MODULE="Efuse"
++//$$ DEVICE="efuse"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "plat-pos"
++//$$ L2 PROP_U32 = "plat-count"
++//$$ L2 PROP_U32 = "usid-min"
++//$$ L2 PROP_U32 = "usid-max"
++    efuse{
++		compatible = "amlogic,efuse";
++		dev_name = "efuse";
++		status = "okay";
++		plat-pos = <0 454>;
++		plat-count = <58>;
++		usid-min = <8>; /*reserved*/
++		usid-max = <31>; /*reserved*/
++	};
+ 
+-
++///	-	Thermal
++//$$ MODULE="Thermal"
++//$$ DEVICE="thermal"
++//$$ L2 PROP_U32 3*3 = "trip_point"
++//$$ L2 PROP_U32 = "#thermal-cells"
++//$$ L2 PROP_U32 = "cpu_cali_a"
++//$$ L2 PROP_U32 = "idle_interval"
++	thermal{
++		compatible = "amlogic-thermal";
++		#thermal-cells=<7>;
++		dev_name = "aml_thermal";
++		trip_point=<70 1608001 1608001 511 511 3 5
++                    80 1200001 1200001 435 435 2 4
++                    90  800001 800001  328 328 2 3
++                    260 0xffffffff 0xffffffff 0xffffffff 0xffffffff 0xffffffff 0xffffffff>;
++		cpu_cali_a=<0>;
++		idle_interval=<1000>;
++        use_virtual_thermal;
++        freq_sample_period=<30>;
++        report_time=<1 10 30 60>;         /* based on freq_sample_period */
++        cpu_virtual=<
++             500000  40  40  40  40
++             600000  45  55  60  65
++             800000  50  60  65  70
++            1000000  55  65  70  75
++            1200000  60  70  75  80
++            1400000  65  75  80  85
++        >;
++        gpu_virtual=<
++            183      40  40  40  40
++            251      40  45  50  55
++            319      50  60  65  70
++            426      55  65  70  75
++            511      60  70  75  80
++        >;
++	};
+ 
+ }; /* end of root */
+diff --git a/arch/arm/configs/mesong9bb_defconfig b/arch/arm/configs/mesong9bb_defconfig
+index a308655511ef..357b09ea840b 100644
+--- a/arch/arm/configs/mesong9bb_defconfig
++++ b/arch/arm/configs/mesong9bb_defconfig
+@@ -162,6 +162,7 @@ CONFIG_AML_PMU=y
+ CONFIG_AML1220=y
+ CONFIG_SECURITYKEY=y
+ CONFIG_EFUSE=y
++CONFIG_AML_PLATFORM_THERMAL=y
+ CONFIG_AMLOGIC_USB=y
+ CONFIG_MMC_AML=y
+ # CONFIG_AML_NFTL_NEW is not set
+@@ -228,6 +229,7 @@ CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+ # CONFIG_HWMON is not set
+ CONFIG_THERMAL=y
+ CONFIG_CPU_THERMAL=y
++CONFIG_AML_VIRTUAL_THERMAL=y
+ CONFIG_CPUCORE_THERMAL=y
+ CONFIG_GPU_THERMAL=y
+ CONFIG_GPUCORE_THERMAL=y
+diff --git a/arch/arm/mach-mesong9bb/thermal.c b/arch/arm/mach-mesong9bb/thermal.c
+index 1e74e776eaf1..bb50bc991bee 100644
+--- a/arch/arm/mach-mesong9bb/thermal.c
++++ b/arch/arm/mach-mesong9bb/thermal.c
+@@ -3,7 +3,7 @@
+ #include <linux/amlogic/saradc.h>
+ #include <mach/thermal.h>
+ #include <linux/slab.h>
+-
++#include <mach/am_regs.h>
+ #define  NOT_WRITE_EFUSE 0x0
+ #define EFUSE_MIGHT_WRONG 0x8
+ #define EFUEE_PRIVATE 0x4
+@@ -52,7 +52,8 @@ int thermal_firmware_init(void)
+ 		temps->efuse_flag=-1;
+ 	}
+ 	if (temps->flag) {
+-		temp_sensor_adc_init(temps->trimming);
++		aml_set_reg32_mask(P_AO_SAR_ADC_REG11,((1<<13)|(1<<19)|(1<<21)));
++		aml_set_reg32_bits(P_AO_SAR_ADC_REG11,temps->trimming,14,5);
+ 		return 0;
+ 	}
+ 	else
+@@ -66,7 +67,7 @@ int get_cpu_temp(void)
+ 	if (temps->flag) {
+ 		ret=get_adc_sample(6);
+ 		if (ret >= 0) {
+-			tempa=(10*(ret-temps->adc_efuse))/32+27;
++			tempa=(10*(ret-temps->adc_efuse))/34+27;
+ 			ret=tempa;
+ 		}
+ 	}
+diff --git a/drivers/amlogic/efuse/efuse_hw.c b/drivers/amlogic/efuse/efuse_hw.c
+index 98e8bbcc1bb5..a272f0aa4020 100755
+--- a/drivers/amlogic/efuse/efuse_hw.c
++++ b/drivers/amlogic/efuse/efuse_hw.c
+@@ -379,7 +379,8 @@ struct efuse_chip_identify_t{
+ 	efuse_socchip_type_e type;
+ };
+ static const struct efuse_chip_identify_t efuse_chip_hw_info[]={
+-	{.chiphw_mver=28, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_G9TV},      //M8BABY 
++	{.chiphw_mver=30, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_G9TVBABY},      //G9TVBB
++	{.chiphw_mver=28, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_G9TV},      //G9TV
+ 	{.chiphw_mver=27, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M8BABY},      //M8BABY 
+ 	{.chiphw_mver=26, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6TVD},      //M6TVD 
+ 	{.chiphw_mver=25, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M8},      //M8 
+@@ -1056,6 +1057,7 @@ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ 		case EFUSE_SOC_CHIP_M8:
+ 		case EFUSE_SOC_CHIP_M8BABY:
+ 		case EFUSE_SOC_CHIP_G9TV:
++		case EFUSE_SOC_CHIP_G9TVBABY:
+ 			if(strcasecmp(intl_item,"temperature") == 0){
+ 				pos = 502;
+ 				len = 2;
+diff --git a/drivers/amlogic/efuse/efuse_regs.h b/drivers/amlogic/efuse/efuse_regs.h
+index 87ae075dfd30..4e6c1aef9d74 100755
+--- a/drivers/amlogic/efuse/efuse_regs.h
++++ b/drivers/amlogic/efuse/efuse_regs.h
+@@ -150,6 +150,7 @@ typedef enum {
+ 	EFUSE_SOC_CHIP_M6TVD,
+ 	EFUSE_SOC_CHIP_M8BABY,
+ 	EFUSE_SOC_CHIP_G9TV,
++	EFUSE_SOC_CHIP_G9TVBABY,
+ 	EFUSE_SOC_CHIP_UNKNOW,
+ }efuse_socchip_type_e;
+ 
+-- 
+2.19.0
+

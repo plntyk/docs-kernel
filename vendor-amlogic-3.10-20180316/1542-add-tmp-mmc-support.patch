@@ -1,0 +1,1509 @@
+From 08653cb7bb079f76b11b818b1417fa1f36a2a42a Mon Sep 17 00:00:00 2001
+From: "yun.cai" <yun.cai@amlogic.com>
+Date: Fri, 25 Oct 2013 14:13:07 +0800
+Subject: [PATCH 1542/5965] add tmp mmc support
+
+---
+ arch/arm/configs/meson8_defconfig  |   1 +
+ drivers/amlogic/mmc/aml_sdio.c     |  49 +--
+ drivers/amlogic/mmc/amlsd.c        |  91 +++---
+ drivers/mmc/Makefile               |   2 +-
+ drivers/mmc/card/Kconfig           |   2 +-
+ drivers/mmc/card/Makefile          |   2 +-
+ drivers/mmc/card/block.c           |  44 ++-
+ drivers/mmc/card/emmc_partitions.c | 509 +++++++++++++++++++++++++++++
+ drivers/mmc/card/emmc_partitions.h |  42 +++
+ drivers/mmc/core/core.c            | 118 +++----
+ drivers/mmc/core/mmc.c             |   4 +-
+ drivers/mmc/core/sd.c              |   4 +-
+ drivers/mmc/core/sdio.c            |  28 +-
+ drivers/mmc/core/sdio_irq.c        |   4 +-
+ include/linux/mmc/host.h           |  11 +
+ 15 files changed, 760 insertions(+), 151 deletions(-)
+ create mode 100644 drivers/mmc/card/emmc_partitions.c
+ create mode 100644 drivers/mmc/card/emmc_partitions.h
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 2b972fa3f02e..e38681154366 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -140,6 +140,7 @@ CONFIG_NEW_AM_REMOTE=y
+ # CONFIG_MESON_INPUT_KEYBOARD is not set
+ CONFIG_AML_PMU_ALGORITHM_SUPPORT=y
+ CONFIG_EFUSE=y
++CONFIG_MMC_AML=y
+ # CONFIG_AMAUDIO is not set
+ CONFIG_AM_VIDEO=y
+ CONFIG_AM_TV_OUTPUT2=y
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 12ee2eb18219..4e2d46610465 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -222,14 +222,14 @@ void aml_sdio_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
+     // u32 virqs = readl(host->base + SDIO_IRQS);
+     // u32 virqc =readl(host->base + SDIO_IRQC);
+     // struct sdio_irq_config* irqc = (void*)&virqc;
+-	
++
+     /* Disable Command-Done-Interrupt
+      * It will be enabled again in the next cmd.
+      */
+     // irqc->arc_cmd_int_en = 0;   // disable cmd irq
+     // writel(virqc, host->base + SDIO_IRQC);
+     // writel(virqs, host->base + SDIO_IRQS);     // clear pending
+-    
++
+     /*
+         * del timer before mmc_request_done,
+         * if fail, it call aml_sdio_request again & mod_timer again
+@@ -237,7 +237,7 @@ void aml_sdio_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
+     // if (!in_atomic()){
+         // del_timer_sync(&host->timeout_tlist); // it may sleep
+     // } else {
+-        // del_timer(&host->timeout_tlist); 
++        // del_timer(&host->timeout_tlist);
+     // }
+     //del_timer(&host->timeout_tlist);
+     cancel_delayed_work(&host->timeout);
+@@ -263,7 +263,7 @@ void aml_sdio_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
+     }
+ 
+     if (pdata->xfer_post)
+-        pdata->xfer_post(pdata);  
++        pdata->xfer_post(pdata);
+ 
+     mmc_request_done(host->mmc, mrq);
+ }
+@@ -300,7 +300,7 @@ static void aml_sdio_timeout(struct work_struct *data)
+             sdio_err("%s: isr have been run\n",  mmc_hostname(host->mmc));
+ 		return;
+ 	}
+-    
++
+     /* Disable Command-Done-Interrupt to avoid irq occurs
+      * It will be enabled again in the next cmd.
+      */
+@@ -317,7 +317,7 @@ static void aml_sdio_timeout(struct work_struct *data)
+             host->mrq->cmd->opcode,
+             host->mrq->cmd->arg,
+             host->mrq->data?host->mrq->data->blksz*host->mrq->data->blocks:0,
+-            host->xfer_step, 
++            host->xfer_step,
+             host->cmd_is_stop,
+             pdata->port,
+             virqs, virqc,
+@@ -353,9 +353,9 @@ static void aml_sdio_timeout(struct work_struct *data)
+     // host->mrq = NULL;
+     // host->xfer_step = XFER_FINISHED;
+     // spin_unlock_irqrestore(&host->mrq_lock, flags);
+-   
++
+     // mmc_request_done(host->mmc, mrq);
+-	
++
+     /*print reg*/
+     // aml_sdio_print_reg(host);
+ 	// sdio_err("Timeout out func\n");
+@@ -452,7 +452,7 @@ void aml_sdio_request(struct mmc_host *mmc, struct mmc_request *mrq)
+ 			// mrq->data->timeout_clks);
+ 	    writel(host->bn_dma_buf, host->base + SDIO_ADDR);
+     }
+-    
++
+     aml_sdio_start_cmd(mmc, mrq);
+     host->xfer_step = XFER_AFTER_START;
+     spin_unlock_irqrestore(&host->mrq_lock, flags);
+@@ -484,7 +484,7 @@ static irqreturn_t aml_sdio_irq(int irq, void *dev_id)
+     // int is_stop;
+ 	struct mmc_request* mrq;
+ 	unsigned long flags;
+-	
++
+ 	spin_lock_irqsave(&host->mrq_lock, flags);
+ 	mrq = host->mrq;
+ 	if(!mrq){
+@@ -522,7 +522,7 @@ static irqreturn_t aml_sdio_irq(int irq, void *dev_id)
+     // writel(virqs, host->base + SDIO_IRQS);
+     //if cmd has stop, call aml_sdio_send_stop
+     return IRQ_HANDLED;
+-} 
++}
+ 
+ irqreturn_t aml_sdio_irq_thread(int irq, void *data)
+ {
+@@ -614,9 +614,10 @@ static void aml_sdio_set_clk_rate(struct amlsd_platform* pdata, u32 clk_ios)
+ 	struct amlsd_host* host = (void*)pdata->host;
+     u32 vconf = readl(host->base + SDIO_CONF);
+     struct sdio_config* conf = (void*)&vconf;
+-    struct clk* clk_src = clk_get_sys("clk81", NULL);
+-    u32 clk_rate = clk_get_rate(clk_src)/2;
+-    u32 clk_div;
++    //struct clk* clk_src = clk_get_sys("clk81", NULL);
++    //u32 clk_rate = clk_get_rate(clk_src)/2;
++    u32 clk_rate = 159000000/2; //tmp for 3.10
++	u32 clk_div;
+ 
+     // aml_sdio_init_param(pdata);
+ 
+@@ -626,10 +627,10 @@ static void aml_sdio_set_clk_rate(struct amlsd_platform* pdata, u32 clk_ios)
+ 		clk_ios = pdata->f_min;
+ 
+     BUG_ON(!clk_ios);
+-    
++
+ 	/*0: dont set it, 1:div2, 2:div3, 3:div4...*/
+ 	clk_div = clk_rate / clk_ios - !(clk_rate%clk_ios);
+-    
++
+     conf->cmd_clk_divide = clk_div;
+     pdata->clkc = clk_div;
+     pdata->mmc->actual_clock = clk_rate / (clk_div + 1);
+@@ -879,7 +880,7 @@ static struct amlsd_host* aml_sdio_init_host(void)
+ 	host->xfer_step = XFER_INIT;
+ 
+ 	INIT_LIST_HEAD(&host->sibling);
+-    
++
+     host->storage_flag = storage_flag;
+ 	return host;
+ }
+@@ -898,7 +899,7 @@ static int aml_sdio_probe(struct platform_device *pdev)
+ 		goto fail_init_host;
+ 	if(amlsd_get_reg_base(pdev, host))
+ 		goto fail_init_host;
+-	
++
+ 	host->pdev = pdev;
+ 	for(i=0;i<MMC_MAX_DEVICE;i++){
+ 		/*malloc extra amlsd_platform*/
+@@ -914,7 +915,7 @@ static int aml_sdio_probe(struct platform_device *pdev)
+             mmc_free_host(mmc);
+ 			break;
+         }
+-        
++
+ 		// if(pdata->parts){
+         if (pdata->port == PORT_SDIO_C) {
+             if (is_emmc_exist(host)) {
+@@ -957,10 +958,10 @@ static int aml_sdio_probe(struct platform_device *pdev)
+ 
+ 		if(pdata->port_init)
+ 			pdata->port_init(pdata);
+-			
++
+        //init sdio reg here
+-        aml_sdio_init_param(pdata);  
+-        
++        aml_sdio_init_param(pdata);
++
+         if (((pdata->port == MESON_SDIO_PORT_B) || (pdata->port == MESON_SDIO_PORT_XC_B)) && aml_is_sduart(pdata)){
+             if(pdata->caps & MMC_CAP_4_BIT_DATA) {
+                 pdata->mmc->caps &= ~MMC_CAP_4_BIT_DATA;
+@@ -982,7 +983,7 @@ static int aml_sdio_probe(struct platform_device *pdev)
+ 		/*Register card detect irq : plug in & unplug*/
+ 		if(pdata->irq_in && pdata->irq_out){
+ 			pdata->irq_init(pdata);
+-			ret = request_threaded_irq(pdata->irq_in+INT_GPIO_0, 
++			ret = request_threaded_irq(pdata->irq_in+INT_GPIO_0,
+                     (irq_handler_t)aml_sdio_irq_cd, aml_irq_cdin_thread,
+                     IRQF_DISABLED, "mmc_in", (void*)pdata);
+             ret |= request_threaded_irq(pdata->irq_out+INT_GPIO_0,
+@@ -1015,7 +1016,7 @@ fail_init_host:
+ 	free_irq(INT_SDIO, host);
+ 	dma_free_coherent(NULL, SDIO_BOUNCE_REQ_SIZE, host->bn_buf,
+ 			(dma_addr_t)host->bn_dma_buf);
+-	kfree(host);	
++	kfree(host);
+     print_tmp("aml_sdio_probe() fail!\n");
+ 	return ret;
+ }
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index 8fd0b535eeff..110dbd0be282 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -2,6 +2,7 @@
+ #include <linux/mtd/mtd.h>
+ #include <linux/mtd/partitions.h>
+ #include <linux/proc_fs.h>
++#include <linux/seq_file.h>
+ #include <linux/genhd.h>
+ #include <linux/blkdev.h>
+ 
+@@ -60,46 +61,41 @@
+ static struct proc_dir_entry *proc_card;
+ static struct mtd_partition *card_table[16];
+ 
+-static inline int card_proc_info (char *buf, char* dev_name, int i)
++static inline int card_proc_info (struct seq_file *m, char* dev_name, int i)
+ {
+ 	struct mtd_partition *this = card_table[i];
+ 
+ 	if (!this)
+ 		return 0;
+ 
+-	return sprintf(buf, "%s%d: %8.8llx %8.8x \"%s\"\n", dev_name,
++	return seq_printf(m, "%s%d: %8.8llx %8.8x \"%s\"\n", dev_name,
+ 		        i+1,(unsigned long long)this->size,
+ 		       512*1024, this->name);
+ }
+ 
+-static int card_read_proc (char *page, char **start, off_t off, int count,
+-			  int *eof, void *data_unused)
++static int card_proc_show(struct seq_file *m, void *v)
+ {
+-	int len, l, i;
+-    off_t   begin = 0;
+-
+-	len = sprintf(page, "dev:    size   erasesize  name\n");
+-    for (i=0; i< 16; i++) {
++	int i;
+ 
+-            l = card_proc_info(page + len, "inand", i);
+-            len += l;
+-            if (len+begin > off+count)
+-                    goto done;
+-            if (len+begin < off) {
+-                    begin += len;
+-                    len = 0;
+-            }
+-    }
++	seq_puts(m, "dev:    size   erasesize  name\n");
++	for (i=0; i< 16; i++)
++		card_proc_info(m, "inand", i);
+ 
+-    *eof = 1;
++	return 0;
++}
+ 
+-done:
+-    if (off >= len+begin)
+-            return 0;
+-    *start = page + (off-begin);
+-    return ((count < begin+len-off) ? count : begin+len-off);
++static int card_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, card_proc_show, NULL);
+ }
+ 
++static const struct file_operations card_proc_fops = {
++	.open = card_proc_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = seq_release,
++};
++
+ /**
+  * add_card_partition : add card partition , refer to 
+  * board-****.c  inand_partition_info[]
+@@ -129,8 +125,8 @@ int add_part_table(struct mtd_partition * part, unsigned int nr_part)
+ 		card_table[i]->name = part[i].name;
+ 	}
+ 
+-	if (!proc_card && (proc_card = create_proc_entry( "inand", 0, NULL )))
+-		proc_card->read_proc = card_read_proc;
++	if (!proc_card)
++		proc_card = proc_create( "inand", 0, NULL, &card_proc_fops);
+ 
+ 	return 0;
+ }
+@@ -279,6 +275,7 @@ static void aml_sg_miter_stop(struct sg_mapping_iter *miter)
+ 	/* drop resources from the last iteration */
+ 	if (miter->addr) {
+ 		miter->__offset += miter->consumed;
++		miter->__remaining -= miter->consumed;
+ 
+ 		if (miter->__flags & SG_MITER_TO_SG){
+ 			//printk("flush page addr %x, length %x\n", miter->addr, miter->length);
+@@ -305,41 +302,41 @@ static void aml_sg_miter_stop(struct sg_mapping_iter *miter)
+  */
+ static bool aml_sg_miter_next(struct sg_mapping_iter *miter)
+ {
+-	unsigned int off, len;
+ 	unsigned long flags;
+ 
+-	/* check for end and drop resources from the last iteration */
+-	if (!miter->__nents)
+-		return false;
++	sg_miter_stop(miter);
+ 
+-	aml_sg_miter_stop(miter);
++	/*
++	 * Get to the next page if necessary.
++	 * __remaining, __offset is adjusted by sg_miter_stop
++	 */
++	if (!miter->__remaining) {
++		struct scatterlist *sg;
++		unsigned long pgoffset;
+ 
+-	/* get to the next sg if necessary.  __offset is adjusted by stop */
+-	while (miter->__offset == miter->__sg->length) {
+-		if (--miter->__nents) {
+-			miter->__sg = sg_next(miter->__sg);
+-			miter->__offset = 0;
+-		} else
++		if (!__sg_page_iter_next(&miter->piter))
+ 			return false;
+-	}
+ 
+-	/* map the next page */
+-	off = miter->__sg->offset + miter->__offset;
+-	len = miter->__sg->length - miter->__offset;
++		sg = miter->piter.sg;
++		pgoffset = miter->piter.sg_pgoffset;
+ 
+-	miter->page = nth_page(sg_page(miter->__sg), off >> PAGE_SHIFT);
+-	off &= ~PAGE_MASK;
+-	miter->length = min_t(unsigned int, len, PAGE_SIZE - off);
+-	miter->consumed = miter->length;
++		miter->__offset = pgoffset ? 0 : sg->offset;
++		miter->__remaining = sg->offset + sg->length -
++				(pgoffset << PAGE_SHIFT) - miter->__offset;
++		miter->__remaining = min_t(unsigned long, miter->__remaining,
++					   PAGE_SIZE - miter->__offset);
++	}
++	miter->page = sg_page_iter_page(&miter->piter);
++	miter->consumed = miter->length = miter->__remaining;
+ 
+     if (PageHighMem(miter->page)){
+ 		printk(KERN_DEBUG "AML_SDHC miter_next highmem\n");
+ 		local_irq_save(flags);
+-    	miter->addr = kmap_atomic(miter->page) + off;
++    	miter->addr = kmap_atomic(miter->page) + miter->__offset;
+ 		local_irq_restore(flags);
+     }
+ 	else
+-		miter->addr = page_address(miter->page) + off;
++		miter->addr = page_address(miter->page) + miter->__offset;
+ 	return true;
+ }
+ 
+diff --git a/drivers/mmc/Makefile b/drivers/mmc/Makefile
+index 400756ec7c49..fcc60251cf88 100644
+--- a/drivers/mmc/Makefile
++++ b/drivers/mmc/Makefile
+@@ -2,7 +2,7 @@
+ # Makefile for the kernel mmc device drivers.
+ #
+ 
+-subdir-ccflags-$(CONFIG_MMC_DEBUG) := -DDEBUG
++# subdir-ccflags-$(CONFIG_MMC_DEBUG) := -DDEBUG
+ 
+ obj-$(CONFIG_MMC)		+= core/
+ obj-$(CONFIG_MMC)		+= card/
+diff --git a/drivers/mmc/card/Kconfig b/drivers/mmc/card/Kconfig
+index 79d82124413f..81fdccebcd0e 100644
+--- a/drivers/mmc/card/Kconfig
++++ b/drivers/mmc/card/Kconfig
+@@ -18,7 +18,7 @@ config MMC_BLOCK_MINORS
+ 	int "Number of minors per block device"
+ 	depends on MMC_BLOCK
+ 	range 4 256
+-	default 8
++	default 16
+ 	help
+ 	  Number of minors per block device. One is needed for every
+ 	  partition on the disk (plus one for the whole disk).
+diff --git a/drivers/mmc/card/Makefile b/drivers/mmc/card/Makefile
+index c73b406a06cd..bc54ecd9bf47 100644
+--- a/drivers/mmc/card/Makefile
++++ b/drivers/mmc/card/Makefile
+@@ -3,7 +3,7 @@
+ #
+ 
+ obj-$(CONFIG_MMC_BLOCK)		+= mmc_block.o
+-mmc_block-objs			:= block.o queue.o
++mmc_block-objs			:= block.o queue.o emmc_partitions.o
+ obj-$(CONFIG_MMC_TEST)		+= mmc_test.o
+ 
+ obj-$(CONFIG_SDIO_UART)		+= sdio_uart.o
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index 366d3528b321..441feece7a24 100644
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -48,6 +48,10 @@
+ 
+ #include "queue.h"
+ 
++#include <mtd/mtd-abi.h> // add by gch
++#include <mach/sd.h> // add by gch
++#include "emmc_partitions.h" // add by gch
++
+ MODULE_ALIAS("mmc:block");
+ #ifdef MODULE_PARAM_PREFIX
+ #undef MODULE_PARAM_PREFIX
+@@ -570,10 +574,40 @@ cmd_err:
+ static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
+ 	unsigned int cmd, unsigned long arg)
+ {
+-	int ret = -EINVAL;
+-	if (cmd == MMC_IOC_CMD)
+-		ret = mmc_blk_ioctl_cmd(bdev, (struct mmc_ioc_cmd __user *)arg);
+-	return ret;
++   void __user *argp = (void __user *)arg;
++   int ret = -EINVAL;
++   struct mtd_info_user info;
++   struct gendisk *disk = bdev->bd_disk;
++   int part_num;
++
++   switch (cmd) {
++       case MMC_IOC_CMD:
++           ret = mmc_blk_ioctl_cmd(bdev, (struct mmc_ioc_cmd __user *)arg);
++           break;
++       case MEMGETINFO:
++           part_num = MINOR(bdev->bd_dev)-disk->first_minor;
++           BUG_ON(part_num < 0);
++           memset(&info, 0, sizeof(info));
++           info.type       = MTD_NORFLASH;
++           info.flags      = MTD_CAP_NORFLASH;
++           info.size       = (disk->part_tbl->part[part_num]->nr_sects<<9);
++           info.erasesize  = SDIO_BOUNCE_REQ_SIZE;
++           info.writesize  = SDIO_BOUNCE_REQ_SIZE;
++           info.oobsize    = 4096;
++           if (copy_to_user(argp, &info, sizeof(struct mtd_info_user)))
++               return -EFAULT;
++           ret = 0;
++           break;
++       case MEMERASE:
++       case MEMLOCK:
++       case MEMUNLOCK:
++       case MEMGETBADBLOCK:
++           return 0;
++       default:
++           ret = -EINVAL;
++   }
++
++   return ret;
+ }
+ 
+ #ifdef CONFIG_COMPAT
+@@ -2347,6 +2381,8 @@ static int mmc_blk_probe(struct mmc_card *card)
+ 	if (mmc_add_disk(md))
+ 		goto out;
+ 
++    aml_emmc_partition_ops(card, md->disk); // add by gch
++
+ 	list_for_each_entry(part_md, &md->part, part) {
+ 		if (mmc_add_disk(part_md))
+ 			goto out;
+diff --git a/drivers/mmc/card/emmc_partitions.c b/drivers/mmc/card/emmc_partitions.c
+new file mode 100644
+index 000000000000..142bc420a691
+--- /dev/null
++++ b/drivers/mmc/card/emmc_partitions.c
+@@ -0,0 +1,509 @@
++#include <linux/types.h>
++#include <linux/stddef.h>
++#include <linux/mtd/mtd.h>
++#include <linux/mtd/partitions.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/genhd.h>
++#include <linux/blkdev.h>
++#include <linux/scatterlist.h>
++
++#include "emmc_partitions.h"
++
++#include <mach/am_regs.h>
++#include <mach/sd.h>
++struct mmc_partitions_fmt *pt_fmt;
++
++/*
++ * Checks that a normal transfer didn't have any errors
++ */
++static int mmc_check_result(struct mmc_request *mrq)
++{
++    int ret;
++
++    BUG_ON(!mrq || !mrq->cmd || !mrq->data);
++
++    ret = 0;
++
++    if (!ret && mrq->cmd->error)
++        ret = mrq->cmd->error;
++    if (!ret && mrq->data->error)
++        ret = mrq->data->error;
++    if (!ret && mrq->stop && mrq->stop->error)
++        ret = mrq->stop->error;
++    if (!ret && mrq->data->bytes_xfered !=
++        mrq->data->blocks * mrq->data->blksz)
++        ret = RESULT_FAIL;
++
++    if (ret == -EINVAL)
++        ret = RESULT_UNSUP_HOST;
++
++    return ret;
++}
++
++static void mmc_prepare_mrq(struct mmc_card *card,
++    struct mmc_request *mrq, struct scatterlist *sg, unsigned sg_len,
++    unsigned dev_addr, unsigned blocks, unsigned blksz, int write)
++{
++    BUG_ON(!mrq || !mrq->cmd || !mrq->data || !mrq->stop);
++
++    if (blocks > 1) {
++        mrq->cmd->opcode = write ?
++            MMC_WRITE_MULTIPLE_BLOCK : MMC_READ_MULTIPLE_BLOCK;
++    } else {
++        mrq->cmd->opcode = write ?
++            MMC_WRITE_BLOCK : MMC_READ_SINGLE_BLOCK;
++    }
++
++    mrq->cmd->arg = dev_addr;
++    if (!mmc_card_blockaddr(card))
++        mrq->cmd->arg <<= 9;
++
++    mrq->cmd->flags = MMC_RSP_R1 | MMC_CMD_ADTC;
++
++    if (blocks == 1)
++        mrq->stop = NULL;
++    else {
++        mrq->stop->opcode = MMC_STOP_TRANSMISSION;
++        mrq->stop->arg = 0;
++        mrq->stop->flags = MMC_RSP_R1B | MMC_CMD_AC;
++    }
++
++    mrq->data->blksz = blksz;
++    mrq->data->blocks = blocks;
++    mrq->data->flags = write ? MMC_DATA_WRITE : MMC_DATA_READ;
++    mrq->data->sg = sg;
++    mrq->data->sg_len = sg_len;
++
++    mmc_set_data_timeout(mrq->data, card);
++}
++
++static unsigned int mmc_capacity (struct mmc_card *card)
++{
++    if (!mmc_card_sd(card) && mmc_card_blockaddr(card))
++        return card->ext_csd.sectors;
++    else
++        return card->csd.capacity << (card->csd.read_blkbits - 9);
++}
++
++static int mmc_transfer (struct mmc_card *card, unsigned dev_addr,
++        unsigned blocks, void *buf, int write)
++{
++    unsigned size;
++    struct scatterlist sg;
++    struct mmc_request mrq = {0};
++    struct mmc_command cmd = {0};
++    struct mmc_command stop = {0};
++    struct mmc_data data = {0};
++    int ret;
++
++    if ((dev_addr + blocks) >= mmc_capacity(card)) {
++        printk("[%s] %s range exceeds device capacity!\n", __FUNCTION__, write?"write":"read");
++        ret = -1;
++        goto exit_err;
++    }
++
++    size = blocks << card->csd.read_blkbits;
++    sg_init_one(&sg, buf, size);
++
++    mrq.cmd = &cmd;
++    mrq.data = &data;
++    mrq.stop = &stop;
++
++    mmc_prepare_mrq(card, &mrq, &sg, 1, dev_addr,
++        blocks, 1<<card->csd.read_blkbits, write);
++
++    mmc_wait_for_req(card->host, &mrq);
++
++    ret = mmc_check_result(&mrq);
++
++exit_err:
++    printk("emmc %s lba=%#x, blocks=%#x %s!\n", write?"write":"read", dev_addr, blocks, (ret == 0)?"OK":"ERROR");
++
++    return ret;
++}
++
++static int mmc_read_internal (struct mmc_card *card, unsigned dev_addr,
++        unsigned blocks, void *buf)
++{
++    return mmc_transfer(card, dev_addr, blocks, buf, 0);
++}
++
++/*
++static int mmc_write_internal (struct mmc_card *card, unsigned dev_addr,
++        unsigned blocks, void *buf)
++{
++    return mmc_transfer(card, dev_addr, blocks, buf, 1);
++}
++*/
++
++// static struct partitions* find_mmc_partition_by_name (struct partitions *pp, int part_num, char *name)
++// {
++    // int i;
++
++    // for (i=0; i < part_num ; i++) {
++        // if (!strcmp(pp[i].name, name))
++            // return &(pp[i]);
++    // }
++
++    // return NULL;
++// }
++
++static int mmc_partition_tbl_checksum_calc (struct partitions *part, int part_num)
++{
++    int i, j;
++    u32 checksum = 0, *p;
++
++    for (i = 0; i < part_num; i++) {
++        p = (u32*)part;
++        for (j = sizeof(struct partitions)/sizeof(checksum); j > 0; j--) {
++            checksum += *p;
++            p++;
++        }
++    }
++
++    return checksum;
++}
++
++int get_reserve_partition_off (struct mmc_card *card) // byte unit
++{
++    int off = -1, storage_flag;
++    struct mmc_host *mmc_host = card->host;
++    struct amlsd_platform* pdata = mmc_priv(mmc_host);
++    struct amlsd_host *host = pdata->host;
++
++    storage_flag = host->storage_flag;
++    if (storage_flag == EMMC_BOOT_FLAG) {
++        off = MMC_BOOT_PARTITION_SIZE + MMC_BOOT_PARTITION_RESERVED;
++    } else if (storage_flag == SPI_EMMC_FLAG) {
++        off = 0;
++    } else if ((storage_flag == 0) || (storage_flag == -1)){ // if storage_flag is invalid
++        if (POR_EMMC_BOOT()) {
++            off = MMC_BOOT_PARTITION_SIZE + MMC_BOOT_PARTITION_RESERVED;
++        } else if(POR_SPI_BOOT() || POR_CARD_BOOT()){
++            off = 0;
++        } else { // POR_NAND_BOOT
++            off = -1;
++        }
++    } else { // error, the storage device does NOT relate to eMMC
++        off = -1;
++    }
++
++    if (off == -1)
++        printk("[%s] Error, the storage device does NOT relate to eMMC,"
++                " storage_flag=%d\n", __FUNCTION__, storage_flag);
++
++    return off;
++}
++
++// static void show_mmc_patition (struct partitions *part, int part_num)
++// {
++    // int i, cnt_stuff;
++
++    // printk("        name                        offset              size\n");
++    // printk("=================================================================\n");
++	// for (i=0; i < part_num ; i++) {
++        // printk("%4d: %s", i, part[i].name);
++        // cnt_stuff = sizeof(part[i].name) - strlen(part[i].name);
++        // if (cnt_stuff < 0) // something is wrong
++            // cnt_stuff = 0;
++        // cnt_stuff += 2;
++        // while (cnt_stuff--) {
++            // printk(" ");
++        // }
++		// printk("%18llx%18llx\n", part[i].offset, part[i].size);
++	// }
++// }
++
++static int mmc_read_partition_tbl (struct mmc_card *card, struct mmc_partitions_fmt *pt_fmt)
++{
++    int ret=0, start_blk, size, blk_cnt;
++    int bit = card->csd.read_blkbits;
++    int blk_size = 1 << bit; // size of a block
++    char *buf, *dst;
++
++    buf = kmalloc(blk_size, GFP_KERNEL);
++    if(buf == NULL){
++        printk("malloc failed for buffer!\n");
++        ret = -ENOMEM;
++        goto exit_err;
++    }
++    memset(pt_fmt, 0, sizeof(struct mmc_partitions_fmt));
++    memset(buf, 0, blk_size);
++
++    start_blk = get_reserve_partition_off(card);
++    if(start_blk < 0){
++        ret = -EINVAL;
++        goto exit_err;
++    }
++    start_blk >>= bit;
++    size = sizeof(struct mmc_partitions_fmt); 
++    dst = (char *)pt_fmt;
++    if (size >= blk_size) {
++        blk_cnt = size >> bit;
++        ret = mmc_read_internal(card, start_blk, blk_cnt, dst);
++        if (ret) { // error
++            goto exit_err;
++        }
++
++        start_blk += blk_cnt;
++        dst += blk_cnt << bit;
++        size -= blk_cnt << bit;
++    } 
++    if (size > 0) { // the last block
++        ret = mmc_read_internal(card, start_blk, 1, buf);
++        if (ret) { // error
++            goto exit_err;
++        }
++
++        memcpy(dst, buf, size);
++        // if ((buf[blk_size - 2] != 0x55) || (buf[blk_size - 1] != 0xaa)) { // error
++            // ret = -1;
++            // goto exit_err;
++        // }
++    }
++    // printk("Partition table stored in eMMC/TSD: \n");
++    // printk("magic: %s, version: %s, checksum=%#x\n",
++    //         pt_fmt->magic, pt_fmt->version, pt_fmt->checksum);
++    // show_mmc_patition(pt_fmt->partitions, pt_fmt->part_num);
++
++    if ((strncmp(pt_fmt->magic, MMC_PARTITIONS_MAGIC, sizeof(pt_fmt->magic)) == 0) // the same
++       && (pt_fmt->part_num > 0) && (pt_fmt->part_num <= MAX_MMC_PART_NUM)
++       && (pt_fmt->checksum == mmc_partition_tbl_checksum_calc(pt_fmt->partitions, pt_fmt->part_num))) {
++        ret = 0; // everything is OK now
++    } else {
++        if (strncmp(pt_fmt->magic, MMC_PARTITIONS_MAGIC, sizeof(pt_fmt->magic)) != 0) {
++            print_tmp("magic error: %s\n", (pt_fmt->magic)?pt_fmt->magic:"NULL");
++        } else if ((pt_fmt->part_num < 0) || (pt_fmt->part_num > MAX_MMC_PART_NUM)) {
++            print_tmp("partition number error: %d\n", pt_fmt->part_num);
++        } else {
++            print_tmp("checksum error: pt_fmt->checksum=%d, now calc_result=%d\n",
++                    pt_fmt->checksum, mmc_partition_tbl_checksum_calc(pt_fmt->partitions, pt_fmt->part_num));
++        }
++
++        printk("\033[0;40;32m [%s]: partition verified error! \033[0m\n", __FUNCTION__);
++        ret = -1; // the partition infomation is invalid
++    }
++
++exit_err:
++    if(buf){
++        kfree(buf);
++    }
++
++    printk("[%s] mmc read partition %s!\n", __FUNCTION__, (ret==0)? "OK": "ERROR");
++
++    return ret;
++}
++
++/* This function is copy and modified from kernel function add_partition() */
++static struct hd_struct *add_emmc_each_part(struct gendisk *disk, int partno,
++                sector_t start, sector_t len, int flags,
++                char * pname)
++{
++    struct hd_struct *p;
++    dev_t devt = MKDEV(0, 0);
++    struct device *ddev = disk_to_dev(disk);
++    struct device *pdev;
++    struct disk_part_tbl *ptbl;
++    const char *dname;
++    int err;
++
++    err = disk_expand_part_tbl(disk, partno);
++    if (err)
++        return ERR_PTR(err);
++    ptbl = disk->part_tbl;
++
++    if (ptbl->part[partno])
++        return ERR_PTR(-EBUSY);
++
++    p = kzalloc(sizeof(*p), GFP_KERNEL);
++    if (!p)
++        return ERR_PTR(-EBUSY);
++
++    if (!init_part_stats(p)) {
++        err = -ENOMEM;
++        goto out_free;
++    }
++    seqcount_init(&p->nr_sects_seq);
++    pdev = part_to_dev(p);
++
++    p->start_sect = start;
++    p->alignment_offset =
++        queue_limit_alignment_offset(&disk->queue->limits, start);
++    p->discard_alignment =
++        queue_limit_discard_alignment(&disk->queue->limits, start);
++    p->nr_sects = len;
++    p->partno = partno;
++    p->policy = get_disk_ro(disk);
++
++    dname = dev_name(ddev);
++    dev_set_name(pdev, "%s", pname);
++
++    device_initialize(pdev);
++    pdev->class = &block_class;
++    pdev->type = &part_type;
++    pdev->parent = ddev;
++
++    err = blk_alloc_devt(p, &devt);
++    if (err)
++        goto out_free_info;
++    pdev->devt = devt;
++
++    /* delay uevent until 'holders' subdir is created */
++    dev_set_uevent_suppress(pdev, 1);
++    err = device_add(pdev);
++    if (err)
++        goto out_put;
++
++    err = -ENOMEM;
++    p->holder_dir = kobject_create_and_add("holders", &pdev->kobj);
++    if (!p->holder_dir)
++        goto out_del;
++
++    dev_set_uevent_suppress(pdev, 0);
++
++    /* everything is up and running, commence */
++    rcu_assign_pointer(ptbl->part[partno], p);
++
++    /* suppress uevent if the disk suppresses it */
++    if (!dev_get_uevent_suppress(ddev))
++        kobject_uevent(&pdev->kobj, KOBJ_ADD);
++
++    hd_ref_init(p);
++    return p;
++
++out_free_info:
++    free_part_info(p);
++out_free:
++    kfree(p);
++    return ERR_PTR(err);
++out_del:
++    kobject_put(p->holder_dir);
++    device_del(pdev);
++out_put:
++    put_device(pdev);
++    blk_free_devt(devt);
++    return ERR_PTR(err);
++}
++
++static inline int card_proc_info (struct seq_file *m, char* dev_name, int i)
++{
++    struct partitions *this = &(pt_fmt->partitions[i]);
++
++    if (i >= pt_fmt->part_num)
++        return 0;
++
++	return seq_printf(m, "%s%02d: %9llx %9x \"%s\"\n", dev_name,
++            i+1,(unsigned long long)this->size, 512*1024, this->name);
++}
++
++static int card_proc_show(struct seq_file *m, void *v)
++{
++	int i;
++
++	seq_puts(m, "dev:    size   erasesize  name\n");
++	for (i=0; i< 16; i++)
++		card_proc_info(m, "inand", i);
++
++	return 0;
++}
++
++static int card_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, card_proc_show, NULL);
++}
++
++static const struct file_operations card_proc_fops = {
++	.open = card_proc_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = seq_release,
++};
++
++static int add_emmc_partition(struct gendisk * disk, struct mmc_partitions_fmt *pt_fmt)
++{
++    unsigned int i;
++    struct hd_struct * ret=NULL;
++    uint64_t offset, size, cap;
++    struct partitions *pp;
++    
++    printk("add_emmc_partition\n");
++
++    cap = get_capacity(disk); // unit:512 bytes
++    for(i=0; i<pt_fmt->part_num; i++){
++        pp = &(pt_fmt->partitions[i]);
++        offset = pp->offset >> 9; // unit:512 bytes
++        size = pp->size >> 9; // unit:512 bytes
++        if ((offset + size) <= cap) {
++            ret = add_emmc_each_part(disk, 1+i, offset, size, 0, pp->name);
++            printk("[%sp%02d] %20s  offset 0x%012llx, size 0x%012llx %s\n",
++                    disk->disk_name, 1+i, pp->name, offset<<9, 
++                    size<<9, IS_ERR(ret) ? "add fail":"");
++        } else {
++            printk("[%s] %s: partition exceeds device capacity:\n \
++                    %20s  offset 0x%012llx, size 0x%012llx\n", 
++                    __FUNCTION__, disk->disk_name, pp->name, offset<<9, size<<9);
++            break;
++        }
++    }
++
++	if (!proc_create( "inand", 0, NULL, &card_proc_fops)) // create /proc/inand
++        printk("[%s] create /proc/inand fail. \n", __FUNCTION__);
++
++	if (!proc_create( "ntd", 0, NULL, &card_proc_fops)) // create /proc/ntd
++        printk("[%s] create /proc/ntd fail. \n", __FUNCTION__);
++
++    return 0;
++}
++
++static int is_card_emmc (struct mmc_card *card)
++{
++    struct mmc_host *mmc = card->host;
++    
++    return mmc->is_emmc_port; // emmc port, so it must be an eMMC or TSD
++}
++
++int aml_emmc_partition_ops (struct mmc_card *card, struct gendisk *disk)
++{
++    int ret=0;
++    struct disk_part_iter piter;
++    struct hd_struct *part;
++
++    printk("Enter %s\n", __FUNCTION__);
++
++    if (!is_card_emmc(card)) { // not emmc, nothing to do
++        printk("[%s] %s is not eMMC!\n", __FUNCTION__, disk->disk_name);
++        return 0;
++    }
++    
++    pt_fmt = kmalloc(sizeof(struct mmc_partitions_fmt), GFP_KERNEL);
++    if(pt_fmt == NULL){
++        printk("[%s] malloc failed for struct mmc_partitions_fmt!\n", __FUNCTION__);
++        return -ENOMEM;
++    }
++
++    mmc_claim_host(card->host);
++    disk_part_iter_init(&piter, disk, DISK_PITER_INCL_EMPTY);
++    while ((part = disk_part_iter_next(&piter))){
++	printk("Delete invalid mbr partition part %x, part->partno %d\n",
++		 (u32)part, part->partno);
++        delete_partition(disk, part->partno);
++    }
++    disk_part_iter_exit(&piter);
++
++    ret = mmc_read_partition_tbl(card, pt_fmt);
++    if (ret == 0) { // ok
++        ret = add_emmc_partition(disk, pt_fmt);
++    }
++
++    mmc_release_host(card->host);
++
++    // if(pt_fmt){ // should not free, because the card_read_proc() will access it
++        // kfree(pt_fmt);
++    // }
++
++    printk("Exit %s %s.\n", __FUNCTION__, (ret == 0)?"OK":"ERROR");
++
++    return ret;
++}
++
+diff --git a/drivers/mmc/card/emmc_partitions.h b/drivers/mmc/card/emmc_partitions.h
+new file mode 100644
+index 000000000000..f385ec4b2f8a
+--- /dev/null
++++ b/drivers/mmc/card/emmc_partitions.h
+@@ -0,0 +1,42 @@
++#ifndef _EMMC_PARTITIONS_H
++#define _EMMC_PARTITIONS_H
++
++#include <linux/mmc/host.h>
++#include <linux/mmc/card.h>
++#include <linux/mmc/mmc.h>
++#include <linux/mmc/core.h>
++
++#include <mach/register.h>
++#include <mach/am_regs.h>
++
++#define     MAX_PART_NAME_LEN               16
++#define     MAX_MMC_PART_NUM                16
++#define     MMC_PARTITIONS_MAGIC            "MPT" // MMC Partition Table
++
++#define     SZ_1M                           0x00100000
++#define     MMC_BOOT_PARTITION_SIZE         (4*SZ_1M) // the size of bootloader partition
++#define     MMC_BOOT_PARTITION_RESERVED     (32*SZ_1M) // the size of reserve space behind bootloader partition
++
++#define     RESULT_OK                       0
++#define     RESULT_FAIL                     1
++#define     RESULT_UNSUP_HOST               2
++#define     RESULT_UNSUP_CARD               3
++
++struct partitions {
++    char name[MAX_PART_NAME_LEN];            /* identifier string */
++    uint64_t size;            /* partition size, byte unit */
++    uint64_t offset;        /* offset within the master space, byte unit */
++    unsigned mask_flags;        /* master flags to mask out for this partition */
++};
++
++struct mmc_partitions_fmt {
++    char magic[4];
++    unsigned char version[12];
++    int part_num;
++    int checksum;
++    struct partitions partitions[MAX_MMC_PART_NUM];
++};
++
++int aml_emmc_partition_ops (struct mmc_card *card, struct gendisk *disk);
++
++#endif
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 6a83f4ccc108..f2b8a559c9d2 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -228,7 +228,7 @@ mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
+ 			 mrq->stop->arg, mrq->stop->flags);
+ 	}
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	mrq->cmd->error = 0;
+ 	mrq->cmd->mrq = mrq;
+@@ -662,7 +662,7 @@ int mmc_wait_for_cmd(struct mmc_host *host, struct mmc_command *cmd, int retries
+ {
+ 	struct mmc_request mrq = {NULL};
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	memset(cmd->resp, 0, sizeof(cmd->resp));
+ 	cmd->retries = retries;
+@@ -878,26 +878,26 @@ int __mmc_claim_host(struct mmc_host *host, atomic_t *abort)
+ 
+ 	might_sleep();
+ 
+-	add_wait_queue(&host->wq, &wait);
+-	spin_lock_irqsave(&host->lock, flags);
++	add_wait_queue(&host->alldev_claim->wq, &wait);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	while (1) {
+ 		set_current_state(TASK_UNINTERRUPTIBLE);
+ 		stop = abort ? atomic_read(abort) : 0;
+-		if (stop || !host->claimed || host->claimer == current)
++		if (stop || !host->alldev_claim->claimed || host->alldev_claim->claimer == current)
+ 			break;
+-		spin_unlock_irqrestore(&host->lock, flags);
++		spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 		schedule();
+-		spin_lock_irqsave(&host->lock, flags);
++		spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	}
+ 	set_current_state(TASK_RUNNING);
+ 	if (!stop) {
+-		host->claimed = 1;
+-		host->claimer = current;
+-		host->claim_cnt += 1;
++		host->alldev_claim->claimed = 1;
++		host->alldev_claim->claimer = current;
++		host->alldev_claim->claim_cnt += 1;
+ 	} else
+-		wake_up(&host->wq);
+-	spin_unlock_irqrestore(&host->lock, flags);
+-	remove_wait_queue(&host->wq, &wait);
++		wake_up(&host->alldev_claim->wq);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
++	remove_wait_queue(&host->alldev_claim->wq, &wait);
+ 	if (host->ops->enable && !stop && host->claim_cnt == 1)
+ 		host->ops->enable(host);
+ 	return stop;
+@@ -916,14 +916,14 @@ int mmc_try_claim_host(struct mmc_host *host)
+ 	int claimed_host = 0;
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&host->lock, flags);
+-	if (!host->claimed || host->claimer == current) {
+-		host->claimed = 1;
+-		host->claimer = current;
+-		host->claim_cnt += 1;
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
++	if (!host->alldev_claim->claimed || host->alldev_claim->claimer == current) {
++		host->alldev_claim->claimed = 1;
++		host->alldev_claim->claimer = current;
++		host->alldev_claim->claim_cnt += 1;
+ 		claimed_host = 1;
+ 	}
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 	if (host->ops->enable && claimed_host && host->claim_cnt == 1)
+ 		host->ops->enable(host);
+ 	return claimed_host;
+@@ -941,20 +941,18 @@ void mmc_release_host(struct mmc_host *host)
+ {
+ 	unsigned long flags;
+ 
+-	WARN_ON(!host->claimed);
+-
++	WARN_ON(!host->alldev_claim->claimed);
+ 	if (host->ops->disable && host->claim_cnt == 1)
+ 		host->ops->disable(host);
+-
+-	spin_lock_irqsave(&host->lock, flags);
+-	if (--host->claim_cnt) {
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
++	if (--host->alldev_claim->claim_cnt) {
+ 		/* Release for nested claim */
+-		spin_unlock_irqrestore(&host->lock, flags);
++		spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 	} else {
+-		host->claimed = 0;
+-		host->claimer = NULL;
+-		spin_unlock_irqrestore(&host->lock, flags);
+-		wake_up(&host->wq);
++		host->alldev_claim->claimed = 0;
++		host->alldev_claim->claimer = NULL;
++		spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
++		wake_up(&host->alldev_claim->wq);
+ 	}
+ }
+ EXPORT_SYMBOL(mmc_release_host);
+@@ -1277,20 +1275,8 @@ int mmc_regulator_get_supply(struct mmc_host *mmc)
+ 	struct regulator *supply;
+ 	int ret;
+ 
+-	supply = devm_regulator_get(dev, "vmmc");
+-	mmc->supply.vmmc = supply;
+-	mmc->supply.vqmmc = devm_regulator_get(dev, "vqmmc");
+-
+-	if (IS_ERR(supply))
+-		return PTR_ERR(supply);
+-
+-	ret = mmc_regulator_get_ocrmask(supply);
+-	if (ret > 0)
+-		mmc->ocr_avail = ret;
+-	else
+ 		dev_warn(mmc_dev(mmc), "Failed getting OCR mask: %d\n", ret);
+-
+-	return 0;
++	return -EINVAL;
+ }
+ EXPORT_SYMBOL_GPL(mmc_regulator_get_supply);
+ 
+@@ -1579,9 +1565,9 @@ static inline void mmc_bus_get(struct mmc_host *host)
+ {
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	host->bus_refs++;
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ }
+ 
+ /*
+@@ -1592,11 +1578,11 @@ static inline void mmc_bus_put(struct mmc_host *host)
+ {
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	host->bus_refs--;
+ 	if ((host->bus_refs == 0) && host->bus_ops)
+ 		__mmc_release_bus(host);
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ }
+ 
+ int mmc_resume_bus(struct mmc_host *host)
+@@ -1607,10 +1593,10 @@ int mmc_resume_bus(struct mmc_host *host)
+ 		return -EINVAL;
+ 
+ 	printk("%s: Starting deferred resume\n", mmc_hostname(host));
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	host->bus_resume_flags &= ~MMC_BUSRESUME_NEEDS_RESUME;
+ 	host->rescan_disable = 0;
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 
+ 	mmc_bus_get(host);
+ 	if (host->bus_ops && !host->bus_dead) {
+@@ -1640,9 +1626,9 @@ void mmc_attach_bus(struct mmc_host *host, const struct mmc_bus_ops *ops)
+ 	BUG_ON(!host);
+ 	BUG_ON(!ops);
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 
+ 	BUG_ON(host->bus_ops);
+ 	BUG_ON(host->bus_refs);
+@@ -1651,7 +1637,7 @@ void mmc_attach_bus(struct mmc_host *host, const struct mmc_bus_ops *ops)
+ 	host->bus_refs = 1;
+ 	host->bus_dead = 0;
+ 
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ }
+ 
+ /*
+@@ -1663,14 +1649,14 @@ void mmc_detach_bus(struct mmc_host *host)
+ 
+ 	BUG_ON(!host);
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 	WARN_ON(!host->bus_ops);
+ 
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 
+ 	host->bus_dead = 1;
+ 
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 
+ 	mmc_bus_put(host);
+ }
+@@ -1689,9 +1675,9 @@ void mmc_detect_change(struct mmc_host *host, unsigned long delay)
+ {
+ #ifdef CONFIG_MMC_DEBUG
+ 	unsigned long flags;
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	WARN_ON(host->removed);
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ #endif
+ 	host->detect_change = 1;
+ 
+@@ -2362,7 +2348,7 @@ int mmc_detect_card_removed(struct mmc_host *host)
+ 	struct mmc_card *card = host->card;
+ 	int ret;
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	if (!card)
+ 		return 1;
+@@ -2478,10 +2464,12 @@ void mmc_start_host(struct mmc_host *host)
+ {
+ 	host->f_init = max(freqs[0], host->f_min);
+ 	host->rescan_disable = 0;
++	mmc_claim_host(host);
+ 	if (host->caps2 & MMC_CAP2_NO_PRESCAN_POWERUP)
+ 		mmc_power_off(host);
+ 	else
+ 		mmc_power_up(host);
++	mmc_release_host(host);
+ 	mmc_detect_change(host, 0);
+ }
+ 
+@@ -2489,9 +2477,9 @@ void mmc_stop_host(struct mmc_host *host)
+ {
+ #ifdef CONFIG_MMC_DEBUG
+ 	unsigned long flags;
+-	spin_lock_irqsave(&host->lock, flags);
++	spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 	host->removed = 1;
+-	spin_unlock_irqrestore(&host->lock, flags);
++	spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ #endif
+ 
+ 	host->rescan_disable = 1;
+@@ -2811,13 +2799,13 @@ int mmc_pm_notify(struct notifier_block *notify_block,
+ 			mmc_card_clr_doing_bkops(host->card);
+ 		}
+ 
+-		spin_lock_irqsave(&host->lock, flags);
++		spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 		if (mmc_bus_needs_resume(host)) {
+-			spin_unlock_irqrestore(&host->lock, flags);
++			spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 			break;
+ 		}
+ 		host->rescan_disable = 1;
+-		spin_unlock_irqrestore(&host->lock, flags);
++		spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 		if (cancel_delayed_work_sync(&host->detect))
+ 			wake_unlock(&host->detect_wake_lock);
+ 
+@@ -2839,13 +2827,13 @@ int mmc_pm_notify(struct notifier_block *notify_block,
+ 	case PM_POST_HIBERNATION:
+ 	case PM_POST_RESTORE:
+ 
+-		spin_lock_irqsave(&host->lock, flags);
++		spin_lock_irqsave(&host->alldev_claim->lock, flags);
+ 		if (mmc_bus_manual_resume(host)) {
+-			spin_unlock_irqrestore(&host->lock, flags);
++			spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 			break;
+ 		}
+ 		host->rescan_disable = 0;
+-		spin_unlock_irqrestore(&host->lock, flags);
++		spin_unlock_irqrestore(&host->alldev_claim->lock, flags);
+ 		mmc_detect_change(host, 0);
+ 
+ 	}
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index 0cbd1effe960..990b5ac92197 100644
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -846,7 +846,7 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
+ 	u8 *ext_csd = NULL;
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	/* Set correct bus mode for MMC before attempting init */
+ 	if (!mmc_host_is_spi(host))
+@@ -1532,7 +1532,7 @@ int mmc_attach_mmc(struct mmc_host *host)
+ 	u32 ocr;
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	/* Set correct bus mode for MMC before attempting attach */
+ 	if (!mmc_host_is_spi(host))
+diff --git a/drivers/mmc/core/sd.c b/drivers/mmc/core/sd.c
+index f008318c5c4d..f0a7c92725d3 100644
+--- a/drivers/mmc/core/sd.c
++++ b/drivers/mmc/core/sd.c
+@@ -930,7 +930,7 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
+ 	u32 rocr = 0;
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	err = mmc_sd_get_cid(host, ocr, cid, &rocr);
+ 	if (err)
+@@ -1208,7 +1208,7 @@ int mmc_attach_sd(struct mmc_host *host)
+ #endif
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	err = mmc_send_app_op_cond(host, 0, &ocr);
+ 	if (err)
+diff --git a/drivers/mmc/core/sdio.c b/drivers/mmc/core/sdio.c
+index 46e68f125ff2..c674c1b3b20f 100644
+--- a/drivers/mmc/core/sdio.c
++++ b/drivers/mmc/core/sdio.c
+@@ -592,7 +592,7 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
+ 	int retries = 10;
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ try_again:
+ 	if (!retries) {
+@@ -1081,6 +1081,7 @@ static const struct mmc_bus_ops mmc_sdio_ops = {
+ 	.alive = mmc_sdio_alive,
+ };
+ 
++struct mmc_card* comm_card;
+ 
+ /*
+  * Starting point for SDIO card init.
+@@ -1092,7 +1093,7 @@ int mmc_attach_sdio(struct mmc_host *host)
+ 	struct mmc_card *card;
+ 
+ 	BUG_ON(!host);
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	err = mmc_send_io_op_cond(host, 0, &ocr);
+ 	if (err)
+@@ -1143,6 +1144,7 @@ int mmc_attach_sdio(struct mmc_host *host)
+ 			goto err;
+ 	}
+ 	card = host->card;
++	comm_card = card;
+ 
+ 	/*
+ 	 * Enable runtime PM only if supported by host+card+board
+@@ -1252,6 +1254,18 @@ int sdio_reset_comm(struct mmc_card *card)
+ 	int err;
+ 
+ 	printk("%s():\n", __func__);
++    if (host == NULL) {
++        printk("\033[0;47;33m %s(): Error----card->host=NULL \033[0m\n", __func__);
++		err = -EINVAL;
++		goto err;
++    }
++
++    if (host->alldev_claim == NULL) {
++        printk("\033[0;47;33m %s(): Error----mmc_host->alldev_claim=NULL \033[0m\n", __func__);
++		err = -EINVAL;
++		goto err;
++    }
++
+ 	mmc_claim_host(host);
+ 
+ 	mmc_go_idle(host);
+@@ -1281,3 +1295,13 @@ err:
+ 	return err;
+ }
+ EXPORT_SYMBOL(sdio_reset_comm);
++
++void sdio_reinit()
++{
++    if(comm_card){
++       sdio_reset_comm(comm_card);
++    }
++}
++EXPORT_SYMBOL(sdio_reinit);
++
++
+diff --git a/drivers/mmc/core/sdio_irq.c b/drivers/mmc/core/sdio_irq.c
+index 3d8ceb4084de..2afbb0e863a7 100644
+--- a/drivers/mmc/core/sdio_irq.c
++++ b/drivers/mmc/core/sdio_irq.c
+@@ -175,7 +175,7 @@ static int sdio_card_irq_get(struct mmc_card *card)
+ {
+ 	struct mmc_host *host = card->host;
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 
+ 	if (!host->sdio_irqs++) {
+ 		atomic_set(&host->sdio_irq_thread_abort, 0);
+@@ -196,7 +196,7 @@ static int sdio_card_irq_put(struct mmc_card *card)
+ {
+ 	struct mmc_host *host = card->host;
+ 
+-	WARN_ON(!host->claimed);
++	WARN_ON(!host->alldev_claim->claimed);
+ 	BUG_ON(host->sdio_irqs < 1);
+ 
+ 	if (!--host->sdio_irqs) {
+diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
+index 66b465927602..6984bb8eb971 100644
+--- a/include/linux/mmc/host.h
++++ b/include/linux/mmc/host.h
+@@ -196,6 +196,14 @@ struct mmc_supply {
+ 	struct regulator *vqmmc;	/* Optional Vccq supply */
+ };
+ 
++struct mmc_claim {
++	unsigned int		claimed:1;	/* host exclusively claimed */
++	struct task_struct	*claimer;	/* task that has host claimed */
++	int 		claim_cnt;	/* "claim" nesting count */
++	spinlock_t		lock;		/* lock for claim and bus ops */
++	wait_queue_head_t	wq;
++};
++
+ struct mmc_host {
+ 	struct device		*parent;
+ 	struct device		class_dev;
+@@ -319,6 +327,9 @@ struct mmc_host {
+ #ifdef CONFIG_MMC_DEBUG
+ 	unsigned int		removed:1;	/* host is being removed */
+ #endif
++	struct mmc_claim* alldev_claim;
++    int         is_emmc_port;
++	int 		(*add_part)(struct gendisk * disk);
+ 
+ 	int			rescan_disable;	/* disable card detection */
+ 	int			rescan_entered;	/* used with nonremovable devices */
+-- 
+2.19.0
+

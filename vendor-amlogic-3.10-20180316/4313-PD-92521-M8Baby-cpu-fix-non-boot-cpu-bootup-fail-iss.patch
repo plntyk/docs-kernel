@@ -1,0 +1,56 @@
+From 8b20a09fb02c43dcbedef79c1a456def0cf058c2 Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Mon, 9 Jun 2014 14:34:21 +0800
+Subject: [PATCH 4313/5965] PD #92521: M8Baby cpu: fix non-boot cpu bootup fail
+ issue
+
+Add P_AO_RTI_PWR_A9_CNTL0 clean;
+Add while loop to wait for power ack bit;
+Add clean MESON_CPU_POWER_CTRL_REG bit one more time.
+---
+ arch/arm/mach-meson8b/clock.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/mach-meson8b/clock.c b/arch/arm/mach-meson8b/clock.c
+index d89c4f4291e3..e368febbe3d8 100755
+--- a/arch/arm/mach-meson8b/clock.c
++++ b/arch/arm/mach-meson8b/clock.c
+@@ -849,8 +849,11 @@ void meson_set_cpu_power_ctrl(uint32_t cpu,int is_power_on)
+ 	BUG_ON(cpu == 0);
+ 
+ 	if(is_power_on){
+-		/* SCU Power on CPU */
++		/* SCU Power on CPU & CPU PWR_A9_CNTL0 CTRL_MODE bit. 
++		    CTRL_MODE bit may write forward to SCU when cpu reset. So, we need clean it here to avoid the forward write happen.*/
+ 		aml_set_reg32_bits(MESON_CPU_POWER_CTRL_REG, 0x0 ,(cpu << 3),2);
++		aml_set_reg32_bits(P_AO_RTI_PWR_A9_CNTL0, 0x0, 2*cpu + 16, 2);
++		udelay(5);
+ 
+ #ifndef CONFIG_MESON_CPU_EMULATOR
+ 		/* Reset enable*/
+@@ -859,14 +862,22 @@ void meson_set_cpu_power_ctrl(uint32_t cpu,int is_power_on)
+ 
+ 		aml_set_reg32_bits(P_AO_RTI_PWR_A9_MEM_PD0, 0, (32 - cpu * 4) ,4);
+ 		aml_set_reg32_bits(P_AO_RTI_PWR_A9_CNTL1, 0x0, ((cpu +1) << 1 ), 2);
++
+ 		udelay(10);
++		while(!(readl(P_AO_RTI_PWR_A9_CNTL1) & (1<<(cpu+16)))){
++			printk("wait power...0x%08x 0x%08x\n",readl(P_AO_RTI_PWR_A9_CNTL0),readl(P_AO_RTI_PWR_A9_CNTL1));
++			udelay(10);
++		};
+ 		/* Isolation disable */
+ 		aml_set_reg32_bits(P_AO_RTI_PWR_A9_CNTL0, 0x0, cpu, 1);
+ 		/* Reset disable */
+ 		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0 , (cpu + 24), 1);
++
++		aml_set_reg32_bits(MESON_CPU_POWER_CTRL_REG, 0x0 ,(cpu << 3),2);
+ #endif
+ 	}else{
+ 		aml_set_reg32_bits(MESON_CPU_POWER_CTRL_REG,0x3,(cpu << 3),2);
++		aml_set_reg32_bits(P_AO_RTI_PWR_A9_CNTL0, 0x3, 2*cpu + 16, 2);
+ 
+ #ifndef CONFIG_MESON_CPU_EMULATOR
+ 		/* Isolation enable */
+-- 
+2.19.0
+

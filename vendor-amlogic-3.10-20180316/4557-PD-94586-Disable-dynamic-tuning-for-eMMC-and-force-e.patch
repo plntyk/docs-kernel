@@ -1,0 +1,72 @@
+From 6ca2b4ba28de64619cadc227e50e89b3a970437e Mon Sep 17 00:00:00 2001
+From: "benjamin.zhao" <benjamin.zhao@amlogic.com>
+Date: Tue, 22 Jul 2014 18:17:18 +0800
+Subject: [PATCH 4557/5965] PD#94586: Disable dynamic tuning for eMMC and force
+ erase while wipe data
+
+---
+ drivers/amlogic/mmc/aml_sdhc_m8.c |  8 +++-----
+ drivers/mmc/card/block.c          | 14 ++++++++------
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdhc_m8.c b/drivers/amlogic/mmc/aml_sdhc_m8.c
+index b8ae0ded78ac..6673c58a4a2c 100755
+--- a/drivers/amlogic/mmc/aml_sdhc_m8.c
++++ b/drivers/amlogic/mmc/aml_sdhc_m8.c
+@@ -387,11 +387,9 @@ static int aml_sdhc_execute_tuning_ (struct mmc_host *mmc, u32 opcode,
+     // pdata->clk2 = vclk2_bak;
+     // sdhc_err("vclk2_bak=%#x\n", vclk2_bak);
+ 	
+-    if (pdata->is_in) {
+-        if(aml_card_type_mmc(pdata))
+-            schedule_delayed_work(&pdata->retuning, 60*HZ);
+-        else
+-            schedule_delayed_work(&pdata->retuning, 15*HZ);
++	//do not dynamical tuning for eMMC
++    if ((pdata->is_in)&&!aml_card_type_mmc(pdata)) {
++        schedule_delayed_work(&pdata->retuning, 15*HZ);
+     }
+ 
+ 	return ret;
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index df6e173873b2..e2fef9b8b3d9 100755
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -2076,6 +2076,7 @@ static int mmc_wipe_part_ioctl(struct block_device *bdev)
+     struct gendisk *disk = bdev->bd_disk;
+     __u64 offset, size;
+     int err, part_num, arg, i;
++    unsigned long time_start_cnt = READ_CBUS_REG(ISA_TIMERE);
+ 
+     part_num = MINOR(bdev->bd_dev)-disk->first_minor;
+     size = (disk->part_tbl->part[part_num]->nr_sects<<9);
+@@ -2114,11 +2115,12 @@ static int mmc_wipe_part_ioctl(struct block_device *bdev)
+ 		goto cmd_rel_host;
+      }
+ 
+-	if (mmc_can_discard(card))
+-		arg = MMC_DISCARD_ARG;
+-	else if (mmc_can_trim(card))
+-		arg = MMC_TRIM_ARG;
+-	else
++//force erase here
++//	if (mmc_can_discard(card))
++//		arg = MMC_DISCARD_ARG;
++//	else if (mmc_can_trim(card))
++//		arg = MMC_TRIM_ARG;
++//	else
+ 		arg = MMC_ERASE_ARG;
+ 
+ retry:
+@@ -2157,7 +2159,7 @@ dev_card_err:
+     mmc_blk_put(md);
+ 
+ blk_get_err:
+-	pr_err("%s completed, err:%d\n", __func__, err);
++	pr_err("%s completed, err:%d time cost:%duS\n", __func__, err, (READ_CBUS_REG(ISA_TIMERE)-time_start_cnt));
+     return err;  
+ }
+ 
+-- 
+2.19.0
+

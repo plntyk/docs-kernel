@@ -1,0 +1,5023 @@
+From 80dfaaf9e37e653bf8d3b40e23266db66e7770b4 Mon Sep 17 00:00:00 2001
+From: "frank.zhao" <frank.zhao@amlogic.com>
+Date: Tue, 5 Nov 2013 10:41:10 +0800
+Subject: [PATCH 1702/5965] merge tvin code from kernel 3.8
+
+---
+ drivers/amlogic/tvin/bt656/bt656_601_in.c |    2 +-
+ drivers/amlogic/tvin/isp/isp_drv.c        |  309 ++-
+ drivers/amlogic/tvin/isp/isp_drv.h        |   59 +-
+ drivers/amlogic/tvin/isp/isp_hw.c         |  312 +--
+ drivers/amlogic/tvin/isp/isp_hw.h         |   10 +-
+ drivers/amlogic/tvin/isp/isp_parm.c       | 2708 +++++++++++++++++++++
+ drivers/amlogic/tvin/isp/isp_sm.c         |  465 +++-
+ drivers/amlogic/tvin/isp/isp_sm.h         |   40 +-
+ drivers/amlogic/tvin/vdin/vdin_canvas.c   |  115 +-
+ drivers/amlogic/tvin/vdin/vdin_ctl.c      |   16 +-
+ drivers/amlogic/tvin/vdin/vdin_drv.c      |  156 +-
+ drivers/amlogic/tvin/vdin/vdin_regs.h     |    4 +-
+ drivers/amlogic/tvin/viu/viuin.c          |    2 +-
+ include/linux/amlogic/tvin/tvin_v4l2.h    |    4 +-
+ 14 files changed, 3813 insertions(+), 389 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/bt656/bt656_601_in.c b/drivers/amlogic/tvin/bt656/bt656_601_in.c
+index 23f2bd449bd2..d20e32eb5605 100755
+--- a/drivers/amlogic/tvin/bt656/bt656_601_in.c
++++ b/drivers/amlogic/tvin/bt656/bt656_601_in.c
+@@ -572,7 +572,7 @@ static int am656in_feopen(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		return -1;
+ 	}
+ 	if( TVIN_PORT_CAMERA == port ){
+-		am656_devp->skip_vdin_frame_count = parm->reserved;
++		am656_devp->skip_vdin_frame_count = parm->skip_count;
+ 	}
+ 	/*copy the param from vdin to bt656*/
+ 	if(!memcpy(&am656_devp->para, parm, sizeof(vdin_parm_t))){
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 8f7f06d48afe..cbc43aead62a 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -88,6 +88,8 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 	parse_param(buf,&parm);
+ 	if(!strcmp(parm[0],"r")){
+ 		addr = simple_strtol(parm[1],NULL,16);
++		data = isp_rd(addr);
++		pr_info("r:0x%x = 0x%x.\n",addr,data);
+ 	}else if(!strcmp(parm[0],"w")){
+ 		addr = simple_strtol(parm[1],NULL,16);
+ 		data = simple_strtol(parm[2],NULL,16);
+@@ -98,9 +100,15 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 	}else if(!strcmp(parm[0],"flag")){
+ 		data = simple_strtol(parm[1],NULL,16);
+ 		devp->flag = data;
+-	}else if(!strcmp(parm[0],"comb4.mode")){
++		isp_sm_init(devp);
++	}else if(!strcmp(parm[0],"lenc-mode")){
+ 		devp->debug.comb4_mode = simple_strtol(parm[1],NULL,10);
+ 		devp->flag |= ISP_FLAG_SET_COMB4;
++	}else if(!strcmp(parm[0],"test_pattern")){
++		unsigned int width,height;
++		width = simple_strtol(parm[1],NULL,10);
++		height = simple_strtol(parm[2],NULL,10);
++		isp_set_init(width,height,width+26,height+16);
+ 	}
+ 	return len;
+ }
+@@ -115,11 +123,12 @@ static ssize_t debug_show(struct device *dev,struct device_attribute *attr, char
+ 	return len;
+ }
+ static DEVICE_ATTR(debug, 0664, debug_show, debug_store);
++
+ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr, const char* buf, size_t len)
+ {
+ 	isp_dev_t *devp;
+-	unsigned int data=0,data1=0,data2=0,data3=0;
+-	char *parm[5]={NULL};
++	int data[10];
++	char *parm[11]={NULL};
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	af_debug_t *af = NULL;
+ 	if(IS_ERR_OR_NULL(buf)){
+@@ -129,9 +138,10 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+ 	if(!strcmp(parm[0],"jump")){
+-		data = simple_strtol(parm[1],NULL,16);
+-		pr_info("%s to 0x%x.\n",parm[0],data);
+-		devp->cam_param->cam_function.set_af_new_step(data);
++		data[0] = simple_strtol(parm[1],NULL,16);
++		pr_info("%s to 0x%x.\n",parm[0],data[0]);
++		devp->cam_param->cam_function.set_af_new_step(data[0]);
++	//echo start control min max dir delay step >af_debug
+ 	}else if(!strcmp(parm[0],"start")){
+ 		af = kmalloc(sizeof(af_debug_t),GFP_KERNEL);
+ 		if(IS_ERR_OR_NULL(af)){
+@@ -140,36 +150,70 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		}
+ 		memset(af,0,sizeof(af_debug_t));
+ 		if(parm[1]&&parm[2]&&parm[3]&&parm[4]){
+-			data = simple_strtol(parm[1],NULL,16);
+-			data1 = simple_strtol(parm[2],NULL,10);
+-			data2 = simple_strtol(parm[3],NULL,10);
+-			data3 = simple_strtol(parm[4],NULL,10);
++			//data[0] = simple_strtol(parm[1],NULL,16);//control
++			data[1] = simple_strtol(parm[2],NULL,10);//min step
++			data[2] = simple_strtol(parm[3],NULL,10);//max step
++			data[3] = simple_strtol(parm[4],NULL,10);//dir
++			data[4] = simple_strtol(parm[5],NULL,10);//delay
++			data[5] = simple_strtol(parm[6],NULL,10);//pre step
++			data[6] = simple_strtol(parm[7],NULL,10);//mid step
++			data[7] = simple_strtol(parm[8],NULL,10);//post step
++			data[8] = simple_strtol(parm[9],NULL,10);//pre threshold
++			data[9] = simple_strtol(parm[10],NULL,10);//post threshold
+ 		}
+-		af->flag = true;
+-		af->control = data;
++		//af->control = data[0];
++		af->min_step = data[1];
++		af->cur_step = af->min_step;
++		af->max_step = data[2];
++		af->dir = data[3]>0?true:false;
++		af->delay = data[4];
++		af->pre_step = data[5];
++		af->mid_step = data[6];
++		af->post_step = data[7];
++		af->pre_threshold = data[8];
++		af->post_threshold = data[9];
++		
+ 		af->state = 0;
+-		af->step = data1;
+-		af->max_step = data2;
+-		af->delay = data3;
++		af->step = af->pre_step;
+ 		if(devp->af_dbg)
+ 			kfree(devp->af_dbg);
+ 		devp->af_dbg = af;
+ 		devp->flag |= ISP_FLAG_AF_DBG;
+-		pr_info("%s:full scan from %u to %u.\n",__func__,data1,data2);
++		pr_info("%s:full scan from %u-%u-%u-%u.\n",__func__,af->min_step,
++				af->pre_threshold,af->post_threshold,af->max_step);
+ 	}else if(!strcmp(parm[0],"print")){	
+-		unsigned int i = 0;
++		unsigned int i=0,cursor=0;
+ 		af = devp->af_dbg;
+ 		if(IS_ERR_OR_NULL(af))
+ 			return len;		
+ 		devp->flag &=(~ISP_FLAG_AF_DBG);
+ 		pr_info("ac[0]   ac[1]    ac[2]   ac[3]   dc[0]   dc[1]   dc[2]   dc[3]\n");
+-		for (i = 0; i < af->max_step; i++){
+-			pr_info("step[%4u]: %u %u %u %u %u %u %u %u\n",
+-					i,af->data[i].ac[0],af->data[i].ac[1],
+-					af->data[i].ac[2],af->data[i].ac[3],
+-					af->data[i].dc[0],af->data[i].dc[1],
+-					af->data[i].dc[2],af->data[i].dc[3]);	
+-			msleep(10);
++		if(af->dir){
++			for (i=af->min_step; i <= af->max_step;i+=af->mid_step){
++				cursor = i;
++				while((af->data[cursor].ac[0]==0)&&(cursor!=0)){
++					cursor--;
++				}
++				pr_info("step[%4u]:%u %u %u %u %u %u %u %u\n",
++					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
++					af->data[cursor].ac[2],af->data[cursor].ac[3],
++					af->data[cursor].dc[0],af->data[cursor].dc[1],
++					af->data[cursor].dc[2],af->data[cursor].dc[3]);	
++				msleep(10);
++			}
++		}else{
++			for (i=af->max_step; i <= af->min_step;i+=af->mid_step){
++				cursor = i;
++				while((af->data[cursor].ac[0]==0)&&(cursor!=0)){
++					cursor--;
++				}
++				pr_info("step[%4u]:%u %u %u %u %u %u %u %u\n",
++					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
++					af->data[cursor].ac[2],af->data[cursor].ac[3],
++					af->data[cursor].dc[0],af->data[cursor].dc[1],
++					af->data[cursor].dc[2],af->data[cursor].dc[3]);	
++				msleep(10);
++			}
+ 		}
+ 		pr_info("%s:full scan end.\n",__func__);
+ 		kfree(af);
+@@ -193,7 +237,11 @@ static ssize_t af_debug_show(struct device *dev,struct device_attribute *attr, c
+ 	
+ 	isp_dev_t *devp = dev_get_drvdata(dev);
+ 	unsigned int pix_sum = ((devp->info.h_active)*(devp->info.v_active))>>2;
+-	len += sprintf(buf+len,"dc/4:0x%x 0x%x 0x%x 0x%x\n",devp->blnr_stat.dc[0]/pix_sum,
++	len += sprintf(buf+len,"ac:  0x%x 0x%x 0x%x 0x%x.\nac/4:0x%x 0x%x 0x%x 0x%x.\ndc:  0x%x 0x%x 0x%x 0x%x.\n"
++				"dc/4:0x%x 0x%x 0x%x 0x%x\n",devp->blnr_stat.ac[0],devp->blnr_stat.ac[1],devp->blnr_stat.ac[2],
++				devp->blnr_stat.ac[3],devp->blnr_stat.ac[0]/pix_sum,devp->blnr_stat.ac[1]/pix_sum,
++				devp->blnr_stat.ac[2]/pix_sum,devp->blnr_stat.ac[3]/pix_sum,devp->blnr_stat.dc[0],
++				devp->blnr_stat.dc[1],devp->blnr_stat.dc[2],devp->blnr_stat.dc[3],devp->blnr_stat.dc[0]/pix_sum,
+ 				devp->blnr_stat.dc[1]/pix_sum,devp->blnr_stat.dc[2]/pix_sum,devp->blnr_stat.dc[3]/pix_sum);
+ 	return len;
+ }
+@@ -201,19 +249,38 @@ static ssize_t af_debug_show(struct device *dev,struct device_attribute *attr, c
+ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ {
+ 	if (af->state == 0) {
+-		af->control = (af->control&0x0000c00f)|((af->step&0x3ff)<<4);
+ 		if(ops&&ops->set_af_new_step)
+-			ops->set_af_new_step(af->control);
++			ops->set_af_new_step(af->cur_step);
+ 		af->state = 1;
+ 		if(af_pr)
+-			pr_info("set step %u.\n",af->step);
++			pr_info("set step %u.\n",af->cur_step);
+ 	}else if(af->state == af->delay) {
+ 		af->state = 0;
+-		if (af->step++ >= af->max_step){
+-			af->step = 0;
+-			/*stop*/
+-			af->state = 0xffffffff;
+-			pr_info("%s get statics ok.\n",__func__);
++		if(af->cur_step >= af->post_threshold)
++			af->step = af->post_step;
++		else if(af->cur_step >= af->pre_threshold)
++			af->step = af->mid_step;
++		else 
++			af->step = af->post_step;
++		
++		if(af->dir){
++			af->cur_step += af->step;
++			if (af->cur_step > af->max_step){
++				af->cur_step = 0;
++				/*stop*/
++				af->state = 0xffffffff;
++				ops->set_af_new_step(0);
++				pr_info("%s get statics ok.\n",__func__);
++			}
++		}else{
++			af->cur_step -= af->step;
++			if (af->cur_step <= af->max_step){
++				af->cur_step = 0;
++				/*stop*/
++				af->state = 0xffffffff;
++				ops->set_af_new_step(0);
++				pr_info("%s get statics ok.\n",__func__);
++			}
+ 		}
+ 	}
+         return;
+@@ -390,6 +457,133 @@ static ssize_t wave_param_show(struct device *dev,struct device_attribute *attr,
+ 	set_wave_parm(devp->wave,&buff);
+ 	return len;
+ }
++static DEVICE_ATTR(wave_param, 0664, wave_param_show, wave_param_store);
++
++static ssize_t gamma_debug_store(struct device *dev,struct device_attribute *attr, const char* buf, size_t len)
++{
++	unsigned int curve_ratio,r,g,b;
++	if(buf){
++		curve_ratio = simple_strtol(buf,NULL,16);
++    	        r = (curve_ratio >> 8) & 15;
++		g = (curve_ratio >> 4) & 15;
++		b = (curve_ratio >> 0) & 15;
++		pr_info("curve ratio r:%u,g:%u,b:%u.\n",r,g,b);
++		if(!set_gamma_table_with_curve_ratio(r,g,b))
++			pr_info("%s:set gamma error.\n",__func__);
++	}else{
++		pr_info("%s:null pointer error.\n",__func__);
++	}
++	return len;
++}
++static ssize_t gamma_debug_show(struct class *cls,struct class_attribute *attr,char *buf)
++{
++	unsigned short *gammaR, *gammaG, *gammaB, i;
++	gammaR = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++	gammaG = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++	gammaB = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++	get_isp_gamma_table(gammaR,GAMMA_R);
++	get_isp_gamma_table(gammaG,GAMMA_G);
++	get_isp_gamma_table(gammaB,GAMMA_B);
++	pr_info("  r        g         b.\n");
++	for(i=0;i<257;i++){
++		pr_info("0x%3x    0x%3x    0x%3x\n",
++                        gammaR[i],gammaG[i],gammaB[i]);
++		msleep(1);
++	}
++	kfree(gammaR);
++	kfree(gammaG);
++	kfree(gammaB);
++	return 0;
++}
++
++static DEVICE_ATTR(gamma_debug, 0664, gamma_debug_show, gamma_debug_store);
++
++static ssize_t gamma_show(struct class *cls,struct class_attribute *attr,char *buf)
++{
++	pr_info("Usage:");
++	pr_info("	echo sgr|sgg|sgb xxx...xx > /sys/class/register/gamma\n");
++	pr_info("Notes:");
++	pr_info("	if the string xxx......xx is less than 257*3,");
++	pr_info("	then the remaining will be set value 0\n");
++	pr_info("	if the string xxx......xx is more than 257*3, ");
++	pr_info("	then the remaining will be ignored\n");
++	return 0;
++}
++
++static ssize_t gamma_store(struct class *cls,
++			 struct class_attribute *attr,
++			 const char *buffer, size_t count)
++{
++
++	int n = 0;
++	char *buf_orig, *ps, *token;
++	char *parm[4];
++	unsigned short *gammaR, *gammaG, *gammaB;
++	unsigned int gamma_count;
++	char gamma[4];
++	int i = 0;
++
++	/* to avoid the bellow warning message while compiling:
++	 * warning: the frame size of 1576 bytes is larger than 1024 bytes
++	 */
++	gammaR = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++	gammaG = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++	gammaB = kmalloc(257 * sizeof(unsigned short), GFP_KERNEL);
++
++	buf_orig = kstrdup(buffer, GFP_KERNEL);
++	ps = buf_orig;
++	while (1) {
++		token = strsep(&ps, " \n");
++		if (token == NULL)
++			break;
++		if (*token == '\0')
++			continue;
++		parm[n++] = token;
++	}
++
++	if ((parm[0][0] == 's') && (parm[0][1] == 'g')) {
++		memset(gammaR, 0, 257 * sizeof(unsigned short));
++		gamma_count = (strlen(parm[1]) + 2) / 3;
++		if (gamma_count > 257)
++			gamma_count = 257;
++
++		for (i = 0; i < gamma_count; ++i) {
++			gamma[0] = parm[1][3 * i + 0];
++			gamma[1] = parm[1][3 * i + 1];
++			gamma[2] = parm[1][3 * i + 2];
++			gamma[3] = '\0';
++			gammaR[i] = simple_strtol(gamma, NULL, 16);
++		}
++
++		switch (parm[0][2]) {
++		case 'r':
++			set_isp_gamma_table(gammaR, GAMMA_R);
++			break;
++
++		case 'g':
++			set_isp_gamma_table(gammaR, GAMMA_G);
++			break;
++
++		case 'b':
++			set_isp_gamma_table(gammaR, GAMMA_B);
++			break;
++		default:
++			break;
++		}
++	} else {
++		pr_info("invalid command\n");
++		pr_info("please: cat /sys/class/isp/isp0/gamma");
++
++	}
++	kfree(buf_orig);
++	kfree(gammaR);
++	kfree(gammaG);
++	kfree(gammaB);
++	return count;
++}
++
++static DEVICE_ATTR(gamma, 0664, gamma_show, gamma_store);
++
+ 
+ static int isp_thread(isp_dev_t *devp) {
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+@@ -414,13 +608,17 @@ static int isp_thread(isp_dev_t *devp) {
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+ 		af_stat(devp->af_dbg,func);
+ 	}
++	if(devp->flag&ISP_FLAG_AF) {
++		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
++			atomic_set(&devp->af_info.writeable,0);
++			func->set_af_new_step(devp->af_info.cur_step);
++		}
++	}
+     if(kthread_should_stop())
+         break;
+ 	}
+ }
+ 
+-static DEVICE_ATTR(wave_param, 0664, wave_param_show, wave_param_store);
+-
+ static int start_isp_thread(isp_dev_t *devp) {	
+ 	if(!devp->kthread) {
+ 		devp->kthread = kthread_run(isp_thread, devp, "isp");
+@@ -475,10 +673,32 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 	} else {
+ 		devp->isp_ae_parm = &devp->cam_param->xml_scenes->ae;
+ 		devp->isp_awb_parm = &devp->cam_param->xml_scenes->awb;
+-		devp->isp_af_parm = &devp->cam_param->xml_scenes->af;
++		//devp->isp_af_parm = &devp->cam_param->xml_scenes->af;
+ 		devp->capture_parm = devp->cam_param->xml_capture;
+ 		devp->wave = devp->cam_param->xml_wave;
+ 		isp_set_def_config(devp->cam_param->xml_regs_map,info->fe_port,info->h_active,info->v_active);
++		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_t_af_t),GFP_KERNEL);
++		memset(devp->isp_af_parm,0,sizeof(xml_algorithm_af_t));
++		devp->isp_af_parm->detect_step = 16;
++		devp->af_info.af_detect = kmalloc(sizeof(isp_blnr_stat_t)*devp->isp_af_parm->detect_step,GFP_KERNEL);
++		devp->isp_af_parm->step[0] = 100;
++		devp->isp_af_parm->step[1] = 150;
++		devp->isp_af_parm->step[2] = 200;
++		devp->isp_af_parm->step[3] = 250;
++		devp->isp_af_parm->step[4] = 290;
++		devp->isp_af_parm->step[5] = 330;
++		devp->isp_af_parm->step[6] = 370;
++		devp->isp_af_parm->step[7] = 400;		
++		devp->isp_af_parm->step[8] = 430;		
++		devp->isp_af_parm->step[9] = 460;
++		devp->isp_af_parm->step[10] = 480;		
++		devp->isp_af_parm->step[11] = 500;
++                devp->isp_af_parm->step[12] = 520;
++                devp->isp_af_parm->step[13] = 530;
++                devp->isp_af_parm->step[14] = 540;
++		devp->isp_af_parm->step[15] = 0;
++		devp->isp_af_parm->jump_offset = 100;
++		devp->isp_af_parm->field_delay = 1;
+ 	}
+         return 0;
+ }
+@@ -624,6 +844,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	xml_wb_manual_t *wb;
+ 	af_debug_t *af;
+         isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
++	struct isp_af_info_s *af_info = &devp->af_info;
+ 	int ret = 0;
+ 	if(IS_ERR_OR_NULL(devp->cam_param)){
+ 		pr_info("%s:null pointer error.\n",__func__);
+@@ -637,7 +858,8 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	}
+ 	if(af_enable){
+ 	if(devp->flag & ISP_FLAG_AF)
+-	        isp_get_af_stat(&devp->isp_af);
++	        isp_get_blnr_stat(&af_info->f[af_info->cur_index]);
++			isp_get_af_stat(&af_info->af_wind[af_info->cur_index]);
+ 	}
+ 	if(devp->flag & ISP_FLAG_SET_EFFECT){
+ 		csc = &(devp->cam_param->xml_effect_manual->csc);
+@@ -655,10 +877,17 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	if(devp->flag & ISP_FLAG_AF_DBG){
+ 		af = devp->af_dbg;
+ 		if((af->state >= 1)&&(af->state <= af->delay)){
+-			isp_get_blnr_stat(&af->data[af->step]);
++			isp_get_blnr_stat(&af->data[af->cur_step]);
+ 			af->state++;
+ 		}
+ 	}
++	if(devp->flag & ISP_TEST_FOR_AF_WIN){
++		isp_get_af_stat(&devp->af_win[devp->cnt]);
++		if(devp->cnt++ > devp->max){
++			devp->flag &=(~ISP_TEST_FOR_AF_WIN);
++			pr_info("get af win info end.\n");
++		}
++	}
+ 	if(devp->flag&ISP_FLAG_MWB){
+ 		wb = devp->cam_param->xml_wb_manual;
+ 		isp_set_manual_wb(wb);
+@@ -691,7 +920,7 @@ static void isp_tasklet(unsigned long arg)
+ 	}
+ 	if(af_enable){
+ 	if(devp->flag & ISP_FLAG_AF)
+-		isp_af_sm(devp);
++		isp_af_detect(devp);
+ 	}
+ }
+ static struct tvin_decoder_ops_s isp_dec_ops ={
+@@ -793,6 +1022,8 @@ static int isp_probe(struct platform_device *pdev)
+ 	ret = device_create_file(devp->dev,&dev_attr_af_debug);
+ 	ret = device_create_file(devp->dev,&dev_attr_cap_param);
+ 	ret = device_create_file(devp->dev,&dev_attr_wave_param);
++	ret = device_create_file(devp->dev,&dev_attr_gamma_debug);
++	ret = device_create_file(devp->dev,&dev_attr_gamma);
+ 	if(ret < 0)
+ 		goto err;
+ 	
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 6f7504961a4f..06eb4af14d8d 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -45,7 +45,7 @@
+ #define ISP_FLAG_MWB			        0x00000200
+ #define ISP_FLAG_BLNR				0x00000400
+ #define ISP_FLAG_SET_COMB4			0x00000800
+-
++#define ISP_TEST_FOR_AF_WIN			0x00001000	
+ typedef struct isp_info_s {
+ 	tvin_port_t fe_port;
+ 	unsigned int h_active;
+@@ -66,15 +66,58 @@ typedef struct flash_property_s {
+ 
+ /*for af debug*/
+ typedef struct af_debug_s {
+-	bool            flag;
+-	unsigned int    control;
++	bool            dir;
++	//unsigned int    control;
+ 	unsigned int    state;
+ 	unsigned int    step;
+-	unsigned int 	max_step;
++	unsigned int 	min_step;
++		 int 	max_step;
+ 	unsigned int    delay;
++		 int 	cur_step;
++	unsigned int    pre_step;
++	unsigned int	mid_step;
++	unsigned int	post_step;
++	unsigned int	pre_threshold;
++	unsigned int	post_threshold;
+ 	isp_blnr_stat_t data[1024];	
+ } af_debug_t;
+ 
++typedef struct isp_af_info_s {
++	unsigned int great_step;
++	unsigned int cur_step;
++	unsigned int cur_index;
++	unsigned long long last_h_fv;
++	unsigned long long last_v_fv;
++	unsigned int last_ave_ac;
++	unsigned int last_ave_dc;
++	isp_blnr_stat_t *f;
++	isp_blnr_stat_t *af_detect;
++	isp_blnr_stat_t af_data[FOCUS_GRIDS];
++	isp_af_stat_t af_wind[FOCUS_GRIDS];
++	//unsigned char af_delay;
++	atomic_t writeable;
++}isp_af_info_t;
++
++typedef struct xml_algorithm_t_af_s {
++    /*for climbing algorithm*/
++	unsigned int step[FOCUS_GRIDS];
++	unsigned int		   step_min;
++	unsigned int		   step_max;
++	unsigned int           f_thr_p;
++	unsigned int 		   f_thr_n;
++	unsigned int 	       step_coarse;
++	unsigned int	       step_fine;
++	unsigned int 		   jump_offset;
++	unsigned int		   field_delay;
++	unsigned int		   detect_step;
++	unsigned int           deta_ave_ratio;//10bits/1024
++	unsigned int		   deta_last_ave;//10bits/1024
++	unsigned int		   window_l_ratio;//10bits/1024
++	unsigned int		   window_r_ratio;//10bits/1024
++	unsigned int		   window_t_ratio;//10bits/1024
++	unsigned int		   window_b_ratio;//10bits/1024
++} xml_algorithm_t_af_t;
++
+ /*for debug cmd*/
+ typedef struct debug_s {
+ 	unsigned int comb4_mode;
+@@ -99,16 +142,21 @@ typedef struct isp_dev_s{
+ 	struct isp_ae_stat_s isp_ae;
+ 	struct isp_awb_stat_s isp_awb;
+ 	struct isp_af_stat_s isp_af;
++	struct isp_af_info_s af_info;
+ 	struct isp_blnr_stat_s blnr_stat;
+ 	cam_parameter_t *cam_param;
+ 	xml_algorithm_ae_t *isp_ae_parm;
+ 	xml_algorithm_awb_t *isp_awb_parm;
+-	xml_algorithm_af_t *isp_af_parm;
++	xml_algorithm_t_af_t *isp_af_parm;
+ 	xml_capture_t *capture_parm;
+ 	wave_t        *wave;
+ 	flash_property_t flash;
+ 	af_debug_t      *af_dbg;
+ 	debug_t         debug;
++	/*test for af win*/
++	unsigned int cnt;
++	unsigned int max;
++	struct isp_af_stat_s *af_win;
+ }isp_dev_t;
+ 
+ typedef enum data_type_e{
+@@ -130,5 +178,6 @@ extern void set_awb_parm(xml_algorithm_awb_t * awb_sw,char * * parm);
+ extern void set_af_parm(xml_algorithm_af_t * af_sw,char * * parm);
+ extern void set_cap_parm(struct xml_capture_s * cap_sw,char * * parm);
+ extern void set_wave_parm(struct wave_s * wave,char * * parm);
++extern bool set_gamma_table_with_curve_ratio(unsigned int r,unsigned int g,unsigned int b);
+ #endif
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index d0279e1ac7ff..33912d97b7d4 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -11,6 +11,7 @@
+  */
+ #include <mach/am_regs.h>
+ #include <linux/kernel.h>
++#include <linux/err.h>
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+ #include "isp_regs.h"
+ #include "isp_hw.h"
+@@ -229,13 +230,31 @@ void isp_set_ae_stat(xml_ae_t *aes,unsigned int w,unsigned int h)
+ */
+ void isp_set_af_stat(xml_af_t *afs,unsigned int w,unsigned int h)
+ {
+-	int i = 0;
++	unsigned int i=0,tmp_w=0,tmp_h=0;
+ 	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(afs){
+ 		for(i=0;i<XML_AF;i++)
+ 			WR(ISP_AFC_FILTER_SEL+i, afs->reg_map[i]);
+ 	}
+-        /*config win0~win8 according to hv size*/
++	WR(ISP_AFC_FILTER_SEL,0x17722);
++    /*config win0~win8 according to hv size*/
++	tmp_w = w/12;
++	tmp_h = h/12;
++	/* wind0 h:2-5  v:2-5*/
++	WR(ISP_AFC_WIND0_LR,(tmp_w<<1)<<16|tmp_w*5);
++	WR(ISP_AFC_WIND0_TB,(tmp_h<<1)<<16|tmp_h*5);
++	/* wind1 h:5-8  v:5-8*/
++	WR(ISP_AFC_WIND1_LR,(tmp_w*5)<<16|tmp_w<<3);
++	WR(ISP_AFC_WIND1_TB,(tmp_h*5)<<16|tmp_h<<3);
++	/* wind2 h:8-11 v:2-5*/
++	WR(ISP_AFC_WIND2_LR,(tmp_w<<3)<<16|tmp_w*11);
++	WR(ISP_AFC_WIND2_TB,(tmp_h<<1)<<16|tmp_h*5);
++	/* wind3 h:2-5  v:8-11*/
++	WR(ISP_AFC_WIND3_LR,(tmp_w<<1)<<16|tmp_w*5);
++	WR(ISP_AFC_WIND3_TB,(tmp_h<<3)<<16|tmp_h*11);
++	/*wind4 h:8-11 v:8-11*/
++	WR(ISP_AFC_WIND4_LR,(tmp_w<<3)<<16|tmp_w*11);
++	WR(ISP_AFC_WIND4_TB,(tmp_h<<3)<<16|tmp_h*11);	
+ }
+ /*
+ *reg 0xac~0xae
+@@ -256,7 +275,7 @@ void isp_set_blenr_stat(unsigned int w,unsigned int h)
+ 	else
+ 		WR_BITS(ISP_BLNR_CTRL,1,BLNR_LPF_MODE_BIT,BLNR_LPF_MODE_WID);
+ 	/*set ac adaptive*/
+-	WR_BITS(ISP_BLNR_CTRL,0,BLNR_AC_ADAPTIVE_BIT,BLNR_AC_ADAPTIVE_WID);
++	WR_BITS(ISP_BLNR_CTRL,1,BLNR_AC_ADAPTIVE_BIT,BLNR_AC_ADAPTIVE_WID);
+ 	WR(ISP_BLNR_WIND_LR, w-1);
+ 	WR(ISP_BLNR_WIND_TB, h-1);
+ 	WR_BITS(ISP_BLNR_CTRL,1,BLNR_STATISTICS_EN_BIT,BLNR_STATISTICS_EN_WID);
+@@ -288,7 +307,16 @@ void isp_set_lnsd_mode(unsigned int mode)
+ {
+ 	WR_BITS(ISP_LNS_CTRL,mode,LNS_MESH_MODE_BIT,LNS_MESH_MODE_WID);
+ }
+-
++static void isp_set_gamma_table(struct xml_lut_gc_s *gt)
++{
++	if(gt){
++		set_isp_gamma_table(gt->gamma_r,GAMMA_R);
++		set_isp_gamma_table(gt->gamma_g,GAMMA_G);
++		set_isp_gamma_table(gt->gamma_b,GAMMA_B);
++	}else{
++		pr_info("%s:null pointer error.\n",__func__);
++	}
++}
+ /*
+ *
+ */
+@@ -308,21 +336,22 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ 	}
+ 	WR_BITS(VPU_MISC_CTRL,mux,ISP_IN_SEL_BIT,ISP_IN_SEL_WID);
+ 	isp_top_init(&regs->top,w,h);
+-	//isp_set_test_pattern(&regs->tp);
+-	//isp_set_clamp_gain(&regs->cg);
+-	//isp_set_lens_shading(&regs->ls);
+-	//isp_set_gamma_correction(&regs->gc);
+-	//isp_set_defect_pixel_correction(&regs->dp);
++	isp_set_test_pattern(&regs->tp);
++	isp_set_clamp_gain(&regs->cg);
++	isp_set_lens_shading(&regs->ls);
++	isp_set_gamma_correction(&regs->gc);
++	isp_set_defect_pixel_correction(&regs->dp);
+ 	isp_set_demosaicing(&regs->dm);
+ 	isp_set_matrix(NULL,h);
+-	//isp_set_sharpness(&regs->sharp);
+-	//isp_set_nr(&regs->nr);
++	isp_set_sharpness(&regs->sharp);
++	isp_set_nr(&regs->nr);
+ 	isp_set_blenr_stat(w,h);
+-	//isp_set_awb_stat(&regs->awb_reg,w,h);
++	isp_set_awb_stat(&regs->awb_reg,w,h);
+ 	isp_set_ae_stat(&regs->ae_reg,w,h);
+-	//isp_set_af_stat(&regs->af_reg,w,h);
++	isp_set_af_stat(&regs->af_reg,w,h);
+ 	//isp_set_dbg(&regs->dbg);
+ 	isp_set_lnsd(&regs->lnsd);
++	isp_set_gamma_table(&regs->lut_gc);
+ 	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ }
+ /*
+@@ -330,28 +359,8 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ */
+ void isp_set_init(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal)
+ {
+-	
+-	WRITE_CBUS_REG_BITS(VPU_MISC_CTRL,1,1,2); //isp_in_sel = 1;
+-        // image size
+-        WRITE_VCBUS_REG_BITS(ISP_HV_SIZE,  hsize,16,13);
+-        WRITE_VCBUS_REG_BITS(ISP_HV_SIZE,  vsize, 0,13);
+-
+-        // general config
+-        WRITE_VCBUS_REG(ISP_HBLANK, (hsize<<16)|10); //reg_hblank = 10  should set
+-        WRITE_VCBUS_REG(ISP_TIMING_MODE,0x0 );
+-        WRITE_VCBUS_REG(ISP_RST_DLY_NUM,0x0 );
+-        WRITE_VCBUS_REG(ISP_OUTVS_DLY_NUM,0x0 );
+-        WRITE_VCBUS_REG(ISP_DIN_WIND_OFST,0x0 );
+-        WRITE_VCBUS_REG(ISP_FRM_SOFT_RST, 0x0 );
+-        WRITE_VCBUS_REG(ISP_RST_SYN_SEL,  0x0 );
+-
+-        WRITE_VCBUS_REG(ISP_RST_DLY_NUM,htotal*5);  //5 hold line between vsync and isp soft_rst, soft_rst should be set after register is ready.
+-        WRITE_VCBUS_REG_BITS(ISP_FRM_DONE_PARA,1,16,1);  //TBD: select frame_done for ISP interrupt
+-        WRITE_VCBUS_REG_BITS(ISP_FRM_DONE_PARA,2,0,16);  //TBD: reg_frm_done_dlynum = 2;
+-        WRITE_VCBUS_REG(ISP_OUTHS_PARA, (10<<16) | 8);       //more hsync at the beginning for VDIN: reg_ouths_pre_dist=10, reg_ouths_pre_num=8
+-
+         // pat gen
+-        WRITE_VCBUS_REG(ISP_PAT_GEN_CTRL, 0x0 );
++        WRITE_VCBUS_REG(ISP_PAT_GEN_CTRL, 0x0);
+         WRITE_VCBUS_REG(ISP_PAT_XRAMP_SCAL,0x00ffffff);
+         WRITE_VCBUS_REG(ISP_PAT_YRAMP_SCAL,0x00ffffff);
+         WRITE_VCBUS_REG(ISP_PAT_XYIDX_OFST,0x0 );
+@@ -378,53 +387,6 @@ void isp_set_init(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsi
+         WRITE_VCBUS_REG(ISP_PAT_DFT_GAIN, 0x0);
+         WRITE_VCBUS_REG(ISP_PAT_HVTOTAL,(vtotal<<16)|(htotal));
+         WRITE_VCBUS_REG(ISP_PAT_VDE_SLINE,0x00000007 );
+-
+-        // clamp gain
+-        WRITE_VCBUS_REG(ISP_CLAMPGAIN_CTRL,  0x00000020);
+-        WRITE_VCBUS_REG(ISP_GAIN_BSCORE_GRBG,0x00000000);
+-        WRITE_VCBUS_REG(ISP_CLAMP_GRBG01, 0x0);
+-        WRITE_VCBUS_REG(ISP_CLAMP_GRBG23, 0x0);
+-        WRITE_VCBUS_REG(ISP_GAIN_GRBG01,0x01000100 );
+-        WRITE_VCBUS_REG(ISP_GAIN_GRBG23,0x01000100 );
+-
+-        // lens shading
+-        WRITE_VCBUS_REG(ISP_LNS_CTRL,0x0);
+-        WRITE_VCBUS_REG(ISP_LNS_XYSCAL,0x008400eb);
+-        WRITE_VCBUS_REG(ISP_LNS_XYIDX_SHFT,0x0 );
+-        WRITE_VCBUS_REG(ISP_LNS_SENSOR_GAINGRBG,0x80808080);
+-        WRITE_VCBUS_REG(ISP_LNS_POST_OFSTGRBG,0x0 );
+-
+-        // raw gamma
+-        WRITE_VCBUS_REG(ISP_GMR0_CTRL, 0x0);
+-
+-        // dft det/correct
+-        // reg_isp_dft_enable=0;reg_isp_dftmap_writeto_lut_stline=0
+-        // reg_isp_dftmap_correct_drtrate=1;reg_isp_dft_detect_mode=2;reg_isp_dftmap_correct_mode =0;
+-        WRITE_VCBUS_REG(ISP_DFT_CTRL,  (0<<28)|(0<<16)|(1<<8)|(2<<4)|(0<<0));
+-        WRITE_VCBUS_REG(ISP_DFT_VAR_MINMAX, 0x0a204baf);
+-
+-        WRITE_VCBUS_REG(ISP_DFT_CALIBRAT_REF,0x00646464);
+-        //reg_isp_dft_lastvalid_mode=1;reg_isp_dft_lastvalid_tmode=1;isp_dft_calibrat_mode=0
+-        //WRITE_VCBUS_REG(ISP_DFT_CALIBRAT_CTRL, 0x2c230110);
+-        //WRITE_VCBUS_REG(ISP_DFT_THDLOW,0x10080202);
+-        //WRITE_VCBUS_REG(ISP_DFT_THDHIG,0x10080202);
+-
+-        //isp_dft_calibrat_mode =2
+-        WRITE_VCBUS_REG(ISP_DFT_CALIBRAT_CTRL, 0x2c230112);
+-        WRITE_VCBUS_REG(ISP_DFT_THDLOW,0x100819d2);
+-        WRITE_VCBUS_REG(ISP_DFT_THDHIG,0x100819d2);
+-
+-        //isp_dft_calibrat_mode =3  if(reg_isp_dft_detect_mode==0)
+-        //WRITE_VCBUS_REG(ISP_DFT_CALIBRAT_CTRL, 0x2c230113);
+-        //WRITE_VCBUS_REG(ISP_DFT_THDLOW,0x10080202);
+-        //WRITE_VCBUS_REG(ISP_DFT_THDHIG,0x10080202);
+-
+-        WRITE_VCBUS_REG(ISP_DFT_DET0_MANUALTH, 0x00505050);
+-        WRITE_VCBUS_REG(ISP_DFT_DET1_ADPTLOWTH,0x00323232);
+-        WRITE_VCBUS_REG(ISP_DFT_DET1_ADPTHIGTH,0x00c8c8c8);
+-        WRITE_VCBUS_REG(ISP_DFT_DET1_ADPTNUM0, 0x00040404);
+-        WRITE_VCBUS_REG(ISP_DFT_DET1_ADPTNUM1, 0x00030303);
+-
+         // demosaicing
+         WRITE_VCBUS_REG(ISP_DMS_CTRL0, 0x00030000);
+         WRITE_VCBUS_REG(ISP_DMS_CTRL1, 0x00120510);
+@@ -439,101 +401,7 @@ void isp_set_init(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsi
+         WRITE_VCBUS_REG(ISP_MATRIX_COEF22,    0x000003eb);
+         WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST0_1, 0x00000200);
+         WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST2,   0x00000200);
+-
+-        // nr+peaking
+-        WRITE_VCBUS_REG(ISP_PKNR_HVBLANK_NUM,0x081e081e);
+-        WRITE_VCBUS_REG(ISP_NR_GAUSSIAN_MODE ,0x00000011);
+-        WRITE_VCBUS_REG(ISP_PK_HVCON_LPF_MODE,0x22222222);
+-        WRITE_VCBUS_REG(ISP_PK_CON_BLEND_GAIN ,0x44000260);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2CIRHPGAIN_TH_RATE,0x193c5014);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2CIRHPGAIN_LIMIT,0x00600500);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2CIRBPGAIN_TH_RATE,0x14323219);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2CIRBPGAIN_LIMIT,0x00280500);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2DRTHPGAIN_TH_RATE,0x193c5014);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2DRTHPGAIN_LIMIT,0x00600500);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2DRTBPGAIN_TH_RATE,0x14323219);
+-        WRITE_VCBUS_REG(ISP_PK_CON_2DRTBPGAIN_LIMIT,0x00280500);
+-        WRITE_VCBUS_REG(ISP_PK_CIRFB_LPF_MODE,0x11101110);
+-        WRITE_VCBUS_REG(ISP_PK_DRTFB_LPF_MODE,0x22102210);
+-        WRITE_VCBUS_REG(ISP_PK_CIRFB_HP_CORING,0x00141414);
+-        WRITE_VCBUS_REG(ISP_PK_CIRFB_BP_CORING,0x000f0f0f);
+-        WRITE_VCBUS_REG(ISP_PK_DRTFB_HP_CORING,0x00141414);
+-        WRITE_VCBUS_REG(ISP_PK_DRTFB_BP_CORING,0x000f0f0f);
+-        WRITE_VCBUS_REG(ISP_PK_CIRFB_BLEND_GAIN,0x88808880);
+-        WRITE_VCBUS_REG(ISP_NR_ALPY_SSD_GAIN_OFST,0x0000103e);
+-        WRITE_VCBUS_REG(ISP_NR_ALP0Y_ERR2CURV_TH_RATE,0x0a195040);
+-        WRITE_VCBUS_REG(ISP_NR_ALP0Y_ERR2CURV_LIMIT,0x3f003f00);
+-        WRITE_VCBUS_REG(ISP_NR_ALP0C_ERR2CURV_TH_RATE,0x0a195040);
+-        WRITE_VCBUS_REG(ISP_NR_ALP0C_ERR2CURV_LIMIT,0x3f3f00);
+-        WRITE_VCBUS_REG(ISP_NR_ALP0_MIN_MAX,0x023f023f);
+-        WRITE_VCBUS_REG(ISP_NR_ALP1_MIERR_CORING,0x00000003);
+-        WRITE_VCBUS_REG(ISP_NR_ALP1_ERR2CURV_TH_RATE,0x00180014);
+-        WRITE_VCBUS_REG(ISP_NR_ALP1_ERR2CURV_LIMIT,0x00203f00);
+-        WRITE_VCBUS_REG(ISP_NR_ALP1_MIN_MAX,0x003f003f);
+-        WRITE_VCBUS_REG(ISP_PK_ALP2_MIERR_CORING,0x00010d03);
+-        WRITE_VCBUS_REG(ISP_PK_ALP2_ERR2CURV_TH_RATE,0x00180014);
+-        WRITE_VCBUS_REG(ISP_PK_ALP2_ERR2CURV_LIMIT,0x00203f00);
+-        WRITE_VCBUS_REG(ISP_PK_ALP2_MIN_MAX,0x0000003f);
+-        WRITE_VCBUS_REG(ISP_PK_FINALGAIN_HP_BP,0x00004040);
+-        WRITE_VCBUS_REG(ISP_PK_OS_HORZ_CORE_GAIN,0x08140214);
+-        WRITE_VCBUS_REG(ISP_PK_OS_VERT_CORE_GAIN,0x08140214);
+-        WRITE_VCBUS_REG(ISP_PK_OS_ADPT_MISC,0x3206c814);
+-        WRITE_VCBUS_REG(ISP_PK_OS_STATIC,0x22000000);
+-        WRITE_VCBUS_REG(ISP_PKNR_ENABLE,0x3);
+-
+-        // pk sde
+-        WRITE_VCBUS_REG(ISP_PKSDE_MODE_PKGAIN, 0x00000888);
+-        WRITE_VCBUS_REG(ISP_PKSDE_REPLACE_Y_U, 0x02000200);
+-        WRITE_VCBUS_REG(ISP_PKSDE_REPLACE_V,   0x02000000);
+-        WRITE_VCBUS_REG(ISP_PKSDE_BINARY_HIG,  0x00c0c0c0);
+-        WRITE_VCBUS_REG(ISP_PKSDE_BINARY_LOW,  0x00408080);
+-
+-        // awb sta
+-        WRITE_VCBUS_REG(ISP_AWB_WIND_LR, 0x00000064);
+-        WRITE_VCBUS_REG(ISP_AWB_WIND_TB, 0x00000064);
+-        WRITE_VCBUS_REG(ISP_AWB_GBGRBR_THRD, 0x00c8c8c8);
+-        WRITE_VCBUS_REG(ISP_AWB_UVTH_YPIECE, 0xc8c832c8);
+-        WRITE_VCBUS_REG(ISP_AWB_AEC_ENABLE,  0x00000007);
+-
+-        // aec sta
+-        WRITE_VCBUS_REG(ISP_AEC_THRESHOLDS,0x80c8c8c8);
+-        WRITE_VCBUS_REG(ISP_AEC_WIND_XYSTART,0x0 );
+-        WRITE_VCBUS_REG(ISP_AEC_WIND_XYSTEP,0x00400040);
+-        WRITE_VCBUS_REG(ISP_AECRAW_WIND_LR, 0x00000064);
+-        WRITE_VCBUS_REG(ISP_AECRAW_WIND_TB, 0x00000064);
+-
+-        // afc sta
+-        WRITE_VCBUS_REG(ISP_AFC_FILTER_SEL, 0x00012422);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND0_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND0_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND1_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND1_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND2_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND2_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND3_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND3_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND4_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND4_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND5_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND5_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND6_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND6_TB,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND7_LR,   0x00000064);
+-        WRITE_VCBUS_REG(ISP_AFC_WIND7_TB,   0x00000064);
+-
+-        // blnr sta
+-        WRITE_VCBUS_REG(ISP_BLNR_CTRL, 0x00000132);
+-        WRITE_VCBUS_REG(ISP_BLNR_WIND_LR,0x00000064);
+-        WRITE_VCBUS_REG(ISP_BLNR_WIND_TB,0x00000064);
+-
+-        // debug pixel
+-        WRITE_VCBUS_REG(ISP_DBG_PIXEL_CTRL, 0x0);
+-        WRITE_VCBUS_REG(ISP_DBG_PIXEL_POSITION, 0x00640064 );
+-        //WRITE_VCBUS_REG(, );
+-
+-        // ram/cbus mode setting
+-        WRITE_VCBUS_REG(ISP_RAM_ACC_MODE,0x0);
+-    
++		
+         WRITE_VCBUS_REG(ISP_RST_DLY_NUM,htotal*6);
+         WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,1,28,1);
+ }
+@@ -745,19 +613,25 @@ void isp_get_ae_stat(isp_ae_stat_t *ae_stat)
+ 	return;
+ }
+ 
+-void isp_set_ae_win(unsigned int width, unsigned int height)
++void isp_set_ae_win(unsigned int left, unsigned int right, unsigned int top, unsigned int bottom)
+ {
+-	WR(ISP_AECRAW_WIND_LR, width-1);
+-	WR(ISP_AECRAW_WIND_TB, height-1);
+-	WR(ISP_AEC_WIND_XYSTART, 0);
+-	WR_BITS(ISP_AEC_WIND_XYSTEP, width>>2, AEC_WIND_XSTEP_BIT, AEC_WIND_XSTEP_WID);
+-	WR_BITS(ISP_AEC_WIND_XYSTEP, height>>2, AEC_WIND_YSTEP_BIT, AEC_WIND_YSTEP_WID);
++	WR_BITS(ISP_AECRAW_WIND_LR, left, AECRAW_WIND_LEFT_BIT, AECRAW_WIND_LEFT_WID);
++	WR_BITS(ISP_AECRAW_WIND_LR, right, AECRAW_WIND_RIGHT_BIT, AECRAW_WIND_RIGHT_WID);
++	WR_BITS(ISP_AECRAW_WIND_TB, top, AECRAW_WIND_TOP_BIT, AECRAW_WIND_TOP_WID);
++	WR_BITS(ISP_AECRAW_WIND_TB, bottom, AECRAW_WIND_BOT_BIT, AECRAW_WIND_BOT_WID);
++	
++	WR_BITS(ISP_AEC_WIND_XYSTART, left, AEC_WIND_XSTART_BIT, AEC_WIND_XSTART_WID);
++	WR_BITS(ISP_AEC_WIND_XYSTART, top, AEC_WIND_YSTART_BIT, AEC_WIND_YSTART_WID);
++	WR_BITS(ISP_AEC_WIND_XYSTEP, (right-left+1)>>2, AEC_WIND_XSTEP_BIT, AEC_WIND_XSTEP_WID);
++	WR_BITS(ISP_AEC_WIND_XYSTEP, (bottom-top+1)>>2, AEC_WIND_YSTEP_BIT, AEC_WIND_YSTEP_WID);
+ }
+ 
+-void isp_set_awb_win(unsigned int width, unsigned int height)
++void isp_set_awb_win(unsigned int left, unsigned int right, unsigned int top, unsigned int bottom)
+ {
+-	WR(ISP_AWB_WIND_LR, width-1);
+-	WR(ISP_AWB_WIND_TB, height-1);
++	WR_BITS(ISP_AWB_WIND_LR, left, AWB_WIND_LEFT_BIT, AWB_WIND_LEFT_BIT);
++	WR_BITS(ISP_AWB_WIND_LR, right, AWB_WIND_RIGHT_BIT, AWB_WIND_RIGHT_WID);
++	WR_BITS(ISP_AWB_WIND_TB, top, AWB_WIND_TOP_BIT, AWB_WIND_TOP_WID);
++	WR_BITS(ISP_AWB_WIND_TB, bottom, AWB_WIND_BOT_BIT, AWB_WIND_BOT_WID);
+ }
+ 
+ void isp_set_ae_thrlpf(unsigned char thr_r, unsigned char thr_g, unsigned char thr_b, unsigned char lpf)
+@@ -786,10 +660,12 @@ void isp_set_awb_rgb_thr(unsigned char gb, unsigned char gr, unsigned br)
+ void isp_get_af_stat(isp_af_stat_t * af_stat)
+ {
+ 	int i = 0;
+-	/*0x1c~0x2b*/
+-	for(i=0;i<16;i++){
+-		WR(ISP_RO_ADDR_PORT, 155 + i);
+-		af_stat->luma_win[i] = RD(ISP_RO_DATA_PORT);
++	/*0xbc~0xc6*/
++	if(IS_ERR_OR_NULL(af_stat)){
++		pr_info("%s null pointer error.\n",__func__);
++	} else {
++	for(i=0;i<16;i++)
++		af_stat->luma_win[i]=isp_rd(0xbc + i);
+ 	}
+ 	return;
+ }
+@@ -819,16 +695,60 @@ void isp_hw_reset()
+ 
+ void isp_awb_set_gain(unsigned int r,unsigned int g,unsigned int b)
+ {
+-	WR_BITS(ISP_GAIN_GRBG01, r, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
+-	WR_BITS(ISP_GAIN_GRBG01, g, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
+-	WR_BITS(ISP_GAIN_GRBG23, g, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);	
+-	WR_BITS(ISP_GAIN_GRBG23, b, GAIN_GRBG3_BIT, GAIN_GRBG3_WID);
++	WR_BITS(ISP_GAIN_GRBG01, g, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
++	WR_BITS(ISP_GAIN_GRBG01, r, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
++	WR_BITS(ISP_GAIN_GRBG23, b, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);	
++	WR_BITS(ISP_GAIN_GRBG23, g, GAIN_GRBG3_BIT, GAIN_GRBG3_WID);
+ }
+ 
+ void isp_awb_get_gain(isp_awb_gain_t *awb_gain)
+ {
+-	awb_gain->b_val = RD_BITS(ISP_GAIN_GRBG23, GAIN_GRBG3_BIT, GAIN_GRBG3_WID);
+-	awb_gain->g_val = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
+-	awb_gain->r_val = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
++	awb_gain->b_val = RD_BITS(ISP_GAIN_GRBG23, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);
++	awb_gain->r_val = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
++	awb_gain->g_val = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
++}
++
++void set_isp_gamma_table(unsigned short *gamma,unsigned int type)
++{
++	unsigned int flag = 0,i = 0; 
++
++        // store gamma table enable/disable status
++        flag = RD_BITS(ISP_GMR0_CTRL,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++
++        // gamma table disable, gamma table vbus mode
++        WR_BITS(ISP_GMR0_CTRL,0,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++	WR_BITS(ISP_GMR0_CTRL,1,GCLUT_ACCMODE_BIT,GCLUT_ACCMODE_WID);
++        // point to gamma
++        WR(ISP_GAMMA_LUT_ADDR, type);
++        // write gamma
++        for (i = 0; i < 257; i++) {
++                WR(ISP_GAMMA_LUT_DATA, gamma[i]);
++        }
++
++        // retrieve gamma table enable/disable status, gamma table hardware mode
++        WR_BITS(ISP_GMR0_CTRL, flag,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++	WR_BITS(ISP_GMR0_CTRL,0,GCLUT_ACCMODE_BIT,GCLUT_ACCMODE_WID);
++	
++}
++void get_isp_gamma_table(unsigned short *gamma,unsigned int type)
++{
++	unsigned int flag = 0,i = 0; 
++
++        // store gamma table enable/disable status
++        flag = RD_BITS(ISP_GMR0_CTRL,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++
++        // gamma table disable, gamma table vbus mode
++        WR_BITS(ISP_GMR0_CTRL,0,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++	WR_BITS(ISP_GMR0_CTRL,1,GCLUT_ACCMODE_BIT,GCLUT_ACCMODE_WID);
++        // point to gamma
++        WR(ISP_GAMMA_LUT_ADDR, type);
++        // get gamma
++        for (i = 0; i < 257; i++) {
++                gamma[i] = RD(ISP_GAMMA_LUT_DATA);
++        }
++
++        // retrieve gamma table enable/disable status, gamma table hardware mode
++        WR_BITS(ISP_GMR0_CTRL, flag,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++	WR_BITS(ISP_GMR0_CTRL,0,GCLUT_ACCMODE_BIT,GCLUT_ACCMODE_WID);
+ }
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index f0092bfc4b1a..d487fd8f2622 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -26,6 +26,10 @@
+ 
+ #endif
+ 
++#define GAMMA_R				0x00000000
++#define GAMMA_G				0x00000200
++#define GAMMA_B				0x00000400
++
+ typedef struct awb_rgb_stat_s {
+ 	unsigned int rgb_count;
+ 	unsigned int rgb_sum[3];// r g b
+@@ -96,8 +100,8 @@ extern void isp_get_awb_stat(isp_awb_stat_t *awb_stat);
+ extern void isp_get_ae_stat(isp_ae_stat_t *ae_stat);
+ extern void isp_get_af_stat(isp_af_stat_t *af_stat);
+ extern void isp_get_blnr_stat(isp_blnr_stat_t *blnr_stat);
+-extern void isp_set_ae_win(unsigned int width, unsigned int height);
+-extern void isp_set_awb_win(unsigned int width, unsigned int height);
++extern void isp_set_ae_win(unsigned int left, unsigned int right, unsigned int top, unsigned int bottom);
++extern void isp_set_awb_win(unsigned int left, unsigned int right, unsigned int top, unsigned int bottom);
+ extern void isp_set_ae_thrlpf(unsigned char thr_r, unsigned char thr_g, unsigned char thr_b, unsigned char lpf);
+ extern void isp_set_awb_yuv_thr(unsigned char yh, unsigned char yl, unsigned char u, unsigned char v);
+ extern void isp_set_awb_rgb_thr(unsigned char gb, unsigned char gr, unsigned br);
+@@ -107,5 +111,7 @@ extern void wave_power_manage(bool enable);
+ extern void isp_hw_reset(void);
+ extern void isp_awb_set_gain(unsigned int r, unsigned int g, unsigned int b);
+ extern void isp_awb_get_gain(isp_awb_gain_t *awb_gain);
++extern void set_isp_gamma_table(unsigned short *gamma,unsigned int type);
++extern void get_isp_gamma_table(unsigned short *gamma,unsigned int type);
+ #endif
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_parm.c b/drivers/amlogic/tvin/isp/isp_parm.c
+index 10a45993c6a3..43918c12f6c3 100755
+--- a/drivers/amlogic/tvin/isp/isp_parm.c
++++ b/drivers/amlogic/tvin/isp/isp_parm.c
+@@ -19,6 +19,7 @@
+ #include <linux/err.h>
+ #include <linux/string.h>
+ #include <linux/fs.h>
++#include <mach/am_regs.h>
+ 
+ /* Amlogic Headers */
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+@@ -77,6 +78,10 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ 		{"ae_exp",            &ae_sw->ae_exp[0],         3,  ISP_U32},
+ 		{"ae_ag",             &ae_sw->ae_ag[0],          3,  ISP_U32},
+ 		{"ae_skip",           &ae_sw->ae_skip[0],        3,  ISP_U32},
++		{"ratio_winl",        &ae_sw->ratio_winl,        1,  ISP_U32},
++		{"ratio_winr",        &ae_sw->ratio_winr,        1,  ISP_U32},
++		{"ratio_wint",        &ae_sw->ratio_wint,        1,  ISP_U32},
++		{"ratio_winb",        &ae_sw->ratio_winb,        1,  ISP_U32},
+ 		{"alert_mode",        &ae_sw->alert_mode,        1,  ISP_U32},
+ 		{"tune_mode",         &ae_sw->tune_mode,         1,  ISP_U32},
+ 		{"ratio_r",           &ae_sw->ratio_r,           1,  ISP_U32},
+@@ -143,6 +148,10 @@ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ 	int len = AWB_PARM_NUM;
+ 	isp_param_t awb[AWB_PARM_NUM]={		
+ 		{"awb_algorithm",  &awb_sw->awb_algorithm,   1,  ISP_U32},
++		{"ratio_winl",	   &awb_sw->ratio_winl,		 1,  ISP_U32},
++		{"ratio_winr",	   &awb_sw->ratio_winr,		 1,  ISP_U32},
++		{"ratio_wint",	   &awb_sw->ratio_wint,		 1,  ISP_U32},
++		{"ratio_winb",	   &awb_sw->ratio_winb,		 1,  ISP_U32},
+ 		{"ratio_rgb",      &awb_sw->ratio_rgb,       1,  ISP_U32},
+ 		{"ratio_yh",       &awb_sw->ratio_yh,        1,  ISP_U32},
+ 		{"ratio_ym",       &awb_sw->ratio_ym,        1,  ISP_U32},
+@@ -286,4 +295,2703 @@ void set_wave_parm(struct wave_s *wave,char **parm)
+ 	}
+ 	
+ }
++static unsigned int gamma[10][257] =
++	{
++		// curve_ratio = 1.0
++		{
++			0x00000000,
++			0x00000004,
++			0x00000008,
++			0x0000000C,
++			0x00000010,
++			0x00000014,
++			0x00000018,
++			0x0000001C,
++			0x00000020,
++			0x00000024,
++			0x00000028,
++			0x0000002C,
++			0x00000030,
++			0x00000034,
++			0x00000038,
++			0x0000003C,
++			0x00000040,
++			0x00000044,
++			0x00000048,
++			0x0000004C,
++			0x00000050,
++			0x00000054,
++			0x00000058,
++			0x0000005C,
++			0x00000060,
++			0x00000064,
++			0x00000068,
++			0x0000006C,
++			0x00000070,
++			0x00000074,
++			0x00000078,
++			0x0000007C,
++			0x00000080,
++			0x00000084,
++			0x00000088,
++			0x0000008C,
++			0x00000090,
++			0x00000094,
++			0x00000098,
++			0x0000009C,
++			0x000000A0,
++			0x000000A4,
++			0x000000A8,
++			0x000000AC,
++			0x000000B0,
++			0x000000B4,
++			0x000000B8,
++			0x000000BC,
++			0x000000C0,
++			0x000000C4,
++			0x000000C8,
++			0x000000CC,
++			0x000000D0,
++			0x000000D4,
++			0x000000D8,
++			0x000000DC,
++			0x000000E0,
++			0x000000E4,
++			0x000000E8,
++			0x000000EC,
++			0x000000F0,
++			0x000000F4,
++			0x000000F8,
++			0x000000FC,
++			0x00000100,
++			0x00000104,
++			0x00000108,
++			0x0000010C,
++			0x00000110,
++			0x00000114,
++			0x00000118,
++			0x0000011C,
++			0x00000120,
++			0x00000124,
++			0x00000128,
++			0x0000012C,
++			0x00000130,
++			0x00000134,
++			0x00000138,
++			0x0000013C,
++			0x00000140,
++			0x00000144,
++			0x00000148,
++			0x0000014C,
++			0x00000150,
++			0x00000154,
++			0x00000158,
++			0x0000015C,
++			0x00000160,
++			0x00000164,
++			0x00000168,
++			0x0000016C,
++			0x00000170,
++			0x00000174,
++			0x00000178,
++			0x0000017C,
++			0x00000180,
++			0x00000184,
++			0x00000188,
++			0x0000018C,
++			0x00000190,
++			0x00000194,
++			0x00000198,
++			0x0000019C,
++			0x000001A0,
++			0x000001A4,
++			0x000001A8,
++			0x000001AC,
++			0x000001B0,
++			0x000001B4,
++			0x000001B8,
++			0x000001BC,
++			0x000001C0,
++			0x000001C4,
++			0x000001C8,
++			0x000001CC,
++			0x000001D0,
++			0x000001D4,
++			0x000001D8,
++			0x000001DC,
++			0x000001E0,
++			0x000001E4,
++			0x000001E8,
++			0x000001EC,
++			0x000001F0,
++			0x000001F4,
++			0x000001F8,
++			0x000001FC,
++			0x00000200,
++			0x00000204,
++			0x00000208,
++			0x0000020C,
++			0x00000210,
++			0x00000214,
++			0x00000218,
++			0x0000021C,
++			0x00000220,
++			0x00000224,
++			0x00000228,
++			0x0000022C,
++			0x00000230,
++			0x00000234,
++			0x00000238,
++			0x0000023C,
++			0x00000240,
++			0x00000244,
++			0x00000248,
++			0x0000024C,
++			0x00000250,
++			0x00000254,
++			0x00000258,
++			0x0000025C,
++			0x00000260,
++			0x00000264,
++			0x00000268,
++			0x0000026C,
++			0x00000270,
++			0x00000274,
++			0x00000278,
++			0x0000027C,
++			0x00000280,
++			0x00000284,
++			0x00000288,
++			0x0000028C,
++			0x00000290,
++			0x00000294,
++			0x00000298,
++			0x0000029C,
++			0x000002A0,
++			0x000002A4,
++			0x000002A8,
++			0x000002AC,
++			0x000002B0,
++			0x000002B4,
++			0x000002B8,
++			0x000002BC,
++			0x000002C0,
++			0x000002C4,
++			0x000002C8,
++			0x000002CC,
++			0x000002D0,
++			0x000002D4,
++			0x000002D8,
++			0x000002DC,
++			0x000002E0,
++			0x000002E4,
++			0x000002E8,
++			0x000002EC,
++			0x000002F0,
++			0x000002F4,
++			0x000002F8,
++			0x000002FC,
++			0x00000300,
++			0x00000304,
++			0x00000308,
++			0x0000030C,
++			0x00000310,
++			0x00000314,
++			0x00000318,
++			0x0000031C,
++			0x00000320,
++			0x00000324,
++			0x00000328,
++			0x0000032C,
++			0x00000330,
++			0x00000334,
++			0x00000338,
++			0x0000033C,
++			0x00000340,
++			0x00000344,
++			0x00000348,
++			0x0000034C,
++			0x00000350,
++			0x00000354,
++			0x00000358,
++			0x0000035C,
++			0x00000360,
++			0x00000364,
++			0x00000368,
++			0x0000036C,
++			0x00000370,
++			0x00000374,
++			0x00000378,
++			0x0000037C,
++			0x00000380,
++			0x00000384,
++			0x00000388,
++			0x0000038C,
++			0x00000390,
++			0x00000394,
++			0x00000398,
++			0x0000039C,
++			0x000003A0,
++			0x000003A4,
++			0x000003A8,
++			0x000003AC,
++			0x000003B0,
++			0x000003B4,
++			0x000003B8,
++			0x000003BC,
++			0x000003C0,
++			0x000003C4,
++			0x000003C8,
++			0x000003CC,
++			0x000003D0,
++			0x000003D4,
++			0x000003D8,
++			0x000003DC,
++			0x000003E0,
++			0x000003E4,
++			0x000003E8,
++			0x000003EC,
++			0x000003F0,
++			0x000003F4,
++			0x000003F8,
++			0x000003FC,
++			0x000003FF,
++		},
++		// curve_ratio = 0.1
++		{
++			0x00000000,
++			0x0000024C,
++			0x00000276,
++			0x00000290,
++			0x000002A4,
++			0x000002B3,
++			0x000002C0,
++			0x000002CA,
++			0x000002D4,
++			0x000002DD,
++			0x000002E4,
++			0x000002EC,
++			0x000002F2,
++			0x000002F8,
++			0x000002FE,
++			0x00000303,
++			0x00000308,
++			0x0000030D,
++			0x00000311,
++			0x00000315,
++			0x0000031A,
++			0x0000031D,
++			0x00000321,
++			0x00000325,
++			0x00000328,
++			0x0000032B,
++			0x0000032F,
++			0x00000332,
++			0x00000335,
++			0x00000338,
++			0x0000033A,
++			0x0000033D,
++			0x00000340,
++			0x00000342,
++			0x00000345,
++			0x00000347,
++			0x0000034A,
++			0x0000034C,
++			0x0000034E,
++			0x00000350,
++			0x00000353,
++			0x00000355,
++			0x00000357,
++			0x00000359,
++			0x0000035B,
++			0x0000035D,
++			0x0000035E,
++			0x00000360,
++			0x00000362,
++			0x00000364,
++			0x00000366,
++			0x00000367,
++			0x00000369,
++			0x0000036B,
++			0x0000036C,
++			0x0000036E,
++			0x00000370,
++			0x00000371,
++			0x00000373,
++			0x00000374,
++			0x00000376,
++			0x00000377,
++			0x00000379,
++			0x0000037A,
++			0x0000037B,
++			0x0000037D,
++			0x0000037E,
++			0x00000380,
++			0x00000381,
++			0x00000382,
++			0x00000383,
++			0x00000385,
++			0x00000386,
++			0x00000387,
++			0x00000388,
++			0x0000038A,
++			0x0000038B,
++			0x0000038C,
++			0x0000038D,
++			0x0000038E,
++			0x00000390,
++			0x00000391,
++			0x00000392,
++			0x00000393,
++			0x00000394,
++			0x00000395,
++			0x00000396,
++			0x00000397,
++			0x00000398,
++			0x00000399,
++			0x0000039A,
++			0x0000039B,
++			0x0000039C,
++			0x0000039D,
++			0x0000039E,
++			0x0000039F,
++			0x000003A0,
++			0x000003A1,
++			0x000003A2,
++			0x000003A3,
++			0x000003A4,
++			0x000003A5,
++			0x000003A6,
++			0x000003A7,
++			0x000003A8,
++			0x000003A9,
++			0x000003AA,
++			0x000003AA,
++			0x000003AB,
++			0x000003AC,
++			0x000003AD,
++			0x000003AE,
++			0x000003AF,
++			0x000003B0,
++			0x000003B0,
++			0x000003B1,
++			0x000003B2,
++			0x000003B3,
++			0x000003B4,
++			0x000003B4,
++			0x000003B5,
++			0x000003B6,
++			0x000003B7,
++			0x000003B8,
++			0x000003B8,
++			0x000003B9,
++			0x000003BA,
++			0x000003BB,
++			0x000003BB,
++			0x000003BC,
++			0x000003BD,
++			0x000003BE,
++			0x000003BE,
++			0x000003BF,
++			0x000003C0,
++			0x000003C1,
++			0x000003C1,
++			0x000003C2,
++			0x000003C3,
++			0x000003C3,
++			0x000003C4,
++			0x000003C5,
++			0x000003C5,
++			0x000003C6,
++			0x000003C7,
++			0x000003C7,
++			0x000003C8,
++			0x000003C9,
++			0x000003C9,
++			0x000003CA,
++			0x000003CB,
++			0x000003CB,
++			0x000003CC,
++			0x000003CD,
++			0x000003CD,
++			0x000003CE,
++			0x000003CF,
++			0x000003CF,
++			0x000003D0,
++			0x000003D0,
++			0x000003D1,
++			0x000003D2,
++			0x000003D2,
++			0x000003D3,
++			0x000003D3,
++			0x000003D4,
++			0x000003D5,
++			0x000003D5,
++			0x000003D6,
++			0x000003D6,
++			0x000003D7,
++			0x000003D8,
++			0x000003D8,
++			0x000003D9,
++			0x000003D9,
++			0x000003DA,
++			0x000003DA,
++			0x000003DB,
++			0x000003DB,
++			0x000003DC,
++			0x000003DD,
++			0x000003DD,
++			0x000003DE,
++			0x000003DE,
++			0x000003DF,
++			0x000003DF,
++			0x000003E0,
++			0x000003E0,
++			0x000003E1,
++			0x000003E1,
++			0x000003E2,
++			0x000003E2,
++			0x000003E3,
++			0x000003E3,
++			0x000003E4,
++			0x000003E5,
++			0x000003E5,
++			0x000003E6,
++			0x000003E6,
++			0x000003E7,
++			0x000003E7,
++			0x000003E8,
++			0x000003E8,
++			0x000003E9,
++			0x000003E9,
++			0x000003EA,
++			0x000003EA,
++			0x000003EA,
++			0x000003EB,
++			0x000003EB,
++			0x000003EC,
++			0x000003EC,
++			0x000003ED,
++			0x000003ED,
++			0x000003EE,
++			0x000003EE,
++			0x000003EF,
++			0x000003EF,
++			0x000003F0,
++			0x000003F0,
++			0x000003F1,
++			0x000003F1,
++			0x000003F2,
++			0x000003F2,
++			0x000003F2,
++			0x000003F3,
++			0x000003F3,
++			0x000003F4,
++			0x000003F4,
++			0x000003F5,
++			0x000003F5,
++			0x000003F6,
++			0x000003F6,
++			0x000003F6,
++			0x000003F7,
++			0x000003F7,
++			0x000003F8,
++			0x000003F8,
++			0x000003F9,
++			0x000003F9,
++			0x000003F9,
++			0x000003FA,
++			0x000003FA,
++			0x000003FB,
++			0x000003FB,
++			0x000003FC,
++			0x000003FC,
++			0x000003FC,
++			0x000003FD,
++			0x000003FD,
++			0x000003FE,
++			0x000003FE,
++			0x000003FE,
++			0x000003FF,
++			0x000003FF,
++			0x000003FF,
++			0x000003FF,
++		},
++		// curve_ratio = 0.2
++		{
++			0x00000000,
++			0x00000152,
++			0x00000184,
++			0x000001A5,
++			0x000001BE,
++			0x000001D2,
++			0x000001E3,
++			0x000001F3,
++			0x00000200,
++			0x0000020C,
++			0x00000217,
++			0x00000222,
++			0x0000022B,
++			0x00000234,
++			0x0000023D,
++			0x00000245,
++			0x0000024C,
++			0x00000253,
++			0x0000025A,
++			0x00000261,
++			0x00000267,
++			0x0000026D,
++			0x00000273,
++			0x00000278,
++			0x0000027E,
++			0x00000283,
++			0x00000288,
++			0x0000028D,
++			0x00000292,
++			0x00000296,
++			0x0000029B,
++			0x0000029F,
++			0x000002A4,
++			0x000002A8,
++			0x000002AC,
++			0x000002B0,
++			0x000002B4,
++			0x000002B7,
++			0x000002BB,
++			0x000002BF,
++			0x000002C2,
++			0x000002C6,
++			0x000002C9,
++			0x000002CD,
++			0x000002D0,
++			0x000002D3,
++			0x000002D6,
++			0x000002DA,
++			0x000002DD,
++			0x000002E0,
++			0x000002E3,
++			0x000002E6,
++			0x000002E8,
++			0x000002EB,
++			0x000002EE,
++			0x000002F1,
++			0x000002F4,
++			0x000002F6,
++			0x000002F9,
++			0x000002FC,
++			0x000002FE,
++			0x00000301,
++			0x00000303,
++			0x00000306,
++			0x00000308,
++			0x0000030A,
++			0x0000030D,
++			0x0000030F,
++			0x00000312,
++			0x00000314,
++			0x00000316,
++			0x00000318,
++			0x0000031B,
++			0x0000031D,
++			0x0000031F,
++			0x00000321,
++			0x00000323,
++			0x00000325,
++			0x00000327,
++			0x00000329,
++			0x0000032B,
++			0x0000032D,
++			0x0000032F,
++			0x00000331,
++			0x00000333,
++			0x00000335,
++			0x00000337,
++			0x00000339,
++			0x0000033B,
++			0x0000033D,
++			0x0000033F,
++			0x00000341,
++			0x00000342,
++			0x00000344,
++			0x00000346,
++			0x00000348,
++			0x0000034A,
++			0x0000034B,
++			0x0000034D,
++			0x0000034F,
++			0x00000351,
++			0x00000352,
++			0x00000354,
++			0x00000356,
++			0x00000357,
++			0x00000359,
++			0x0000035A,
++			0x0000035C,
++			0x0000035E,
++			0x0000035F,
++			0x00000361,
++			0x00000362,
++			0x00000364,
++			0x00000365,
++			0x00000367,
++			0x00000369,
++			0x0000036A,
++			0x0000036C,
++			0x0000036D,
++			0x0000036F,
++			0x00000370,
++			0x00000371,
++			0x00000373,
++			0x00000374,
++			0x00000376,
++			0x00000377,
++			0x00000379,
++			0x0000037A,
++			0x0000037B,
++			0x0000037D,
++			0x0000037E,
++			0x00000380,
++			0x00000381,
++			0x00000382,
++			0x00000384,
++			0x00000385,
++			0x00000386,
++			0x00000388,
++			0x00000389,
++			0x0000038A,
++			0x0000038C,
++			0x0000038D,
++			0x0000038E,
++			0x0000038F,
++			0x00000391,
++			0x00000392,
++			0x00000393,
++			0x00000394,
++			0x00000396,
++			0x00000397,
++			0x00000398,
++			0x00000399,
++			0x0000039B,
++			0x0000039C,
++			0x0000039D,
++			0x0000039E,
++			0x0000039F,
++			0x000003A1,
++			0x000003A2,
++			0x000003A3,
++			0x000003A4,
++			0x000003A5,
++			0x000003A6,
++			0x000003A8,
++			0x000003A9,
++			0x000003AA,
++			0x000003AB,
++			0x000003AC,
++			0x000003AD,
++			0x000003AE,
++			0x000003AF,
++			0x000003B1,
++			0x000003B2,
++			0x000003B3,
++			0x000003B4,
++			0x000003B5,
++			0x000003B6,
++			0x000003B7,
++			0x000003B8,
++			0x000003B9,
++			0x000003BA,
++			0x000003BB,
++			0x000003BC,
++			0x000003BE,
++			0x000003BF,
++			0x000003C0,
++			0x000003C1,
++			0x000003C2,
++			0x000003C3,
++			0x000003C4,
++			0x000003C5,
++			0x000003C6,
++			0x000003C7,
++			0x000003C8,
++			0x000003C9,
++			0x000003CA,
++			0x000003CB,
++			0x000003CC,
++			0x000003CD,
++			0x000003CE,
++			0x000003CF,
++			0x000003D0,
++			0x000003D1,
++			0x000003D2,
++			0x000003D3,
++			0x000003D3,
++			0x000003D4,
++			0x000003D5,
++			0x000003D6,
++			0x000003D7,
++			0x000003D8,
++			0x000003D9,
++			0x000003DA,
++			0x000003DB,
++			0x000003DC,
++			0x000003DD,
++			0x000003DE,
++			0x000003DF,
++			0x000003E0,
++			0x000003E1,
++			0x000003E1,
++			0x000003E2,
++			0x000003E3,
++			0x000003E4,
++			0x000003E5,
++			0x000003E6,
++			0x000003E7,
++			0x000003E8,
++			0x000003E9,
++			0x000003E9,
++			0x000003EA,
++			0x000003EB,
++			0x000003EC,
++			0x000003ED,
++			0x000003EE,
++			0x000003EF,
++			0x000003EF,
++			0x000003F0,
++			0x000003F1,
++			0x000003F2,
++			0x000003F3,
++			0x000003F4,
++			0x000003F5,
++			0x000003F5,
++			0x000003F6,
++			0x000003F7,
++			0x000003F8,
++			0x000003F9,
++			0x000003FA,
++			0x000003FA,
++			0x000003FB,
++			0x000003FC,
++			0x000003FD,
++			0x000003FE,
++			0x000003FE,
++			0x000003FF,
++			0x000003FF,
++		},
++		// curve_ratio = 0.3
++		{
++			0x00000000,
++			0x000000C2,
++			0x000000EF,
++			0x0000010E,
++			0x00000126,
++			0x0000013A,
++			0x0000014C,
++			0x0000015C,
++			0x0000016A,
++			0x00000177,
++			0x00000183,
++			0x0000018E,
++			0x00000199,
++			0x000001A3,
++			0x000001AC,
++			0x000001B5,
++			0x000001BE,
++			0x000001C6,
++			0x000001CE,
++			0x000001D5,
++			0x000001DD,
++			0x000001E4,
++			0x000001EA,
++			0x000001F1,
++			0x000001F7,
++			0x000001FE,
++			0x00000204,
++			0x00000209,
++			0x0000020F,
++			0x00000215,
++			0x0000021A,
++			0x00000220,
++			0x00000225,
++			0x0000022A,
++			0x0000022F,
++			0x00000234,
++			0x00000238,
++			0x0000023D,
++			0x00000242,
++			0x00000246,
++			0x0000024B,
++			0x0000024F,
++			0x00000253,
++			0x00000258,
++			0x0000025C,
++			0x00000260,
++			0x00000264,
++			0x00000268,
++			0x0000026C,
++			0x00000270,
++			0x00000273,
++			0x00000277,
++			0x0000027B,
++			0x0000027E,
++			0x00000282,
++			0x00000286,
++			0x00000289,
++			0x0000028D,
++			0x00000290,
++			0x00000293,
++			0x00000297,
++			0x0000029A,
++			0x0000029D,
++			0x000002A0,
++			0x000002A4,
++			0x000002A7,
++			0x000002AA,
++			0x000002AD,
++			0x000002B0,
++			0x000002B3,
++			0x000002B6,
++			0x000002B9,
++			0x000002BC,
++			0x000002BF,
++			0x000002C2,
++			0x000002C5,
++			0x000002C7,
++			0x000002CA,
++			0x000002CD,
++			0x000002D0,
++			0x000002D2,
++			0x000002D5,
++			0x000002D8,
++			0x000002DA,
++			0x000002DD,
++			0x000002E0,
++			0x000002E2,
++			0x000002E5,
++			0x000002E7,
++			0x000002EA,
++			0x000002EC,
++			0x000002EF,
++			0x000002F1,
++			0x000002F4,
++			0x000002F6,
++			0x000002F9,
++			0x000002FB,
++			0x000002FD,
++			0x00000300,
++			0x00000302,
++			0x00000304,
++			0x00000307,
++			0x00000309,
++			0x0000030B,
++			0x0000030E,
++			0x00000310,
++			0x00000312,
++			0x00000314,
++			0x00000316,
++			0x00000319,
++			0x0000031B,
++			0x0000031D,
++			0x0000031F,
++			0x00000321,
++			0x00000323,
++			0x00000325,
++			0x00000328,
++			0x0000032A,
++			0x0000032C,
++			0x0000032E,
++			0x00000330,
++			0x00000332,
++			0x00000334,
++			0x00000336,
++			0x00000338,
++			0x0000033A,
++			0x0000033C,
++			0x0000033E,
++			0x00000340,
++			0x00000342,
++			0x00000344,
++			0x00000346,
++			0x00000347,
++			0x00000349,
++			0x0000034B,
++			0x0000034D,
++			0x0000034F,
++			0x00000351,
++			0x00000353,
++			0x00000355,
++			0x00000356,
++			0x00000358,
++			0x0000035A,
++			0x0000035C,
++			0x0000035E,
++			0x0000035F,
++			0x00000361,
++			0x00000363,
++			0x00000365,
++			0x00000367,
++			0x00000368,
++			0x0000036A,
++			0x0000036C,
++			0x0000036D,
++			0x0000036F,
++			0x00000371,
++			0x00000373,
++			0x00000374,
++			0x00000376,
++			0x00000378,
++			0x00000379,
++			0x0000037B,
++			0x0000037D,
++			0x0000037E,
++			0x00000380,
++			0x00000382,
++			0x00000383,
++			0x00000385,
++			0x00000386,
++			0x00000388,
++			0x0000038A,
++			0x0000038B,
++			0x0000038D,
++			0x0000038E,
++			0x00000390,
++			0x00000392,
++			0x00000393,
++			0x00000395,
++			0x00000396,
++			0x00000398,
++			0x00000399,
++			0x0000039B,
++			0x0000039C,
++			0x0000039E,
++			0x0000039F,
++			0x000003A1,
++			0x000003A2,
++			0x000003A4,
++			0x000003A5,
++			0x000003A7,
++			0x000003A8,
++			0x000003AA,
++			0x000003AB,
++			0x000003AD,
++			0x000003AE,
++			0x000003B0,
++			0x000003B1,
++			0x000003B3,
++			0x000003B4,
++			0x000003B5,
++			0x000003B7,
++			0x000003B8,
++			0x000003BA,
++			0x000003BB,
++			0x000003BD,
++			0x000003BE,
++			0x000003BF,
++			0x000003C1,
++			0x000003C2,
++			0x000003C4,
++			0x000003C5,
++			0x000003C6,
++			0x000003C8,
++			0x000003C9,
++			0x000003CA,
++			0x000003CC,
++			0x000003CD,
++			0x000003CE,
++			0x000003D0,
++			0x000003D1,
++			0x000003D2,
++			0x000003D4,
++			0x000003D5,
++			0x000003D6,
++			0x000003D8,
++			0x000003D9,
++			0x000003DA,
++			0x000003DC,
++			0x000003DD,
++			0x000003DE,
++			0x000003E0,
++			0x000003E1,
++			0x000003E2,
++			0x000003E3,
++			0x000003E5,
++			0x000003E6,
++			0x000003E7,
++			0x000003E9,
++			0x000003EA,
++			0x000003EB,
++			0x000003EC,
++			0x000003EE,
++			0x000003EF,
++			0x000003F0,
++			0x000003F1,
++			0x000003F3,
++			0x000003F4,
++			0x000003F5,
++			0x000003F6,
++			0x000003F8,
++			0x000003F9,
++			0x000003FA,
++			0x000003FB,
++			0x000003FC,
++			0x000003FE,
++			0x000003FF,
++			0x000003FF,
++		},
++		// curve_ratio = 0.4
++		{
++			0x00000000,
++			0x0000006F,
++			0x00000093,
++			0x000000AD,
++			0x000000C2,
++			0x000000D4,
++			0x000000E4,
++			0x000000F3,
++			0x00000100,
++			0x0000010C,
++			0x00000118,
++			0x00000123,
++			0x0000012D,
++			0x00000137,
++			0x00000140,
++			0x00000149,
++			0x00000152,
++			0x0000015A,
++			0x00000162,
++			0x0000016A,
++			0x00000171,
++			0x00000179,
++			0x00000180,
++			0x00000187,
++			0x0000018D,
++			0x00000194,
++			0x0000019A,
++			0x000001A0,
++			0x000001A7,
++			0x000001AD,
++			0x000001B2,
++			0x000001B8,
++			0x000001BE,
++			0x000001C3,
++			0x000001C9,
++			0x000001CE,
++			0x000001D3,
++			0x000001D8,
++			0x000001DD,
++			0x000001E2,
++			0x000001E7,
++			0x000001EC,
++			0x000001F1,
++			0x000001F6,
++			0x000001FA,
++			0x000001FF,
++			0x00000203,
++			0x00000208,
++			0x0000020C,
++			0x00000211,
++			0x00000215,
++			0x00000219,
++			0x0000021D,
++			0x00000221,
++			0x00000225,
++			0x0000022A,
++			0x0000022E,
++			0x00000232,
++			0x00000235,
++			0x00000239,
++			0x0000023D,
++			0x00000241,
++			0x00000245,
++			0x00000248,
++			0x0000024C,
++			0x00000250,
++			0x00000253,
++			0x00000257,
++			0x0000025B,
++			0x0000025E,
++			0x00000262,
++			0x00000265,
++			0x00000269,
++			0x0000026C,
++			0x0000026F,
++			0x00000273,
++			0x00000276,
++			0x00000279,
++			0x0000027D,
++			0x00000280,
++			0x00000283,
++			0x00000286,
++			0x00000289,
++			0x0000028D,
++			0x00000290,
++			0x00000293,
++			0x00000296,
++			0x00000299,
++			0x0000029C,
++			0x0000029F,
++			0x000002A2,
++			0x000002A5,
++			0x000002A8,
++			0x000002AB,
++			0x000002AE,
++			0x000002B1,
++			0x000002B4,
++			0x000002B7,
++			0x000002B9,
++			0x000002BC,
++			0x000002BF,
++			0x000002C2,
++			0x000002C5,
++			0x000002C7,
++			0x000002CA,
++			0x000002CD,
++			0x000002D0,
++			0x000002D2,
++			0x000002D5,
++			0x000002D8,
++			0x000002DA,
++			0x000002DD,
++			0x000002E0,
++			0x000002E2,
++			0x000002E5,
++			0x000002E8,
++			0x000002EA,
++			0x000002ED,
++			0x000002EF,
++			0x000002F2,
++			0x000002F4,
++			0x000002F7,
++			0x000002F9,
++			0x000002FC,
++			0x000002FE,
++			0x00000301,
++			0x00000303,
++			0x00000306,
++			0x00000308,
++			0x0000030A,
++			0x0000030D,
++			0x0000030F,
++			0x00000312,
++			0x00000314,
++			0x00000316,
++			0x00000319,
++			0x0000031B,
++			0x0000031D,
++			0x00000320,
++			0x00000322,
++			0x00000324,
++			0x00000327,
++			0x00000329,
++			0x0000032B,
++			0x0000032D,
++			0x00000330,
++			0x00000332,
++			0x00000334,
++			0x00000336,
++			0x00000339,
++			0x0000033B,
++			0x0000033D,
++			0x0000033F,
++			0x00000341,
++			0x00000344,
++			0x00000346,
++			0x00000348,
++			0x0000034A,
++			0x0000034C,
++			0x0000034E,
++			0x00000351,
++			0x00000353,
++			0x00000355,
++			0x00000357,
++			0x00000359,
++			0x0000035B,
++			0x0000035D,
++			0x0000035F,
++			0x00000361,
++			0x00000363,
++			0x00000365,
++			0x00000367,
++			0x00000369,
++			0x0000036B,
++			0x0000036D,
++			0x0000036F,
++			0x00000371,
++			0x00000373,
++			0x00000375,
++			0x00000377,
++			0x00000379,
++			0x0000037B,
++			0x0000037D,
++			0x0000037F,
++			0x00000381,
++			0x00000383,
++			0x00000385,
++			0x00000387,
++			0x00000389,
++			0x0000038B,
++			0x0000038D,
++			0x0000038F,
++			0x00000391,
++			0x00000393,
++			0x00000394,
++			0x00000396,
++			0x00000398,
++			0x0000039A,
++			0x0000039C,
++			0x0000039E,
++			0x000003A0,
++			0x000003A2,
++			0x000003A3,
++			0x000003A5,
++			0x000003A7,
++			0x000003A9,
++			0x000003AB,
++			0x000003AD,
++			0x000003AE,
++			0x000003B0,
++			0x000003B2,
++			0x000003B4,
++			0x000003B6,
++			0x000003B7,
++			0x000003B9,
++			0x000003BB,
++			0x000003BD,
++			0x000003BE,
++			0x000003C0,
++			0x000003C2,
++			0x000003C4,
++			0x000003C6,
++			0x000003C7,
++			0x000003C9,
++			0x000003CB,
++			0x000003CC,
++			0x000003CE,
++			0x000003D0,
++			0x000003D2,
++			0x000003D3,
++			0x000003D5,
++			0x000003D7,
++			0x000003D8,
++			0x000003DA,
++			0x000003DC,
++			0x000003DE,
++			0x000003DF,
++			0x000003E1,
++			0x000003E3,
++			0x000003E4,
++			0x000003E6,
++			0x000003E8,
++			0x000003E9,
++			0x000003EB,
++			0x000003ED,
++			0x000003EE,
++			0x000003F0,
++			0x000003F1,
++			0x000003F3,
++			0x000003F5,
++			0x000003F6,
++			0x000003F8,
++			0x000003FA,
++			0x000003FB,
++			0x000003FD,
++			0x000003FE,
++			0x000003FF,
++		},
++		// curve_ratio = 0.5
++		{
++			0x00000000,
++			0x00000040,
++			0x0000005B,
++			0x0000006F,
++			0x00000080,
++			0x0000008F,
++			0x0000009D,
++			0x000000A9,
++			0x000000B5,
++			0x000000C0,
++			0x000000CA,
++			0x000000D4,
++			0x000000DE,
++			0x000000E7,
++			0x000000EF,
++			0x000000F8,
++			0x00000100,
++			0x00000108,
++			0x00000110,
++			0x00000117,
++			0x0000011E,
++			0x00000125,
++			0x0000012C,
++			0x00000133,
++			0x0000013A,
++			0x00000140,
++			0x00000146,
++			0x0000014D,
++			0x00000153,
++			0x00000159,
++			0x0000015F,
++			0x00000164,
++			0x0000016A,
++			0x00000170,
++			0x00000175,
++			0x0000017B,
++			0x00000180,
++			0x00000185,
++			0x0000018B,
++			0x00000190,
++			0x00000195,
++			0x0000019A,
++			0x0000019F,
++			0x000001A4,
++			0x000001A9,
++			0x000001AD,
++			0x000001B2,
++			0x000001B7,
++			0x000001BB,
++			0x000001C0,
++			0x000001C5,
++			0x000001C9,
++			0x000001CE,
++			0x000001D2,
++			0x000001D6,
++			0x000001DB,
++			0x000001DF,
++			0x000001E3,
++			0x000001E7,
++			0x000001EC,
++			0x000001F0,
++			0x000001F4,
++			0x000001F8,
++			0x000001FC,
++			0x00000200,
++			0x00000204,
++			0x00000208,
++			0x0000020C,
++			0x00000210,
++			0x00000214,
++			0x00000217,
++			0x0000021B,
++			0x0000021F,
++			0x00000223,
++			0x00000227,
++			0x0000022A,
++			0x0000022E,
++			0x00000232,
++			0x00000235,
++			0x00000239,
++			0x0000023C,
++			0x00000240,
++			0x00000244,
++			0x00000247,
++			0x0000024B,
++			0x0000024E,
++			0x00000252,
++			0x00000255,
++			0x00000258,
++			0x0000025C,
++			0x0000025F,
++			0x00000263,
++			0x00000266,
++			0x00000269,
++			0x0000026D,
++			0x00000270,
++			0x00000273,
++			0x00000276,
++			0x0000027A,
++			0x0000027D,
++			0x00000280,
++			0x00000283,
++			0x00000286,
++			0x0000028A,
++			0x0000028D,
++			0x00000290,
++			0x00000293,
++			0x00000296,
++			0x00000299,
++			0x0000029C,
++			0x0000029F,
++			0x000002A2,
++			0x000002A5,
++			0x000002A8,
++			0x000002AB,
++			0x000002AE,
++			0x000002B1,
++			0x000002B4,
++			0x000002B7,
++			0x000002BA,
++			0x000002BD,
++			0x000002C0,
++			0x000002C3,
++			0x000002C6,
++			0x000002C9,
++			0x000002CC,
++			0x000002CE,
++			0x000002D1,
++			0x000002D4,
++			0x000002D7,
++			0x000002DA,
++			0x000002DD,
++			0x000002DF,
++			0x000002E2,
++			0x000002E5,
++			0x000002E8,
++			0x000002EA,
++			0x000002ED,
++			0x000002F0,
++			0x000002F3,
++			0x000002F5,
++			0x000002F8,
++			0x000002FB,
++			0x000002FD,
++			0x00000300,
++			0x00000303,
++			0x00000305,
++			0x00000308,
++			0x0000030B,
++			0x0000030D,
++			0x00000310,
++			0x00000312,
++			0x00000315,
++			0x00000318,
++			0x0000031A,
++			0x0000031D,
++			0x0000031F,
++			0x00000322,
++			0x00000324,
++			0x00000327,
++			0x0000032A,
++			0x0000032C,
++			0x0000032F,
++			0x00000331,
++			0x00000334,
++			0x00000336,
++			0x00000339,
++			0x0000033B,
++			0x0000033E,
++			0x00000340,
++			0x00000342,
++			0x00000345,
++			0x00000347,
++			0x0000034A,
++			0x0000034C,
++			0x0000034F,
++			0x00000351,
++			0x00000353,
++			0x00000356,
++			0x00000358,
++			0x0000035B,
++			0x0000035D,
++			0x0000035F,
++			0x00000362,
++			0x00000364,
++			0x00000366,
++			0x00000369,
++			0x0000036B,
++			0x0000036E,
++			0x00000370,
++			0x00000372,
++			0x00000374,
++			0x00000377,
++			0x00000379,
++			0x0000037B,
++			0x0000037E,
++			0x00000380,
++			0x00000382,
++			0x00000385,
++			0x00000387,
++			0x00000389,
++			0x0000038B,
++			0x0000038E,
++			0x00000390,
++			0x00000392,
++			0x00000394,
++			0x00000397,
++			0x00000399,
++			0x0000039B,
++			0x0000039D,
++			0x0000039F,
++			0x000003A2,
++			0x000003A4,
++			0x000003A6,
++			0x000003A8,
++			0x000003AA,
++			0x000003AD,
++			0x000003AF,
++			0x000003B1,
++			0x000003B3,
++			0x000003B5,
++			0x000003B7,
++			0x000003BA,
++			0x000003BC,
++			0x000003BE,
++			0x000003C0,
++			0x000003C2,
++			0x000003C4,
++			0x000003C6,
++			0x000003C8,
++			0x000003CB,
++			0x000003CD,
++			0x000003CF,
++			0x000003D1,
++			0x000003D3,
++			0x000003D5,
++			0x000003D7,
++			0x000003D9,
++			0x000003DB,
++			0x000003DD,
++			0x000003DF,
++			0x000003E2,
++			0x000003E4,
++			0x000003E6,
++			0x000003E8,
++			0x000003EA,
++			0x000003EC,
++			0x000003EE,
++			0x000003F0,
++			0x000003F2,
++			0x000003F4,
++			0x000003F6,
++			0x000003F8,
++			0x000003FA,
++			0x000003FC,
++			0x000003FE,
++			0x000003FF,
++		},
++		// curve_ratio = 0.6
++		{
++			0x00000000,
++			0x00000025,
++			0x00000038,
++			0x00000047,
++			0x00000054,
++			0x00000061,
++			0x0000006C,
++			0x00000076,
++			0x00000080,
++			0x00000089,
++			0x00000092,
++			0x0000009B,
++			0x000000A3,
++			0x000000AB,
++			0x000000B3,
++			0x000000BB,
++			0x000000C2,
++			0x000000C9,
++			0x000000D0,
++			0x000000D7,
++			0x000000DE,
++			0x000000E4,
++			0x000000EB,
++			0x000000F1,
++			0x000000F7,
++			0x000000FE,
++			0x00000104,
++			0x0000010A,
++			0x0000010F,
++			0x00000115,
++			0x0000011B,
++			0x00000121,
++			0x00000126,
++			0x0000012C,
++			0x00000131,
++			0x00000136,
++			0x0000013C,
++			0x00000141,
++			0x00000146,
++			0x0000014B,
++			0x00000150,
++			0x00000155,
++			0x0000015A,
++			0x0000015F,
++			0x00000164,
++			0x00000169,
++			0x0000016E,
++			0x00000172,
++			0x00000177,
++			0x0000017C,
++			0x00000180,
++			0x00000185,
++			0x0000018A,
++			0x0000018E,
++			0x00000193,
++			0x00000197,
++			0x0000019B,
++			0x000001A0,
++			0x000001A4,
++			0x000001A8,
++			0x000001AD,
++			0x000001B1,
++			0x000001B5,
++			0x000001BA,
++			0x000001BE,
++			0x000001C2,
++			0x000001C6,
++			0x000001CA,
++			0x000001CE,
++			0x000001D2,
++			0x000001D6,
++			0x000001DA,
++			0x000001DE,
++			0x000001E2,
++			0x000001E6,
++			0x000001EA,
++			0x000001EE,
++			0x000001F2,
++			0x000001F6,
++			0x000001FA,
++			0x000001FE,
++			0x00000201,
++			0x00000205,
++			0x00000209,
++			0x0000020D,
++			0x00000210,
++			0x00000214,
++			0x00000218,
++			0x0000021C,
++			0x0000021F,
++			0x00000223,
++			0x00000227,
++			0x0000022A,
++			0x0000022E,
++			0x00000231,
++			0x00000235,
++			0x00000238,
++			0x0000023C,
++			0x00000240,
++			0x00000243,
++			0x00000247,
++			0x0000024A,
++			0x0000024E,
++			0x00000251,
++			0x00000254,
++			0x00000258,
++			0x0000025B,
++			0x0000025F,
++			0x00000262,
++			0x00000265,
++			0x00000269,
++			0x0000026C,
++			0x00000270,
++			0x00000273,
++			0x00000276,
++			0x0000027A,
++			0x0000027D,
++			0x00000280,
++			0x00000283,
++			0x00000287,
++			0x0000028A,
++			0x0000028D,
++			0x00000290,
++			0x00000294,
++			0x00000297,
++			0x0000029A,
++			0x0000029D,
++			0x000002A0,
++			0x000002A4,
++			0x000002A7,
++			0x000002AA,
++			0x000002AD,
++			0x000002B0,
++			0x000002B3,
++			0x000002B6,
++			0x000002BA,
++			0x000002BD,
++			0x000002C0,
++			0x000002C3,
++			0x000002C6,
++			0x000002C9,
++			0x000002CC,
++			0x000002CF,
++			0x000002D2,
++			0x000002D5,
++			0x000002D8,
++			0x000002DB,
++			0x000002DE,
++			0x000002E1,
++			0x000002E4,
++			0x000002E7,
++			0x000002EA,
++			0x000002ED,
++			0x000002F0,
++			0x000002F3,
++			0x000002F6,
++			0x000002F9,
++			0x000002FC,
++			0x000002FF,
++			0x00000301,
++			0x00000304,
++			0x00000307,
++			0x0000030A,
++			0x0000030D,
++			0x00000310,
++			0x00000313,
++			0x00000316,
++			0x00000318,
++			0x0000031B,
++			0x0000031E,
++			0x00000321,
++			0x00000324,
++			0x00000327,
++			0x00000329,
++			0x0000032C,
++			0x0000032F,
++			0x00000332,
++			0x00000335,
++			0x00000337,
++			0x0000033A,
++			0x0000033D,
++			0x00000340,
++			0x00000342,
++			0x00000345,
++			0x00000348,
++			0x0000034B,
++			0x0000034D,
++			0x00000350,
++			0x00000353,
++			0x00000356,
++			0x00000358,
++			0x0000035B,
++			0x0000035E,
++			0x00000360,
++			0x00000363,
++			0x00000366,
++			0x00000368,
++			0x0000036B,
++			0x0000036E,
++			0x00000370,
++			0x00000373,
++			0x00000376,
++			0x00000378,
++			0x0000037B,
++			0x0000037E,
++			0x00000380,
++			0x00000383,
++			0x00000385,
++			0x00000388,
++			0x0000038B,
++			0x0000038D,
++			0x00000390,
++			0x00000392,
++			0x00000395,
++			0x00000398,
++			0x0000039A,
++			0x0000039D,
++			0x0000039F,
++			0x000003A2,
++			0x000003A4,
++			0x000003A7,
++			0x000003AA,
++			0x000003AC,
++			0x000003AF,
++			0x000003B1,
++			0x000003B4,
++			0x000003B6,
++			0x000003B9,
++			0x000003BB,
++			0x000003BE,
++			0x000003C0,
++			0x000003C3,
++			0x000003C5,
++			0x000003C8,
++			0x000003CA,
++			0x000003CD,
++			0x000003CF,
++			0x000003D2,
++			0x000003D4,
++			0x000003D7,
++			0x000003D9,
++			0x000003DC,
++			0x000003DE,
++			0x000003E0,
++			0x000003E3,
++			0x000003E5,
++			0x000003E8,
++			0x000003EA,
++			0x000003ED,
++			0x000003EF,
++			0x000003F2,
++			0x000003F4,
++			0x000003F6,
++			0x000003F9,
++			0x000003FB,
++			0x000003FE,
++			0x000003FF,
++		},
++		// curve_ratio = 0.7
++		{
++			0x00000000,
++			0x00000015,
++			0x00000022,
++			0x0000002E,
++			0x00000038,
++			0x00000041,
++			0x0000004A,
++			0x00000052,
++			0x0000005B,
++			0x00000062,
++			0x0000006A,
++			0x00000071,
++			0x00000078,
++			0x0000007F,
++			0x00000086,
++			0x0000008D,
++			0x00000093,
++			0x00000099,
++			0x000000A0,
++			0x000000A6,
++			0x000000AC,
++			0x000000B2,
++			0x000000B8,
++			0x000000BE,
++			0x000000C3,
++			0x000000C9,
++			0x000000CF,
++			0x000000D4,
++			0x000000DA,
++			0x000000DF,
++			0x000000E4,
++			0x000000EA,
++			0x000000EF,
++			0x000000F4,
++			0x000000F9,
++			0x000000FE,
++			0x00000103,
++			0x00000108,
++			0x0000010D,
++			0x00000112,
++			0x00000117,
++			0x0000011C,
++			0x00000121,
++			0x00000126,
++			0x0000012B,
++			0x0000012F,
++			0x00000134,
++			0x00000139,
++			0x0000013D,
++			0x00000142,
++			0x00000146,
++			0x0000014B,
++			0x00000150,
++			0x00000154,
++			0x00000159,
++			0x0000015D,
++			0x00000161,
++			0x00000166,
++			0x0000016A,
++			0x0000016F,
++			0x00000173,
++			0x00000177,
++			0x0000017B,
++			0x00000180,
++			0x00000184,
++			0x00000188,
++			0x0000018C,
++			0x00000191,
++			0x00000195,
++			0x00000199,
++			0x0000019D,
++			0x000001A1,
++			0x000001A5,
++			0x000001A9,
++			0x000001AE,
++			0x000001B2,
++			0x000001B6,
++			0x000001BA,
++			0x000001BE,
++			0x000001C2,
++			0x000001C6,
++			0x000001CA,
++			0x000001CE,
++			0x000001D1,
++			0x000001D5,
++			0x000001D9,
++			0x000001DD,
++			0x000001E1,
++			0x000001E5,
++			0x000001E9,
++			0x000001ED,
++			0x000001F0,
++			0x000001F4,
++			0x000001F8,
++			0x000001FC,
++			0x00000200,
++			0x00000203,
++			0x00000207,
++			0x0000020B,
++			0x0000020F,
++			0x00000212,
++			0x00000216,
++			0x0000021A,
++			0x0000021D,
++			0x00000221,
++			0x00000225,
++			0x00000228,
++			0x0000022C,
++			0x00000230,
++			0x00000233,
++			0x00000237,
++			0x0000023B,
++			0x0000023E,
++			0x00000242,
++			0x00000245,
++			0x00000249,
++			0x0000024C,
++			0x00000250,
++			0x00000253,
++			0x00000257,
++			0x0000025B,
++			0x0000025E,
++			0x00000262,
++			0x00000265,
++			0x00000268,
++			0x0000026C,
++			0x0000026F,
++			0x00000273,
++			0x00000276,
++			0x0000027A,
++			0x0000027D,
++			0x00000281,
++			0x00000284,
++			0x00000287,
++			0x0000028B,
++			0x0000028E,
++			0x00000292,
++			0x00000295,
++			0x00000298,
++			0x0000029C,
++			0x0000029F,
++			0x000002A3,
++			0x000002A6,
++			0x000002A9,
++			0x000002AD,
++			0x000002B0,
++			0x000002B3,
++			0x000002B6,
++			0x000002BA,
++			0x000002BD,
++			0x000002C0,
++			0x000002C4,
++			0x000002C7,
++			0x000002CA,
++			0x000002CD,
++			0x000002D1,
++			0x000002D4,
++			0x000002D7,
++			0x000002DA,
++			0x000002DE,
++			0x000002E1,
++			0x000002E4,
++			0x000002E7,
++			0x000002EB,
++			0x000002EE,
++			0x000002F1,
++			0x000002F4,
++			0x000002F7,
++			0x000002FB,
++			0x000002FE,
++			0x00000301,
++			0x00000304,
++			0x00000307,
++			0x0000030A,
++			0x0000030D,
++			0x00000311,
++			0x00000314,
++			0x00000317,
++			0x0000031A,
++			0x0000031D,
++			0x00000320,
++			0x00000323,
++			0x00000326,
++			0x0000032A,
++			0x0000032D,
++			0x00000330,
++			0x00000333,
++			0x00000336,
++			0x00000339,
++			0x0000033C,
++			0x0000033F,
++			0x00000342,
++			0x00000345,
++			0x00000348,
++			0x0000034B,
++			0x0000034E,
++			0x00000351,
++			0x00000354,
++			0x00000357,
++			0x0000035A,
++			0x0000035D,
++			0x00000361,
++			0x00000364,
++			0x00000367,
++			0x0000036A,
++			0x0000036D,
++			0x00000370,
++			0x00000372,
++			0x00000375,
++			0x00000378,
++			0x0000037B,
++			0x0000037E,
++			0x00000381,
++			0x00000384,
++			0x00000387,
++			0x0000038A,
++			0x0000038D,
++			0x00000390,
++			0x00000393,
++			0x00000396,
++			0x00000399,
++			0x0000039C,
++			0x0000039F,
++			0x000003A2,
++			0x000003A5,
++			0x000003A8,
++			0x000003AA,
++			0x000003AD,
++			0x000003B0,
++			0x000003B3,
++			0x000003B6,
++			0x000003B9,
++			0x000003BC,
++			0x000003BF,
++			0x000003C2,
++			0x000003C4,
++			0x000003C7,
++			0x000003CA,
++			0x000003CD,
++			0x000003D0,
++			0x000003D3,
++			0x000003D6,
++			0x000003D8,
++			0x000003DB,
++			0x000003DE,
++			0x000003E1,
++			0x000003E4,
++			0x000003E7,
++			0x000003E9,
++			0x000003EC,
++			0x000003EF,
++			0x000003F2,
++			0x000003F5,
++			0x000003F8,
++			0x000003FA,
++			0x000003FD,
++			0x000003FF,
++		},
++		// curve_ratio = 0.8
++		{
++			0x00000000,
++			0x0000000C,
++			0x00000015,
++			0x0000001D,
++			0x00000025,
++			0x0000002C,
++			0x00000033,
++			0x0000003A,
++			0x00000040,
++			0x00000046,
++			0x0000004D,
++			0x00000053,
++			0x00000059,
++			0x0000005E,
++			0x00000064,
++			0x0000006A,
++			0x0000006F,
++			0x00000075,
++			0x0000007A,
++			0x00000080,
++			0x00000085,
++			0x0000008B,
++			0x00000090,
++			0x00000095,
++			0x0000009A,
++			0x0000009F,
++			0x000000A4,
++			0x000000A9,
++			0x000000AE,
++			0x000000B3,
++			0x000000B8,
++			0x000000BD,
++			0x000000C2,
++			0x000000C7,
++			0x000000CC,
++			0x000000D0,
++			0x000000D5,
++			0x000000DA,
++			0x000000DF,
++			0x000000E3,
++			0x000000E8,
++			0x000000ED,
++			0x000000F1,
++			0x000000F6,
++			0x000000FA,
++			0x000000FF,
++			0x00000103,
++			0x00000108,
++			0x0000010C,
++			0x00000111,
++			0x00000115,
++			0x0000011A,
++			0x0000011E,
++			0x00000122,
++			0x00000127,
++			0x0000012B,
++			0x00000130,
++			0x00000134,
++			0x00000138,
++			0x0000013D,
++			0x00000141,
++			0x00000145,
++			0x00000149,
++			0x0000014E,
++			0x00000152,
++			0x00000156,
++			0x0000015A,
++			0x0000015E,
++			0x00000163,
++			0x00000167,
++			0x0000016B,
++			0x0000016F,
++			0x00000173,
++			0x00000177,
++			0x0000017B,
++			0x0000017F,
++			0x00000184,
++			0x00000188,
++			0x0000018C,
++			0x00000190,
++			0x00000194,
++			0x00000198,
++			0x0000019C,
++			0x000001A0,
++			0x000001A4,
++			0x000001A8,
++			0x000001AC,
++			0x000001B0,
++			0x000001B4,
++			0x000001B8,
++			0x000001BC,
++			0x000001C0,
++			0x000001C4,
++			0x000001C8,
++			0x000001CB,
++			0x000001CF,
++			0x000001D3,
++			0x000001D7,
++			0x000001DB,
++			0x000001DF,
++			0x000001E3,
++			0x000001E7,
++			0x000001EA,
++			0x000001EE,
++			0x000001F2,
++			0x000001F6,
++			0x000001FA,
++			0x000001FE,
++			0x00000201,
++			0x00000205,
++			0x00000209,
++			0x0000020D,
++			0x00000211,
++			0x00000214,
++			0x00000218,
++			0x0000021C,
++			0x00000220,
++			0x00000223,
++			0x00000227,
++			0x0000022B,
++			0x0000022F,
++			0x00000232,
++			0x00000236,
++			0x0000023A,
++			0x0000023D,
++			0x00000241,
++			0x00000245,
++			0x00000248,
++			0x0000024C,
++			0x00000250,
++			0x00000253,
++			0x00000257,
++			0x0000025B,
++			0x0000025E,
++			0x00000262,
++			0x00000266,
++			0x00000269,
++			0x0000026D,
++			0x00000271,
++			0x00000274,
++			0x00000278,
++			0x0000027B,
++			0x0000027F,
++			0x00000283,
++			0x00000286,
++			0x0000028A,
++			0x0000028D,
++			0x00000291,
++			0x00000295,
++			0x00000298,
++			0x0000029C,
++			0x0000029F,
++			0x000002A3,
++			0x000002A6,
++			0x000002AA,
++			0x000002AD,
++			0x000002B1,
++			0x000002B5,
++			0x000002B8,
++			0x000002BC,
++			0x000002BF,
++			0x000002C3,
++			0x000002C6,
++			0x000002CA,
++			0x000002CD,
++			0x000002D1,
++			0x000002D4,
++			0x000002D8,
++			0x000002DB,
++			0x000002DF,
++			0x000002E2,
++			0x000002E5,
++			0x000002E9,
++			0x000002EC,
++			0x000002F0,
++			0x000002F3,
++			0x000002F7,
++			0x000002FA,
++			0x000002FE,
++			0x00000301,
++			0x00000305,
++			0x00000308,
++			0x0000030B,
++			0x0000030F,
++			0x00000312,
++			0x00000316,
++			0x00000319,
++			0x0000031C,
++			0x00000320,
++			0x00000323,
++			0x00000327,
++			0x0000032A,
++			0x0000032D,
++			0x00000331,
++			0x00000334,
++			0x00000338,
++			0x0000033B,
++			0x0000033E,
++			0x00000342,
++			0x00000345,
++			0x00000348,
++			0x0000034C,
++			0x0000034F,
++			0x00000353,
++			0x00000356,
++			0x00000359,
++			0x0000035D,
++			0x00000360,
++			0x00000363,
++			0x00000367,
++			0x0000036A,
++			0x0000036D,
++			0x00000371,
++			0x00000374,
++			0x00000377,
++			0x0000037B,
++			0x0000037E,
++			0x00000381,
++			0x00000384,
++			0x00000388,
++			0x0000038B,
++			0x0000038E,
++			0x00000392,
++			0x00000395,
++			0x00000398,
++			0x0000039C,
++			0x0000039F,
++			0x000003A2,
++			0x000003A5,
++			0x000003A9,
++			0x000003AC,
++			0x000003AF,
++			0x000003B2,
++			0x000003B6,
++			0x000003B9,
++			0x000003BC,
++			0x000003BF,
++			0x000003C3,
++			0x000003C6,
++			0x000003C9,
++			0x000003CC,
++			0x000003D0,
++			0x000003D3,
++			0x000003D6,
++			0x000003D9,
++			0x000003DD,
++			0x000003E0,
++			0x000003E3,
++			0x000003E6,
++			0x000003EA,
++			0x000003ED,
++			0x000003F0,
++			0x000003F3,
++			0x000003F6,
++			0x000003FA,
++			0x000003FD,
++			0x000003FF,
++		},
++		// curve_ratio = 0.9
++		{
++			0x00000000,
++			0x00000007,
++			0x0000000D,
++			0x00000013,
++			0x00000018,
++			0x0000001E,
++			0x00000023,
++			0x00000028,
++			0x0000002D,
++			0x00000032,
++			0x00000037,
++			0x0000003C,
++			0x00000041,
++			0x00000046,
++			0x0000004B,
++			0x00000050,
++			0x00000054,
++			0x00000059,
++			0x0000005E,
++			0x00000063,
++			0x00000067,
++			0x0000006C,
++			0x00000070,
++			0x00000075,
++			0x0000007A,
++			0x0000007E,
++			0x00000083,
++			0x00000087,
++			0x0000008C,
++			0x00000090,
++			0x00000095,
++			0x00000099,
++			0x0000009E,
++			0x000000A2,
++			0x000000A6,
++			0x000000AB,
++			0x000000AF,
++			0x000000B4,
++			0x000000B8,
++			0x000000BC,
++			0x000000C1,
++			0x000000C5,
++			0x000000C9,
++			0x000000CE,
++			0x000000D2,
++			0x000000D6,
++			0x000000DA,
++			0x000000DF,
++			0x000000E3,
++			0x000000E7,
++			0x000000EB,
++			0x000000F0,
++			0x000000F4,
++			0x000000F8,
++			0x000000FC,
++			0x00000101,
++			0x00000105,
++			0x00000109,
++			0x0000010D,
++			0x00000111,
++			0x00000115,
++			0x0000011A,
++			0x0000011E,
++			0x00000122,
++			0x00000126,
++			0x0000012A,
++			0x0000012E,
++			0x00000132,
++			0x00000137,
++			0x0000013B,
++			0x0000013F,
++			0x00000143,
++			0x00000147,
++			0x0000014B,
++			0x0000014F,
++			0x00000153,
++			0x00000157,
++			0x0000015B,
++			0x0000015F,
++			0x00000163,
++			0x00000167,
++			0x0000016C,
++			0x00000170,
++			0x00000174,
++			0x00000178,
++			0x0000017C,
++			0x00000180,
++			0x00000184,
++			0x00000188,
++			0x0000018C,
++			0x00000190,
++			0x00000194,
++			0x00000198,
++			0x0000019C,
++			0x000001A0,
++			0x000001A4,
++			0x000001A8,
++			0x000001AC,
++			0x000001B0,
++			0x000001B3,
++			0x000001B7,
++			0x000001BB,
++			0x000001BF,
++			0x000001C3,
++			0x000001C7,
++			0x000001CB,
++			0x000001CF,
++			0x000001D3,
++			0x000001D7,
++			0x000001DB,
++			0x000001DF,
++			0x000001E3,
++			0x000001E7,
++			0x000001EB,
++			0x000001EE,
++			0x000001F2,
++			0x000001F6,
++			0x000001FA,
++			0x000001FE,
++			0x00000202,
++			0x00000206,
++			0x0000020A,
++			0x0000020E,
++			0x00000211,
++			0x00000215,
++			0x00000219,
++			0x0000021D,
++			0x00000221,
++			0x00000225,
++			0x00000229,
++			0x0000022C,
++			0x00000230,
++			0x00000234,
++			0x00000238,
++			0x0000023C,
++			0x00000240,
++			0x00000244,
++			0x00000247,
++			0x0000024B,
++			0x0000024F,
++			0x00000253,
++			0x00000257,
++			0x0000025A,
++			0x0000025E,
++			0x00000262,
++			0x00000266,
++			0x0000026A,
++			0x0000026E,
++			0x00000271,
++			0x00000275,
++			0x00000279,
++			0x0000027D,
++			0x00000281,
++			0x00000284,
++			0x00000288,
++			0x0000028C,
++			0x00000290,
++			0x00000293,
++			0x00000297,
++			0x0000029B,
++			0x0000029F,
++			0x000002A3,
++			0x000002A6,
++			0x000002AA,
++			0x000002AE,
++			0x000002B2,
++			0x000002B5,
++			0x000002B9,
++			0x000002BD,
++			0x000002C1,
++			0x000002C4,
++			0x000002C8,
++			0x000002CC,
++			0x000002D0,
++			0x000002D3,
++			0x000002D7,
++			0x000002DB,
++			0x000002DF,
++			0x000002E2,
++			0x000002E6,
++			0x000002EA,
++			0x000002EE,
++			0x000002F1,
++			0x000002F5,
++			0x000002F9,
++			0x000002FC,
++			0x00000300,
++			0x00000304,
++			0x00000308,
++			0x0000030B,
++			0x0000030F,
++			0x00000313,
++			0x00000316,
++			0x0000031A,
++			0x0000031E,
++			0x00000322,
++			0x00000325,
++			0x00000329,
++			0x0000032D,
++			0x00000330,
++			0x00000334,
++			0x00000338,
++			0x0000033B,
++			0x0000033F,
++			0x00000343,
++			0x00000346,
++			0x0000034A,
++			0x0000034E,
++			0x00000351,
++			0x00000355,
++			0x00000359,
++			0x0000035C,
++			0x00000360,
++			0x00000364,
++			0x00000367,
++			0x0000036B,
++			0x0000036F,
++			0x00000372,
++			0x00000376,
++			0x0000037A,
++			0x0000037D,
++			0x00000381,
++			0x00000385,
++			0x00000388,
++			0x0000038C,
++			0x00000390,
++			0x00000393,
++			0x00000397,
++			0x0000039B,
++			0x0000039E,
++			0x000003A2,
++			0x000003A6,
++			0x000003A9,
++			0x000003AD,
++			0x000003B0,
++			0x000003B4,
++			0x000003B8,
++			0x000003BB,
++			0x000003BF,
++			0x000003C3,
++			0x000003C6,
++			0x000003CA,
++			0x000003CD,
++			0x000003D1,
++			0x000003D5,
++			0x000003D8,
++			0x000003DC,
++			0x000003E0,
++			0x000003E3,
++			0x000003E7,
++			0x000003EA,
++			0x000003EE,
++			0x000003F2,
++			0x000003F5,
++			0x000003F9,
++			0x000003FC,
++			0x000003FF,
++		},
++	};
++
++// echo 0x00000rgb > .../gamma_table_curve_ratio
++// curve_ratio_r/g/b: '0' for straight, '1' for ^0.1, ..., '9' for ^0.9
++
++bool set_gamma_table_with_curve_ratio(unsigned int r,unsigned int g,unsigned int b)
++{
++	
++
++    bool flag = false; 
++	unsigned int i = 0;
++    
++    // parameter validation check
++    if ((r>9) || (g>9) || (b>9))
++    {
++        return false;
++    }
++
++    // store gamma table enable/disable status
++    flag = (RD(0x2d30)&0x10000000)?true:false;
++
++    // gamma table disable, gamma table vbus mode
++    WR(0x2d30, 0x00000001);
++
++    // point to gamma_r
++    WR(0x2dc2, 0x00000000);
++    // write gamma_r
++    for (i = 0; i < 257; i++)
++    {
++        WR(0x2dc3, gamma[r][i]);
++    }
++
++    // point to gamma_r
++    WR(0x2dc2, 0x00000000);
++    // varify gamma_r
++    for (i = 0; i < 257; i++)
++    {
++        if (gamma[r][i] != RD(0x2dc3))
++        {
++            // retrieve gamma table enable/disable status, gamma table hardware mode
++            WR(0x2d30, (flag?0x10000000:0x00000000));
++            // return with failure
++            return false;
++        }
++    }
++
++    // point to gamma_g
++    WR(0x2dc2, 0x00000200);
++    // write gamma_g
++    for (i = 0; i < 257; i++)
++    {
++        WR(0x2dc3, gamma[g][i]);
++    }
++
++    // point to gamma_g
++    WR(0x2dc2, 0x00000200);
++    // varify gamma_g
++    for (i = 0; i < 257; i++)
++    {
++        if (gamma[g][i] != RD(0x2dc3))
++        {
++            // retrieve gamma table enable/disable status, gamma table hardware mode
++            WR(0x2d30, (flag?0x10000000:0x00000000));
++            // return with failure
++            return false;
++        }
++    }
++
++    // point to gamma_b
++    WR(0x2dc2, 0x00000400);
++    // write gamma_b
++    for (i = 0; i < 257; i++)
++    {
++        WR(0x2dc3, gamma[b][i]);
++    }
++
++    // point to gamma_b
++    WR(0x2dc2, 0x00000400);
++    // varify gamma_b
++    for (i = 0; i < 257; i++)
++    {
++        if (gamma[b][i] != RD(0x2dc3))
++        {
++            // retrieve gamma table enable/disable status, gamma table hardware mode
++            WR(0x2d30, (flag?0x10000000:0x00000000));
++            // return with failure
++            return false;
++        }
++    }
++
++    // retrieve gamma table enable/disable status, gamma table hardware mode
++    WR(0x2d30, (flag?0x10000000:0x00000000));
++
++    // return with success
++    return true;
++}
++
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 6e9e10281530..a5db2470cbd3 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -11,6 +11,7 @@
+ */
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+ #include <linux/module.h>
++#include <linux/slab.h>
+ 
+ #include "isp_drv.h"
+ #include "isp_hw.h"
+@@ -85,6 +86,15 @@ static unsigned int awb_debug4 = 0;
+ module_param(awb_debug4,uint,0664);
+ MODULE_PARM_DESC(awb_debug4,"\n debug flag for awb.\n");
+ 
++#define AF_FLAG_PR			0x00000001
++#define AF_FLAG_AE			0x00000002
++#define AF_FLAG_AWB			0x00000004
++
++static unsigned int af_sm_dg = 0;
++module_param(af_sm_dg,uint,0664);
++MODULE_PARM_DESC(af_sm_dg,"\n debug flag for auto focus.\n");
++
++
+ volatile struct isp_ae_to_sensor_s ae_sens;
+ 
+ 
+@@ -118,6 +128,11 @@ void isp_sm_init(isp_dev_t *devp)
+ 	sm_state.isp_ae_parm.isp_ae_enh_state = AE_ENH_INIT;
+ 	sm_state.isp_awb_parm.isp_awb_state = AWB_INIT;
+ 	sm_state.env = ENV_NULL;
++	/*init for af*/
++        sm_state.af_state = AF_DETECT_INIT;
++	devp->af_info.last_h_fv = 0;
++	devp->af_info.last_v_fv = 0;
++	devp->af_info.f = devp->af_info.af_detect;
+ 	/*init for wave*/
+ 	sm_state.cap_sm.fr_time = devp->wave->flash_rising_time;
+ 	sm_state.cap_sm.tr_time = devp->wave->torch_rising_time;
+@@ -157,13 +172,20 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 		case AE_IDLE:
+ 			break;
+ 		case AE_INIT:
+-			isp_set_ae_win(parm->h_active, parm->v_active);
++			aepa->win_l = (parm->h_active * aep->ratio_winl) >> 10;
++			aepa->win_r = ((parm->h_active * aep->ratio_winr) >> 10) - 1;
++			aepa->win_t = (parm->v_active * aep->ratio_wint) >> 10;
++			aepa->win_b = ((parm->v_active * aep->ratio_winb) >> 10) - 1;
++			printk("ae,win_l=%d,win_r=%d,win_t=%d,win_b=%d\n",aepa->win_l,aepa->win_r,aepa->win_t,aepa->win_b);
++			isp_set_ae_win(aepa->win_l, aepa->win_r, aepa->win_t, aepa->win_b);
+ 			isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);
+ 			aepa->pixel_sum = parm->h_active * parm->v_active;
+ 			aepa->sub_pixel_sum = aepa->pixel_sum >> 4;
+ 			aepa->alert_r = ((aepa->pixel_sum >> 2) * aep->ratio_r) >> 8;
+ 			aepa->alert_g = ((aepa->pixel_sum >> 2) * aep->ratio_g) >> 7;	 //grgb
+ 			aepa->alert_b = ((aepa->pixel_sum >> 2) * aep->ratio_b) >> 8;
++			printk("aepa->alert_r=%d,g=%d,b=%d\n",aepa->alert_r,aepa->alert_g,aepa->alert_b);
++			aepa->change_step = 0;
+ 			if(func&&func->get_aet_max_gain)
+ 			aepa->max_gain = func->get_aet_max_gain();
+ 			if(func&&func->get_aet_min_gain)
+@@ -181,7 +203,6 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			sm_state.isp_ae_parm.isp_ae_state = AE_SHUTTER_ADJUST;
+ 			break;
+ 		case AE_ORI_SET:
+-			sm_state.ae_down = false;
+ 			aepa->cur_step = func->get_aet_current_step;
+ 			newstep = aepa->cur_step;
+ 			if(aep->ae_skip[1] == 0x1)
+@@ -198,7 +219,6 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AE_LOW_GAIN:
+-			sm_state.ae_down = false;
+ 			aepa->cur_gain = func->get_aet_current_gain;
+ 			targrate = (aepa->cur_gain << 10)/aepa->tf_ratio;
+ 			//newstep = find_step(func,0,aepa->max_step,targrate);
+@@ -224,15 +244,21 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 				break;
+ 			if(ae_debug1)
+ 			printk("cur_gain = %d,cur_step = %d\n",aepa->cur_gain,aepa->cur_step);
+-			sm_state.ae_down = false;
+ 			while(step != AE_SUCCESS)
+ 			{
+ 				switch(step){
+ 					case AE_START:
+ 						//printk("step2 =%d,aep->alert_mode=%x\n",step,aep->alert_mode);
+-						if(0)//aep->alert_mode&0x1)
++						if(aep->alert_mode&0x1)
+ 						{
+-						step = AE_EXPOSURE_MAX_CHECK;
++						if(ae_debug4)
++						{
++							printk("[%d]bayer_over_info[0]=%d,%d,%d\n",aepa->change_step,ae->bayer_over_info[0],ae->bayer_over_info[1],ae->bayer_over_info[2]);	
++						}
++							if(aepa->change_step == 1)
++								step = AE_EXPOSURE_MAX_CHECK2;
++							else
++								step = AE_EXPOSURE_MAX_CHECK;
+ 						}
+ 						else
+ 						{
+@@ -241,34 +267,39 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 						break;
+ 
+ 					case AE_EXPOSURE_MAX_CHECK:
+-						if(ae->bayer_over_info[0] > aepa->alert_r)
+-							step = AE_EXPOSURE_RDECREASE;
+-						else if(ae->bayer_over_info[1] > aepa->alert_g)
+-							step = AE_EXPOSURE_GDECREASE;
+-						else if(ae->bayer_over_info[2] > aepa->alert_b)
+-							step = AE_EXPOSURE_BDECREASE;					
++						if((ae->bayer_over_info[0] > aepa->alert_r)||
++							(ae->bayer_over_info[1] > aepa->alert_g)||
++							(ae->bayer_over_info[2] > aepa->alert_b)
++							)
++							step = AE_EXPOSURE_DECREASE;					
+ 						else
+ 						{
+-							if(aep->tune_mode&0x1)
+-							step = AE_EXPOSURE_INCREASE;
+-							else
+-							step = AE_CALCULATE_LUMA_AVG;	
++							isp_set_ae_thrlpf(aep->thr_r_low, aep->thr_g_low, aep->thr_b_low, aep->lpftype_mid);
++							aepa->change_step = 1;
++							step = AE_SUCCESS;//AE_CALCULATE_LUMA_AVG;	
+ 						}
+ 						break;
+-					case AE_EXPOSURE_RDECREASE:
+-						newstep = ae->curstep - aep->stepdnr;
+-						step = AE_SET_NEWSTEP;
+-						break;
+-					case AE_EXPOSURE_GDECREASE:
+-						newstep = ae->curstep - aep->stepdng;
+-						step = AE_SET_NEWSTEP;
++					case AE_EXPOSURE_MAX_CHECK2:
++						if((ae->bayer_over_info[0] > aepa->alert_r)||
++							(ae->bayer_over_info[1] > aepa->alert_g)||
++							(ae->bayer_over_info[2] > aepa->alert_b)
++							)
++						{
++							isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);	
++							aepa->change_step = 0;
++							step = AE_SUCCESS;	
++						}
++						else
++						{
++							step = AE_EXPOSURE_INCREASE;
++						}
+ 						break;
+-					case AE_EXPOSURE_BDECREASE:
+-						newstep = ae->curstep - aep->stepdnb;
++					case AE_EXPOSURE_DECREASE:
++						newstep = aepa->cur_step - aep->stepdnb;
+ 						step = AE_SET_NEWSTEP;
+ 						break;
+ 					case AE_EXPOSURE_INCREASE:
+-						newstep = ae->curstep + aep->stepup;
++						newstep = aepa->cur_step + aep->stepup;
+ 						step = AE_SET_NEWSTEP;
+ 						break;
+ 					case AE_CALCULATE_LUMA_AVG:
+@@ -364,19 +395,21 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							targstep = aepa->max_step;
+ 						if(ae_debug1)
+ 							printk("targstep = %d,%d\n",targstep,targrate);
+-						lpfcoef = 50;//(devp->flag & ISP_FLAG_CAPTURE)?aep->fast_lpfcoef:aep->slow_lpfcoef;
++						lpfcoef = (devp->flag & ISP_FLAG_CAPTURE)?aep->fast_lpfcoef:aep->slow_lpfcoef;
+ 						newstep = (aepa->cur_step*lpfcoef + targstep*(256-lpfcoef))>>8;
+ 						if(ae_debug1)
+ 						printk("newstep =%d,lpf =%d,%d\n",newstep,lpfcoef,aepa->cur_step);
+-						step = AE_SET_NEWSTEP;
+-						break;
+-					case AE_SET_NEWSTEP:
+-						if(ae_debug4)
++						if(newstep >= aepa->max_step - 1)
+ 						{
+-							if(func&&func->set_aet_new_step)
+-							func->set_aet_new_step(ae_step,true,true);
+-							sm_state.isp_ae_parm.isp_ae_state = AE_REST;								
++							sm_state.status = ISP_AE_STATUS_STABLE;
++							step = AE_SUCCESS;
+ 						}
++						else if(newstep > aepa->cur_step)
++							step = AE_MAX_CHECK_STOP;
++						else
++							step = AE_SET_NEWSTEP;
++						break;
++					case AE_SET_NEWSTEP:
+ 						if(ae_sens.send == 0)
+ 						{
+ 						ae_sens.send = 1;
+@@ -384,30 +417,24 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 						ae_sens.shutter = 1;
+ 						ae_sens.gain = 1;
+ 						//printk("ae_sens.send \n");
++						sm_state.ae_down = false;
+ 						sm_state.isp_ae_parm.isp_ae_state = AE_REST;
+ 						}
+-						if(ae_debug3)
+-						{
+-							//printk("set step \n");
+-							//if(ae_debug5)
+-							ae_debug3 = 0;
+-				        //if(func&&func->set_aet_new_step)
+-							//func->set_aet_new_step(30,true,true);
+-												//}
+-						if(aep->ae_skip[1] == 0x1)
++						step = AE_SUCCESS;
++						break;
++					case AE_MAX_CHECK_STOP:
++						if(ae_debug4)
++							printk("ae->bayer_over_info[0]=%d,%d,%d\n",ae->bayer_over_info[0],ae->bayer_over_info[1],ae->bayer_over_info[2]);
++						if((ae->bayer_over_info[0] > aepa->alert_r)||
++							(ae->bayer_over_info[1] > aepa->alert_g)||
++							(ae->bayer_over_info[2] > aepa->alert_b)
++							)
+ 						{
+-							if(func&&func->set_aet_new_step)
+-							func->set_aet_new_step(newstep,true,true);
+-							sm_state.isp_ae_parm.isp_ae_state = AE_REST;							
++							sm_state.status = ISP_AE_STATUS_STABLE;
++							step = AE_SUCCESS;
+ 						}
+ 						else
+-						{
+-							if(func&&func->set_aet_new_step)
+-							func->set_aet_new_step(newstep,true,false);
+-							sm_state.isp_ae_parm.isp_ae_state = AE_GAIN_ADJUST;
+-						}
+-						}
+-						step = AE_SUCCESS;
++							step = AE_SET_NEWSTEP;
+ 						break;
+ 					case AE_SUCCESS:
+ 					default:
+@@ -505,7 +532,12 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 		case AWB_IDLE:
+ 			break;
+ 		case AWB_INIT:
+-			isp_set_awb_win(parm->h_active, parm->v_active);
++			awba->win_l = (parm->h_active * awbp->ratio_winl) >> 10;
++			awba->win_r = ((parm->h_active * awbp->ratio_winr) >> 10) - 1;
++			awba->win_t = (parm->v_active * awbp->ratio_wint) >> 10;
++			awba->win_b = ((parm->v_active * awbp->ratio_winb) >> 10) - 1;	
++			printk("awb,win_l=%d,win_r=%d,win_t=%d,win_b=%d\n",awba->win_l,awba->win_r,awba->win_t,awba->win_b);
++			isp_set_awb_win(awba->win_l, awba->win_r, awba->win_t, awba->win_b);
+ 			awba->pixel_sum = parm->h_active * parm->v_active;
+ 			awba->countlimitrgb = ((awba->pixel_sum >> 2) * awbp->ratio_rgb) >> 6;
+ 			awba->countlimityh	= ((awba->pixel_sum >> 2) * awbp->ratio_yh) >> 6;
+@@ -709,12 +741,12 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 							printk("r_val=%d,b_val=%d\n",awb_gain.r_val,awb_gain.b_val);
+ 						target_r = (awb_gain.r_val<<10)/rg;
+ 						target_b = (awb_gain.b_val<<10)/bg;
+-						awbp->r_max = 282;
++						//awbp->r_max = 282;
+ 						//awbp->g_max = 512;
+-						awbp->b_max = 282;
+-						awbp->r_min = 200;
++						//awbp->b_max = 282;
++						//awbp->r_min = 200;
+ 						//awbp->g_min = 128;
+-						awbp->b_min = 200;
++						//awbp->b_min = 200;
+ 							
+ 						if(awb_debug2)
+ 							printk("target_r=%d,target_b=%d\n",target_r,target_b);
+@@ -741,14 +773,317 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 			break;
+ 	}
+ }
++unsigned long long div64(unsigned long long n, unsigned long long d) // n for numerator, d for denominator
++{
++    unsigned int n_bits = 0, d_bits = 0, i = 0;
++    unsigned long long q = 0, t = 0; // q for quotient, t for temporary
++    // invalid
++    if (!d) {
++        q = 0xffffffffffffffff;
++    }
++    // (0.5, 0]
++    else if (n + n < d) {
++        q = 0;
++    }
++    // [1.0, 0.5]
++    else if (n <= d) {
++        q = 1;
++    }
++    // [max, 1.0)
++    else
++    {
++        // get n_bits
++        for (n_bits = 1; n_bits <= 64; n_bits++)
++            if (!(n >> n_bits))
++                break;
++        if (n_bits > 64)
++		n_bits = 64;
++		// get d_bits
++        for (d_bits = 1; d_bits <= 64; d_bits++)
++            if (!(d >> d_bits))
++                break;
++        if (d_bits > 64)
++            d_bits = 64;
++        // check integer part
++        for (i = n_bits; i >= d_bits; i--) {
++            q <<= 1;
++            t = d << (i - d_bits);
++            if (n >= t)
++            {
++                n -= t;
++                q += 1;
++            }
++        }
++        // check fraction part
++        if (n + n >= d)
++            q += 1;
++    }
++    return q;
++}
++
++unsigned int get_best_step(isp_blnr_stat_t *blnr,unsigned int *step)
++{
++        unsigned int i = 0, cur_grid = 0, max_grid = 0, best_step = 0;
++        unsigned long long sum_ac = 0, sum_dc = 0, mul_ac = 0, fv[FOCUS_GRIDS], max_fv = 0, moment = 0, sum_fv = 0;
++
++        for (i = 0; i < FOCUS_GRIDS; i++){
++                if (i && (step[i]==0)){
++                        break;
++                }
++                max_grid = i;
++                sum_ac = (unsigned long long)blnr[i].ac[0]+
++                        (unsigned long long)blnr[i].ac[1]+
++                        (unsigned long long)blnr[i].ac[2]+
++                        (unsigned long long)blnr[i].ac[3];
++                sum_dc = (unsigned long long)blnr[i].dc[0]+
++                        (unsigned long long)blnr[i].dc[1]+
++                        (unsigned long long)blnr[i].dc[2]+
++                        (unsigned long long)blnr[i].dc[3];
++                mul_ac = (sum_ac > 0x00000000ffffffff) ? 0xffffffffffffffff : sum_ac*sum_ac;
++                fv[i] = div64(mul_ac,sum_dc);
++	        if(af_sm_dg)
++                        pr_info("%s ac:%u %u %u %u dc:%u %u %u %u\n", __func__, blnr[i].ac[0], blnr[i].ac[1], blnr[i].ac[2], blnr[i].ac[3], blnr[i].dc[0], blnr[i].dc[1], blnr[i].dc[2], blnr[i].dc[3]);
++                if (max_fv < fv[i]){
++		        max_fv = fv[i];
++		        cur_grid = i;
++	        }
++        }
++	// too less stroke, for power saving
++        if (!cur_grid) {
++	        best_step = 0;
++        }
++        // too much stroke
++        else if (cur_grid == max_grid){
++	        best_step = step[max_grid];
++	}
++	// work out best step with 3 grids
++	else if ((cur_grid == 1) || (cur_grid == max_grid - 1)){
++                moment += fv[cur_grid - 1]*(unsigned long long)step[cur_grid - 1];
++                moment += fv[cur_grid    ]*(unsigned long long)step[cur_grid    ];
++                moment += fv[cur_grid + 1]*(unsigned long long)step[cur_grid + 1];
++                sum_fv += fv[cur_grid - 1];
++                sum_fv += fv[cur_grid    ];
++                sum_fv += fv[cur_grid + 1];
++                best_step = (unsigned int)div64(moment,sum_fv);
++	}
++	// work out best step with 5 grids
++        else {
++                moment += (unsigned long long)fv[cur_grid - 2]*(unsigned long long)step[cur_grid - 2];
++                moment += (unsigned long long)fv[cur_grid - 1]*(unsigned long long)step[cur_grid - 1];
++                moment += (unsigned long long)fv[cur_grid    ]*(unsigned long long)step[cur_grid    ];
++                moment += (unsigned long long)fv[cur_grid + 1]*(unsigned long long)step[cur_grid + 1];
++                moment += (unsigned long long)fv[cur_grid + 2]*(unsigned long long)step[cur_grid + 2];
++                sum_fv += fv[cur_grid - 2];
++                sum_fv += fv[cur_grid - 1];
++                sum_fv += fv[cur_grid    ];
++                sum_fv += fv[cur_grid + 1];
++                sum_fv += fv[cur_grid + 2];
++                best_step = (unsigned int)div64(moment,sum_fv);
++	}
++	return best_step;
++}
++static unsigned int jitter = 5;
++module_param(jitter,uint,0664);
++MODULE_PARM_DESC(jitter,"\n debug flag for ae.\n");
+ 
+-void isp_af_sm(isp_dev_t *devp)
++static unsigned int delta = 9;
++module_param(delta,uint,0664);
++MODULE_PARM_DESC(delta,"\n debug flag for ae.\n");
++
++static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_t_af_t *af_alg)
++{
++	unsigned long long *fv,h_sum_fv=0,v_sum_fv=0,sum_wind1=0,sum_wind2=0,sum_wind3=0,h_ave_fv=0,v_ave_fv=0,
++				new_stable_fv=0,tmp_ac=0,tmp_dc=0,curr_r=0;
++	unsigned int i=0,step_cnt=0;
++	bool ret = false;
++	fv = kmalloc(sizeof(unsigned long long)*(af_alg->detect_step<<1),GFP_KERNEL);
++
++	memset(fv,0,sizeof(unsigned long long)*(af_alg->detect_step<<1));
++	
++	for(i=0;i< af_alg->detect_step;i++){
++		sum_wind1  = (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[0];
++		sum_wind1 += (unsigned long long)60*(unsigned long long)af_info->af_wind[i].luma_win[2];
++		sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[4];
++		sum_wind1 += (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[6];
++		sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[8];
++		
++		sum_wind2  = af_info->af_wind[i].luma_win[0];
++		sum_wind2 += af_info->af_wind[i].luma_win[2];
++		sum_wind2 += af_info->af_wind[i].luma_win[4];
++		sum_wind2 += af_info->af_wind[i].luma_win[6];
++		sum_wind2 += af_info->af_wind[i].luma_win[8];
++		/* center of gravity in horitial*/
++		fv[i<<1] = div64(sum_wind1,sum_wind2);
++		h_sum_fv += fv[i<<1];
++		sum_wind3  = (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[0];
++		sum_wind3 += (unsigned long long)60*(unsigned long long)af_info->af_wind[i].luma_win[2];
++		sum_wind3 += (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[4];
++		sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[6];
++		sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[8];
++		/* center of gravity in veritial*/
++		fv[(i<<1) + 1] = div64(sum_wind3,sum_wind2);
++		v_sum_fv += fv[(i<<1) + 1];
++	}
++	step_cnt = af_alg->detect_step;
++	h_ave_fv = div64(h_sum_fv,step_cnt);
++	v_ave_fv = div64(v_sum_fv,step_cnt);
++
++	for(i=0;i<step_cnt;i++){
++		tmp_ac = fv[i<<1] > h_ave_fv ? (fv[i<<1]-h_ave_fv):(h_ave_fv-fv[i<<1]);
++		tmp_dc = fv[(i<<1)+1] > v_ave_fv ? (fv[(i<<1)+1]-v_ave_fv):(v_ave_fv-fv[(i<<1)+1]);
++		if(tmp_ac > jitter || tmp_dc > jitter)
++		{
++			if(af_sm_dg)
++				pr_info("1 %5llu %5llu %5llu %5llu -----,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv);
++			kfree(fv);
++			return false;
++		}
++	}
++	tmp_ac = h_ave_fv > af_info->last_h_fv ? (h_ave_fv-af_info->last_h_fv):(af_info->last_h_fv-h_ave_fv);
++	tmp_dc = v_ave_fv > af_info->last_v_fv ? (v_ave_fv-af_info->last_v_fv):(af_info->last_v_fv-v_ave_fv);
++	curr_r = tmp_ac*tmp_ac + tmp_dc*tmp_dc;
++	if(curr_r > delta){
++		pr_info("2 %5llu %5llu %5llu %5llu %5llu,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv,curr_r);
++		ret = true;
++	}else{
++		ret = false;
++		if(af_sm_dg)
++			pr_info("3 %5llu %5llu %5llu %5llu %5llu,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv,curr_r);
++	}
++
++	kfree(fv);
++
++	return ret;
++	
++}
++void isp_af_detect(isp_dev_t *devp)
+ {
++	static unsigned int start_jf,af_delay=0;
++	struct xml_algorithm_t_af_s *af_alg = devp->isp_af_parm;
++	struct isp_af_info_s *af_info = &devp->af_info;
+ 
++	switch(sm_state.af_state){
++		case AF_DETECT_INIT:
++			af_info->f = af_info->af_detect;
++			af_info->cur_index = 0;
++			sm_state.af_state = AF_GET_STEPS_INFO;
++			break;
++		case AF_GET_STEPS_INFO:	
++			if(sm_state.status!=ISP_AE_STATUS_STABLE){
++				sm_state.af_state = AF_DETECT_INIT;
++				if(af_sm_dg)
++					pr_info("%s ae unstable return to af init.\n",__func__);
++			}
++			af_info->cur_index++;
++			if(af_info->cur_index >= af_alg->detect_step){
++				af_info->cur_index = 0;
++				sm_state.af_state = AF_GET_STATUS;
++				pr_info("%s state get_status.\n",__func__);
++			}
++			break;
++		case AF_GET_STATUS:
++			if(is_lost_focus(af_info,af_alg)){
++				sm_state.af_state = AF_INIT;
++				if(af_sm_dg)
++					pr_info("[af_sm]:lost focus.\n");
++			}
++			af_info->cur_index++;
++			if(af_info->cur_index >= af_alg->detect_step){
++				af_info->cur_index = 0;
++			}
++			break;
++		default:
++			isp_af_sm(devp);
++			break;
++	}
++}
++void isp_af_sm(isp_dev_t *devp)
++{
++	static unsigned int start_jf,af_delay=0;
++	struct xml_algorithm_t_af_s *af_alg = devp->isp_af_parm;
++	struct isp_af_info_s *af_info = &devp->af_info;
++	struct isp_af_sm_s *sm = &sm_state.af_sm;
++	static unsigned int flag = 0;
++	unsigned long long sum_wind1,sum_wind2,sum_wind3;
++	af_delay++;
++	
++	switch(sm_state.af_state){
++		case AF_INIT:
++			if((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down)){
++			/*awb brake,ae brake*/
++			flag = (devp->flag&ISP_FLAG_AWB)+(devp->flag&ISP_FLAG_AE);
++			if(af_sm_dg)
++				pr_info("%s:ae,awb flag status 0x%x.\n",__func__,flag);
++			devp->flag &=(~ISP_FLAG_AWB);
++			devp->flag &=(~ISP_FLAG_AE);
++			af_info->f = af_info->af_data;
++			af_info->cur_index = 0;
++			af_info->cur_step = af_alg->step[af_info->cur_index];
++			atomic_set(&af_info->writeable,1);
++			start_jf = jiffies;
++			af_delay = 0;
++			sm_state.af_state = AF_GET_COARSE_INFO;
++		}
++			break;
++		case AF_GET_COARSE_INFO:
++			if((af_info->cur_index >= FOCUS_GRIDS)||(af_alg->step[af_info->cur_index]==0)){
++				sm_state.af_state = AF_CALC_GREAT;
++			} else if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
++				af_info->cur_step = af_alg->step[af_info->cur_index];
++				af_info->cur_index++;
++				atomic_set(&af_info->writeable,1);
++				af_delay = 0;
++			} 
++			break;
++		case AF_CALC_GREAT:
++			af_info->great_step = get_best_step(af_info->af_data,af_alg->step);
++			af_info->cur_step = af_info->great_step - af_alg->jump_offset;
++			if(af_sm_dg)
++				pr_info("%s:get best step %u.\n",__func__,af_info->great_step);
++			atomic_set(&af_info->writeable,1);
++			af_delay = 0;
++			sm_state.af_state = AF_GET_FINE_INFO;
++			break;
++		case AF_GET_FINE_INFO:
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
++				af_info->cur_step = af_info->great_step;
++				atomic_set(&af_info->writeable,1);
++				af_delay = 0;
++				sm_state.af_state = AF_SUCCESS;
++			}
++			break;
++		case AF_SUCCESS:
++			/*enable awb,enable af*/
++			devp->flag |=flag;
++		        sum_wind1  = (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[0];
++		        sum_wind1 += (unsigned long long)60*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[2];
++		        sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[4];
++		        sum_wind1 += (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[6];
++		        sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[8];
++		
++		        sum_wind2  = af_info->af_wind[af_info->cur_index].luma_win[0];
++		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[2];
++		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[4];
++		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[6];
++		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[8];
++		        /* center of gravity in horitial*/
++		        af_info->last_h_fv = div64(sum_wind1,sum_wind2);		
++		        sum_wind3  = (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[0];
++		        sum_wind3 += (unsigned long long)60*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[2];
++		        sum_wind3 += (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[4];
++		        sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[6];
++		        sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[8];
++		        /* center of gravity in veritial*/
++		        af_info->last_v_fv = div64(sum_wind3,sum_wind2);
++		        sm_state.af_state = AF_DETECT_INIT;
++			break;
++		default:
++			break;
++	}
+ }
+-#define FLASH_OFF     0
++#define FLASH_OFF         0
+ #define FLASH_ON	  1
+-#define FLASH_TORCH   2
++#define FLASH_TORCH       2
+ static void isp_set_flash(isp_dev_t *devp,unsigned flash_mode,unsigned level)
+ {
+ 	if(!flash_mode)		
+@@ -923,7 +1258,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case CAPTURE_TUNE_AF:
+-			if(sm_state.isp_af_state == AF_SUCCESS){
++			if(sm_state.af_state == AF_SUCCESS){
+ 				devp->flag &=(~ISP_FLAG_AF);
+ 				if(cap_sm->flash_on){
+ 					devp->flag |= ISP_FLAG_AE;
+@@ -1211,7 +1546,11 @@ void isp_awb_enh_sm(isp_dev_t *devp)
+ 		case AWB_IDLE:
+ 			break;
+ 		case AWB_INIT:
+-			isp_set_ae_win(parm->h_active, parm->v_active);
++			awba->win_l = (parm->h_active * awbp->ratio_winl) >> 10;
++			awba->win_r = (parm->h_active * awbp->ratio_winr) >> 10 - 1;
++			awba->win_t = (parm->v_active * awbp->ratio_wint) >> 10;
++			awba->win_b = (parm->v_active * awbp->ratio_winb) >> 10 - 1;			
++			isp_set_awb_win(awba->win_l, awba->win_r, awba->win_t, awba->win_b);
+ 			awba->pixel_sum = parm->h_active * parm->v_active;
+ 			awba->countlimityuv = ((awba->pixel_sum >> 4) * awbp->ratio_yuv) >> 6;
+ 			awba->coun = 10;
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.h b/drivers/amlogic/tvin/isp/isp_sm.h
+index bb381f474c9e..04d2c4b2c442 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.h
++++ b/drivers/amlogic/tvin/isp/isp_sm.h
+@@ -17,15 +17,15 @@
+ typedef enum isp_auto_exposure_step_e {
+ 	AE_START = 0,
+ 	AE_EXPOSURE_MAX_CHECK,
+-	AE_EXPOSURE_RDECREASE,
+-	AE_EXPOSURE_GDECREASE,
+-	AE_EXPOSURE_BDECREASE,
++	AE_EXPOSURE_DECREASE,
+ 	AE_EXPOSURE_INCREASE,
+ 	AE_CALCULATE_LUMA_AVG,
+ 	AE_CALCULATE_LUMA_TARG,
+ 	AE_LUMA_AVG_CHECK,
+ 	AE_EXPOSURE_ADJUST,
+ 	AE_SET_NEWSTEP,
++	AE_MAX_CHECK_STOP,
++	AE_EXPOSURE_MAX_CHECK2,
+ 	AE_SUCCESS,
+ } isp_auto_exposure_step_t;
+ 
+@@ -78,10 +78,19 @@ typedef enum isp_auto_white_balance_state_e {
+ 	AWB_CHECK,
+ } isp_auto_white_balance_state_t;
+ 
+-typedef enum isp_auto_focus_state_e {
+-	AF_IDLE,
++typedef enum af_state_e {
++	AF_NULL,
++	AF_DETECT_INIT,
++	AF_GET_STEPS_INFO,
++	AF_GET_STATUS,
++	AF_INIT,
++	AF_GET_COARSE_INFO,
++	AF_CALC_GREAT,
++	AF_GET_FINE_INFO,
++	AF_CLIMBING,
++	AF_FINE,
+ 	AF_SUCCESS,
+-} isp_auto_focus_state_t;
++} af_state_t;
+ typedef enum isp_capture_state_e {
+ 	CAPTURE_INIT,
+ 	CAPTURE_PRE_WAIT,//for time lapse
+@@ -110,6 +119,10 @@ typedef enum isp_ae_status_s {
+ typedef struct isp_ae_sm_s {
+ 	unsigned int pixel_sum;
+ 	unsigned int sub_pixel_sum;
++	unsigned int win_l;
++	unsigned int win_r;
++	unsigned int win_t;
++	unsigned int win_b;
+ 	unsigned int alert_r;   
+ 	unsigned int alert_g;   
+ 	unsigned int alert_b; 
+@@ -122,7 +135,8 @@ typedef struct isp_ae_sm_s {
+ 	unsigned int countlimit_g;
+ 	unsigned int countlimit_b;
+ 	unsigned int tf_ratio;
+-
++    unsigned int change_step;
++	
+ 	isp_auto_exposure_enh_state_t  isp_ae_enh_state;
+ 	isp_auto_exposure_state_t isp_ae_state;
+ }isp_ae_sm_t;
+@@ -136,6 +150,10 @@ typedef enum isp_awb_status_s {
+ typedef struct isp_awb_sm_s {
+ 	enum isp_awb_status_s status;
+ 	unsigned int pixel_sum;
++	unsigned int win_l;
++	unsigned int win_r;
++	unsigned int win_t;
++	unsigned int win_b;
+ 	unsigned int countlimitrgb;
+ 	unsigned int countlimityh;
+ 	unsigned int countlimitym;
+@@ -162,6 +180,9 @@ typedef enum isp_env_status_s {
+ 	ENV_MID,
+ 	ENV_LOW,
+ }isp_env_status_t;
++typedef struct isp_af_sm_s {
++	af_state_t state;
++} isp_af_sm_t;
+ 
+ typedef struct isp_capture_sm_s {
+ 	unsigned int adj_cnt;
+@@ -178,9 +199,10 @@ typedef struct isp_sm_s {
+ 	enum isp_flash_status_s flash;
+ 	enum isp_env_status_s env;
+ 	bool ae_down;
+-	isp_auto_focus_state_t isp_af_state;
++	af_state_t af_state;
+ 	isp_ae_sm_t isp_ae_parm;
+ 	isp_awb_sm_t isp_awb_parm;
++	isp_af_sm_t af_sm;
+ 	isp_capture_sm_t cap_sm;
+ } isp_sm_t;
+ 
+@@ -196,7 +218,9 @@ extern void isp_set_flash_mode(isp_dev_t *devp);
+ extern void isp_ae_sm(isp_dev_t *devp);
+ extern void isp_awb_sm(isp_dev_t *devp);
+ extern void isp_af_sm(isp_dev_t *devp);
++extern void isp_af_detect(isp_dev_t *devp);
+ extern int isp_capture_sm(isp_dev_t *devp);
++extern unsigned long long div64(unsigned long long n, unsigned long long d);
+ #endif
+ 
+ 
+diff --git a/drivers/amlogic/tvin/vdin/vdin_canvas.c b/drivers/amlogic/tvin/vdin/vdin_canvas.c
+index 83d8b26b80ba..f6627c925bbb 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_canvas.c
++++ b/drivers/amlogic/tvin/vdin/vdin_canvas.c
+@@ -14,11 +14,16 @@
+ #include <linux/amlogic/amports/canvas.h>
+ #include <linux/amlogic/amports/vframe.h>
+ #include <linux/mm.h>
++#include <linux/module.h>
+ 
+ #include "../tvin_format_table.h"
+ #include "vdin_drv.h"
+ #include "vdin_canvas.h"
+ 
++static unsigned int max_buf_num = 4;
++module_param(max_buf_num, uint, 0664);
++MODULE_PARM_DESC(max_buf_num, "vdin max buf num.\n");
++
+ const unsigned int vdin_canvas_ids[2][VDIN_CANVAS_MAX_CNT] = {
+ 	{
+ 		12, 13, 14, 15, 16, 17,
+@@ -49,8 +54,7 @@ inline void vdin_canvas_init(struct vdin_dev_s *devp)
+         
+ 	devp->mem_start = roundup(devp->mem_start,32);
+ 	pr_info("vdin.%d cnavas initial table:\n", devp->index);
+-	for ( i = 0; i < devp->canvas_max_num; i++)
+-	{
++	for ( i = 0; i < devp->canvas_max_num; i++){
+ 		canvas_id = vdin_canvas_ids[devp->index][i];
+ 		canvas_addr = devp->mem_start + devp->canvas_max_size * i;
+                 
+@@ -66,26 +70,27 @@ inline void vdin_canvas_start_config(struct vdin_dev_s *devp)
+ {
+ 	int i, canvas_id;
+ 	unsigned long canvas_addr;
+-        unsigned int canvas_max_w = VDIN_CANVAS_MAX_WIDTH << 1;
+-        unsigned int canvas_max_h = VDIN_CANVAS_MAX_HEIGH;
+-        unsigned int canvas_num = VDIN_CANVAS_MAX_CNT;
++	unsigned int canvas_max_w = VDIN_CANVAS_MAX_WIDTH << 1;
++	unsigned int canvas_max_h = VDIN_CANVAS_MAX_HEIGH;
++	unsigned int canvas_num = VDIN_CANVAS_MAX_CNT;
++	unsigned int chroma_size = 0;
++	unsigned int canvas_step = 1;
+ 
+ 	if ((devp->format_convert == VDIN_FORMAT_CONVERT_YUV_YUV444) ||
+-	    (devp->format_convert == VDIN_FORMAT_CONVERT_YUV_RGB   ) ||
++	    (devp->format_convert == VDIN_FORMAT_CONVERT_YUV_RGB) ||
+ 	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_YUV444) ||
+-	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_RGB   ))
++	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_RGB)){
+ 		devp->canvas_w = devp->h_active * 3;
+-	else if((devp->prop.dest_cfmt == TVIN_NV12) ||
+-                (devp->prop.dest_cfmt == TVIN_NV21))
+-        {
+-                canvas_max_w = VDIN_CANVAS_MAX_WIDTH;
+-		canvas_max_h = VDIN_CANVAS_MAX_HEIGH>>1;
++	}else if((devp->prop.dest_cfmt == TVIN_NV12) ||
++                (devp->prop.dest_cfmt == TVIN_NV21)){
++		canvas_max_w = VDIN_CANVAS_MAX_WIDTH;
++		canvas_max_h = VDIN_CANVAS_MAX_HEIGH;
+ 		canvas_num >>= 1;
+-                devp->canvas_w = devp->h_active;
+-	}
+-        else
++		canvas_step = 2;
++		devp->canvas_w = devp->h_active;
++	}else{
+ 		devp->canvas_w = devp->h_active * 2;
+-
++	}
+ #if 0
+ 	const struct tvin_format_s *fmt_info = tvin_get_fmt_info(devp->parm.info.fmt);
+ 	if(fmt_info->scan_mode == TVIN_SCAN_MODE_INTERLACED)
+@@ -95,29 +100,32 @@ inline void vdin_canvas_start_config(struct vdin_dev_s *devp)
+ #else
+ 	devp->canvas_h = devp->v_active;
+ #endif
+-	devp->canvas_max_size = PAGE_ALIGN(canvas_max_w*canvas_max_h);
+-        devp->canvas_max_num  = devp->mem_size / devp->canvas_max_size;
++	if((devp->prop.dest_cfmt == TVIN_NV12) ||(devp->prop.dest_cfmt == TVIN_NV21))
++		chroma_size = canvas_max_w*canvas_max_h/2;
++	devp->canvas_max_size = PAGE_ALIGN((canvas_max_w*canvas_max_h+chroma_size));
++	devp->canvas_max_num  = devp->mem_size / devp->canvas_max_size;
+ 	devp->canvas_max_num = min(devp->canvas_max_num,canvas_num);
++	devp->canvas_max_num = min(devp->canvas_max_num,max_buf_num);
+ 	devp->canvas_w = roundup(devp->canvas_w,32);
+ 	devp->mem_start = roundup(devp->mem_start,32);
+-	#ifdef VDIN_DEBUG	
++#ifdef VDIN_DEBUG	
+ 	pr_info("vdin.%d cnavas configuration table:\n", devp->index);
+-	#endif
+-	for (i = 0; i < devp->canvas_max_num; i++)
+-	{
+-		canvas_id = vdin_canvas_ids[devp->index][i];
++#endif
++	for (i = 0; i < devp->canvas_max_num; i++){
++		canvas_id = vdin_canvas_ids[devp->index][i*canvas_step];
+ 		//canvas_addr = canvas_get_addr(canvas_id);
+ 		/*reinitlize the canvas*/
+ 		canvas_addr = devp->mem_start + devp->canvas_max_size * i;
+ 		canvas_config(canvas_id, canvas_addr, devp->canvas_w, devp->canvas_h,
+ 				CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		
+-		#ifdef VDIN_DEBUG
++		if(chroma_size)
++			canvas_config(canvas_id+1, canvas_addr+devp->canvas_w*devp->canvas_h, devp->canvas_w, devp->canvas_h/2,
++					CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++#ifdef VDIN_DEBUG
+ 		pr_info("\t0x%2x: 0x%lx-0x%lx %ux%u\n",
+ 				canvas_id, canvas_addr, canvas_addr + devp->canvas_max_size, devp->canvas_w, devp->canvas_h);
+-		#endif
++#endif
+ 	}
+-
+ }
+ /*
+ *this function used for configure canvas base on the input format
+@@ -128,44 +136,51 @@ void vdin_canvas_auto_config(struct vdin_dev_s *devp)
+ 	int i = 0;
+ 	int canvas_id;
+ 	unsigned long canvas_addr;
++	unsigned int chroma_size = 0;
++	unsigned int canvas_step = 1;
++	unsigned int canvas_num = VDIN_CANVAS_MAX_CNT;
+ 
+ 	if ((devp->format_convert == VDIN_FORMAT_CONVERT_YUV_YUV444) ||
+ 	    (devp->format_convert == VDIN_FORMAT_CONVERT_YUV_RGB   ) ||
+ 	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_YUV444) ||
+-	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_RGB   ))
++	    (devp->format_convert == VDIN_FORMAT_CONVERT_RGB_RGB   )){
+ 		devp->canvas_w = devp->h_active * 3;
+-        else if((devp->prop.dest_cfmt == TVIN_NV12) ||
+-                (devp->prop.dest_cfmt == TVIN_NV21))
+-                devp->canvas_w = devp->h_active;
+-	else
++	}else if((devp->prop.dest_cfmt == TVIN_NV12) ||(devp->prop.dest_cfmt == TVIN_NV21)){
++		devp->canvas_w = devp->h_active;
++		canvas_num = canvas_num/2;
++		canvas_step = 2;
++	}else{
+ 		devp->canvas_w = devp->h_active * 2;
++	}
+ 	devp->canvas_w = roundup(devp->canvas_w,32);
+ 	devp->canvas_h = devp->v_active;
+-	devp->canvas_max_size = PAGE_ALIGN(devp->canvas_w*devp->canvas_h);
++
++	if((devp->prop.dest_cfmt == TVIN_NV12) ||(devp->prop.dest_cfmt == TVIN_NV21))
++		chroma_size = devp->canvas_w*devp->canvas_h/2;
++
++	devp->canvas_max_size = PAGE_ALIGN(devp->canvas_w*devp->canvas_h+chroma_size);
+ 	devp->canvas_max_num  = devp->mem_size / devp->canvas_max_size;
+-	if (devp->canvas_max_num > VDIN_CANVAS_MAX_CNT)
+-		devp->canvas_max_num = VDIN_CANVAS_MAX_CNT;
+-#ifdef CONFIG_ARCH_MESON6
+-        /*the max buffer in mid is 6*/
+-        if(devp->canvas_max_num > 6)
+-                devp->canvas_max_num = 6;
+-#endif
++
++	devp->canvas_max_num = min(devp->canvas_max_num,canvas_num);
++	devp->canvas_max_num = min(devp->canvas_max_num,max_buf_num);
++
+ 	devp->mem_start = roundup(devp->mem_start,32);
+-	#ifdef VDIN_DEBUG
++#ifdef VDIN_DEBUG
+ 	pr_info("vdin%d cnavas auto configuration table:\n", devp->index);
+-	#endif
+-	for (i = 0; i < devp->canvas_max_num; i++)
+-	{
+-		canvas_id = vdin_canvas_ids[devp->index][i];
++#endif
++	for (i = 0; i < devp->canvas_max_num; i++){
++		canvas_id = vdin_canvas_ids[devp->index][i*canvas_step];
+ 		canvas_addr = devp->mem_start + devp->canvas_max_size * i;
+-                canvas_config(canvas_id, canvas_addr, devp->canvas_w, devp->canvas_h,
+-				CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-
+-		#ifdef VDIN_DEBUG
++		canvas_config(canvas_id, canvas_addr, devp->canvas_w, devp->canvas_h,
++			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++		if(chroma_size)
++			canvas_config(canvas_id+1, canvas_addr+devp->canvas_w*devp->canvas_h, devp->canvas_w, devp->canvas_h/2,
++					CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
++#ifdef VDIN_DEBUG
+ 		pr_info("\t%3d: 0x%lx-0x%lx %ux%u\n",
+ 				canvas_id, canvas_addr, canvas_addr + devp->canvas_max_size,
+ 				devp->canvas_w, devp->canvas_h);
+-		#endif
++#endif
+ 	}
+ }
+ 
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index 240c09396e3f..39f9b44556a3 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -91,6 +91,7 @@ MODULE_PARM_DESC(use_frame_rate,"use frame rate to cal duraton");
+ #define MEAS_MUX_HDMI                   4
+ #define MEAS_MUX_DVIN                   5
+ #define MEAS_MUX_DTV                    6
++#define MEAS_MUX_ISP                    8
+ 
+ #define MEAS_MUX_VIU                    6
+ 
+@@ -393,9 +394,12 @@ void vdin_set_meas_mux(unsigned int offset, enum tvin_port_e port_)
+ 		case 0xc0://viu
+ 			meas_mux = MEAS_MUX_VIU;
+ 			break;
+-		case 0x100://dtv
++		case 0x100://dtv mipi
+ 			meas_mux = MEAS_MUX_DTV;
+ 			break;
++		case 0x200://isp
++			meas_mux = MEAS_MUX_ISP;
++			break;
+ 		default:
+ 			meas_mux = MEAS_MUX_NULL;
+ 			break;
+@@ -1631,14 +1635,14 @@ void vdin_enable_module(unsigned int offset, bool enable)
+ 	if (enable)
+ 	{
+ 		//set VDIN_MEAS_CLK_CNTL, select XTAL clock
+-		WR(HHI_VDIN_MEAS_CLK_CNTL, 0x00000100);
++		WRITE_CBUS_REG(HHI_VDIN_MEAS_CLK_CNTL, 0x00000100);
+ 		//vdin_hw_enable(offset);
+ 		//todo: check them
+ 	}
+ 	else
+ 	{
+ 		//set VDIN_MEAS_CLK_CNTL, select XTAL clock
+-		WR(HHI_VDIN_MEAS_CLK_CNTL, 0x00000000);
++		WRITE_CBUS_REG(HHI_VDIN_MEAS_CLK_CNTL, 0x00000000);
+ 		vdin_hw_disable(offset);
+ 	}
+ }
+@@ -1903,7 +1907,9 @@ inline void vdin_set_hvscale(struct vdin_dev_s *devp)
+         unsigned int offset = devp->addr_offset;
+     
+         if (((devp->scaler4w < devp->h_active) && (devp->scaler4w != 0)) ||
+-                (devp->h_active > TVIN_MAX_HACTIVE)){
++                (devp->h_active > TVIN_MAX_HACTIVE)	&&
++                ((devp->parm.port >= TVIN_PORT_HDMI0)&&(devp->parm.port <= TVIN_PORT_HDMI7))
++           ){
+             if ((devp->h_active > TVIN_MAX_HACTIVE)&&(devp->scaler4w == 0)) {
+                 vdin_set_hscale(offset, devp->h_active, TVIN_MAX_HACTIVE);
+                 devp->h_active = TVIN_MAX_HACTIVE;
+@@ -1918,7 +1924,7 @@ inline void vdin_set_hvscale(struct vdin_dev_s *devp)
+         if ((devp->scaler4h < devp->v_active) && (devp->scaler4h != 0)) {
+                 vdin_set_vscale(offset, devp->v_active, devp->scaler4h);
+                 devp->v_active = devp->scaler4h;
+-                pr_info("[vdin.%d] dst vactive:%u.\n",devp->index, devp->scaler4h);
++                pr_info("[vdin.%d] dst vactive:%u.\n",devp->index, devp->v_active);
+         } //else
+         //  pr_err("[vdin%x..] dst vactive:0x%x not valid.\n",devp->addr_offset, dst_h);
+ #endif
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index d034ccf1a1f0..156cc2bc4ba4 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -87,7 +87,7 @@ static int callmaster_status = 0;
+  * 1: start cofig
+  * 2: auto config
+  */
+-static int canvas_config_mode = 1;
++static int canvas_config_mode = 2;
+ module_param(canvas_config_mode, int, 0664);
+ MODULE_PARM_DESC(canvas_config_mode, "canvas configure mode");
+ 
+@@ -107,7 +107,7 @@ static int ignore_frames = 0;
+ module_param(ignore_frames, int, 0664);
+ MODULE_PARM_DESC(ignore_frames, "ignore first <n> frames");
+ 
+-static int start_provider_delay = 100;
++static int start_provider_delay = 0;
+ module_param(start_provider_delay, int, 0664);
+ MODULE_PARM_DESC(start_provider_delay, "ignore first <n> frames");
+ static bool vdin_dbg_en = 0;
+@@ -543,13 +543,15 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	else if (canvas_config_mode == 2){
+ 		vdin_canvas_auto_config(devp);
+ 	}
++#if 0
++	if((devp->prop.dest_cfmt == TVIN_NV12)||(devp->prop.dest_cfmt == TVIN_NV21)){
++		devp->vfp->size = devp->canvas_max_num;
++	} else {
++		devp->vfp->size = devp->canvas_max_num;
++	}
++#endif
+ 
+-        if((devp->prop.dest_cfmt == TVIN_NV12)||(devp->prop.dest_cfmt == TVIN_NV21))
+-        {
+-                devp->vfp->size = devp->canvas_max_num>>1;
+-       	} else {
+-       		devp->vfp->size = devp->canvas_max_num;
+-       	}
++	devp->vfp->size = devp->canvas_max_num;
+ 	vf_pool_init(devp->vfp, devp->vfp->size);
+ 	vdin_vf_init(devp);
+ 
+@@ -1287,14 +1289,14 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 		goto irq_handled;
+ 	}
+ 	/*check vs is valid base on the time during continuous vs*/
+-	//if(vdin_check_cycle(devp)){
+-		//goto irq_handled;
+-	//}
++        vdin_check_cycle(devp);
+         /*check the skip frame*/
+         if(devp->frontend && devp->frontend->sm_ops){
+-                sm_ops = devp->frontend->sm_ops;
+-                if(sm_ops->check_frame_skip)
+-                        sm_ops->check_frame_skip(devp->frontend);
++    	        sm_ops = devp->frontend->sm_ops;
++                if(sm_ops->check_frame_skip && 
++        	        sm_ops->check_frame_skip(devp->frontend)) {
++            	        goto irq_handled;
++                }
+         }
+ 
+ 	if (devp->flags & VDIN_FLAG_DEC_STOP_ISR){
+@@ -1959,7 +1961,7 @@ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,
+ 	}else if(!strncmp(parm[0], "fps", 3)){
+ 		if(devp->cycle)
+ 			fps = (VDIN_CRYSTAL + (devp->cycle>>3))/devp->cycle;
+-                pr_info("%u\n",fps);
++                pr_info("%u f/s\n",fps);
+         }
+         else if(!strcmp(parm[0],"capture")){
+ 		if(parm[3] != NULL){
+@@ -2391,6 +2393,128 @@ static ssize_t memp_store(struct class *class,
+ 
+ static CLASS_ATTR(memp, 0644, memp_show, memp_store);
+ 
++static ssize_t vdin_cm2_show(struct device *dev, 
++             struct device_attribute *attr,
++			                     char *buf)
++{
++    struct vdin_dev_s *devp;
++	unsigned int addr_port = VDIN_CHROMA_ADDR_PORT;
++	unsigned int data_port = VDIN_CHROMA_DATA_PORT;
++	
++    devp = dev_get_drvdata(dev);
++    if (devp->addr_offset != 0)     {
++        addr_port = VDIN_CHROMA_ADDR_PORT + devp->addr_offset;
++	    data_port = VDIN_CHROMA_DATA_PORT + devp->addr_offset;	    
++    }
++    pr_info("addr_port: [0x%x] data_port: : [0x%x]\n",addr_port, data_port);
++    
++	pr_info("Usage:");
++	pr_info("	echo wm addr data0 data1 data2 data3 data4 > /sys/class/vdin/vdin0/cm2 \n");
++	pr_info("	echo rm addr > /sys/class/vdin/vdin0/cm2 \n");
++	pr_info("	echo wm addr data0 data1 data2 data3 data4 > /sys/class/vdin/vdin1/cm2 \n");
++	pr_info("	echo rm addr > /sys/class/vdin/vdin1/cm2 \n");
++	return 0;
++}
++
++static ssize_t vdin_cm2_store(struct device *dev, 
++              struct device_attribute *attr,
++		   const char *buffer, size_t count)
++{
++    struct vdin_dev_s *devp;	        
++	int n = 0;
++	char *buf_orig, *ps, *token;
++	char *parm[7];
++	u32 addr, val, bit;
++	int data[5] = {0};
++	unsigned int addr_port = VDIN_CHROMA_ADDR_PORT;
++	unsigned int data_port = VDIN_CHROMA_DATA_PORT;
++	
++    devp = dev_get_drvdata(dev);
++    if (devp->addr_offset != 0)     {
++        addr_port = VDIN_CHROMA_ADDR_PORT + devp->addr_offset;
++	    data_port = VDIN_CHROMA_DATA_PORT + devp->addr_offset;	    
++    }
++	buf_orig = kstrdup(buffer, GFP_KERNEL);
++	ps = buf_orig;
++	while (1) {
++		token = strsep(&ps, " \n");
++		if (token == NULL)
++			break;
++		if (*token == '\0')
++			continue;
++		parm[n++] = token;
++	}
++
++	if ((parm[0][0] == 'w') && parm[0][1] == 'm' ) {
++		if (n != 7) {
++			pr_info("read: invalid parameter\n");
++			pr_info("please: cat /sys/class/vdin/vdin0/cm2 \n");
++			kfree(buf_orig);
++			return count;
++		}
++		addr = simple_strtol(parm[1], NULL, 16);
++		addr = addr - addr%8;
++		data[0] = simple_strtol(parm[2], NULL, 16);
++		data[1] = simple_strtol(parm[3], NULL, 16);
++		data[2] = simple_strtol(parm[4], NULL, 16);
++		data[3] = simple_strtol(parm[5], NULL, 16);
++		data[4] = simple_strtol(parm[6], NULL, 16);
++
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr);
++		aml_write_reg32(VCBUS_REG_ADDR(data_port), data[0]);
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr + 1);
++		aml_write_reg32(VCBUS_REG_ADDR(data_port), data[1]);
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr + 2);
++		aml_write_reg32(VCBUS_REG_ADDR(data_port), data[2]);
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr + 3);
++		aml_write_reg32(VCBUS_REG_ADDR(data_port), data[3]);
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr + 4);
++		aml_write_reg32(VCBUS_REG_ADDR(data_port), data[4]);
++
++		pr_info("wm: [0x%x] <-- 0x0 \n",addr);
++	}
++	else if ((parm[0][0] == 'r') && parm[0][1] == 'm' ) {
++		if (n != 2) {
++			pr_info("read: invalid parameter\n");
++			pr_info("please: cat /sys/class/vdin/vdin0/cm2 \n");
++			kfree(buf_orig);
++			return count;
++		}
++		addr = simple_strtol(parm[1], NULL, 16);
++		addr = addr - addr%8;
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr);
++		data[0] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[0] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[0] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr+1);
++		data[1] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[1] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[1] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr+2);
++		data[2] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[2] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[2] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr+3);
++		data[3] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[3] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[3] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		aml_write_reg32(VCBUS_REG_ADDR(addr_port), addr+4);
++		data[4] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[4] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++		data[4] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
++
++		pr_info("rm:[0x%x]-->[0x%x][0x%x][0x%x][0x%x][0x%x] \n",addr, data[0],data[1],data[2],data[3],data[4]);
++	}
++	else {
++		pr_info("invalid command\n");
++		pr_info("please: cat /sys/class/vdin/vdin0/bit");
++	}
++	kfree(buf_orig);
++	return count;
++
++}
++
++static DEVICE_ATTR(cm2, S_IWUSR | S_IRUGO, vdin_cm2_show, vdin_cm2_store);
+ 
+ 
+ static int vdin_add_cdev(struct cdev *cdevp, struct file_operations *fops,
+@@ -2464,6 +2588,7 @@ static int vdin_drv_probe(struct platform_device *pdev)
+         ret = device_create_file(vdevp->dev,&dev_attr_isr_log);
+         #endif
+         ret = device_create_file(vdevp->dev,&dev_attr_attr);
++	    ret = device_create_file(vdevp->dev,&dev_attr_cm2);
+ 
+ 	if(ret < 0) {
+ 		pr_err("%s: fail to create vdin attribute files.\n", __func__);
+@@ -2569,6 +2694,7 @@ static int vdin_drv_remove(struct platform_device *pdev)
+         device_remove_file(vdevp->dev,&dev_attr_isr_log);
+         #endif
+         device_remove_file(vdevp->dev,&dev_attr_attr);
++		device_remove_file(vdevp->dev,&dev_attr_cm2);
+ 	device_remove_file(vdevp->dev,&dev_attr_sig_det);
+ 
+ 	vdin_delete_device(vdevp->index);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_regs.h b/drivers/amlogic/tvin/vdin/vdin_regs.h
+index 272232218ee8..19439bc744b3 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_regs.h
++++ b/drivers/amlogic/tvin/vdin/vdin_regs.h
+@@ -845,8 +845,8 @@
+ #define MEAS_WIDEN_HS_VS_EN_WID         1
+ #define MEAS_VS_TOTAL_CNT_EN_BIT        16 // vsync total counter always accumulating enable
+ #define MEAS_VS_TOTAL_CNT_EN_WID        1
+-#define MEAS_HS_VS_SEL_BIT              12 // 0: null, 1: vdi1, 2: vdi2, 3: vdi3, 4:vdi4, 5:vdi5,for m6 6:vdi6,7:vdi7
+-#define MEAS_HS_VS_SEL_WID              3
++#define MEAS_HS_VS_SEL_BIT              12 // 0: null, 1: vdi1, 2: vdi2, 3: vdi3, 4:vdi4, 5:vdi5,for m6 6:vdi6,7:vdi7 8:vdi8-isp
++#define MEAS_HS_VS_SEL_WID              4
+ #define MEAS_VS_SPAN_BIT                4  // define how many VS span need to measure
+ #define MEAS_VS_SPAN_WID                8
+ #define MEAS_HS_INDEX_BIT               0  // select which HS counter/range
+diff --git a/drivers/amlogic/tvin/viu/viuin.c b/drivers/amlogic/tvin/viu/viuin.c
+index 39a515c6ecc8..1decc83cc3ee 100755
+--- a/drivers/amlogic/tvin/viu/viuin.c
++++ b/drivers/amlogic/tvin/viu/viuin.c
+@@ -536,7 +536,7 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ static void viuin_close(struct tvin_frontend_s *fe)
+ {        
+         viuin_t *devp = container_of(fe,viuin_t,frontend);
+-        memset(&devp->parm,0,sizeof(viuin_t));
++        memset(&devp->parm,0,sizeof(vdin_parm_t));
+         /*close the venc to vdin path*/
+                         WR_BITS(VPU_VIU_VENC_MUX_CTRL,0,4,8);
+ }
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index c863cbdd1c6a..4e306b4b014f 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -291,7 +291,7 @@ typedef struct xml_window_s {
+         unsigned char ratio_y1; // 0 ~ 255, y1 = (format.v * ratio_y1) >> 8
+ } xml_window_t;
+ 
+-#define AE_PARM_NUM			55
++#define AE_PARM_NUM			59
+ typedef struct xml_algorithm_ae_s {
+         unsigned int  ae_algorithm;       //0:basic;    1:enhanced
+         unsigned int  ae_statistics[3];   //0: false, 1: true
+@@ -357,7 +357,7 @@ typedef struct xml_algorithm_ae_s {
+         unsigned int           flash_thr_enh;	     // 0 ~ 255                 
+ } xml_algorithm_ae_t;
+ 
+-#define AWB_PARM_NUM			53
++#define AWB_PARM_NUM			57
+ typedef struct xml_algorithm_awb_s {
+         unsigned int           awb_algorithm;       //0:basic;    1:enhanced
+         unsigned int           ratio_winl;            //0 ~ 1024
+-- 
+2.19.0
+

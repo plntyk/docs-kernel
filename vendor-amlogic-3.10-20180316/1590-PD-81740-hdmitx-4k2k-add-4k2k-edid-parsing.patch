@@ -1,0 +1,116 @@
+From 0049c675e8655b63cc7d33eb9a92e003ca97a73e Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Mon, 28 Oct 2013 19:59:24 +0800
+Subject: [PATCH 1590/5965] PD #81740: hdmitx: 4k2k: add 4k2k edid parsing
+
+cat /sys/class/amhdmitx/amhdmitx0/disp_cap
+720p
+1080i
+1080p*
+720p50hz
+1080i50hz
+1080p50hz
+1080p24hz
+4k2k30hz
+4k2k25hz
+4k2k24hz
+4k2ksmpte
+---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c   | 46 ++++++++++++++++++-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h |  2 +-
+ 2 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+index 44ad10ddfd9e..4dbf0563e460 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+@@ -950,6 +950,29 @@ static int hdmitx_edid_3d_parse(rx_cap_t* pRXCap, unsigned char *dat, unsigned s
+     return 1;
+ }
+ 
++//parse Sink 4k2k information
++static void hdmitx_edid_4k2k_parse(rx_cap_t* pRXCap, unsigned char *dat, unsigned size)
++{
++    if((size > 4) || (size == 0)) {
++        printk("HDMI: 4k2k in edid out of range, SIZE = %d\n", size);
++        return;
++    }
++    while(size--) {
++        if(*dat == 1)
++            pRXCap->VIC[pRXCap->VIC_count] = HDMI_4k2k_30;
++        else if(*dat == 2)
++            pRXCap->VIC[pRXCap->VIC_count] = HDMI_4k2k_25;
++        else if(*dat == 3)
++            pRXCap->VIC[pRXCap->VIC_count] = HDMI_4k2k_24;
++        else if(*dat == 4)
++            pRXCap->VIC[pRXCap->VIC_count] = HDMI_4k2k_smpte;
++        else {
++        }
++        dat ++;
++        pRXCap->VIC_count++ ;
++    }
++}
++
+ static int hdmitx_edid_block_parse(hdmitx_dev_t* hdmitx_device, unsigned char *BlockBuf)
+ {
+     unsigned char offset,End ;
+@@ -1015,6 +1038,21 @@ static int hdmitx_edid_block_parse(hdmitx_dev_t* hdmitx_device, unsigned char *B
+                 if(count > 7)
+                     hdmitx_edid_3d_parse(pRXCap, &BlockBuf[offset+7], count - 7);
+ 
++                {   // parsing 4k2k mode
++                    unsigned int idx = offset + 7;
++                    unsigned int e4k2k_len = 0;
++                    if((BlockBuf[offset+7] & (1 << 5)) == 0x00) 
++                        break;
++                    if(BlockBuf[offset+7] & (1 << 7))
++                        idx += 2;
++                    if(BlockBuf[offset+7] & (1 << 6))
++                        idx += 2;
++                    e4k2k_len = BlockBuf[idx + 2] >> 5;
++                    if(e4k2k_len) {
++                        hdmitx_edid_4k2k_parse(pRXCap, &BlockBuf[idx + 3], e4k2k_len);
++                    }
++                }
++
+                 offset += count ; // ignore the remaind.
+                 break ;
+             
+@@ -1247,7 +1285,11 @@ static dispmode_vic_t dispmode_VIC_tab[]=
+     {"720p50hz", HDMI_720p50},
+     {"1080i50hz", HDMI_1080i50},
+     {"1080p50hz", HDMI_1080p50},
+-};    
++    {"4k2k30hz", HDMI_4k2k_30},
++    {"4k2k25hz", HDMI_4k2k_25},
++    {"4k2k24hz", HDMI_4k2k_24},
++    {"4k2ksmpte", HDMI_4k2k_smpte},
++};
+ 
+ HDMI_Video_Codes_t hdmitx_get_VIC(hdmitx_dev_t* hdmitx_device, const char* disp_mode)
+ {
+@@ -1293,7 +1335,7 @@ HDMI_Video_Codes_t hdmitx_edid_get_VIC(hdmitx_dev_t* hdmitx_device, const char*
+                 vic = HDMI_Unkown;
+             }
+         }
+-    }    
++    }
+     return vic;
+ }    
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
+index 643b52e15e7e..4087672b7676 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
+@@ -11,7 +11,7 @@
+ /************************************
+ *    hdmitx device structure
+ *************************************/
+-#define VIC_MAX_NUM 60
++#define VIC_MAX_NUM 72  // consider 4k2k
+ #define AUD_MAX_NUM 60
+ typedef struct
+ {
+-- 
+2.19.0
+

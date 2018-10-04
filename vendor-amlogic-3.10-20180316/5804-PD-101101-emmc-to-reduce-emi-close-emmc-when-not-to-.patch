@@ -1,0 +1,72 @@
+From 19520e93766cc430ebc55f7245809e7d1ce99b06 Mon Sep 17 00:00:00 2001
+From: Long Yu <long.yu@amlogic.com>
+Date: Mon, 27 Jul 2015 14:09:43 +0800
+Subject: [PATCH 5804/5965] PD#101101: emmc: to reduce emi, close emmc when not
+ to access emmc
+
+Change-Id: I70a5c27c9925511845dabd99e87a20dccd4d321a
+---
+ drivers/amlogic/mmc/aml_sdhc_m8.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdhc_m8.c b/drivers/amlogic/mmc/aml_sdhc_m8.c
+index 6f7d246432eb..0c235e5ee223 100755
+--- a/drivers/amlogic/mmc/aml_sdhc_m8.c
++++ b/drivers/amlogic/mmc/aml_sdhc_m8.c
+@@ -47,7 +47,8 @@ static unsigned int sdhc_debug_flag = 0;
+ static int sdhc_err_bak;
+ 
+ void aml_sdhc_send_stop(struct amlsd_host* host);
+-
++static void aml_sdhc_emmc_clock_switch_on (struct amlsd_platform* pdata);
++static void aml_sdhc_clk_switch_off (struct amlsd_host* host);
+ static void aml_sdhc_clk_switch (struct amlsd_platform* pdata, int clk_div, int clk_src_sel);
+ static int aml_sdhc_status (struct amlsd_host* host);
+ 
+@@ -1008,6 +1009,7 @@ void aml_sdhc_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
+     if(aml_sdhc_wait_ready(host, STAT_POLL_TIMEOUT)){ /*Wait command busy*/
+ 		sdhc_err("aml_sdhc_wait_ready request done\n");
+     }
++    aml_sdhc_clk_switch_off(host);
+     mmc_request_done(host->mmc, mrq);
+ }
+ 
+@@ -1318,7 +1320,7 @@ void aml_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq)
+ 
+     if (aml_check_unsupport_cmd(mmc, mrq))
+         return;
+-
++    aml_sdhc_emmc_clock_switch_on(pdata);
+     //only for SDCARD
+     if(!pdata->is_in || (!host->init_flag && aml_card_type_sd(pdata))){
+         spin_lock_irqsave(&host->mrq_lock, flags);
+@@ -1930,6 +1932,26 @@ static void aml_sdhc_clk_switch_off (struct amlsd_host* host)
+     // sdhc_err("clock off\n");
+ }
+ 
++static void aml_sdhc_emmc_clock_switch_on (struct amlsd_platform* pdata)
++{
++    struct amlsd_host* host = (void*)pdata->host;
++    u32 vclkc = readl(host->base+SDHC_CLKC);
++    struct sdhc_clkc* clkc = (struct sdhc_clkc*)&vclkc;
++
++    /*Turn on Clock*/
++    clkc->mod_clk_on = 1;
++    writel(vclkc, host->base+SDHC_CLKC);
++
++    clkc->tx_clk_on = 1;
++    clkc->rx_clk_on = 1;
++    clkc->sd_clk_on = 1;
++    writel(vclkc, host->base+SDHC_CLKC);
++
++    host->is_gated = false;
++    // udelay(10);
++    // sdhc_err("clock on, SDHC_CLKC=%#x\n", readl(host->base+SDHC_CLKC));
++}
++
+ static void aml_sdhc_clk_switch_on (struct amlsd_platform* pdata, int clk_div, int clk_src_sel)
+ {
+     struct amlsd_host* host = (void*)pdata->host;
+-- 
+2.19.0
+

@@ -1,0 +1,164 @@
+From 6f838b0915362da581b1c090cd22022cebbfed76 Mon Sep 17 00:00:00 2001
+From: Zhe Wang <zhe.wang@amlogic.com>
+Date: Wed, 8 Apr 2015 18:32:20 +0800
+Subject: [PATCH 5539/5965] PD#105155: sound: update for audioin and pmu4
+
+1) set audioin ctrl reg of ATV,AV,HDMI in i2s prepare
+
+2) close pmu4 overflow detect and reduce PGA
+
+Change-Id: I925d059d86297d063a2d91af150c7cb2413b0a40
+---
+ sound/soc/aml/m8/aml_audio_hw.c   | 44 +++++++++++++++++++++++++------
+ sound/soc/aml/m8/aml_audio_hw.h   |  1 +
+ sound/soc/aml/m8/aml_g9tv.c       | 26 ++++--------------
+ sound/soc/codecs/aml_pmu4_codec.c |  4 +--
+ 4 files changed, 44 insertions(+), 31 deletions(-)
+
+diff --git a/sound/soc/aml/m8/aml_audio_hw.c b/sound/soc/aml/m8/aml_audio_hw.c
+index 8b7d8d3a1e0e..5b6c3779bcfd 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.c
++++ b/sound/soc/aml/m8/aml_audio_hw.c
+@@ -204,7 +204,14 @@ void audio_set_958outbuf(u32 addr, u32 size,int flag)
+ }
+ /*
+ i2s mode 0: master 1: slave
++source: 0: linein; 1: ATV; 2: HDMI-in
+ */
++static int audio_in_source = 0;
++void set_i2s_source(int source){
++    audio_in_source = source;
++    return;
++}
++
+ static void i2sin_fifo0_set_buf(u32 addr, u32 size,u32 i2s_mode,u32 i2s_sync)
+ {
+     unsigned char  mode = 0;
+@@ -236,16 +243,37 @@ static void i2sin_fifo0_set_buf(u32 addr, u32 size,u32 i2s_mode,u32 i2s_sync)
+                                        | 2 << 2               // fifo0_din_byte_num
+                                        | 0 << 0);             // fifo0_din_pos
+ 
+-
+-    WRITE_MPEG_REG(AUDIN_I2SIN_CTRL, (3<<I2SIN_SIZE)
+-                                    |(1<<I2SIN_CHAN_EN)        //  2 channel
+-                                    |(sync_mode<<I2SIN_POS_SYNC)
+-                                    |(1<<I2SIN_LRCLK_SKEW)
++    if (audio_in_source == 0) {
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
++                                    (1<<I2SIN_CHAN_EN)        //  2 channel
++                                    |(3<<I2SIN_SIZE)
+                                     |(1<<I2SIN_LRCLK_INVT)
+-                                    |(!mode<<I2SIN_CLK_SEL)
++                                    |(1<<I2SIN_LRCLK_SKEW)
++                                    |(sync_mode<<I2SIN_POS_SYNC)
+                                     |(!mode<<I2SIN_LRCLK_SEL)
+-                                    |(!mode<<I2SIN_DIR)
+-                  );
++                                    |(!mode<<I2SIN_CLK_SEL)
++                                    |(!mode<<I2SIN_DIR));
++    } else if (audio_in_source == 1) {
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
++                                    (1<<I2SIN_CHAN_EN)        //  2 channel
++                                    |(0<<I2SIN_SIZE)
++                                    |(0<<I2SIN_LRCLK_INVT)
++                                    |(0<<I2SIN_LRCLK_SKEW)
++                                    |(sync_mode<<I2SIN_POS_SYNC)
++                                    |(0<<I2SIN_LRCLK_SEL)
++                                    |(0<<I2SIN_CLK_SEL)
++                                    |(0<<I2SIN_DIR));
++    } else if (audio_in_source == 2) {
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
++                                    (1<<I2SIN_CHAN_EN)        //  2 channel
++                                    |(3<<I2SIN_SIZE)
++                                    |(1<<I2SIN_LRCLK_INVT)
++                                    |(1<<I2SIN_LRCLK_SKEW)
++                                    |(sync_mode<<I2SIN_POS_SYNC)
++                                    |(1<<I2SIN_LRCLK_SEL)
++                                    |(1<<I2SIN_CLK_SEL)
++                                    |(1<<I2SIN_DIR));
++    }
+ 
+ }
+ 
+diff --git a/sound/soc/aml/m8/aml_audio_hw.h b/sound/soc/aml/m8/aml_audio_hw.h
+index cdbc751770bc..8244c1ed76f6 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.h
++++ b/sound/soc/aml/m8/aml_audio_hw.h
+@@ -141,6 +141,7 @@ void audio_in_spdif_enable(int flag);
+ unsigned audio_spdifout_pg_enable(unsigned char enable);
+ unsigned audio_aiu_pg_enable(unsigned char enable);
+ void audio_mute_left_right(unsigned flag);
++void set_i2s_source(int source);
+ 
+ #include "mach/cpu.h"
+ 
+diff --git a/sound/soc/aml/m8/aml_g9tv.c b/sound/soc/aml/m8/aml_g9tv.c
+index 23c69d0ece84..e5607fcd8266 100644
+--- a/sound/soc/aml/m8/aml_g9tv.c
++++ b/sound/soc/aml/m8/aml_g9tv.c
+@@ -175,42 +175,26 @@ static int aml_audio_get_in_source(struct snd_kcontrol *kcontrol,
+     ucontrol->value.enumerated.item[0] = 1;//ATV
+     else if (value == 2)
+     ucontrol->value.enumerated.item[0] = 2;//hdmi
+-    else
+-    printk(KERN_INFO "unknown source\n");
+-
+     return 0;
+ }
+ 
++static int audio_source = 0;
+ static int aml_audio_set_in_source(struct snd_kcontrol *kcontrol,
+         struct snd_ctl_elem_value *ucontrol) {
+     if (ucontrol->value.enumerated.item[0] == 0) { // select external codec output as I2S source
+         WRITE_MPEG_REG(AUDIN_SOURCE_SEL, 0);
+-        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
+-                (1 << I2SIN_CHAN_EN) | (3 << I2SIN_SIZE)
+-                        | (1 << I2SIN_LRCLK_INVT) | (1 << I2SIN_LRCLK_SKEW)
+-                        | (0 << I2SIN_POS_SYNC) | (1 << I2SIN_LRCLK_SEL)
+-                        | (1 << I2SIN_CLK_SEL) | (1 << I2SIN_DIR));
+-        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++        audio_source = 0;
+     } else if (ucontrol->value.enumerated.item[0] == 1) { // select ATV output as I2S source
+         WRITE_MPEG_REG(AUDIN_SOURCE_SEL, 1);
+-        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
+-                (1 << I2SIN_CHAN_EN) | (0 << I2SIN_SIZE)
+-                        | (0 << I2SIN_LRCLK_INVT) | (0 << I2SIN_LRCLK_SKEW)
+-                        | (0 << I2SIN_POS_SYNC) | (0 << I2SIN_LRCLK_SEL)
+-                        | (0 << I2SIN_CLK_SEL) | (0 << I2SIN_DIR));
+-        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++        audio_source = 1;
+     } else if (ucontrol->value.enumerated.item[0] == 2) { // select HDMI-rx as I2S source
+         WRITE_MPEG_REG(AUDIN_SOURCE_SEL, (0 << 12) | // [14:12]cntl_hdmirx_chsts_sel: 0=Report chan1 status; 1=Report chan2 status; ...;
+                 (0xf << 8) | // [11:8] cntl_hdmirx_chsts_en
+                 (1 << 4) | // [5:4]  spdif_src_sel: 1=Select HDMIRX SPDIF output as AUDIN source
+                 (2 << 0)); // [1:0]  i2sin_src_sel: 2=Select HDMIRX I2S output as AUDIN source
+-        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,
+-                (1 << I2SIN_CHAN_EN) | (3 << I2SIN_SIZE)
+-                        | (1 << I2SIN_LRCLK_INVT) | (1 << I2SIN_LRCLK_SKEW)
+-                        | (0 << I2SIN_POS_SYNC) | (1 << I2SIN_LRCLK_SEL)
+-                        | (1 << I2SIN_CLK_SEL) | (1 << I2SIN_DIR));
+-        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++        audio_source = 2;
+     }
++    set_i2s_source(audio_source);
+     return 0;
+ }
+ 
+diff --git a/sound/soc/codecs/aml_pmu4_codec.c b/sound/soc/codecs/aml_pmu4_codec.c
+index 1bcf4875e2d9..ca048b3a2376 100755
+--- a/sound/soc/codecs/aml_pmu4_codec.c
++++ b/sound/soc/codecs/aml_pmu4_codec.c
+@@ -38,8 +38,8 @@ struct pmu4_audio_init_reg {
+ 
+ static struct pmu4_audio_init_reg init_list[] = {
+     {PMU4_BLOCK_ENABLE    , 0xBc06}, // 
+-    {PMU4_AUDIO_CONFIG    , 0x3c00}, //
+-    {PMU4_PGA_IN_CONFIG   , 0x3535}, // ALI1,20dB;AR1,20dB
++    {PMU4_AUDIO_CONFIG    , 0x3400}, //
++    {PMU4_PGA_IN_CONFIG   , 0x2525}, // ALI1,0dB;AR1,0dB
+     {PMU4_ADC_VOL_CTR     , 0x5050}, // 0dB
+     {PMU4_DAC_SOFT_MUTE   , 0x0000}, //
+     {PMU4_DAC_VOL_CTR     , 0xFFFF}, // 0dB
+-- 
+2.19.0
+

@@ -1,0 +1,174 @@
+From 080e07fab7fa34d451d23b5c179d392560556457 Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Thu, 17 Jul 2014 14:59:15 +0800
+Subject: [PATCH 4669/5965] PD#94296:add nr fine tuned setting. PD
+ #94296:enable cue as default,enble l/r nr. PD #94296:bypass nr for hd on
+ mbox,disable cue for progressive.
+
+Change-Id: I9ddd270dbbb00aa49e38e192325b0e520eed87a1
+
+Conflicts:
+
+	drivers/amlogic/deinterlace/deinterlace.c
+---
+ drivers/amlogic/deinterlace/deinterlace.c    |  4 +-
+ drivers/amlogic/deinterlace/deinterlace.h    |  3 ++
+ drivers/amlogic/deinterlace/deinterlace_hw.c | 53 +++++++++++++++-----
+ 3 files changed, 46 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+index c3b8ef51edcc..ced9329deb69 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -6113,8 +6113,10 @@ static void di_reg_process(void)
+             di_set_power_control(1,1);
+ 
+ /* add for di Reg re-init */
+-#if defined(NEW_DI_TV)
++#ifdef NEW_DI_TV
+ di_set_para_by_tvinfo(vframe);
++#else
++di_load_nr_setting();
+ #endif
+             if(di_printk_flag&2){
+                 di_printk_flag=1;
+diff --git a/drivers/amlogic/deinterlace/deinterlace.h b/drivers/amlogic/deinterlace/deinterlace.h
+index 9dd672fa3cf6..f595a7896fdb 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.h
++++ b/drivers/amlogic/deinterlace/deinterlace.h
+@@ -415,6 +415,7 @@ void reset_pd_his(void);
+ void insert_pd_his(pulldown_detect_info_t* pd_info);
+ void reset_pd32_status(void);
+ int detect_pd32(void);
++
+ extern unsigned int pd32_match_num;
+ extern unsigned int pd32_debug_th;
+ extern unsigned int pd32_diff_num_0_th;
+@@ -422,6 +423,8 @@ extern unsigned int pd22_th;
+ extern unsigned int pd22_num_th;
+ extern int nr_hfilt_en;
+ 
++/* init for nr */
++void di_load_nr_setting(void);
+ 
+ #undef DI_DEBUG
+ 
+diff --git a/drivers/amlogic/deinterlace/deinterlace_hw.c b/drivers/amlogic/deinterlace/deinterlace_hw.c
+index 0f00c47be55f..185eac6ae10a 100755
+--- a/drivers/amlogic/deinterlace/deinterlace_hw.c
++++ b/drivers/amlogic/deinterlace/deinterlace_hw.c
+@@ -73,7 +73,7 @@ uint post_ctrl__di_post_repeat;
+ uint di_pre_ctrl__di_pre_repeat;
+ 
+ uint noise_reduction_level = 2;
+-static bool cue_enable = 0;
++static bool cue_enable = 1;
+ 
+ uint field_32lvl;
+ uint field_22lvl;
+@@ -362,11 +362,7 @@ void di_hw_uninit(void)
+ {
+ }
+ 
+-#ifdef NEW_DI_TV
+ unsigned int nr2_en = 0x1;
+-#else
+-unsigned int nr2_en = 0;
+-#endif
+ module_param(nr2_en,uint,0644);
+ MODULE_PARM_DESC(nr2_en,"\n nr2_en\n");
+ 
+@@ -386,7 +382,7 @@ void enable_di_pre_aml (
+    int nr_en, int mtn_en, int pd32_check_en, int pd22_check_en, int hist_check_en,
+    int pre_field_num, int pre_viu_link, int hold_line, int urgent)
+ {
+-  	int hist_check_only;
++    int hist_check_only = 0,nr_w = 0,nr_h = 0;
+     pd32_check_en = 1; // for progressive luma detection
+ 
+   	hist_check_only = hist_check_en && !nr_en && !mtn_en && !pd22_check_en && !pd32_check_en ;
+@@ -401,6 +397,13 @@ void enable_di_pre_aml (
+   	if ( pd22_check_en || hist_check_only )
+   	{
+        	set_di_chan2_mif(di_chan2_mif, urgent, hold_line);   	// set urgent 0.
++       	#ifdef NEW_DI_V1
++            Wr(DI_NR_CTRL0, nr_ctrl0 | (cue_enable << 26));
++	#else
++     	    Wr(DI_NR_CTRL0, nr_ctrl0);
++	#endif
++  	}else{
++            Wr(DI_NR_CTRL0, nr_ctrl0 | (0 << 26));
+   	}
+ 
+   	// set nr wr mif interface.
+@@ -416,11 +419,6 @@ void enable_di_pre_aml (
+      	                                                                    // urgent bit 8
+ #endif
+ #if !defined(CONFIG_ARCH_MESON)
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+-     	Wr(DI_NR_CTRL0, nr_ctrl0 | (cue_enable << 26));
+-#else
+-     	Wr(DI_NR_CTRL0, nr_ctrl0);
+-#endif
+      	Wr(DI_NR_CTRL1, nr_ctrl1);
+      	Wr(DI_NR_CTRL2, nr_ctrl2);
+      	Wr(DI_NR_CTRL3, nr_ctrl3);
+@@ -469,10 +467,19 @@ void enable_di_pre_aml (
+     }
+ 
+ #ifdef NEW_DI_V1
+-        Wr(NR2_FRM_SIZE,((di_nrwr_mif->end_y - di_nrwr_mif->start_y + 1) <<16) |
+-                                          (di_nrwr_mif->end_x - di_nrwr_mif->start_x + 1));
++	nr_w = (di_nrwr_mif->end_x - di_nrwr_mif->start_x + 1);
++	nr_h = (di_nrwr_mif->end_y - di_nrwr_mif->start_y + 1);
++        Wr(NR2_FRM_SIZE,(nr_h<<16)|nr_w);
+ 	/*gate for nr*/
++	#ifdef NEW_DI_TV
+ 	Wr_reg_bits(NR2_SW_EN,nr2_en,4,1);
++	#else
++	/*only process sd,avoid affecting sharp*/
++	if((nr_h<<1) >= 720 || nr_w >= 1280) 
++	    Wr_reg_bits(NR2_SW_EN,0,4,1);
++	else
++	    Wr_reg_bits(NR2_SW_EN,1,4,1);
++	#endif
+ 	/*enable noise meter*/
+ 	Wr_reg_bits(NR2_SW_EN,1,17,1);
+ #endif
+@@ -1515,6 +1522,9 @@ void initial_di_pre_aml ( int hsize_pre, int vsize_pre, int hold_line )
+ void initial_di_post_2 ( int hsize_post, int vsize_post, int hold_line )
+ {
+    	VSYNC_WR_MPEG_REG(DI_POST_SIZE, (hsize_post -1) | ((vsize_post -1 ) << 16));
++   	/* di demo */
++   	VSYNC_WR_MPEG_REG(DI_BLEND_REG0_X,((hsize_post-1)>>1));
++   	VSYNC_WR_MPEG_REG(DI_BLEND_REG0_Y,(vsize_post-1));
+    	VSYNC_WR_MPEG_REG(DI_BLEND_CTRL,
+                       (0x2 << 20) |      				// top mode. EI only
+                        25);              				// KDEINT
+@@ -2179,6 +2189,23 @@ unsigned char di_get_power_control(unsigned char type)
+ 
+ }
+ 
++void di_load_nr_setting()
++{
++    Wr(NR2_3DEN_MODE, 0x77);
++    Wr(NR2_SNR_SAD_CFG, 0x134f);
++    Wr(NR2_MATNR_SNR_NRM_GAIN, 0x0);
++    Wr(NR2_MATNR_SNR_LPF_CFG, 0xc1b86);
++    Wr(NR2_MATNR_SNR_USF_GAIN, 0x404);
++    Wr(NR2_MATNR_SNR_EDGE2B, 0xff08);
++    Wr(NR2_MATNR_BETA_EGAIN, 0x4040);
++    Wr(NR2_MATNR_YBETA_SCL, 0xff2000);
++    Wr(NR2_MATNR_CBETA_SCL, 0xff2000);
++    Wr(NR2_MATNR_MTN_CRTL2, 0x32020);
++    Wr(NR2_MATNR_MTN_GAIN, 0xffffffff);
++    Wr(NR2_MATNR_DEGHOST, 0x133);
++        
++}
++
+ #ifdef DI_POST_SKIP_LINE
+ MODULE_PARM_DESC(di_vscale_skip_mode, "\n di_vscale_skip_mode\n");
+ module_param(di_vscale_skip_mode, uint, 0664);
+-- 
+2.19.0
+

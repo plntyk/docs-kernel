@@ -1,0 +1,231 @@
+From 2479146b7529322109b95339f4a8f15a99d8a759 Mon Sep 17 00:00:00 2001
+From: "chunxue.yu" <chunxue.yu@amlogic.com>
+Date: Wed, 6 Nov 2013 19:43:30 +0800
+Subject: [PATCH 1745/5965] add error handling for key
+
+---
+ drivers/amlogic/input/gpio_key/aml_gpiokey.c | 37 ++++++++++++++------
+ drivers/amlogic/input/keyboard/adc_keypad.c  | 29 ++++++++++-----
+ 2 files changed, 47 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/amlogic/input/gpio_key/aml_gpiokey.c b/drivers/amlogic/input/gpio_key/aml_gpiokey.c
+index b319d705a720..2ec8ec379e00 100755
+--- a/drivers/amlogic/input/gpio_key/aml_gpiokey.c
++++ b/drivers/amlogic/input/gpio_key/aml_gpiokey.c
+@@ -186,6 +186,7 @@ static int gpio_key_probe(struct platform_device *pdev)
+     struct gpio_key *key;
+     struct gpio_platform_data *pdata = NULL;
+     int *key_param = NULL;
++	int state;
+ #ifdef USE_IRQ
+     int irq_keyup;
+     int irq_keydown;
+@@ -195,18 +196,21 @@ static int gpio_key_probe(struct platform_device *pdev)
+ 
+ 	  if (!pdev->dev.of_node) {
+ 				printk("gpio_key: pdev->dev.of_node == NULL!\n");
+-				return -1;
++				state = -EINVAL;
++				goto get_key_node_fail;
+ 		}
+ 		ret = of_property_read_u32(pdev->dev.of_node,"key_num",&key_size);
+     if (ret) {
+ 		  printk("gpio_key: faild to get key_num!\n");
+-		  return -1;
++		  state = -EINVAL;
++		  goto get_key_node_fail;
+ 	  }
+ 
+     pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
+     if (!pdata) {
+         dev_err(&pdev->dev, "platform data is required!\n");
+-        return -EINVAL;
++        state = -EINVAL;
++        goto get_key_node_fail;
+     }
+    
+ 		pdata->key = kzalloc(sizeof(*(pdata->key))*key_size, GFP_KERNEL);
+@@ -244,7 +248,7 @@ static int gpio_key_probe(struct platform_device *pdev)
+     ret |= of_property_read_u32(pdev->dev.of_node,"irq_keydown",&irq_keydown);
+     if (ret) {
+         printk(KERN_INFO "Failed to get key irq number from dts.\n");
+-		goto get_key_param_failed;
++        goto get_key_param_failed;
+ 	}
+     else
+     {
+@@ -288,11 +292,12 @@ static int gpio_key_probe(struct platform_device *pdev)
+     if (!kp || !input_dev) {
+         kfree(kp);
+         input_free_device(input_dev);
+-        return -ENOMEM;
++        state = -ENOMEM;
++        goto get_key_param_failed;
+     }
+     gp_kp=kp;
+ 
+-    platform_set_drvdata(pdev, kp);
++    platform_set_drvdata(pdev, pdata);
+     kp->input = input_dev;
+      
+     INIT_WORK(&(kp->work_update), update_work_func);
+@@ -303,7 +308,8 @@ static int gpio_key_probe(struct platform_device *pdev)
+         printk(KERN_INFO "Failed to request gpio key up irq.\n");
+         kfree(kp);
+         input_free_device(input_dev);
+-        return -EINVAL;
++        state = -EINVAL;
++        goto get_key_param_failed;
+     }
+ 
+     if(request_irq(irq_keydown + INT_GPIO_0, kp_isr, IRQF_DISABLED, "irq_keydown", kp))
+@@ -311,7 +317,8 @@ static int gpio_key_probe(struct platform_device *pdev)
+         printk(KERN_INFO "Failed to request gpio key down irq.\n");
+         kfree(kp);
+         input_free_device(input_dev);
+-        return -EINVAL;
++        state = -EINVAL;
++        goto get_key_param_failed;
+     }
+ #else
+     setup_timer(&kp->timer, kp_timer_sr, (unsigned int)kp) ;
+@@ -351,10 +358,12 @@ static int gpio_key_probe(struct platform_device *pdev)
+         printk(KERN_ERR "Unable to register keypad input device.\n");
+ 		    kfree(kp);
+ 		    input_free_device(input_dev);
+-		    return -EINVAL;
++		    state = -EINVAL;
++		    goto get_key_param_failed;
+     }
+     printk("gpio keypad register input device completed.\r\n");
+     register_keypad_dev(gp_kp);
++    kfree(key_param);
+     return 0;
+ 
+     get_key_param_failed:
+@@ -363,12 +372,14 @@ static int gpio_key_probe(struct platform_device *pdev)
+ 			kfree(pdata->key);
+     get_key_mem_fail:
+ 			kfree(pdata);
+-    return -EINVAL;
++    get_key_node_fail:
++    return state;
+ }
+ 
+ static int gpio_key_remove(struct platform_device *pdev)
+ {
+-    struct kp *kp = platform_get_drvdata(pdev);
++    struct gpio_platform_data *pdata = platform_get_drvdata(pdev);
++    struct kp *kp = gp_kp;
+ 
+     input_unregister_device(kp->input);
+     input_free_device(kp->input);
+@@ -380,6 +391,10 @@ static int gpio_key_remove(struct platform_device *pdev)
+         class_destroy(kp->config_class);
+     }
+     kfree(kp);
++#ifdef CONFIG_OF
++	kfree(pdata->key);
++	kfree(pdata);
++#endif
+     gp_kp=NULL ;
+     return 0;
+ }
+diff --git a/drivers/amlogic/input/keyboard/adc_keypad.c b/drivers/amlogic/input/keyboard/adc_keypad.c
+index 9b06752a192e..35460d2aefa1 100755
+--- a/drivers/amlogic/input/keyboard/adc_keypad.c
++++ b/drivers/amlogic/input/keyboard/adc_keypad.c
+@@ -250,18 +250,21 @@ static int kp_probe(struct platform_device *pdev)
+     struct adc_key *key;
+     struct adc_kp_platform_data *pdata = NULL;
+     int *key_param = NULL;
++	int state;
+ 
+ 		printk("==%s==\n", __func__);
+ 
+ #ifdef CONFIG_OF
+ 	 if (!pdev->dev.of_node) {
+ 				printk("adc_key: pdev->dev.of_node == NULL!\n");
+-				return -1;
++				state =  -EINVAL;
++				goto get_key_node_fail;
+ 		}
+ 		ret = of_property_read_u32(pdev->dev.of_node,"key_num",&key_size);
+     if (ret) {
+ 		  printk("adc_key: faild to get key_num!\n");
+-		  return -1;
++		  state =  -EINVAL;
++		  goto get_key_node_fail;
+ 	  }
+ 	  ret = of_property_read_u32(pdev->dev.of_node,"name_len",&name_len);
+     if (ret) {
+@@ -271,7 +274,8 @@ static int kp_probe(struct platform_device *pdev)
+     pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
+     if (!pdata) {
+         dev_err(&pdev->dev, "platform data is required!\n");
+-        return -EINVAL;
++        state = -EINVAL;
++        goto get_key_node_fail;
+     }
+    
+ 		pdata->key = kzalloc(sizeof(*(pdata->key))*key_size, GFP_KERNEL);
+@@ -332,11 +336,12 @@ static int kp_probe(struct platform_device *pdev)
+         kfree(kp->led_control_param);
+         kfree(kp);
+         input_free_device(input_dev);
+-        return -ENOMEM;
++        state = -ENOMEM;
++        goto get_key_param_failed;
+     }
+     gp_kp=kp;
+ 
+-    platform_set_drvdata(pdev, kp);
++    platform_set_drvdata(pdev, pdata);
+     kp->input = input_dev;
+     kp->cur_keycode = 0;
+ 		kp->tmp_code = 0;
+@@ -399,10 +404,12 @@ static int kp_probe(struct platform_device *pdev)
+ 		    kfree(kp->led_control_param);
+ 		    kfree(kp);
+ 		    input_free_device(input_dev);
+-		    return -EINVAL;
++		    state = -EINVAL;
++		    goto get_key_param_failed;
+     }
+     printk("adc keypad register input device completed.\r\n");
+     register_keypad_dev(gp_kp);
++    kfree(key_param);
+     return 0;
+ 
+     get_key_param_failed:
+@@ -411,12 +418,14 @@ static int kp_probe(struct platform_device *pdev)
+ 			kfree(pdata->key);
+     get_key_mem_fail:
+ 			kfree(pdata);
+-    return -EINVAL;
++    get_key_node_fail:
++    return state;
+ }
+ 
+ static int kp_remove(struct platform_device *pdev)
+ {
+-    struct kp *kp = platform_get_drvdata(pdev);
++    struct adc_kp_platform_data *pdata = platform_get_drvdata(pdev);
++    struct kp *kp = gp_kp;
+ 
+ #if 0
+     if (kp->p_led_timer){
+@@ -437,6 +446,10 @@ static int kp_remove(struct platform_device *pdev)
+     }
+     kfree(kp->led_control_param);
+     kfree(kp);
++#ifdef CONFIG_OF
++	kfree(pdata->key);
++	kfree(pdata);
++#endif
+     gp_kp=NULL ;
+     return 0;
+ }
+-- 
+2.19.0
+

@@ -1,0 +1,138 @@
+From d7826c91864662e2e46ea36ed30be6eb52554913 Mon Sep 17 00:00:00 2001
+From: "zongdong.jiao" <zongdong.jiao@amlogic.com>
+Date: Fri, 10 Oct 2014 21:41:02 +0800
+Subject: [PATCH 4948/5965] PD #98413: hdmitx: support DVI device strictly
+
+---
+ drivers/amlogic/hdmi/Kconfig                 |  7 ---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c       |  2 -
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c  | 49 ++++++++++++++++++++
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_video.c |  9 ----
+ 4 files changed, 49 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/amlogic/hdmi/Kconfig b/drivers/amlogic/hdmi/Kconfig
+index 760239c1ffcd..9f6d9ad49d35 100755
+--- a/drivers/amlogic/hdmi/Kconfig
++++ b/drivers/amlogic/hdmi/Kconfig
+@@ -14,13 +14,6 @@ config AML_HDMI_TX_HDCP
+         default n
+         help
+                 hdmitx hdcp enable, it should be enalbe if board burned hdmitx hdcp keys
+-
+-config AML_HDMI_TX_CTS_DVI
+-        bool "HDMI DVI mode Output Enable"
+-        default n
+-        help
+-                HDMI DVI output enable. By default, Tx will output HDMI mode signal, not DVI.
+-                If you want to pass HDMI official CTS or compliance DVI device, enable it.
+ endif
+ 
+ endmenu
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index caca0e65c4a9..2b90d14fd893 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -398,13 +398,11 @@ static int set_disp_mode_auto(void)
+ 
+     if((vic_ready != HDMI_Unkown) && (vic_ready == vic)) {
+         hdmi_print(IMP, SYS "[%s] ALREADY init VIC = %d\n", __func__, vic);
+-#ifdef CONFIG_AML_HDMI_TX_CTS_DVI
+         if(hdmitx_device.RXCap.IEEEOUI == 0) {
+             // DVI case judgement. In uboot, directly output HDMI mode
+             hdmitx_device.HWOp.CntlConfig(&hdmitx_device, CONF_HDMI_DVI_MODE, DVI_MODE);
+             hdmi_print(IMP, SYS "change to DVI mode\n");
+         }
+-#endif
+         hdmitx_device.cur_VIC = vic;
+         hdmitx_device.output_blank_flag = 1;
+         return 1;
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+index 00a7219a861c..9ebaf0d73578 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+@@ -1130,6 +1130,45 @@ static int hdmitx_edid_search_IEEEOUI(char *buf)
+     return 0;
+ }
+ 
++// check EDID strictly
++static int edid_check_valid(unsigned char *buf)
++{
++    unsigned int chksum = 0;
++    unsigned int i = 0;
++
++    // check block 0 first 8 bytes
++    if((buf[0] != 0) && (buf[7] != 0))
++        return 0;
++    for(i = 1; i < 7; i ++) {
++        if(buf[i] != 0xff)
++            return 0;
++    }
++
++    // check block 0 checksum
++    for(chksum = 0, i = 0; i < 0x80; i++) {
++        chksum += buf[i];
++    }
++    if((chksum & 0xff) != 0)
++        return 0;
++
++    // check Extension flag at block 0
++    if(buf[0x7e] == 0)
++        return 0;
++
++    // check block 1 extension tag
++    if(buf[0x80] != 0x2)
++        return 0;
++
++    // check block 1 checksum
++    for(chksum = 0, i = 0x80; i < 0x100; i++) {
++        chksum += buf[i];
++    }
++    if((chksum & 0xff) != 0)
++        return 0;
++
++    return 1;
++}
++
+ int hdmitx_edid_parse(hdmitx_dev_t* hdmitx_device)
+ {
+     unsigned char CheckSum ;
+@@ -1268,6 +1307,16 @@ int hdmitx_edid_parse(hdmitx_dev_t* hdmitx_device)
+         hdmitx_edid_set_default_vic(hdmitx_device);
+     }    
+ 
++    // strictly DVI device judgement
++    // valid EDID & no audio tag & no IEEEOUI
++    if( edid_check_valid(&EDID_buf[0]) && (pRXCap->AUD_count == 0)
++        && !hdmitx_edid_search_IEEEOUI(&EDID_buf[128]) ) {
++        pRXCap->IEEEOUI = 0x0;
++        printk("hdmitx: edid: sink is DVI device\n");
++    } else {
++        pRXCap->IEEEOUI = 0x0c03;
++    }
++
+ #if 1    
+     i=hdmitx_edid_dump(hdmitx_device, (char*)(hdmitx_device->tmp_buf), HDMI_TMP_BUF_SIZE);
+     hdmitx_device->tmp_buf[i]=0;
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_video.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_video.c
+index 70b1f2065fff..ab9dc215ec15 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_video.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_video.c
+@@ -410,15 +410,6 @@ void hdmitx_init_parameters(HDMI_TX_INFO_t *info)
+ //If not, treated as a DVI Device
+ static int is_dvi_device(rx_cap_t* pRXCap)
+ {
+-    hdmitx_dev_t *hdmitx_device = container_of(pRXCap, struct hdmi_tx_dev_s, RXCap);
+-
+-#ifndef CONFIG_AML_HDMI_TX_CTS_DVI
+-    hdmi_print(IMP, SYS "fixed HDMI mode output\n");
+-    return 0;
+-#endif
+-    if(hdmitx_device->tv_no_edid)
+-        return 0;
+-
+     if(pRXCap->IEEEOUI != 0x000c03)
+         return 1;
+     else
+-- 
+2.19.0
+

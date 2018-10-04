@@ -1,0 +1,282 @@
+From 18d2c19d39c9bcd4426500499ba29a8cd471f989 Mon Sep 17 00:00:00 2001
+From: Kieth Liu <kieth.liu@amlogic.com>
+Date: Tue, 10 Mar 2015 11:01:23 +0800
+Subject: [PATCH 5439/5965] PD#103662: osd/rdma: fix rdma write registers issue
+
+Change-Id: I53d17848041af9b25d7d492c737b63ede116f32b
+---
+ drivers/amlogic/amports/rdma.c         | 37 +++++++++-
+ drivers/amlogic/display/osd/osd_hw.c   | 10 ++-
+ drivers/amlogic/display/osd/osd_rdma.c | 95 +++++++++++++++++++++++---
+ drivers/amlogic/display/osd/osd_rdma.h |  5 ++
+ 4 files changed, 132 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/amlogic/amports/rdma.c b/drivers/amlogic/amports/rdma.c
+index db45f7282135..12ec9e24371f 100755
+--- a/drivers/amlogic/amports/rdma.c
++++ b/drivers/amlogic/amports/rdma.c
+@@ -59,6 +59,22 @@
+ #define Wr_reg_bits(adr, val, start, len)  WRITE_MPEG_REG_BITS(adr, val, start, len)
+ #endif
+ 
++
++#if (defined CONFIG_RDMA_IN_RDMAIRQ)||(defined CONFIG_RDMA_IN_TASK)
++#if MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV
++#define RDMA_CHECK_REG   VPU_D2D3_MMC_CTRL
++#define RDMA_CHECK_BIT      6
++#endif
++#endif
++
++#if 0
++#if MESON_CPU_TYPE==MESON_CPU_TYPE_MESON8
++#define RDMA_CHECK_REG   VPU_VD3_MMC_CTRL
++#define RDMA_CHECK_BIT      6
++#endif
++#endif
++
++
+ //#define RDMA_CHECK_PRE
+ #if MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV
+ #undef READ_BACK_SUPPORT
+@@ -271,11 +287,18 @@ static int rdma_config(unsigned char type)
+     Wr(GCLK_REG_MISC_RDMA, Rd(GCLK_REG_MISC_RDMA)|GCLK_MASK_MISC_RDMA);
+ #endif
+     if(rmda_item_count>0){
+-    memcpy(rmda_table_addr_remap, rmda_table, rmda_item_count*8);
++#if (defined RDMA_CHECK_REG)&&(defined RDMA_CHECK_BIT)
++        unsigned long check_val = Rd(RDMA_CHECK_REG);
++        rdma_table_prepare_write(RDMA_CHECK_REG, check_val|(1<<RDMA_CHECK_BIT));
++#endif
++        memcpy(rmda_table_addr_remap, rmda_table, rmda_item_count*8);
+ #ifdef RDMA_CHECK_PRE
+         memcpy(rmda_table_pre, rmda_table, rmda_item_count*8);
+ #endif
+     }
++    else {
++        rdma_config_flag = 2;
++    }
+ #ifdef RDMA_CHECK_PRE
+     rmda_item_count_pre = rmda_item_count;
+ #endif
+@@ -441,6 +464,14 @@ EXPORT_SYMBOL(vsync_rdma_config_pre);
+ 
+ static irqreturn_t rdma_isr(int irq, void *dev_id)
+ {
++#if (defined RDMA_CHECK_REG)&&(defined RDMA_CHECK_BIT)
++        unsigned long check_val = Rd(RDMA_CHECK_REG);
++        if (((check_val>>RDMA_CHECK_BIT)&0x1) == 0) {
++            return IRQ_HANDLED;
++        }
++        Wr(RDMA_CHECK_REG, Rd(RDMA_CHECK_REG)&(~(1<<RDMA_CHECK_BIT)));
++#endif
++
+ #ifdef CONFIG_RDMA_IN_TASK
+       if(rmda_item_count > 0){
+         rdma_config_flag = 1;
+@@ -800,6 +831,10 @@ static int  __init rdma_init(void)
+     enable = 1;
+     vout_register_client(&display_mode_notifier_nb_v);
+ #endif
++#if (defined RDMA_CHECK_REG)&&(defined RDMA_CHECK_BIT)
++    Wr(RDMA_CHECK_REG, Rd(RDMA_CHECK_REG)&(~(1<<RDMA_CHECK_BIT)));
++#endif
++
+ #ifdef CONFIG_RDMA_IN_TASK
+      sema_init(&rdma_sema,1);
+      kthread_run(rdma_task_handle, NULL, "kthread_h265");
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index cb5cf525b18c..669ec6f3f601 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -70,6 +70,7 @@
+ int reset_rdma(void);
+ int osd_rdma_enable(u32  enable);
+ int read_rdma_table(void);
++void osd_rdma_table_setup(void);
+ #endif
+ 
+ static DEFINE_MUTEX(osd_mutex);
+@@ -465,14 +466,12 @@ static irqreturn_t osd_rdma_isr(int irq, void *dev_id)
+ 	unsigned  char output_type=0;
+ 
+ 	read_rdma_table();
++#if 0
+ 	do{
+ 		if((aml_read_reg32(P_RDMA_STATUS)&0x0fffff0f) == 0){
+ 			break;
+ 		}
+ 	}while(1);
+-
+-#ifdef CONFIG_VSYNC_RDMA
+-	reset_rdma();
+ #endif
+ 
+ 	output_type=aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0x3;
+@@ -546,6 +545,11 @@ static irqreturn_t osd_rdma_isr(int irq, void *dev_id)
+ 
+ 	osd_update_3d_mode(osd_hw.mode_3d[OSD1].enable,osd_hw.mode_3d[OSD2].enable);
+ 
++#ifdef CONFIG_VSYNC_RDMA
++	//reset_rdma();
++	osd_rdma_table_setup();
++#endif
++
+ 	if (!vsync_hit)
+ 	{
+ #ifdef FIQ_VSYNC
+diff --git a/drivers/amlogic/display/osd/osd_rdma.c b/drivers/amlogic/display/osd/osd_rdma.c
+index 090f3dca964a..57140c513387 100755
+--- a/drivers/amlogic/display/osd/osd_rdma.c
++++ b/drivers/amlogic/display/osd/osd_rdma.c
+@@ -37,6 +37,10 @@ static int ctrl_ahb_rd_burst_size = 3;
+ static int ctrl_ahb_wr_burst_size = 3;
+ 
+ static int  osd_rdma_init(void);
++void osd_rdma_start(void);
++
++static u32		   sw_item_count=0;
++static rdma_table_item_t sw_rdma_table[(TABLE_SIZE+7)/8];
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define Wr(adr,val) WRITE_VCBUS_REG(adr, val)
+@@ -54,13 +58,38 @@ static int  osd_rdma_init(void);
+ 
+ static int  update_table_item(u32 addr,u32 val)
+ {
+-	if(item_count > (MAX_TABLE_ITEM-1)) return -1;
+-
+-	//new comer,then add it .
+-	rdma_table[item_count].addr=addr;
+-	rdma_table[item_count].val=val;
+-	item_count++;
+-	aml_write_reg32(END_ADDR,(table_paddr + item_count*8-1));
++	unsigned int rdma_flag = Rd(OSD_RDMA_FLAG_REG);
++	if (item_count > (MAX_TABLE_ITEM-2))
++		return -1;
++	if ((rdma_flag == OSD_RDMA_IDLE) || (rdma_flag == OSD_RDMA_WAIT)) {
++		if (!item_count) {
++			rdma_table[0].addr=addr;
++			rdma_table[0].val=val;
++			rdma_table[1].addr=OSD_RDMA_FLAG_REG;
++			rdma_table[1].val=OSD_RDMA_DONE;
++			item_count=2;
++			aml_write_reg32(END_ADDR,(table_paddr + item_count*8 - 1));
++		}
++		else{
++			rdma_table[item_count].addr=OSD_RDMA_FLAG_REG;
++			rdma_table[item_count].val=OSD_RDMA_DONE;
++			aml_write_reg32(END_ADDR,(table_paddr + (item_count+1)*8 - 1));
++			rdma_table[item_count-1].addr=addr;
++			rdma_table[item_count-1].val=val;
++			item_count++;
++		}
++		if (rdma_flag == OSD_RDMA_IDLE) {
++			Wr(OSD_RDMA_FLAG_REG, OSD_RDMA_WAIT);
++		}
++	}
++	else{ // OSD_RDMA_DONE
++		if (sw_item_count > (MAX_TABLE_ITEM-1))
++			return -1;
++		printk("WARNING: ===== osd_rdma reg added between vsync and rdma_done =====\n");
++		sw_rdma_table[sw_item_count].addr=addr;
++		sw_rdma_table[sw_item_count].val=val;
++		sw_item_count++;
++	}
+ 	return 0;
+ }
+ 
+@@ -70,9 +99,16 @@ u32  VSYNCOSD_RD_MPEG_REG(unsigned long addr)
+ 
+ 	if(rdma_enable)
+ 	{
+-		for(i=(item_count -1); i>=0; i--)
++		if (Rd(OSD_RDMA_FLAG_REG) == OSD_RDMA_DONE) {
++			for (i=(sw_item_count -1); i>=0; i--)
++			{
++				if (addr == sw_rdma_table[i].addr)
++				return sw_rdma_table[i].val;
++			}
++		}
++		for (i=(item_count -1); i>=0; i--)
+ 		{
+-			if(addr==rdma_table[i].addr)
++			if (addr == rdma_table[i].addr)
+ 			return rdma_table[i].val;
+ 		}
+ 	}
+@@ -200,6 +236,42 @@ int reset_rdma(void)
+ }
+ EXPORT_SYMBOL(reset_rdma);
+ 
++void osd_rdma_table_setup(void)
++{
++	int i, j;
++	unsigned addr;
++
++	if (Rd(OSD_RDMA_FLAG_REG) == OSD_RDMA_DONE) {
++		aml_write_reg32(END_ADDR,(table_paddr - 1));
++		for (i=0;i<item_count-1;i++) {
++			addr = rdma_table[i].addr;
++			for (j=item_count-2;j>i;j--) {
++				if (rdma_table[j].addr == addr) {
++					break;
++				}
++			}
++			if (Rd(addr) != rdma_table[j].val) { // make sure all registers write in even if it was added between hw vsync and rdma done interrupt handler(not write in last rdma)
++				Wr(addr, rdma_table[j].val);
++				printk("===== osd_rdma missed [%x]=%x, [%x]=%x =====\n", addr, rdma_table[i].val, rdma_table[j].addr, rdma_table[j].val);
++			}
++		}
++		item_count = 0;
++		if (sw_item_count) {
++			memcpy(rdma_table, sw_rdma_table, sw_item_count*8);
++			rdma_table[sw_item_count].addr=OSD_RDMA_FLAG_REG;
++			rdma_table[sw_item_count].val=OSD_RDMA_DONE;
++			item_count=sw_item_count+1;
++			sw_item_count=0;
++			Wr(OSD_RDMA_FLAG_REG, OSD_RDMA_WAIT);
++			aml_write_reg32(END_ADDR,(table_paddr + item_count*8 - 1));
++		}
++		else {
++			Wr(OSD_RDMA_FLAG_REG, OSD_RDMA_IDLE);
++		}
++	}
++}
++EXPORT_SYMBOL(osd_rdma_table_setup);
++
+ int osd_rdma_enable(u32  enable)
+ {
+ 	if (!osd_rdma_init_flat){
+@@ -208,12 +280,13 @@ int osd_rdma_enable(u32  enable)
+ 
+ 	if(enable == rdma_enable) return 0;
+ 	rdma_enable = enable;
+-	if(enable){
++	if (enable) {
++		Wr(OSD_RDMA_FLAG_REG, OSD_RDMA_IDLE);
+ 		aml_write_reg32(START_ADDR,table_paddr);
+ 		//enable then start it.
+ 		reset_rdma();
+ 		start_osd_rdma(RDMA_CHANNEL_INDEX);
+-	}else{
++	}else {
+ 		stop_rdma(RDMA_CHANNEL_INDEX);
+ 	}
+ 	return 1;
+diff --git a/drivers/amlogic/display/osd/osd_rdma.h b/drivers/amlogic/display/osd/osd_rdma.h
+index 40919e7e195c..18f6c4bd2df1 100755
+--- a/drivers/amlogic/display/osd/osd_rdma.h
++++ b/drivers/amlogic/display/osd/osd_rdma.h
+@@ -34,4 +34,9 @@ typedef  struct{
+ #define START_ADDR		(P_RDMA_AHB_START_ADDR_MAN+(RDMA_CHANNEL_INDEX<<3))
+ #define END_ADDR		(P_RDMA_AHB_END_ADDR_MAN+(RDMA_CHANNEL_INDEX<<3))
+ 
++#define OSD_RDMA_FLAG_REG	VPU_OSD4_MMC_CTRL
++#define OSD_RDMA_IDLE ((0x3f<<6)|0x2d)
++#define OSD_RDMA_DONE ((0x3e<<6)|0x2d)
++#define OSD_RDMA_WAIT ((0x3d<<6)|0x2d)
++
+ #endif
+-- 
+2.19.0
+

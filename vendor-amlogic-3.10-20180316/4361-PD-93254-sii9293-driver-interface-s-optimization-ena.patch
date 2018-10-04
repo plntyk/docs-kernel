@@ -1,0 +1,465 @@
+From df3575c02d5ba62db396d0b3e61e9a4bb5b34a82 Mon Sep 17 00:00:00 2001
+From: "jets.yan" <jets.yan@amlogic.com>
+Date: Fri, 14 Mar 2014 16:04:10 +0800
+Subject: [PATCH 4361/5965] PD#93254:[sii9293]: driver interface's
+ optimization: enable, cable_status, signal_status, audio_frame_rate.
+
+---
+ .../component/rx/si_rx_video_mode_detection.c |  10 +-
+ .../sii9293/driver/rx_drv/si_drv_rx_isr.c     |  42 ++++--
+ .../driver/rx_drv/si_sii5293_registers.h      |   2 +
+ .../linux_driver/application/mhl_linuxdrv.h   |  12 ++
+ .../application/mhl_linuxdrv_main.c           | 135 +++++++++++++-----
+ .../application/sii5293_interface.c           |  33 +++++
+ .../application/sii5293_interface.h           |   3 +
+ 7 files changed, 188 insertions(+), 49 deletions(-)
+
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+index 99f76775174d..43cf45fe9bb5 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+@@ -995,12 +995,20 @@ void VMD_ResetTimingData(void)
+     clear_sync_info();
+ }
+ #if defined(__KERNEL__)
++extern void sii_signal_notify(unsigned int status);
+ static void VMD_Timer_Callback(void *pArg)
+ {
++	bool_t signal_detected = false;
++
+     DEBUG_PRINT(MSG_STAT, ("Video stable timer expired.\n"));
+ 	vmd_data.bReadyforVMD = true;
+-    VMD_DetectVideoResolution();
++    signal_detected = VMD_DetectVideoResolution();
+     SiiDrvRxMuteVideo(OFF);
++
++    if( signal_detected == true )
++    {
++    	sii_signal_notify(1);
++    }
+ }
+ #else
+ void SiiRxFormatDetect(void)
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
+index 20e43580a95d..5f2f115c185d 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx_isr.c
+@@ -390,11 +390,28 @@ static void hdcp_error_handler(bool_t v_sync_mode)
+  *
+  *****************************************************************************/
+ extern void sii5293_output_mode_trigger(unsigned int flag);
++static uint8_t signal_status = 0;
+ 
+-void SiiRxInterruptHandler(void)
++void sii_signal_notify(unsigned int status)
+ {
+-	static uint8_t current_scdt = 0;
++	printk("sii9293, [%s] status = %d, signal_status = %d\n", __FUNCTION__, status, signal_status);
++    // signal detection for vdin utility.
++    if( (status==1) && (signal_status==0) )
++    {
++    	signal_status = status;
++        sii5293_output_mode_trigger(1);
++    }
++    else if( (status==0) && (signal_status==1) )
++    {
++    	signal_status = status;
++    	sii5293_output_mode_trigger(0);
++    }
++
++    return ;
++}
+ 
++void SiiRxInterruptHandler(void)
++{
+     uint8_t interrupts[NMB_OF_RX_INTERRUPTS];
+    
+     //DEBUG_PRINT(MSG_STAT, ("RX Interrupt detected!\n"));
+@@ -439,32 +456,29 @@ void SiiRxInterruptHandler(void)
+         switch_hdcp_failure_check_with_v_sync_rate(OFF);
+         SiiDrvRxMuteVideo(ON);
+         rx_isr.bVidStableChgEvent = true;
++
+         if(SiiDrvRxIsSyncDetected())
+         {
++        	// SCDT detection for vdin utility.
++        	printk("sii9293 irq got SCDT!\n");
++
+             rx_isr.bScdtState = true;
+ #if defined(__KERNEL__)
+             SiiConnectionStateNotify(true);
+ #endif  
+-            // SCDT detection for vdin utility.
+-	        if( current_scdt == 0 )
+-	        {
+-	            sii5293_output_mode_trigger(1);
+-	            current_scdt = 1;
+-	        }
+         }
+         else
+         {
++        	// SCDT detection for vdin utility.
++			printk("sii9293 irq lost SCDT!\n");
++			sii_signal_notify(0);
++
+             rx_isr.bScdtState = false;
+             SiiDrvSoftwareReset(RX_M__SRST__SRST);
+             VMD_ResetTimingData();
+             DEBUG_PRINT(MSG_STAT, ("RX: IDLE!\n"));
+ 
+-            // SCDT detection for vdin utility.
+-	        if( current_scdt == 1 )
+-	        {
+-	            sii5293_output_mode_trigger(0);
+-	            current_scdt = 0;
+-	        }
++
+         }
+ 
+     }
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_sii5293_registers.h b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_sii5293_registers.h
+index ec3ce529a8a6..bbe4409660c4 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_sii5293_registers.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_sii5293_registers.h
+@@ -450,6 +450,8 @@
+ #define RX_A__CHST1				0x22A
+ #define RX_A__CHST2				0x22B
+ #define RX_A__CHST3				0x22C
++#define RX_A__CHST4				0x230
++#define RX_A__CHST4__BIT_AUD_FS	0x0F // AUD_FS, sampling frequency
+ 
+ #define RX_A__SW_OW				0x22E
+ #define RX_M__SW_OW__SWAP_CH3			0x80
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+index c34378c64daa..d173dbeff87e 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+@@ -159,6 +159,18 @@ typedef struct
+ 	unsigned int	vdin_started;
+ }sii5293_vdin;
+ 
++typedef struct
++{
++    unsigned int        user_cmd; // 0 to disable from user
++                                  // 1 to enable, driver will trigger to vdin-stop
++                                  // 2 to enable, driver will trigger to vdin-start
++                                  // 3 to enable, driver will trigger to vdin-start/vdin-stop
++                                  // 4 to enable, driver will not trigger to vdin-start/vdin-stop
++                                  // 0xff to enable, and driver will NOT trigger on signal-lost/vdin-stop, singal-get/vdin-start
++    unsigned int        cable_status; // 1 for cable plug in, 0 for cable plug out
++    unsigned int        signal_status; // external hdmi cable is insert or not
++}sii9293_info_t;
++
+ /***** global variables ********************************************/
+ 
+ extern MHL_DRIVER_CONTEXT_T gDriverContext;
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+index b2966be20ac7..ab701e72787d 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+@@ -1439,6 +1439,7 @@ typedef enum
+ 
+ static unsigned int vdin_state = 0;
+ sii5293_vdin sii5293_vdin_info;
++sii9293_info_t sii9293_info;
+ 
+ void dump_input_video_info(void)
+ {
+@@ -1589,36 +1590,45 @@ static unsigned int sii_output_mode = 0xff;
+ void sii5293_output_mode_trigger(unsigned int flag)
+ {
+ 	unsigned int mode = 0xff;
+-	
+-	printk("sii5293 SCDT trigger flag = %d\n", flag);
+-	if( flag == 0 ) // sii5293 SCDT off
++
++	sii9293_info.signal_status = flag;
++	printk("[%s] set signal_status = %d\n", __FUNCTION__, sii9293_info.signal_status);
++
++	if( (sii9293_info.user_cmd==0) || (sii9293_info.user_cmd==0x4) || (sii9293_info.user_cmd==0xff) )
+ 		return ;
+ 
+-	// if vdin is not started, then don't trigger automatically.
+-	if( sii5293_vdin_info.vdin_started != 1 )
++	if( (0==flag) && ((sii9293_info.user_cmd==1)||(sii9293_info.user_cmd==3)) )
++	{
++		printk("[%s], lost signal, stop vdin!\n", __FUNCTION__);
++		sii_output_mode = 0xff;
++		sii5293_stop_vdin(&sii5293_vdin_info);
+ 		return ;
++	}
+ 
+-	msleep(500);
+-	mode = sii5293_get_output_mode();
+-	if( mode != sii_output_mode )
++	if( (1==flag) && ((sii9293_info.user_cmd==2)||(sii9293_info.user_cmd==3)) )
+ 	{
+-		printk("[%s], trigger new mode = %d, old mode = %d\n", __FUNCTION__, mode, sii_output_mode);
+-		if( mode < CEA_MAX )
++		mode = sii5293_get_output_mode();
++		if( mode != sii_output_mode )
+ 		{
+-			sii5293_start_vdin_mode(mode);
+-			sii_output_mode = mode;
++			printk("[%s], trigger new mode = %d, old mode = %d\n", __FUNCTION__, mode, sii_output_mode);
++			if( mode < CEA_MAX )
++			{
++				sii5293_start_vdin_mode(mode);
++				sii_output_mode = mode;
++			}
+ 		}
+ 	}
+ 
+ 	return ;
+ }
+ 
+-static ssize_t vdin_enable_show(struct class *class, struct class_attribute *attr, char *buf)
++
++static ssize_t user_enable_show(struct class *class, struct class_attribute *attr, char *buf)
+ {
+-	return sprintf(buf, "sii5293 vdin eanble = %d\n", sii5293_vdin_info.vdin_started);
++	return sprintf(buf, "sii9293 user eanble = %d\n", sii9293_info.user_cmd);
+ }
+ 
+-static ssize_t vdin_enable_store(struct class *class, struct class_attribute *attr,
++static ssize_t user_enable_store(struct class *class, struct class_attribute *attr,
+ 									const char *buf, size_t count)
+ {
+ 	int argn;
+@@ -1637,10 +1647,16 @@ static ssize_t vdin_enable_store(struct class *class, struct class_attribute *at
+ 	}
+ 
+ //	printk("argn = %d, \"%s\", \"%s\", \"%s\", \"%s\", \"%s\"\n", argn, argv[0], argv[1], argv[2], argv[3], argv[4] );
+-	if( !strcmp(argv[0], "0\n") )
++	if( !strcmp(argv[0], "0\n") ) // disable
+ 		enable = 0;
+-	else if( !strcmp(argv[0], "1\n") )
++	else if( !strcmp(argv[0], "1\n") ) // enable, driver will trigger to vdin-stop
+ 		enable = 1;
++	else if( !strcmp(argv[0], "2\n") ) // enable, driver will trigger to vdin-start
++		enable = 2;
++	else if( !strcmp(argv[0], "3\n") ) // enable, driver will trigger to vdin-start/vdin-stop
++		enable = 3;
++	else if( !strcmp(argv[0], "4\n") ) // enable, driver will not trigger to vdin-start/vdin-stop
++		enable = 4;
+ 	else
+ 	{
+ 		for( i=0; i<10; i++ )
+@@ -1648,11 +1664,13 @@ static ssize_t vdin_enable_store(struct class *class, struct class_attribute *at
+ 			if( !strcmp(argv[0], vmode[i]) )
+ 			{
+ 				mode = i;
+-				enable = 2;
++				enable = 0xff;
+ 			}
+ 		}
+ 	}
+ 
++	sii9293_info.user_cmd = enable;
++
+ 	if( (enable==1) && (argn!=5) && (argn!=1) )
+ 	{
+ 		printk("invalid parameters to enable cmd !\n");
+@@ -1662,15 +1680,15 @@ static ssize_t vdin_enable_store(struct class *class, struct class_attribute *at
+ 	if( (enable==0) && (sii5293_vdin_info.vdin_started==1) )
+ 	{
+ 		sii5293_stop_vdin(&sii5293_vdin_info);
+-		printk("sii5293 disable dvin !\n");
++		printk("sii9293 disable dvin !\n");
+ 	}
+-	else if( (enable==1) && (sii5293_vdin_info.vdin_started==0) )
++	else if( ( (enable==1)||(enable==2)||(enable==3)||(enable==4) ) && (sii5293_vdin_info.vdin_started==0) )
+ 	{
+ 		mode = sii5293_get_output_mode();
+ 		sii5293_start_vdin_mode(mode);
+-		printk("sii5293 enable(1) dvin !\n");
++		printk("sii9293 enable(0x%x) dvin !\n", enable);
+ 	}
+-	else if( (enable==2) && (sii5293_vdin_info.vdin_started==0) )
++	else if( (enable==0xff) && (sii5293_vdin_info.vdin_started==0) )
+ 	{
+ 		
+ 		switch(mode)
+@@ -1689,21 +1707,20 @@ static ssize_t vdin_enable_store(struct class *class, struct class_attribute *at
+ 			default:
+ 				mode = CEA_720P60;		break;
+ 			case 6: // 1080i60
+-				mode = CEA_1080I60; 	break;
++				mode = CEA_1080I60;		break;
+ 			case 7: // 1080p60
+-				mode = CEA_1080P60; 	break;
++				mode = CEA_1080P60;		break;
+ 			case 8: // 1080i50
+-				mode = CEA_1080I50; 	break;
++				mode = CEA_1080I50;		break;
+ 			case 9: // 1080p50
+-				mode = CEA_1080P50; 	break;
++				mode = CEA_1080P50;		break;
+ 		}
+ 
+ 		sii5293_start_vdin_mode(mode);
+-		printk("sii5293 enable(2) dvin !\n");
++		printk("sii9293 enable(0x%x) dvin !\n", enable);
+ 	}
+ 
+ 	return count;
+-
+ }
+ 
+ static ssize_t debug_show(struct class *class, struct class_attribute *attr, char *buf)
+@@ -1993,10 +2010,52 @@ static ssize_t pinmux_store(struct class *class, struct class_attribute *attr,
+ 	return count;
+ }
+ 
+-static CLASS_ATTR(vdin_enable, S_IRUGO | S_IWUGO, vdin_enable_show, vdin_enable_store);
+-static CLASS_ATTR(debug, S_IRUGO | S_IWUGO, debug_show, debug_store);
+-//static CLASS_ATTR(pinmux, S_IRUGO | S_IWUGO, pinmux_show, pinmux_store);
+-static CLASS_ATTR(input_mode, S_IRUGO, sii5293_input_mode_show, NULL);
++static ssize_t sii9293_cable_status_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++	sii9293_info.cable_status = sii_get_pwr5v_status();
++	return sprintf(buf, "%d\n", sii9293_info.cable_status);
++}
++
++static ssize_t sii9293_signal_status_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", sii9293_info.signal_status);
++}
++
++static ssize_t sii9293_audio_sr_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++	int audio_sr;
++	char *audio_sr_array[] =
++	{
++		"44.1 kHz",			// 0x0
++		"Not indicated",	// 0x1
++		"48 kHz",			// 0x2
++		"32 kHz",			// 0x3
++		"22.05 kHz",		// 0x4
++		"reserved",			// 0x5
++		"24 kHz",			// 0x6
++		"reserved",			// 0x7
++		"88.2 kHz",			// 0x8
++		"768 kHz (192*4)",	// 0x9
++		"96 kHz",			// 0xa
++		"reserved",			// 0xb
++		"176.4 kHz",		// 0xc
++		"reserved",			// 0xd
++		"192 kHz",			// 0xe
++		"reserved"			// 0xf
++	};
++
++	audio_sr = sii_get_audio_sampling_freq()&0xf;
++
++	return sprintf(buf, "%s\n", audio_sr_array[audio_sr]);
++}
++
++static CLASS_ATTR(enable, 				S_IRUGO | S_IWUGO,	user_enable_show,			user_enable_store);
++static CLASS_ATTR(debug, 				S_IRUGO | S_IWUGO,	debug_show,					debug_store);
++//static CLASS_ATTR(pinmux,				S_IRUGO | S_IWUGO,	pinmux_show,				pinmux_store);
++static CLASS_ATTR(input_mode, 			S_IRUGO,			sii5293_input_mode_show,	NULL);
++static CLASS_ATTR(cable_status, 		S_IRUGO,			sii9293_cable_status_show,	NULL);
++static CLASS_ATTR(signal_status, 		S_IRUGO,			sii9293_signal_status_show,	NULL);
++static CLASS_ATTR(audio_sample_rate, 	S_IRUGO,			sii9293_audio_sr_show,		NULL);
+ 
+ static int aml_sii5293_create_attrs(struct class *cls)
+ {
+@@ -2005,10 +2064,13 @@ static int aml_sii5293_create_attrs(struct class *cls)
+ 	if( cls == NULL )
+ 		return 1;
+ 
+-	ret = class_create_file(cls, &class_attr_vdin_enable);	
++	ret = class_create_file(cls, &class_attr_enable);	
+ 	ret |= class_create_file(cls, &class_attr_debug);
+ //	ret |= class_create_file(cls, &class_attr_pinmux);
+ 	ret |= class_create_file(cls, &class_attr_input_mode);
++	ret |= class_create_file(cls, &class_attr_cable_status);
++	ret |= class_create_file(cls, &class_attr_signal_status);
++	ret |= class_create_file(cls, &class_attr_audio_sample_rate);
+ 
+ 	return ret;
+ }
+@@ -2018,10 +2080,13 @@ static void aml_sii5293_remove_attrs(struct class *cls)
+ 	if( cls == NULL )
+ 		return ;
+ 
+-	class_remove_file(cls, &class_attr_vdin_enable);	
++	class_remove_file(cls, &class_attr_enable);	
+ 	class_remove_file(cls, &class_attr_debug);
+ //	class_remove_file(cls, &class_attr_pinmux);
+ 	class_remove_file(cls, &class_attr_input_mode);
++	class_remove_file(cls, &class_attr_cable_status);
++	class_remove_file(cls, &class_attr_signal_status);
++	class_remove_file(cls, &class_attr_audio_sample_rate);
+ 
+ 	return ;
+ }
+@@ -2124,6 +2189,8 @@ static int sii5293_probe(struct platform_device *pdev)
+ 	sii5293_get_of_data(pdev->dev.of_node);
+ #endif
+ 
++	memset((void*)&sii9293_info, 0x00, sizeof(sii9293_info_t));
++
+ 	//amlogic_gpio_request(hdmirx_info.gpio_reset, HDMIRX_SII9233A_NAME);
+ 
+ 	ret = sii5293_register_tvin_frontend(&(sii5293_vdin_info.tvin_frontend));
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+index 15482aac3666..baa8983d45d2 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+@@ -8,6 +8,39 @@
+ 
+ #endif
+ 
++/*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
++
++int sii_get_pwr5v_status(void)
++{
++	char pwr5v;
++
++	pwr5v = SiiRegRead(RX_A__STATE)&RX_M__STATE__PWR5V;
++
++	return (pwr5v==0)?0:1;
++}
++
++// audio sampling frequency:
++// 0x0 for 44.1 KHz
++// 0x1 for Not indicated
++// 0x2 for 48 KHz
++// 0x3 for 32 KHz
++// 0x4 for 22.05 KHz
++// 0x6 for 24 kHz
++// 0x8 for 88.2 kHz
++// 0x9 for 768 kHz (192*4)
++// 0xa for 96 kHz
++// 0xc for 176.4 kHz
++// 0xe for 192 kHz
++int sii_get_audio_sampling_freq(void)
++{
++	unsigned char freq;
++
++	freq = SiiRegRead(RX_A__CHST4)&RX_A__CHST4__BIT_AUD_FS;
++
++	return freq;
++}
++
++/*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+ 
+ #ifdef GET_VIDEO_INFO_FROM_TABLE
+ /*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
+index f61bcd4a8e7c..407ac3975795 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
+@@ -28,5 +28,8 @@ int sii_get_h_freq(void);
+ int sii_get_v_freq(void);
+ int sii_get_interlaced(void);
+ 
++int sii_get_pwr5v_status(void);
++int sii_get_audio_sampling_freq(void);
++
+ #endif
+ 
+-- 
+2.19.0
+

@@ -1,0 +1,176 @@
+From d62a4b77bc095dd5c5b0d3b8cf765eee6f989ab2 Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Fri, 25 Apr 2014 21:02:03 +0800
+Subject: [PATCH 3965/5965] PD #86682:modified pinctrl for spi and nand
+
+---
+ arch/arm/mach-meson6/include/mach/nand.h  | 11 +++++---
+ drivers/amlogic/pinctrl/pinctrl-amlogic.c | 10 +++++--
+ drivers/amlogic/spi_nor/apollo_spi_nor.c  | 34 +++++++++++++++++------
+ 3 files changed, 39 insertions(+), 16 deletions(-)
+
+diff --git a/arch/arm/mach-meson6/include/mach/nand.h b/arch/arm/mach-meson6/include/mach/nand.h
+index 7f0d731fa7c4..8d2feea866ca 100755
+--- a/arch/arm/mach-meson6/include/mach/nand.h
++++ b/arch/arm/mach-meson6/include/mach/nand.h
+@@ -606,6 +606,8 @@ struct new_tech_nand_t{
+     struct aml_nand_dynamic_read dynamic_read_info;
+ };
+ #endif
++
++
+ struct aml_nand_chip {
+ 
+ 	u8 mfr_type;
+@@ -675,10 +677,7 @@ struct aml_nand_chip {
+ 	
+ 	struct aml_nandkey_info_t *aml_nandkey_info;
+ 	struct cdev				nand_key_cdev;
+-#ifdef CONFIG_OF
+-	struct pinctrl *nand_pinctrl;
+-	struct pinctrl_state *nand_pinstate;
+-#endif
++
+ 	struct early_suspend nand_early_suspend;
+     struct class      cls;
+ 
+@@ -719,6 +718,10 @@ struct aml_nand_device {
+ 	struct aml_nand_platform *aml_nand_platform;
+ 	u8 dev_num;
+ 	struct notifier_block nb;
++	struct pinctrl *nand_pinctrl;
++	struct pinctrl_state *nand_rbstate;
++	struct pinctrl_state *nand_norbstate;
++	struct pinctrl_state *nand_idlestate;
+ };
+ 
+ #if 0
+diff --git a/drivers/amlogic/pinctrl/pinctrl-amlogic.c b/drivers/amlogic/pinctrl/pinctrl-amlogic.c
+index 67c14091fd3f..f57525292a64 100755
+--- a/drivers/amlogic/pinctrl/pinctrl-amlogic.c
++++ b/drivers/amlogic/pinctrl/pinctrl-amlogic.c
+@@ -82,7 +82,7 @@ void amlogic_pinctrl_dt_free_map(struct pinctrl_dev *pctldev,
+ 		if (map[i].type == PIN_MAP_TYPE_CONFIGS_GROUP)
+ 			kfree(map[i].data.configs.configs);
+ 	}
+-	vfree(map);
++	kfree(map);
+ }
+ 
+ 
+@@ -120,7 +120,7 @@ int amlogic_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
+ 	if (!purecfg&&config)
+ 		new_num =2;
+ 
+-	new_map = vmalloc(sizeof(*new_map) * new_num);
++	new_map = kzalloc(sizeof(*new_map) * new_num,GFP_KERNEL);
+ 	if (!new_map){
+ 		printk("vmalloc map fail\n");
+ 		return -ENOMEM;
+@@ -152,7 +152,7 @@ int amlogic_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
+ 	return 0;
+ 
+ free_group:
+-	vfree(new_map);
++	kfree(new_map);
+ 	return ret;
+ }
+ #else
+@@ -700,6 +700,8 @@ static void amlogic_dump_pinctrl_data(struct platform_device *pdev)
+ 	}
+ }
+ #endif
++struct pinctrl_dev *pctl;
++
+ int  amlogic_pmx_probe(struct platform_device *pdev,struct amlogic_pinctrl_soc_data *soc_data)
+ {
+ 	struct amlogic_pmx *apmx;
+@@ -743,7 +745,9 @@ int  amlogic_pmx_probe(struct platform_device *pdev,struct amlogic_pinctrl_soc_d
+ 	}
+ 	pinctrl_add_gpio_range(apmx->pctl, &amlogic_gpio_ranges);
+ 	pctdev_name=dev_name(&pdev->dev);
++	pinctrl_provide_dummies();
+ 	dev_info(&pdev->dev, "Probed amlogic pinctrl driver\n");
++	pctl=apmx->pctl;
+ 
+ 	return 0;
+ err:
+diff --git a/drivers/amlogic/spi_nor/apollo_spi_nor.c b/drivers/amlogic/spi_nor/apollo_spi_nor.c
+index 4aeacb01a763..5b6df15ef12e 100755
+--- a/drivers/amlogic/spi_nor/apollo_spi_nor.c
++++ b/drivers/amlogic/spi_nor/apollo_spi_nor.c
+@@ -48,6 +48,8 @@ struct amlogic_spi {
+ 	struct device *dev;
+ 	struct pinctrl *p;
+ 	char *spi_state_name;
++	struct pinctrl_state *spi_state;
++	struct pinctrl_state *spi_idlestate;
+ #endif
+ };
+ 
+@@ -140,10 +142,10 @@ static void spi_hw_init(struct amlogic_spi	*amlogic_spi)
+ 	//SET_PERI_REG_MASK(SPI_FLASH_USER,(1<<2));
+ 	aml_set_reg32_mask(P_SPI_FLASH_USER, (1<<2));
+ }
+-
++ int xx_spi=0;
+ static void spi_hw_enable(struct amlogic_spi	*amlogic_spi)
+ {
+-int retry = 0;
++int retry = 0,ret;
+ 	DECLARE_WAITQUEUE(spi_wait, current);
+ #if (defined(CONFIG_ARCH_MESON3) || defined(CONFIG_ARCH_MESON6) ||defined(CONFIG_ARCH_MESON8))
+   /*clear_mio_mux(2,7<<19);
+@@ -159,9 +161,8 @@ int retry = 0;
+ 	#ifdef CONFIG_OF
+ 	for (retry=0; retry<10; retry++) {
+ 		mutex_lock(&spi_nand_mutex);
+-		amlogic_spi->p = devm_pinctrl_get_select(amlogic_spi->dev,amlogic_spi->spi_state_name);
+-		if(IS_ERR(amlogic_spi->p)){
+-			amlogic_spi->p = NULL;
++		ret =  pinctrl_select_state(amlogic_spi->p, amlogic_spi->spi_state);
++		if(ret<0){
+ 			mutex_unlock(&spi_nand_mutex);
+ 			printk("set spi pinmux error\n");
+ 		}
+@@ -189,10 +190,13 @@ static void spi_hw_disable(struct amlogic_spi	*amlogic_spi)
+ {
+ #if (defined(CONFIG_ARCH_MESON6) || defined(CONFIG_ARCH_MESON8))
+ #ifdef CONFIG_OF
++	int ret=0;
+ 	if(amlogic_spi->p)
+-	{
+-		devm_pinctrl_put(amlogic_spi->p);
+-		amlogic_spi->p = NULL;
++	{	
++		ret = pinctrl_select_state(amlogic_spi->p, amlogic_spi->spi_idlestate);
++		
++		if(ret<0)
++			printk("select idle state error\n");
+ 		mutex_unlock(&spi_nand_mutex);
+ 	}
+ #else
+@@ -636,7 +640,19 @@ static int amlogic_spi_nor_probe(struct platform_device *pdev)
+ 	amlogic_spi->spi_dev.dev.platform_data = pdev->dev.platform_data;
+ 	spin_lock_init(&amlogic_spi->lock);
+ 	INIT_LIST_HEAD(&amlogic_spi->msg_queue);
+-
++	amlogic_spi->p = devm_pinctrl_get(amlogic_spi->dev);
++	if (IS_ERR(amlogic_spi->p))
++		return amlogic_spi->p;
++	amlogic_spi->spi_state=pinctrl_lookup_state(amlogic_spi->p,amlogic_spi->spi_state_name);
++	if (IS_ERR(amlogic_spi->spi_state)) {
++		pinctrl_put(amlogic_spi->p);
++		return ERR_PTR(PTR_ERR(amlogic_spi->spi_state));
++	}
++	amlogic_spi->spi_idlestate=pinctrl_lookup_state(amlogic_spi->p,"dummy");
++	if (IS_ERR(amlogic_spi->spi_idlestate)) {
++		pinctrl_put(amlogic_spi->p);
++		return ERR_PTR(PTR_ERR(amlogic_spi->spi_idlestate));
++	}
+ 	status = spi_register_master(master);
+ 	if (status < 0)
+ 		goto err1;
+-- 
+2.19.0
+

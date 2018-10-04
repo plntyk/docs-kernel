@@ -1,0 +1,139 @@
+From 1e1d418b4a0bf75f063f6fcb39c936729aeb2686 Mon Sep 17 00:00:00 2001
+From: Yukang Zhong <yukang.zhong@amlogic.com>
+Date: Wed, 5 Aug 2015 14:44:00 +0800
+Subject: [PATCH 5745/5965] PD#110442: eeprom: write protection optimization
+
+This feature validated on g9tv.
+
+Change-Id: I0c1cc36e7be4c0c8c8ff42122d49f4b13764f5cc
+---
+ drivers/misc/eeprom/at24.c | 69 ++++++++++++++++++++++++++------------
+ include/linux/i2c/at24.h   |  1 +
+ 2 files changed, 48 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/misc/eeprom/at24.c b/drivers/misc/eeprom/at24.c
+index b99125100235..c30a79309053 100644
+--- a/drivers/misc/eeprom/at24.c
++++ b/drivers/misc/eeprom/at24.c
+@@ -132,6 +132,41 @@ static const struct i2c_device_id at24_ids[] = {
+ MODULE_DEVICE_TABLE(i2c, at24_ids);
+ 
+ #define MODULE_NAME  "at24"
++
++/*eeprom protect gpio enable*/
++void at24_wp_enable(struct at24_platform_data *chip)
++{
++	int ret;
++	if (chip->wp_port> 0) {
++		ret = amlogic_gpio_request(chip->wp_port,MODULE_NAME);
++		if (ret) {
++			printk("faild to alloc write protect control gpio (%d)!\n", chip->wp_port);
++		}
++		else {
++			amlogic_gpio_direction_output(chip->wp_port,chip->wp_port_level,MODULE_NAME);
++		}
++	}
++	else {
++		printk("wrong wp port\n");
++	}
++}
++/* enable write protect*/
++void at24_enable_write_operation(struct at24_platform_data *chip)
++{
++	if (chip->wp_port > 0)	{
++			chip->wp_port_level = chip->wp_port_level_save;
++			amlogic_gpio_direction_output(chip->wp_port,chip->wp_port_level,MODULE_NAME);
++		}
++}
++/* disable write protect*/
++void at24_disable_write_operation(struct at24_platform_data *chip)
++{
++	if (chip->wp_port > 0)	{
++			chip->wp_port_level = !chip->wp_port_level_save;
++			amlogic_gpio_direction_output(chip->wp_port,chip->wp_port_level,MODULE_NAME);
++		}
++}
++
+ /*-------------------------------------------------------------------------*/
+ 
+ /*
+@@ -397,7 +432,9 @@ static ssize_t at24_write(struct at24_data *at24, const char *buf, loff_t off,
+ 
+ 	if (unlikely(!count))
+ 		return count;
+-
++	/*enable write ops*/
++	at24_enable_write_operation(&at24->chip);
++	mdelay(at24->chip.write_ops_interval);
+ 	/*
+ 	 * Write data to chip, protecting against concurrent updates
+ 	 * from this host, but not from other I2C masters.
+@@ -422,6 +459,9 @@ static ssize_t at24_write(struct at24_data *at24, const char *buf, loff_t off,
+ 
+ 	mutex_unlock(&at24->lock);
+ 
++	/*write protect*/
++	at24_disable_write_operation(&at24->chip);
++
+ 	return retval;
+ }
+ 
+@@ -482,23 +522,6 @@ static void at24_get_ofdata(struct i2c_client *client,
+ { }
+ #endif /* CONFIG_OF */
+ 
+-/*eeprom protect gpio enable*/
+-void at24_wp_enable(struct at24_platform_data *chip)
+-{
+-	int ret;
+-	if (chip->wp_port> 0) {
+-		ret = amlogic_gpio_request(chip->wp_port,MODULE_NAME);
+-		if (ret) {
+-			printk("faild to alloc write protect control gpio (%d)!\n", chip->wp_port);
+-		}
+-		else {
+-			amlogic_gpio_direction_output(chip->wp_port,chip->wp_port_level,MODULE_NAME);
+-		}
+-	}
+-	else {
+-		printk("wrong wp port\n");
+-	}
+-}
+ void at24_dt_parse(struct i2c_client *client,struct at24_platform_data *chip)
+ {
+ 	const char *str;
+@@ -521,13 +544,15 @@ void at24_dt_parse(struct i2c_client *client,struct at24_platform_data *chip)
+ 		printk("faild to get write protect control port level!\n");
+ 	}
+ 	if (!strcmp(str,"0")) {
+-		chip->wp_port_level = 0;
+-		at24_wp_enable(chip);
++		chip->wp_port_level_save = chip->wp_port_level = 0;
++		//at24_wp_enable(chip);
+ 	}
+ 	else {
+-		chip->wp_port_level = 1;
+-		at24_wp_enable(chip);
++		chip->wp_port_level_save = chip->wp_port_level = 1;
++		//at24_wp_enable(chip);
+ 	}
++	chip->wp_port_level = !chip->wp_port_level_save;
++	at24_wp_enable(chip);
+ 	printk("EEPROM_AT%s write protect port level is %d,wp_port=%d write_ops_interval=%dms\n",client->name,amlogic_get_value(chip->wp_port,MODULE_NAME),chip->wp_port,chip->write_ops_interval);
+ }
+ 
+diff --git a/include/linux/i2c/at24.h b/include/linux/i2c/at24.h
+index 0b7e6742b968..b28b99f5b63c 100644
+--- a/include/linux/i2c/at24.h
++++ b/include/linux/i2c/at24.h
+@@ -49,6 +49,7 @@ struct at24_platform_data {
+ #define AT24_FLAG_TAKE8ADDR	0x10	/* take always 8 addresses (24c00) */
+ 	unsigned int wp_port;
+ 	unsigned int wp_port_level;
++	unsigned int wp_port_level_save;
+ 	unsigned int write_ops_interval;/*Write operation interval ,write time in spec*/
+ 	void		(*setup)(struct memory_accessor *, void *context);
+ 	void		*context;
+-- 
+2.19.0
+

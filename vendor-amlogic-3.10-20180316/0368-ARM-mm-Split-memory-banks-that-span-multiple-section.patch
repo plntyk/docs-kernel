@@ -1,0 +1,53 @@
+From 4ee50207d6c722da637bb6cd22de0cf8a9f3f365 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Thu, 6 Dec 2012 20:46:49 -0800
+Subject: [PATCH 0368/5965] ARM: mm: Split memory banks that span multiple
+ sections when sparsemem is enabled
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This fixes a crash in mem_init which assumes all pages in a memory bank
+are part of the same page array.
+
+Signed-off-by: Arve Hjønnevåg <arve@android.com>
+---
+ arch/arm/mm/mmu.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/arch/arm/mm/mmu.c b/arch/arm/mm/mmu.c
+index d11e7b569e37..cc9c66694f34 100644
+--- a/arch/arm/mm/mmu.c
++++ b/arch/arm/mm/mmu.c
+@@ -1017,6 +1017,28 @@ void __init sanity_check_meminfo(void)
+ 		struct membank *bank = &meminfo.bank[j];
+ 		*bank = meminfo.bank[i];
+ 
++#ifdef CONFIG_SPARSEMEM
++		if (pfn_to_section_nr(bank_pfn_start(bank)) !=
++		    pfn_to_section_nr(bank_pfn_end(bank) - 1)) {
++			phys_addr_t sz;
++			unsigned long start_pfn = bank_pfn_start(bank);
++			unsigned long end_pfn = SECTION_ALIGN_UP(start_pfn + 1);
++			sz = ((phys_addr_t)(end_pfn - start_pfn) << PAGE_SHIFT);
++
++			if (meminfo.nr_banks >= NR_BANKS) {
++				pr_crit("NR_BANKS too low, ignoring %lld bytes of memory\n",
++					(unsigned long long)(bank->size - sz));
++			} else {
++				memmove(bank + 1, bank,
++					(meminfo.nr_banks - i) * sizeof(*bank));
++				meminfo.nr_banks++;
++				bank[1].size -= sz;
++				bank[1].start = __pfn_to_phys(end_pfn);
++			}
++			bank->size = sz;
++		}
++#endif
++
+ 		if (bank->start > ULONG_MAX)
+ 			highmem = 1;
+ 
+-- 
+2.19.0
+

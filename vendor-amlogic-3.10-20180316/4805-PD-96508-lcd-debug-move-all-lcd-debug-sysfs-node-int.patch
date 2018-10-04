@@ -1,0 +1,1161 @@
+From dd101c1c0ea46a80bf188b0da3cee76492cdb182 Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Mon, 1 Sep 2014 11:13:45 +0800
+Subject: [PATCH 4805/5965] PD#96508: lcd debug: move all lcd debug sysfs node
+ into directory /sys/class/lcd/
+
+Change-Id: Iafafa3c6736a02af82262cb60698530c715e257b
+
+Conflicts:
+
+	arch/arm/mach-meson8/lcd/lcd_config.h
+---
+ arch/arm/mach-meson6/lcd/lcd_config.c      |  46 +++-----
+ arch/arm/mach-meson6/lcd/lcd_config.h      |   2 +-
+ arch/arm/mach-meson8/lcd/edp_drv.c         |  63 ++++-------
+ arch/arm/mach-meson8/lcd/edp_drv.h         |   5 +-
+ arch/arm/mach-meson8/lcd/lcd_config.c      |  36 +++---
+ arch/arm/mach-meson8/lcd/lcd_config.h      |   2 +-
+ arch/arm/mach-meson8/lcd/mipi_dsi_util.c   |  53 ++++-----
+ arch/arm/mach-meson8/lcd/mipi_dsi_util.h   |   2 +-
+ arch/arm/mach-meson8b/lcd/lcd_config.c     |  50 ++++-----
+ arch/arm/mach-meson8b/lcd/lcd_config.h     |   2 +-
+ arch/arm/mach-meson8b/lcd/mipi_dsi_util.c  |  53 ++++-----
+ arch/arm/mach-meson8b/lcd/mipi_dsi_util.h  |   2 +-
+ drivers/amlogic/display/backlight/aml_bl.c |  58 ++++++++++
+ drivers/amlogic/display/vout/lcdoutc.c     | 121 ++++++++++++++++-----
+ include/linux/amlogic/vout/lcdoutc.h       |   2 +-
+ 15 files changed, 280 insertions(+), 217 deletions(-)
+
+diff --git a/arch/arm/mach-meson6/lcd/lcd_config.c b/arch/arm/mach-meson6/lcd/lcd_config.c
+index 54d7dba45d79..28890f394b11 100755
+--- a/arch/arm/mach-meson6/lcd/lcd_config.c
++++ b/arch/arm/mach-meson6/lcd/lcd_config.c
+@@ -49,7 +49,6 @@ static spinlock_t gamma_write_lock;
+ static spinlock_t lcd_clk_lock;
+ 
+ static Lcd_Config_t *lcd_Conf;
+-static struct class *lcd_video_class = NULL;
+ static unsigned char lcd_gamma_init_err = 0;
+ static unsigned gamma_cntl_port_offset = 0;
+ 
+@@ -1423,11 +1422,11 @@ static void lcd_test(unsigned num)
+ 		case 4:
+ 			WRITE_LCD_REG(venc_video_mode, 0);
+ 			WRITE_LCD_REG((venc_test_base+1), 0);
+-			WRITE_LCD_REG((venc_test_base+2), 0x3ff);
++			WRITE_LCD_REG((venc_test_base+2), 0x200);
+ 			WRITE_LCD_REG((venc_test_base+3), 0x200);
+ 			WRITE_LCD_REG((venc_test_base+4), 0x200);
+ 			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show test pattern 4: White\n");
++			printk("show test pattern 4: Gray\n");
+ 			break;
+ 		case 5:
+ 			WRITE_LCD_REG(venc_video_mode, 0);
+@@ -1467,25 +1466,21 @@ static void lcd_test(unsigned num)
+ //***********************************************
+ static ssize_t lcd_video_vso_read(struct class *class, struct class_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "read vso start: %u %u\n", lcd_Conf->lcd_timing.vso_hstart, lcd_Conf->lcd_timing.vso_vstart);
++    return sprintf(buf, "read vso start: %u\n", lcd_Conf->lcd_timing.vso_vstart);
+ }
+ 
+ static ssize_t lcd_video_vso_write(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
+ {
+     unsigned int ret;
+-    unsigned int para[2];
++    unsigned int temp;
+ 
+-    para[0] = 10;
+-    para[0] = 10;
+-    ret = sscanf(buf, "%u %u", &para[0], &para[1]);
+-    lcd_Conf->lcd_timing.vso_hstart = (unsigned short)para[0];
+-    lcd_Conf->lcd_timing.vso_vstart = (unsigned short)para[1];
++    temp = 10;
++    ret = sscanf(buf, "%u", &temp);
++    lcd_Conf->lcd_timing.vso_vstart = (unsigned short)temp;
+     lcd_Conf->lcd_timing.vso_user = 1;
+-    WRITE_LCD_REG(ENCL_VIDEO_VSO_BEGIN,   lcd_Conf->lcd_timing.vso_hstart);
+-    WRITE_LCD_REG(ENCL_VIDEO_VSO_END,     lcd_Conf->lcd_timing.vso_hstart);
+     WRITE_LCD_REG(ENCL_VIDEO_VSO_BLINE,   lcd_Conf->lcd_timing.vso_vstart);
+     WRITE_LCD_REG(ENCL_VIDEO_VSO_ELINE,   lcd_Conf->lcd_timing.vso_vstart + 2);
+-    printk("set vso start: %u %u\n", lcd_Conf->lcd_timing.vso_hstart, lcd_Conf->lcd_timing.vso_vstart);
++    printk("set vso start: %u\n", lcd_Conf->lcd_timing.vso_vstart);
+ 
+     if (ret != 1 || ret !=2)
+         return -EINVAL;
+@@ -1498,18 +1493,12 @@ static struct class_attribute lcd_video_class_attrs[] = {
+     __ATTR(vso,  S_IRUGO | S_IWUSR, lcd_video_vso_read, lcd_video_vso_write),
+ };
+ 
+-static int creat_lcd_video_attr(void)
++static int creat_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    lcd_video_class = class_create(THIS_MODULE, "lcd_video");
+-    if(IS_ERR(lcd_video_class)) {
+-        printk("create lcd_video class fail\n");
+-        return -1;
+-    }
+-
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        if (class_create_file(lcd_video_class, &lcd_video_class_attrs[i])) {
++        if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i])) {
+             printk("create lcd_video attribute %s fail\n", lcd_video_class_attrs[i].attr.name);
+         }
+     }
+@@ -1517,17 +1506,16 @@ static int creat_lcd_video_attr(void)
+     return 0;
+ }
+ 
+-static int remove_lcd_video_attr(void)
++static int remove_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (lcd_video_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        class_remove_file(lcd_video_class, &lcd_video_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i]);
+     }
+-    class_destroy(lcd_video_class);
+ 
+     return 0;
+ }
+@@ -1813,7 +1801,7 @@ static void lcd_tcon_config(Lcd_Config_t *pConf)
+ #endif
+ 
+     if (pConf->lcd_timing.vso_user == 0) {
+-        pConf->lcd_timing.vso_hstart = pConf->lcd_timing.vs_hs_addr;
++        //pConf->lcd_timing.vso_hstart = pConf->lcd_timing.vs_hs_addr;
+         pConf->lcd_timing.vso_vstart = pConf->lcd_timing.vs_vs_addr;
+     }
+ 
+@@ -1960,10 +1948,10 @@ void lcd_config_probe(Lcd_Config_t *pConf)
+     lcd_Conf = pConf;
+     lcd_config_assign(pConf);
+ 
+-    creat_lcd_video_attr();
++    creat_lcd_video_attr(pConf);
+ }
+ 
+-void lcd_config_remove(void)
++void lcd_config_remove(Lcd_Config_t *pConf)
+ {
+-    remove_lcd_video_attr();
++    remove_lcd_video_attr(pConf);
+ }
+diff --git a/arch/arm/mach-meson6/lcd/lcd_config.h b/arch/arm/mach-meson6/lcd/lcd_config.h
+index b38f18baf574..527ec6422bd4 100755
+--- a/arch/arm/mach-meson6/lcd/lcd_config.h
++++ b/arch/arm/mach-meson6/lcd/lcd_config.h
+@@ -8,7 +8,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c6"
+-#define LCD_DRV_DATE      "20140805"
++#define LCD_DRV_DATE      "20140826"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8/lcd/edp_drv.c b/arch/arm/mach-meson8/lcd/edp_drv.c
+index 03bbdbf70564..78f7d5f7e3f3 100755
+--- a/arch/arm/mach-meson8/lcd/edp_drv.c
++++ b/arch/arm/mach-meson8/lcd/edp_drv.c
+@@ -20,8 +20,6 @@
+ 
+ #define DPRINT(...)		printk(__VA_ARGS__)
+ 
+-static struct class *edp_debug_class = NULL;
+-
+ //*************************************//
+ // dptx for operation eDP Host (Tx) 
+ // trdp for operation eDP Sink (Rx)
+@@ -372,15 +370,7 @@ static int dptx_init_downspread(unsigned char ss_enable)
+ 	
+ 	return status;
+ }
+-#if 0
+-static char *dptx_explain_reply_code(int status)
+-{
+-	switch (status) {
+-		default:
+-			return "unknown status";
+-	}
+-}
+-#endif
++
+ static int trdp_AUX_check_status(void)
+ {
+ 	if (READ_DPTX_REG(EDP_TX_TRANSMITTER_OUTPUT_ENABLE) & 1)
+@@ -404,7 +394,7 @@ static int trdp_AUXRead(unsigned long address, unsigned long byte_count, unsigne
+ 	
+ 	status = trdp_AUX_check_status();
+ 	if (status) {
+-		printk("AUXRead error: edp transmitter disabled\n");
++		DPRINT("AUXRead error: edp transmitter disabled\n");
+ 		return (int)status;
+ 	}
+ 	
+@@ -476,7 +466,7 @@ static int trdp_AUXRead(unsigned long address, unsigned long byte_count, unsigne
+ 	
+ 	status = trdp_AUX_check_status();
+ 	if (status) {
+-		printk("AUXRead error: edp transmitter disabled\n");
++		DPRINT("AUXRead error: edp transmitter disabled\n");
+ 		return (int)status;
+ 	}
+ 	
+@@ -539,7 +529,7 @@ static int trdp_AUXWrite(unsigned long address, unsigned long byte_count, unsign
+ 	
+ 	status = trdp_AUX_check_status();
+ 	if (status) {
+-		printk("AUXWrite error: edp transmitter disabled\n");
++		DPRINT("AUXWrite error: edp transmitter disabled\n");
+ 		return (int)status;
+ 	}
+ 	
+@@ -606,7 +596,7 @@ static int trdp_AUXWrite(unsigned long address, unsigned long byte_count, unsign
+ 
+ 	status = trdp_AUX_check_status();
+ 	if (status) {
+-		printk("AUXWrite error: edp transmitter disabled\n");
++		DPRINT("AUXWrite error: edp transmitter disabled\n");
+ 		return (int)status;
+ 	}
+ 	
+@@ -1859,14 +1849,14 @@ void dplpm_off(void)
+ //***********************************************//
+ static const char * edp_usage_str =
+ {"Usage:\n"
+-"    echo read tx <addr> <reg_count> > debug ; read edp tx reg value\n"
+-"    echo write <value> tx <addr> > debug ; write edp tx reg with value\n"
+-"    echo read rx <addr> <reg_count> > debug ; read edp DPCD reg value\n"
+-"    echo write <value> rx <addr> > debug ; write edp DPCD reg with value\n"
+-"    echo link > debug ; print edp link config information\n"
+-"    echo msa > debug ; print edp main stream attributes information\n"
+-"    echo dpcd > debug ; print edp DPCD information\n"
+-"    echo status > debug ; print edp link training status information\n"
++"    echo read tx <addr> <reg_count> > edp ; read edp tx reg value\n"
++"    echo write <value> tx <addr> > edp ; write edp tx reg with value\n"
++"    echo read rx <addr> <reg_count> > edp ; read edp DPCD reg value\n"
++"    echo write <value> rx <addr> > edp ; write edp DPCD reg with value\n"
++"    echo link > edp ; print edp link config information\n"
++"    echo msa > edp ; print edp main stream attributes information\n"
++"    echo dpcd > edp ; print edp DPCD information\n"
++"    echo status > edp ; print edp link training status information\n"
+ };
+ 
+ static ssize_t edp_debug_help(struct class *class, struct class_attribute *attr, char *buf)
+@@ -1971,50 +1961,43 @@ static ssize_t edp_debug(struct class *class, struct class_attribute *attr, cons
+ }
+ 
+ static struct class_attribute edp_debug_class_attrs[] = {
+-	__ATTR(debug, S_IRUGO | S_IWUSR, edp_debug_help, edp_debug),
+-	__ATTR(help, S_IRUGO | S_IWUSR, edp_debug_help, NULL),
++	__ATTR(edp, S_IRUGO | S_IWUSR, edp_debug_help, edp_debug),
+ };
+ 
+-static int creat_edp_attr(void)
++static int creat_edp_attr(Lcd_Config_t *pConf)
+ {
+ 	int i;
+ 
+-	edp_debug_class = class_create(THIS_MODULE, "edp");
+-	if(IS_ERR(edp_debug_class)) {
+-		printk("create edp debug class fail\n");
+-		return -1;
+-	}
+ 	//create class attr
+ 	for(i=0;i<ARRAY_SIZE(edp_debug_class_attrs);i++) {
+-		if (class_create_file(edp_debug_class, &edp_debug_class_attrs[i])) {
++		if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &edp_debug_class_attrs[i])) {
+ 			printk("create edp debug attribute %s fail\n",edp_debug_class_attrs[i].attr.name);
+ 		}
+ 	}
+ 
+ 	return 0;
+ }
+-static int remove_edp_attr(void)
++static int remove_edp_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (edp_debug_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(edp_debug_class_attrs);i++) {
+-        class_remove_file(edp_debug_class, &edp_debug_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &edp_debug_class_attrs[i]);
+     }
+-    class_destroy(edp_debug_class);
+ 
+     return 0;
+ }
+ //*********************************************************//
+ 
+-void edp_probe(void)
++void edp_probe(Lcd_Config_t *pConf)
+ {
+-	creat_edp_attr();
++	creat_edp_attr(pConf);
+ }
+ 
+-void edp_remove(void)
++void edp_remove(Lcd_Config_t *pConf)
+ {
+-	remove_edp_attr();
++	remove_edp_attr(pConf);
+ }
+diff --git a/arch/arm/mach-meson8/lcd/edp_drv.h b/arch/arm/mach-meson8/lcd/edp_drv.h
+index 5a51a5cfc183..88b223cb88aa 100755
+--- a/arch/arm/mach-meson8/lcd/edp_drv.h
++++ b/arch/arm/mach-meson8/lcd/edp_drv.h
+@@ -1,5 +1,6 @@
+ #ifndef EDP_DRV_H
+ #define EDP_DRV_H
++#include <linux/amlogic/vout/lcdoutc.h>
+ 
+ //********************************************************//
+ // displayport host (tx) control
+@@ -277,7 +278,7 @@ extern void edp_phy_config_update(unsigned char vswing_tx, unsigned char preemp_
+ extern int dplpm_link_policy_maker(EDP_Link_Config_t *mlconfig, EDP_MSA_t *vm);
+ extern int dplpm_link_off(void);
+ extern void dplpm_off(void);
+-extern void edp_probe(void);
+-extern void edp_remove(void);
++extern void edp_probe(Lcd_Config_t *pConf);
++extern void edp_remove(Lcd_Config_t *pConf);
+ 
+ #endif
+diff --git a/arch/arm/mach-meson8/lcd/lcd_config.c b/arch/arm/mach-meson8/lcd/lcd_config.c
+index bcf7a839fd2f..dbc7e965f117 100755
+--- a/arch/arm/mach-meson8/lcd/lcd_config.c
++++ b/arch/arm/mach-meson8/lcd/lcd_config.c
+@@ -52,7 +52,6 @@ static spinlock_t gamma_write_lock;
+ static spinlock_t lcd_clk_lock;
+ 
+ static Lcd_Config_t *lcd_Conf;
+-static struct class *lcd_video_class = NULL;
+ static unsigned char lcd_gamma_init_err = 0;
+ 
+ void lcd_config_init(Lcd_Config_t *pConf);
+@@ -1169,11 +1168,11 @@ static void lcd_test(unsigned num)
+ 		case 4:
+ 			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+ 			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x3ff);
++			WRITE_LCD_REG(ENCL_TST_Y, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_CB, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_CR, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 4: White\n");
++			printk("show test pattern 4: Gray\n");
+ 			break;
+ 		case 5:
+ 			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+@@ -1240,18 +1239,12 @@ static struct class_attribute lcd_video_class_attrs[] = {
+     __ATTR(vso,  S_IRUGO | S_IWUSR, lcd_video_vso_read, lcd_video_vso_write),
+ };
+ 
+-static int creat_lcd_video_attr(void)
++static int creat_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    lcd_video_class = class_create(THIS_MODULE, "lcd_video");
+-    if(IS_ERR(lcd_video_class)) {
+-        printk("create lcd_video class fail\n");
+-        return -1;
+-    }
+-
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        if (class_create_file(lcd_video_class, &lcd_video_class_attrs[i])) {
++        if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i])) {
+             printk("create lcd_video attribute %s fail\n", lcd_video_class_attrs[i].attr.name);
+         }
+     }
+@@ -1259,17 +1252,16 @@ static int creat_lcd_video_attr(void)
+     return 0;
+ }
+ 
+-static int remove_lcd_video_attr(void)
++static int remove_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (lcd_video_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        class_remove_file(lcd_video_class, &lcd_video_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i]);
+     }
+-    class_destroy(lcd_video_class);
+ 
+     return 0;
+ }
+@@ -1920,25 +1912,25 @@ void lcd_config_probe(Lcd_Config_t *pConf)
+             dsi_probe(pConf);
+             break;
+         case LCD_DIGITAL_EDP:
+-            edp_probe();
++            edp_probe(pConf);
+             break;
+         default:
+             break;
+     }
+ 
+-    creat_lcd_video_attr();
++    creat_lcd_video_attr(pConf);
+ }
+ 
+-void lcd_config_remove(void)
++void lcd_config_remove(Lcd_Config_t *pConf)
+ {
+-    remove_lcd_video_attr();
++    remove_lcd_video_attr(pConf);
+ 
+-    switch (lcd_Conf->lcd_basic.lcd_type) {
++    switch (pConf->lcd_basic.lcd_type) {
+         case LCD_DIGITAL_MIPI:
+-            dsi_remove();
++            dsi_remove(pConf);
+             break;
+         case LCD_DIGITAL_EDP:
+-            edp_remove();
++            edp_remove(pConf);
+             break;
+         default:
+             break;
+diff --git a/arch/arm/mach-meson8/lcd/lcd_config.h b/arch/arm/mach-meson8/lcd/lcd_config.h
+index af3cb8c53388..2c4e5d4209bf 100755
+--- a/arch/arm/mach-meson8/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8"
+-#define LCD_DRV_DATE      "20140808"
++#define LCD_DRV_DATE      "20140826"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8/lcd/mipi_dsi_util.c b/arch/arm/mach-meson8/lcd/mipi_dsi_util.c
+index 554bf32a01e7..02030f25b3f5 100755
+--- a/arch/arm/mach-meson8/lcd/mipi_dsi_util.c
++++ b/arch/arm/mach-meson8/lcd/mipi_dsi_util.c
+@@ -52,7 +52,6 @@ static const char *video_mode_type_table[] = {
+ static DSI_Phy_t dsi_phy_config;
+ static DSI_Vid_t dsi_vid_config;
+ static DSI_Config_t *dsi_config = NULL;
+-static struct class *dsi_debug_class = NULL;
+ static unsigned char dsi_init_on_table_dft[] = {
+     0x05,0x11,0,
+     0xff,50,
+@@ -1107,10 +1106,10 @@ void mipi_dsi_off(void)
+ //***********************************************//
+ static const char * dsi_usage_str =
+ {"Usage:\n"
+-"    echo read <addr> <reg_count> > debug ; read dsi phy reg value\n"
+-"    echo write <addr> <value> > debug ; write dsi phy reg with value\n"
+-"    echo info > debug ; print dsi config information\n"
+-"    echo dphy > debug ; print dsi phy timing information\n"
++"    echo read <addr> <reg_count> > dsi ; read dsi phy reg value\n"
++"    echo write <addr> <value> > dsi ; write dsi phy reg with value\n"
++"    echo info > dsi ; print dsi config information\n"
++"    echo dphy > dsi ; print dsi phy timing information\n"
+ };
+ 
+ static ssize_t dsi_debug_help(struct class *class, struct class_attribute *attr, char *buf)
+@@ -1161,39 +1160,33 @@ static ssize_t dsi_debug(struct class *class, struct class_attribute *attr, cons
+ }
+ 
+ static struct class_attribute dsi_debug_class_attrs[] = {
+-    __ATTR(debug, S_IRUGO | S_IWUSR, dsi_debug_help, dsi_debug),
+-    __ATTR(help, S_IRUGO | S_IWUSR, dsi_debug_help, NULL),
++    __ATTR(dsi, S_IRUGO | S_IWUSR, dsi_debug_help, dsi_debug),
+ };
+ 
+-static int creat_dsi_attr(void)
++static int creat_dsi_attr(Lcd_Config_t *pConf)
+ {
+-	int i;
+-
+-	dsi_debug_class = class_create(THIS_MODULE, "dsi");
+-	if(IS_ERR(dsi_debug_class)) {
+-		printk("create dsi debug class fail\n");
+-		return -1;
+-	}
+-	//create class attr
+-	for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
+-		if (class_create_file(dsi_debug_class, &dsi_debug_class_attrs[i])) {
+-			printk("create dsi debug attribute %s fail\n",dsi_debug_class_attrs[i].attr.name);
+-		}
+-	}
+-
+-	return 0;
++    int i;
++
++    //create class attr
++    for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
++        if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &dsi_debug_class_attrs[i])) {
++            printk("create dsi debug attribute %s fail\n",dsi_debug_class_attrs[i].attr.name);
++        }
++    }
++
++    return 0;
+ }
+-static int remove_dsi_attr(void)
++static int remove_dsi_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (dsi_debug_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
+-        class_remove_file(dsi_debug_class, &dsi_debug_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &dsi_debug_class_attrs[i]);
+     }
+-    class_destroy(dsi_debug_class);
++    class_destroy(pConf->lcd_misc_ctrl.debug_class);
+ 
+     return 0;
+ }
+@@ -1206,11 +1199,11 @@ void dsi_probe(Lcd_Config_t *pConf)
+     //pConf->lcd_control.mipi_config->bit_rate_min *= 1000;
+     pConf->lcd_control.mipi_config->bit_rate_max *= 1000;
+ 
+-    creat_dsi_attr();
++    creat_dsi_attr(pConf);
+ }
+ 
+-void dsi_remove(void)
++void dsi_remove(Lcd_Config_t *pConf)
+ {
+-    remove_dsi_attr();
++    remove_dsi_attr(pConf);
+ }
+ 
+diff --git a/arch/arm/mach-meson8/lcd/mipi_dsi_util.h b/arch/arm/mach-meson8/lcd/mipi_dsi_util.h
+index c8dc1991c36c..78c236dfe500 100755
+--- a/arch/arm/mach-meson8/lcd/mipi_dsi_util.h
++++ b/arch/arm/mach-meson8/lcd/mipi_dsi_util.h
+@@ -440,6 +440,6 @@ extern void mipi_dsi_link_off(Lcd_Config_t *pConf);
+ extern void set_mipi_dsi_control(Lcd_Config_t *pConf);
+ extern void mipi_dsi_off(void);
+ extern void dsi_probe(Lcd_Config_t *pConf);
+-extern void dsi_remove(void);
++extern void dsi_remove(Lcd_Config_t *pConf);
+ 
+ #endif
+diff --git a/arch/arm/mach-meson8b/lcd/lcd_config.c b/arch/arm/mach-meson8b/lcd/lcd_config.c
+index 738f0b90e487..218802e4777a 100755
+--- a/arch/arm/mach-meson8b/lcd/lcd_config.c
++++ b/arch/arm/mach-meson8b/lcd/lcd_config.c
+@@ -51,7 +51,6 @@ static spinlock_t gamma_write_lock;
+ static spinlock_t lcd_clk_lock;
+ 
+ static Lcd_Config_t *lcd_Conf;
+-static struct class *lcd_video_class = NULL;
+ static unsigned char lcd_gamma_init_err = 0;
+ 
+ void lcd_config_init(Lcd_Config_t *pConf);
+@@ -867,11 +866,11 @@ static void lcd_test(unsigned num)
+ 		case 4:
+ 			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+ 			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x3ff);
++			WRITE_LCD_REG(ENCL_TST_Y, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_CB, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_CR, 0x200);
+ 			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 4: White\n");
++			printk("show test pattern 4: Gray\n");
+ 			break;
+ 		case 5:
+ 			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+@@ -911,25 +910,21 @@ static void lcd_test(unsigned num)
+ //***********************************************
+ static ssize_t lcd_video_vso_read(struct class *class, struct class_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "read vso start: %u %u\n", lcd_Conf->lcd_timing.vso_hstart, lcd_Conf->lcd_timing.vso_vstart);
++    return sprintf(buf, "read vso start: %u\n", lcd_Conf->lcd_timing.vso_vstart);
+ }
+ 
+ static ssize_t lcd_video_vso_write(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
+ {
+     unsigned int ret;
+-    unsigned int para[2];
++    unsigned int temp;
+ 
+-    para[0] = 10;
+-    para[0] = 10;
+-    ret = sscanf(buf, "%u %u", &para[0], &para[1]);
+-    lcd_Conf->lcd_timing.vso_hstart = (unsigned short)para[0];
+-    lcd_Conf->lcd_timing.vso_vstart = (unsigned short)para[1];
++    temp = 10;
++    ret = sscanf(buf, "%u", &temp);
++    lcd_Conf->lcd_timing.vso_vstart = (unsigned short)temp;
+     lcd_Conf->lcd_timing.vso_user = 1;
+-    WRITE_LCD_REG(ENCL_VIDEO_VSO_BEGIN,   lcd_Conf->lcd_timing.vso_hstart);
+-    WRITE_LCD_REG(ENCL_VIDEO_VSO_END,     lcd_Conf->lcd_timing.vso_hstart);
+     WRITE_LCD_REG(ENCL_VIDEO_VSO_BLINE,   lcd_Conf->lcd_timing.vso_vstart);
+     WRITE_LCD_REG(ENCL_VIDEO_VSO_ELINE,   lcd_Conf->lcd_timing.vso_vstart + 2);
+-    printk("set vso start: %u %u\n", lcd_Conf->lcd_timing.vso_hstart, lcd_Conf->lcd_timing.vso_vstart);
++    printk("set vso start: %u\n", lcd_Conf->lcd_timing.vso_vstart);
+ 
+     if (ret != 1 || ret !=2)
+         return -EINVAL;
+@@ -942,18 +937,12 @@ static struct class_attribute lcd_video_class_attrs[] = {
+     __ATTR(vso,  S_IRUGO | S_IWUSR, lcd_video_vso_read, lcd_video_vso_write),
+ };
+ 
+-static int creat_lcd_video_attr(void)
++static int creat_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    lcd_video_class = class_create(THIS_MODULE, "lcd_video");
+-    if(IS_ERR(lcd_video_class)) {
+-        printk("create lcd_video class fail\n");
+-        return -1;
+-    }
+-
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        if (class_create_file(lcd_video_class, &lcd_video_class_attrs[i])) {
++        if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i])) {
+             printk("create lcd_video attribute %s fail\n", lcd_video_class_attrs[i].attr.name);
+         }
+     }
+@@ -961,17 +950,16 @@ static int creat_lcd_video_attr(void)
+     return 0;
+ }
+ 
+-static int remove_lcd_video_attr(void)
++static int remove_lcd_video_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (lcd_video_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(lcd_video_class_attrs);i++) {
+-        class_remove_file(lcd_video_class, &lcd_video_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &lcd_video_class_attrs[i]);
+     }
+-    class_destroy(lcd_video_class);
+ 
+     return 0;
+ }
+@@ -1333,7 +1321,7 @@ static void lcd_tcon_config(Lcd_Config_t *pConf)
+ #endif
+ 
+     if (pConf->lcd_timing.vso_user == 0) {
+-        pConf->lcd_timing.vso_hstart = pConf->lcd_timing.vs_hs_addr;
++        //pConf->lcd_timing.vso_hstart = pConf->lcd_timing.vs_hs_addr;
+         pConf->lcd_timing.vso_vstart = pConf->lcd_timing.vs_vs_addr;
+     }
+ 
+@@ -1507,16 +1495,16 @@ void lcd_config_probe(Lcd_Config_t *pConf)
+             break;
+     }
+ 
+-    creat_lcd_video_attr();
++    creat_lcd_video_attr(pConf);
+ }
+ 
+-void lcd_config_remove(void)
++void lcd_config_remove(Lcd_Config_t *pConf)
+ {
+-    remove_lcd_video_attr();
++    remove_lcd_video_attr(pConf);
+ 
+-    switch (lcd_Conf->lcd_basic.lcd_type) {
++    switch (pConf->lcd_basic.lcd_type) {
+         case LCD_DIGITAL_MIPI:
+-            dsi_remove();
++            dsi_remove(pConf);
+             break;
+         default:
+             break;
+diff --git a/arch/arm/mach-meson8b/lcd/lcd_config.h b/arch/arm/mach-meson8b/lcd/lcd_config.h
+index f4ebf239155a..026326c21653 100755
+--- a/arch/arm/mach-meson8b/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8b/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8b"
+-#define LCD_DRV_DATE      "20140805"
++#define LCD_DRV_DATE      "20140826"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8b/lcd/mipi_dsi_util.c b/arch/arm/mach-meson8b/lcd/mipi_dsi_util.c
+index 554bf32a01e7..02030f25b3f5 100755
+--- a/arch/arm/mach-meson8b/lcd/mipi_dsi_util.c
++++ b/arch/arm/mach-meson8b/lcd/mipi_dsi_util.c
+@@ -52,7 +52,6 @@ static const char *video_mode_type_table[] = {
+ static DSI_Phy_t dsi_phy_config;
+ static DSI_Vid_t dsi_vid_config;
+ static DSI_Config_t *dsi_config = NULL;
+-static struct class *dsi_debug_class = NULL;
+ static unsigned char dsi_init_on_table_dft[] = {
+     0x05,0x11,0,
+     0xff,50,
+@@ -1107,10 +1106,10 @@ void mipi_dsi_off(void)
+ //***********************************************//
+ static const char * dsi_usage_str =
+ {"Usage:\n"
+-"    echo read <addr> <reg_count> > debug ; read dsi phy reg value\n"
+-"    echo write <addr> <value> > debug ; write dsi phy reg with value\n"
+-"    echo info > debug ; print dsi config information\n"
+-"    echo dphy > debug ; print dsi phy timing information\n"
++"    echo read <addr> <reg_count> > dsi ; read dsi phy reg value\n"
++"    echo write <addr> <value> > dsi ; write dsi phy reg with value\n"
++"    echo info > dsi ; print dsi config information\n"
++"    echo dphy > dsi ; print dsi phy timing information\n"
+ };
+ 
+ static ssize_t dsi_debug_help(struct class *class, struct class_attribute *attr, char *buf)
+@@ -1161,39 +1160,33 @@ static ssize_t dsi_debug(struct class *class, struct class_attribute *attr, cons
+ }
+ 
+ static struct class_attribute dsi_debug_class_attrs[] = {
+-    __ATTR(debug, S_IRUGO | S_IWUSR, dsi_debug_help, dsi_debug),
+-    __ATTR(help, S_IRUGO | S_IWUSR, dsi_debug_help, NULL),
++    __ATTR(dsi, S_IRUGO | S_IWUSR, dsi_debug_help, dsi_debug),
+ };
+ 
+-static int creat_dsi_attr(void)
++static int creat_dsi_attr(Lcd_Config_t *pConf)
+ {
+-	int i;
+-
+-	dsi_debug_class = class_create(THIS_MODULE, "dsi");
+-	if(IS_ERR(dsi_debug_class)) {
+-		printk("create dsi debug class fail\n");
+-		return -1;
+-	}
+-	//create class attr
+-	for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
+-		if (class_create_file(dsi_debug_class, &dsi_debug_class_attrs[i])) {
+-			printk("create dsi debug attribute %s fail\n",dsi_debug_class_attrs[i].attr.name);
+-		}
+-	}
+-
+-	return 0;
++    int i;
++
++    //create class attr
++    for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
++        if (class_create_file(pConf->lcd_misc_ctrl.debug_class, &dsi_debug_class_attrs[i])) {
++            printk("create dsi debug attribute %s fail\n",dsi_debug_class_attrs[i].attr.name);
++        }
++    }
++
++    return 0;
+ }
+-static int remove_dsi_attr(void)
++static int remove_dsi_attr(Lcd_Config_t *pConf)
+ {
+     int i;
+ 
+-    if (dsi_debug_class == NULL)
++    if (pConf->lcd_misc_ctrl.debug_class == NULL)
+         return -1;
+ 
+     for(i=0;i<ARRAY_SIZE(dsi_debug_class_attrs);i++) {
+-        class_remove_file(dsi_debug_class, &dsi_debug_class_attrs[i]);
++        class_remove_file(pConf->lcd_misc_ctrl.debug_class, &dsi_debug_class_attrs[i]);
+     }
+-    class_destroy(dsi_debug_class);
++    class_destroy(pConf->lcd_misc_ctrl.debug_class);
+ 
+     return 0;
+ }
+@@ -1206,11 +1199,11 @@ void dsi_probe(Lcd_Config_t *pConf)
+     //pConf->lcd_control.mipi_config->bit_rate_min *= 1000;
+     pConf->lcd_control.mipi_config->bit_rate_max *= 1000;
+ 
+-    creat_dsi_attr();
++    creat_dsi_attr(pConf);
+ }
+ 
+-void dsi_remove(void)
++void dsi_remove(Lcd_Config_t *pConf)
+ {
+-    remove_dsi_attr();
++    remove_dsi_attr(pConf);
+ }
+ 
+diff --git a/arch/arm/mach-meson8b/lcd/mipi_dsi_util.h b/arch/arm/mach-meson8b/lcd/mipi_dsi_util.h
+index c8dc1991c36c..78c236dfe500 100755
+--- a/arch/arm/mach-meson8b/lcd/mipi_dsi_util.h
++++ b/arch/arm/mach-meson8b/lcd/mipi_dsi_util.h
+@@ -440,6 +440,6 @@ extern void mipi_dsi_link_off(Lcd_Config_t *pConf);
+ extern void set_mipi_dsi_control(Lcd_Config_t *pConf);
+ extern void mipi_dsi_off(void);
+ extern void dsi_probe(Lcd_Config_t *pConf);
+-extern void dsi_remove(void);
++extern void dsi_remove(Lcd_Config_t *pConf);
+ 
+ #endif
+diff --git a/drivers/amlogic/display/backlight/aml_bl.c b/drivers/amlogic/display/backlight/aml_bl.c
+index 2f6451f85f26..71190a14cb55 100755
+--- a/drivers/amlogic/display/backlight/aml_bl.c
++++ b/drivers/amlogic/display/backlight/aml_bl.c
+@@ -1280,6 +1280,56 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+ }
+ #endif
+ 
++//****************************
++#ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
++static struct class *bl_debug_class = NULL;
++static ssize_t bl_status_read(struct class *class, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "read backlight status: bl_real_status=%s(%d), bl_status=%s(%d), bl_level=%d\n", (bl_real_status ? "ON" : "OFF"), bl_real_status, 
++						((bl_status == 0) ? "OFF" : ((bl_status == 1) ? "lcd_on_bl_off" : "lcd_on_bl_on")), bl_status, bl_level);
++}
++
++static struct class_attribute bl_debug_class_attrs[] = {
++	__ATTR(status,  S_IRUGO | S_IWUSR, bl_status_read, NULL),
++};
++
++static int creat_bl_attr(void)
++{
++    int i;
++
++    bl_debug_class = class_create(THIS_MODULE, "lcd_bl");
++    if(IS_ERR(bl_debug_class)) {
++        printk("create lcd_bl debug class fail\n");
++        return -1;
++    }
++
++    for(i=0;i<ARRAY_SIZE(bl_debug_class_attrs);i++) {
++        if (class_create_file(bl_debug_class, &bl_debug_class_attrs[i])) {
++            printk("create lcd_bl debug attribute %s fail\n", bl_debug_class_attrs[i].attr.name);
++        }
++    }
++
++    return 0;
++}
++
++static int remove_bl_attr(void)
++{
++    int i;
++
++    if (bl_debug_class == NULL)
++        return -1;
++
++    for(i=0;i<ARRAY_SIZE(bl_debug_class_attrs);i++) {
++        class_remove_file(bl_debug_class, &bl_debug_class_attrs[i]);
++    }
++    class_destroy(bl_debug_class);
++    bl_debug_class = NULL;
++
++    return 0;
++}
++#endif
++//****************************
++
+ static int aml_bl_probe(struct platform_device *pdev)
+ {
+     struct backlight_properties props;
+@@ -1369,6 +1419,10 @@ static int aml_bl_probe(struct platform_device *pdev)
+     if (pdata->set_bl_level)
+         pdata->set_bl_level(bldev->props.brightness);
+ 
++#ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
++    creat_bl_attr();
++#endif
++
+     printk("aml bl probe OK.\n");
+     return 0;
+ 
+@@ -1383,6 +1437,10 @@ static int __exit aml_bl_remove(struct platform_device *pdev)
+ 
+     DTRACE();
+ 
++#ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
++    remove_bl_attr();
++#endif
++
+     if (bl_config.workqueue)
+         destroy_workqueue(bl_config.workqueue);
+ 
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index 7d47382913f2..4246af12f963 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -775,6 +775,7 @@ static int remove_lcd_gamma_attr(void)
+         class_remove_file(gamma_debug_class, &aml_lcd_gamma_class_attrs[i]);
+     }
+     class_destroy(gamma_debug_class);
++    gamma_debug_class = NULL;
+ 
+     return 0;
+ }
+@@ -794,6 +795,28 @@ static unsigned char temp_dsi_lane_num;
+ static unsigned temp_dsi_bit_rate_min, temp_dsi_bit_rate_max, temp_factor_denominator, temp_factor_numerator;
+ static unsigned char temp_edp_link_rate, temp_edp_lane_count, temp_edp_vswing, temp_edp_preemphasis;
+ 
++static const char * lcd_common_usage_str =
++{"Usage:\n"
++"    echo 0/1 > status ; 0=disable lcd; 1=enable lcd\n"
++"    cat status ; read current lcd status\n"
++"\n"
++"    echo 0/1 > print ; 0=disable debug print; 1=enable debug print\n"
++"    cat print ; read current debug print flag\n"
++"\n"
++"    echo <cmd> ... > debug ; lcd common debug, use 'cat debug' for help\n"
++"    cat debug ; print help information for debug command\n"
++#ifdef CONFIG_LCD_IF_MIPI_VALID
++"\n"
++"    echo <cmd> ... > dsi ; mipi-dsi debug, use 'cat dsi' for help\n"
++"    cat dsi ; print help information for dsi command\n"
++#endif
++#ifdef CONFIG_LCD_IF_EDP_VALID
++"\n"
++"    echo <cmd> ... > print ; edp debug, use 'cat edp' for help\n"
++"    cat print ; print help information for edp command\n"
++#endif
++};
++
+ static const char * lcd_usage_str =
+ {"Usage:\n"
+ "    echo basic <h_active> <v_active> <h_period> <v_period> > debug ; write lcd basic config\n"
+@@ -812,29 +835,34 @@ static const char * lcd_usage_str =
+ #endif
+ "3=ttl\n"
+ "    <lcd_bits> : 6=6bit(RGB18bit), 8=8bit(RGB24bit)\n"
+-"    <ss_level> : lcd clock spread spectrum level (0~6), 0 for disable\n"
++"    <ss_level> : lcd clock spread spectrum level, 0 for disable\n"
+ "    <xx_pol>   : 0=negative, 1=positive\n"
+ "    <xx_valid> : 0=disable, 1=enable\n"
+ "\n"
+ "    echo ttl <rb_swap> <bit_swap> > debug ; write ttl RGB swap config\n"
+ "    echo lvds <vswing_level> <lvds_repack> <pn_swap> > debug ; write lvds config\n"
+ #ifdef CONFIG_LCD_IF_MIPI_VALID
+-"    echo mdsi <bit_rate_min> <bit_rate_max> <factor> > debug ; write mipi-dsi config\n"
++"    echo mdsi <lane_num> <bit_rate_max> <factor> > debug ; write mipi-dsi clock config\n"
++"    echo mctl <init_mode> <disp_mode> <lp_clk_auto_stop> <transfer_switch> > debug ; write mipi-dsi control config\n"
+ #endif
+ #ifdef CONFIG_LCD_IF_EDP_VALID
+ "    echo edp <link_rate> <lane_count> <vswing_level> > debug ; write edp config\n"
+ #endif
+ "data format:\n"
+ "    <xx_swap>      : 0=normal, 1=swap\n"
+-"    <vswing_level> : lvds support level 0~4 (Default=1); "
++"    <vswing_level> : lvds support level 0~4 (Default=1);"
+ #ifdef CONFIG_LCD_IF_EDP_VALID
+-"edp support level 0~3 (default=0)"
++" edp support level 0~3 (default=0)"
+ #endif
+ "\n"
+ "    <lvds_repack>  : 0=JEIDA mode, 1=VESA mode\n"
+ "    <pn_swap>      : 0=normal, 1=swap lvds p/n channels\n"
+ #ifdef CONFIG_LCD_IF_MIPI_VALID
+-"    <bit_rate_xxx> : unit in MHz\n"
++"    <bit_rate_max> : unit in MHz\n"
++"    <factor>:      : special adjust, 0 for default\n"
++"    <xxxx_mode>    : 0=video mode, 1=command mode\n"
++"    <lp_clk_auto_stop> : 0=disable, 1=enable\n"
++"    <transfer_switch>  : 0=auto, 1=standard, 2=slow\n"
+ #endif
+ #ifdef CONFIG_LCD_IF_EDP_VALID
+ "    <link_rate>    : 0=1.62G, 1=2.7G\n"
+@@ -855,11 +883,13 @@ static const char * lcd_usage_str =
+ "    echo reset > debug ; reset lcd config & driver\n"
+ "    echo read > debug ; read current lcd config\n"
+ "    echo test <num> > debug ; bist pattern test, 0=pattern off, 1~7=different pattern\n"
+-"\n"
+-"    echo 0/1 > status ; 0=disable lcd; 1=enable lcd\n"
+-"    cat status ; read current lcd status\n"
+ };
+ 
++static ssize_t lcd_debug_common_help(struct class *class, struct class_attribute *attr, char *buf)
++{
++    return sprintf(buf, "%s\n",lcd_common_usage_str);
++}
++
+ static ssize_t lcd_debug_help(struct class *class, struct class_attribute *attr, char *buf)
+ {
+     return sprintf(buf, "%s\n",lcd_usage_str);
+@@ -1111,7 +1141,7 @@ static ssize_t lcd_debug(struct class *class, struct class_attribute *attr, cons
+ 				t[0] = 0;
+ 				ret = sscanf(buf, "test %d", &t[0]);
+ 				if (pDev->pConf->lcd_misc_ctrl.lcd_status == 0)
+-					printk("lcd has already OFF, can't display test pattern\n");
++					printk("lcd is already OFF, can't display test pattern\n");
+ 				else
+ 					pDev->pConf->lcd_misc_ctrl.lcd_test(t[0]);
+ 			}
+@@ -1192,15 +1222,27 @@ static ssize_t lcd_debug(struct class *class, struct class_attribute *attr, cons
+ 			break;
+ #ifdef CONFIG_LCD_IF_MIPI_VALID
+ 		case 'm':	//write mipi config
+-			t[0] = 0;
+-			t[1] = 0;
+-			t[2] = 0;
+-			ret = sscanf(buf, "mdsi %d %d %d", &t[0],&t[1],&t[2]);
+-			pDev->pConf->lcd_control.mipi_config->bit_rate_min = t[0]*1000;
+-			pDev->pConf->lcd_control.mipi_config->bit_rate_max = t[1]*1000;
+-			pDev->pConf->lcd_control.mipi_config->factor_numerator=t[2];
+-			pDev->pConf->lcd_control.mipi_config->factor_denominator=10;
+-			printk("dsi bit_rate min=%dMHz, max=%dMHz, factor=%d\n",t[0], t[1], pDev->pConf->lcd_control.mipi_config->factor_numerator=t[2]);
++			if (buf[1] == 'd') {
++				t[0] = 0;
++				t[1] = 4;
++				t[2] = 0;
++				ret = sscanf(buf, "mdsi %d %d %d", &t[0],&t[1],&t[2]);
++				pDev->pConf->lcd_control.mipi_config->lane_num = (unsigned char)(t[0]);
++				pDev->pConf->lcd_control.mipi_config->bit_rate_max = t[1]*1000;
++				pDev->pConf->lcd_control.mipi_config->factor_numerator = t[2];
++				pDev->pConf->lcd_control.mipi_config->factor_denominator=10;
++				printk("dsi lane_num = %d, bit_rate max=%dMHz, factor=%d\n",t[0], t[1], pDev->pConf->lcd_control.mipi_config->factor_numerator);
++			}
++			else if (buf[1] == 'c') {
++				t[0] = 1;
++				t[1] = 0;
++				t[2] = 0;
++				t[3] = 0;
++				ret = sscanf(buf, "mctl %d %d %d %d", &t[0],&t[1],&t[2],&t[3]);
++				pDev->pConf->lcd_control.mipi_config->operation_mode = ((t[0] << BIT_OPERATION_MODE_INIT) | (t[1] << BIT_OPERATION_MODE_DISP));
++				pDev->pConf->lcd_control.mipi_config->transfer_ctrl = ((t[2] << BIT_TRANS_CTRL_CLK) | (t[3] << BIT_TRANS_CTRL_SWITCH));
++				printk("dsi operation mode init=%s(%d), display=%s(%d), lp_clk_auto_stop=%d, transfer_switch=%d\n",(t[0]? "command" : "video"), t[0], (t[1] ? "command" : "video"), t[1], t[2], t[3]);
++			}
+ 			break;
+ #endif
+ 		case 'd':
+@@ -1242,7 +1284,10 @@ static ssize_t lcd_debug(struct class *class, struct class_attribute *attr, cons
+ 		case 'e':
+ 			if (buf[1] == 'n') {
+ 				printk("power on lcd.\n");
++				_lcd_module_disable();
++				mdelay(200);
+ 				_lcd_module_enable();
++				_enable_backlight();
+ 			}
+ #ifdef CONFIG_LCD_IF_EDP_VALID
+ 			else if (buf[1] == 'd') {
+@@ -1302,7 +1347,7 @@ static ssize_t lcd_status_write(struct class *class, struct class_attribute *att
+ 			mutex_unlock(&lcd_vout_mutex);
+ 		}
+ 		else {
+-			printk("lcd has already ON\n");
++			printk("lcd is already ON\n");
+ 		}
+ 	}
+ 	else {
+@@ -1313,7 +1358,7 @@ static ssize_t lcd_status_write(struct class *class, struct class_attribute *att
+ 			mutex_unlock(&lcd_vout_mutex);
+ 		}
+ 		else {
+-			printk("lcd has already OFF\n");
++			printk("lcd is already OFF\n");
+ 		}
+ 	}
+ 
+@@ -1345,20 +1390,39 @@ static ssize_t lcd_print_write(struct class *class, struct class_attribute *attr
+ 
+ static struct class_attribute lcd_debug_class_attrs[] = {
+ 	__ATTR(debug,  S_IRUGO | S_IWUSR, lcd_debug_help, lcd_debug),
+-	__ATTR(help,  S_IRUGO | S_IWUSR, lcd_debug_help, NULL),
++	__ATTR(help,  S_IRUGO | S_IWUSR, lcd_debug_common_help, NULL),
+ 	__ATTR(status,  S_IRUGO | S_IWUSR, lcd_status_read, lcd_status_write),
+ 	__ATTR(print,  S_IRUGO | S_IWUSR, lcd_print_read, lcd_print_write),
+ };
+ 
+-static int creat_lcd_attr(void)
++static int creat_lcd_class(void)
+ {
+-    int i;
+-
+     pDev->pConf->lcd_misc_ctrl.debug_class = class_create(THIS_MODULE, "lcd");
+     if(IS_ERR(pDev->pConf->lcd_misc_ctrl.debug_class)) {
+         printk("create lcd debug class fail\n");
+         return -1;
+     }
++    return 0;
++}
++
++static int remove_lcd_class(void)
++{
++    if (pDev->pConf->lcd_misc_ctrl.debug_class == NULL)
++        return -1;
++
++    class_destroy(pDev->pConf->lcd_misc_ctrl.debug_class);
++    pDev->pConf->lcd_misc_ctrl.debug_class = NULL;
++    return 0;
++}
++
++static int creat_lcd_attr(void)
++{
++    int i;
++
++    if(pDev->pConf->lcd_misc_ctrl.debug_class == NULL) {
++        printk("no lcd debug class exist\n");
++        return -1;
++    }
+ 
+     for(i=0;i<ARRAY_SIZE(lcd_debug_class_attrs);i++) {
+         if (class_create_file(pDev->pConf->lcd_misc_ctrl.debug_class, &lcd_debug_class_attrs[i])) {
+@@ -1379,7 +1443,6 @@ static int remove_lcd_attr(void)
+     for(i=0;i<ARRAY_SIZE(lcd_debug_class_attrs);i++) {
+         class_remove_file(pDev->pConf->lcd_misc_ctrl.debug_class, &lcd_debug_class_attrs[i]);
+     }
+-    class_destroy(pDev->pConf->lcd_misc_ctrl.debug_class);
+ 
+     return 0;
+ }
+@@ -2172,6 +2235,7 @@ static int lcd_probe(struct platform_device *pdev)
+ 	pDev->pConf = (Lcd_Config_t *)(pdata->lcd_conf);
+ #endif
+ 	
++	creat_lcd_class();
+ 	lcd_config_assign(pDev->pConf);
+ 	lcd_config_probe(pDev->pConf);
+ 	save_lcd_config(pDev->pConf);
+@@ -2200,9 +2264,12 @@ static int lcd_remove(struct platform_device *pdev)
+ {
+ 	unregister_reboot_notifier(&lcd_reboot_nb);
+ 	
+-	remove_lcd_gamma_attr();
+-	lcd_config_remove();
++	lcd_config_remove(pDev->pConf);
+ 	remove_lcd_attr();
++	remove_lcd_class();
++#ifdef CONFIG_AML_GAMMA_DEBUG
++	remove_lcd_gamma_attr();
++#endif
+ 	
+ 	if (pDev->pConf->lcd_basic.model_name)
+ 		kfree(pDev->pConf->lcd_basic.model_name);
+diff --git a/include/linux/amlogic/vout/lcdoutc.h b/include/linux/amlogic/vout/lcdoutc.h
+index c0457addb67a..02949ba518df 100755
+--- a/include/linux/amlogic/vout/lcdoutc.h
++++ b/include/linux/amlogic/vout/lcdoutc.h
+@@ -310,7 +310,7 @@ typedef struct {
+ extern Lcd_Config_t* get_lcd_config(void);
+ extern void lcd_config_init(Lcd_Config_t *pConf);
+ extern void lcd_config_probe(Lcd_Config_t *pConf);
+-extern void lcd_config_remove(void);
++extern void lcd_config_remove(Lcd_Config_t *pConf);
+ 
+ 
+ #define LCD_NAME	"lcd"
+-- 
+2.19.0
+

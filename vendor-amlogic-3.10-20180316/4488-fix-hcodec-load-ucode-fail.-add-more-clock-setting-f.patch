@@ -1,0 +1,403 @@
+From b154e1d945210398949aa10621548d741c87f4b2 Mon Sep 17 00:00:00 2001
+From: "brian.zhu" <brian.zhu@amlogic.com>
+Date: Mon, 7 Jul 2014 21:32:25 +0800
+Subject: [PATCH 4488/5965] fix hcodec load ucode fail. add more clock setting
+ for encode. add api vdec2 usage
+
+---
+ drivers/amlogic/amports/encoder.c    | 49 +++++++++-------------------
+ drivers/amlogic/amports/encoder.h    |  8 +++--
+ drivers/amlogic/amports/jpegenc.h    |  4 +--
+ drivers/amlogic/amports/vdec.c       | 14 ++++++++
+ drivers/amlogic/amports/vdec.h       | 11 +++++++
+ drivers/amlogic/amports/vh264_4k2k.c | 37 ++++++++++++++++++++-
+ 6 files changed, 85 insertions(+), 38 deletions(-)
+ mode change 100644 => 100755 drivers/amlogic/amports/vdec.c
+
+diff --git a/drivers/amlogic/amports/encoder.c b/drivers/amlogic/amports/encoder.c
+index d0bd268c9ce9..389865ac7673 100755
+--- a/drivers/amlogic/amports/encoder.c
++++ b/drivers/amlogic/amports/encoder.c
+@@ -36,6 +36,7 @@
+ #include <linux/of.h>
+ #include <linux/of_fdt.h>
+ #include <linux/dma-contiguous.h>
++#include "amports_config.h"
+ 
+ #define ENC_CANVAS_OFFSET  AMVENC_CANVAS_INDEX
+ 
+@@ -46,7 +47,7 @@
+ 			printk(x); \
+ 	} while (0);
+ 
+-#define PUT_INTERVAL        (HZ/100)
++
+ #ifdef CONFIG_AM_VDEC_MJPEG_LOG
+ #define AMLOG
+ #define LOG_LEVEL_VAR       amlog_level_avc
+@@ -61,6 +62,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
+ #include "encoder.h"
+ #include "amvdec.h"
+ #include "encoder_mc.h"
++
+ static int avc_device_major = 0;
+ static struct class *amvenc_avc_class;
+ static struct device *amvenc_avc_dev;
+@@ -279,18 +281,6 @@ void amvenc_reset(void);
+ extern bool jpegenc_on(void);
+ #endif
+ 
+-/*
+-static DEFINE_SPINLOCK(lock);
+-
+-static void avc_put_timer_func(unsigned long arg)
+-{
+-    struct timer_list *timer = (struct timer_list *)arg;
+-    timer->expires = jiffies + PUT_INTERVAL;
+-
+-    add_timer(timer);
+-}
+-*/
+-
+ int avc_dec_status(struct vdec_status *vstatus)
+ {
+     return 0;
+@@ -344,7 +334,6 @@ static void avc_init_encoder(void)
+ 	WRITE_HREG(VLC_TOTAL_BYTES, 0);
+ 	WRITE_HREG(VLC_CONFIG, 0x07);
+ 	WRITE_HREG(VLC_INT_CONTROL, 0);
+-	//WRITE_HREG(ENCODER_STATUS,ENCODER_IDLE);
+ 	WRITE_HREG(HCODEC_ASSIST_AMR1_INT0, 0x15);
+ 	WRITE_HREG(HCODEC_ASSIST_AMR1_INT1, 0x8);
+ 	WRITE_HREG(HCODEC_ASSIST_AMR1_INT3, 0x14);
+@@ -539,7 +528,7 @@ static int  set_input_format (amvenc_mem_type type, amvenc_frame_fmt fmt, unsign
+                 input,
+                 canvas_w, picsize_y,
+                 CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-           input = ENC_CANVAS_OFFSET+6;
++            input = ENC_CANVAS_OFFSET+6;
+         }else if((fmt == FMT_NV21)||(fmt == FMT_NV12)){
+             canvas_w =  ((encoder_width+31)>>5)<<5;
+             iformat = (fmt == FMT_NV21)?2:3;
+@@ -788,14 +777,14 @@ static void avc_prot_init(void)
+                 (i_pic_qp<<16) |
+                 ((i_pic_qp_c%6)<<12)|((i_pic_qp_c/6)<<8)|((i_pic_qp%6)<<4)|((i_pic_qp/6)<<0));
+ 
+-   WRITE_HREG(QDCT_Q_QUANT_P,
++    WRITE_HREG(QDCT_Q_QUANT_P,
+                 (p_pic_qp_c<<22) |
+                 (p_pic_qp<<16) |
+                 ((p_pic_qp_c%6)<<12)|((p_pic_qp_c/6)<<8)|((p_pic_qp%6)<<4)|((p_pic_qp/6)<<0));
+ 
+-   //avc_init_input_buffer();
++    //avc_init_input_buffer();
+ 
+-   WRITE_HREG(IGNORE_CONFIG ,
++    WRITE_HREG(IGNORE_CONFIG ,
+                 (1<<31) | // ignore_lac_coeff_en
+                 (1<<26) | // ignore_lac_coeff_else (<1)
+                 (1<<21) | // ignore_lac_coeff_2 (<1)
+@@ -1028,7 +1017,6 @@ s32 amvenc_loadmc(const u32 *p)
+     return ret;
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+ const u32 fix_mc[] __attribute__ ((aligned (8))) = {
+     0x0809c05a, 0x06696000, 0x0c780000, 0x00000000
+ };
+@@ -1090,8 +1078,6 @@ bool amvenc_avc_on(void)
+     return hcodec_on;
+ }
+ 
+-#endif
+-
+ #if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON8
+ #define  DMC_SEC_PORT8_RANGE0  0x840
+ #define  DMC_SEC_CTRL  0x829
+@@ -1112,7 +1098,6 @@ static s32 avc_poweron(void)
+ 	data32 = 0;
+ 	enable_hcoder_ddr_access();
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+ 	//CLK_GATE_ON(DOS);
+ 	switch_mod_gate_by_name("vdec", 1);
+ 
+@@ -1128,7 +1113,6 @@ static s32 avc_poweron(void)
+ 	data32 = data32 & (~0x3); 
+ 	WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, data32);
+ 	udelay(10);
+-#endif
+ #endif
+ 
+ 	WRITE_VREG(DOS_SW_RESET1, 0xffffffff);
+@@ -1136,7 +1120,6 @@ static s32 avc_poweron(void)
+ 
+ 	// Enable Dos internal clock gating
+ 	hvdec_clock_enable();
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	//Powerup HCODEC memories
+ 	WRITE_VREG(DOS_MEM_PD_HCODEC, 0x0);
+@@ -1156,7 +1139,6 @@ static s32 avc_poweron(void)
+ 	WRITE_VREG(DOS_GEN_CTRL0, data32);
+ 
+ 	spin_unlock_irqrestore(&lock, flags);
+-#endif
+ 
+ 	mdelay(10);
+ 
+@@ -1165,7 +1147,6 @@ static s32 avc_poweron(void)
+ 
+ static s32 avc_poweroff(void)
+ {
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&lock, flags);
+@@ -1183,16 +1164,13 @@ static s32 avc_poweroff(void)
+ 	// HCODEC power off
+ 	WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0x3);
+ #endif
++
+ 	spin_unlock_irqrestore(&lock, flags);
+ 
+ 	// release DOS clk81 clock gating
+ 	//CLK_GATE_OFF(DOS);
+ 	switch_mod_gate_by_name("vdec", 0);
+-#else
+-	hvdec_clock_disable();
+-	switch_mod_gate_by_name("vdec", 0);
+ 
+-#endif
+ 	return 0;
+ }
+ 
+@@ -1202,7 +1180,11 @@ static s32 avc_init(void)
+     const u32 * p = full_encoder_mc;
+     avc_poweron();
+     avc_canvas_init();
++#if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON8M2
+     WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x2);
++#else
++    WRITE_HREG(HCODEC_ASSIST_MMC_CTRL1,0x32);
++#endif
+     debug_level(1,"start to load microcode\n");
+     if(half_ucode_mode == 1)
+         p = half_encoder_mc;
+@@ -1544,8 +1526,7 @@ static int avc_mmap(struct file *filp, struct vm_area_struct *vma)
+ 
+ static unsigned int amvenc_avc_poll(struct file *file, poll_table *wait_table)
+ {
+-    if(((encoder_status != ENCODER_IDR_DONE)&&(encoder_status != ENCODER_NON_IDR_DONE))||(process_irq!=1))
+-        poll_wait(file, &avc_wait, wait_table);
++    poll_wait(file, &avc_wait, wait_table);
+ 
+     if (atomic_read(&avc_ready)) {
+         atomic_dec(&avc_ready);
+@@ -1591,18 +1572,20 @@ int uninit_avc_device(void)
+     unregister_chrdev(avc_device_major, DEVICE_NAME);	
+     return 0;
+ }
++
+ #ifndef CONFIG_CMA
+ static struct resource memobj;
+ #endif
+ static int amvenc_avc_probe(struct platform_device *pdev)
+ {
++
+     amlog_level(LOG_LEVEL_INFO, "amvenc_avc probe start.\n");
+ 
+ #ifdef CONFIG_CMA
+     this_pdev = pdev;
+ #else
+-    int idx;
+     struct resource *mem;
++    int idx;
+     mem = &memobj;
+     idx = find_reserve_block(pdev->dev.of_node->name,0);
+     if(idx < 0){
+diff --git a/drivers/amlogic/amports/encoder.h b/drivers/amlogic/amports/encoder.h
+index eb47291fa2cf..73145a88fa02 100755
+--- a/drivers/amlogic/amports/encoder.h
++++ b/drivers/amlogic/amports/encoder.h
+@@ -22,13 +22,17 @@
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define HDEC_255M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (2 << 25) | (1 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
+ #define HDEC_319M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (0 << 25) | (1 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
++#define HDEC_364M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (3 << 25) | (0 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
++#define HDEC_425M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (1 << 25) | (1 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
++#define HDEC_510M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (2 << 25) | (0 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
++#define HDEC_638M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (0 << 25) | (0 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
+ #define hvdec_clock_enable() \
+     HDEC_319M(); \
+     WRITE_VREG_BITS(DOS_GCLK_EN0, 0x7fff, 12, 15)
+ 
+ #define hvdec_clock_disable() \
+     WRITE_VREG_BITS(DOS_GCLK_EN0, 0, 12, 15); \
+-    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  24, 0, 1);
++    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 24, 1);
+ #else
+ #define HDEC_250M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (0 << 25) | (3 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
+ #define hvdec_clock_enable() \
+@@ -36,7 +40,7 @@
+     WRITE_VREG(DOS_GCLK_EN0, 0xffffffff)
+ 
+ #define hvdec_clock_disable() \
+-    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  24, 0, 1);
++    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 24, 1);
+ #endif
+ 
+ 
+diff --git a/drivers/amlogic/amports/jpegenc.h b/drivers/amlogic/amports/jpegenc.h
+index 75b0b6b631b1..abec69cd068a 100755
+--- a/drivers/amlogic/amports/jpegenc.h
++++ b/drivers/amlogic/amports/jpegenc.h
+@@ -23,7 +23,7 @@
+ 
+ #define jpegenc_clock_disable() \
+     WRITE_VREG_BITS(DOS_GCLK_EN0, 0, 12, 15); \
+-    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  24, 0, 1);
++    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 24, 1);
+ #else
+ #define HDEC_250M()   WRITE_MPEG_REG(HHI_VDEC_CLK_CNTL, (0 << 25) | (3 << 16) |(1 << 24) | (0xffff&READ_CBUS_REG(HHI_VDEC_CLK_CNTL)))
+ #define jpegenc_clock_enable() \
+@@ -31,7 +31,7 @@
+     WRITE_VREG(DOS_GCLK_EN0, 0xffffffff)
+ 
+ #define jpegenc_clock_disable() \
+-    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  24, 0, 1);
++    WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 24, 1);
+ #endif
+ 
+ #define JPEGENC_IOC_MAGIC  'E'
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+old mode 100644
+new mode 100755
+index 1b1edad5ca43..785f25104c9e
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -480,6 +480,20 @@ void vdec2_power_mode(int level)
+     spin_unlock_irqrestore(&lock, flags);
+ }
+ 
++static vdec2_usage_t vdec2_usage = USAGE_NONE;
++void set_vdec2_usage(vdec2_usage_t usage)
++{
++    ulong flags;
++    spin_lock_irqsave(&lock, flags);
++    vdec2_usage = usage;
++    spin_unlock_irqrestore(&lock, flags);
++}
++
++vdec2_usage_t get_vdec2_usage(void)
++{
++    return vdec2_usage;
++}
++
+ #endif
+ 
+ 
+diff --git a/drivers/amlogic/amports/vdec.h b/drivers/amlogic/amports/vdec.h
+index e58745df24e5..f6e3dfab04b8 100755
+--- a/drivers/amlogic/amports/vdec.h
++++ b/drivers/amlogic/amports/vdec.h
+@@ -22,6 +22,7 @@
+ #ifndef VDEC_H
+ #define VDEC_H
+ #include <mach/cpu.h>
++#include "amports_config.h"
+ 
+ #include <linux/platform_device.h>
+ 
+@@ -56,4 +57,14 @@ extern bool vdec_on(vdec_type_t core);
+ #define vdec_poweroff(core)
+ #endif
+ 
++#if HAS_VDEC2
++typedef enum {
++    USAGE_NONE,
++    USAGE_DEC_4K2K,
++    USAGE_ENCODE,
++} vdec2_usage_t;
++
++extern void set_vdec2_usage(vdec2_usage_t usage);
++extern vdec2_usage_t get_vdec2_usage(void);
++#endif
+ #endif /* VDEC_H */
+diff --git a/drivers/amlogic/amports/vh264_4k2k.c b/drivers/amlogic/amports/vh264_4k2k.c
+index 3b3ccfb196f4..8f68e31b7728 100755
+--- a/drivers/amlogic/amports/vh264_4k2k.c
++++ b/drivers/amlogic/amports/vh264_4k2k.c
+@@ -35,6 +35,7 @@
+ #include <linux/amlogic/amports/vframe_receiver.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/dma-contiguous.h>
++#include <linux/delay.h>
+ 
+ #include <mach/am_regs.h>
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+@@ -1361,12 +1362,20 @@ static int vh264_4k2k_stop(void)
+     return 0;
+ }
+ 
++#ifndef CONFIG_H264_4K2K_SINGLE_CORE
++#ifdef CONFIG_AM_ENCODER
++extern void AbortEncodeWithVdec2(int abort);
++#endif
++#endif
++
+ static int amvdec_h264_4k2k_probe(struct platform_device *pdev)
+ {
+     struct resource *mem;
+ 
+     printk("amvdec_h264_4k2k probe start.\n");
+-
++#ifndef CONFIG_H264_4K2K_SINGLE_CORE
++    int count = 0;
++#endif
+     mutex_lock(&vh264_4k2k_mutex);
+     
+     fatal_error = 0;
+@@ -1388,6 +1397,31 @@ static int amvdec_h264_4k2k_probe(struct platform_device *pdev)
+     cma_dev = (struct device *)mem[2].start;
+ 
+ #ifndef CONFIG_H264_4K2K_SINGLE_CORE
++#ifdef CONFIG_AM_ENCODER
++    if(get_vdec2_usage() != USAGE_NONE)
++        AbortEncodeWithVdec2(1);
++#endif
++
++    while((get_vdec2_usage() != USAGE_NONE)&&(count < 10)){
++        msleep(50);
++        count++;
++    }
++
++    if(get_vdec2_usage() != USAGE_NONE){
++        printk("\namvdec_h264_4k2k --- vdec2 is used by encode now.\n");
++        mutex_unlock(&vh264_4k2k_mutex);
++        return -EBUSY;
++    }
++
++    if (vdec_on(VDEC_2)) {//++++
++        vdec_poweroff(VDEC_2);//++++
++        mdelay(10);
++    }
++
++    set_vdec2_usage(USAGE_DEC_4K2K);
++#ifdef CONFIG_AM_ENCODER
++    AbortEncodeWithVdec2(0);
++#endif
+     vdec_poweron(VDEC_2);
+ #endif
+ 
+@@ -1424,6 +1458,7 @@ static int amvdec_h264_4k2k_remove(struct platform_device *pdev)
+ 
+ #ifndef CONFIG_H264_4K2K_SINGLE_CORE
+     vdec_poweroff(VDEC_2);
++    set_vdec2_usage(USAGE_NONE);
+ #endif
+ 
+ #ifdef DEBUG_PTS
+-- 
+2.19.0
+

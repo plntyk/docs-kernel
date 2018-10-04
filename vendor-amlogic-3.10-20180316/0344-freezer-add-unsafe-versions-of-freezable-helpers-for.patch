@@ -1,0 +1,82 @@
+From 74f7d2064859a6c799e6ede20f2fc3b3f537cbdf Mon Sep 17 00:00:00 2001
+From: Colin Cross <ccross@android.com>
+Date: Tue, 7 May 2013 17:52:05 +0000
+Subject: [PATCH 0344/5965] freezer: add unsafe versions of freezable helpers
+ for CIFS
+
+CIFS calls wait_event_freezekillable_unsafe with a VFS lock held,
+which is unsafe and will cause lockdep warnings when 6aa9707
+"lockdep: check that no locks held at freeze time" is reapplied
+(it was reverted in dbf520a).  CIFS shouldn't be doing this, but
+it has long-running syscalls that must hold a lock but also
+shouldn't block suspend.  Until CIFS freeze handling is rewritten
+to use a signal to exit out of the critical section, add a new
+wait_event_freezekillable_unsafe helper that will not run the
+lockdep test when 6aa9707 is reapplied, and call it from CIFS.
+
+In practice the likley result of holding the lock while freezing
+is that a second task blocked on the lock will never freeze,
+aborting suspend, but it is possible to manufacture a case using
+the cgroup freezer, the lock, and the suspend freezer to create
+a deadlock.  Silencing the lockdep warning here will allow
+problems to be found in other drivers that may have a more
+serious deadlock risk, and prevent new problems from being added.
+
+Change-Id: I420c5392bacf68e58e268293b2b36068ad4df753
+Acked-by: Pavel Machek <pavel@ucw.cz>
+Acked-by: Tejun Heo <tj@kernel.org>
+Reviewed-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Colin Cross <ccross@android.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+---
+ fs/cifs/transport.c     |  2 +-
+ include/linux/freezer.h | 13 +++++++++++++
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/fs/cifs/transport.c b/fs/cifs/transport.c
+index bfbf4700d160..b70aa7c91394 100644
+--- a/fs/cifs/transport.c
++++ b/fs/cifs/transport.c
+@@ -447,7 +447,7 @@ wait_for_response(struct TCP_Server_Info *server, struct mid_q_entry *midQ)
+ {
+ 	int error;
+ 
+-	error = wait_event_freezekillable(server->response_q,
++	error = wait_event_freezekillable_unsafe(server->response_q,
+ 				    midQ->mid_state != MID_REQUEST_SUBMITTED);
+ 	if (error < 0)
+ 		return -ERESTARTSYS;
+diff --git a/include/linux/freezer.h b/include/linux/freezer.h
+index 5b31e21c485f..d3c038ec9a88 100644
+--- a/include/linux/freezer.h
++++ b/include/linux/freezer.h
+@@ -212,6 +212,16 @@ static inline bool freezer_should_skip(struct task_struct *p)
+ 	__retval;							\
+ })
+ 
++/* DO NOT ADD ANY NEW CALLERS OF THIS FUNCTION */
++#define wait_event_freezekillable_unsafe(wq, condition)			\
++({									\
++	int __retval;							\
++	freezer_do_not_count();						\
++	__retval = wait_event_killable(wq, (condition));		\
++	freezer_count_unsafe();						\
++	__retval;							\
++})
++
+ #define wait_event_freezable(wq, condition)				\
+ ({									\
+ 	int __retval;							\
+@@ -277,6 +287,9 @@ static inline void set_freezable(void) {}
+ #define wait_event_freezekillable(wq, condition)		\
+ 		wait_event_killable(wq, condition)
+ 
++#define wait_event_freezekillable_unsafe(wq, condition)			\
++		wait_event_killable(wq, condition)
++
+ #endif /* !CONFIG_FREEZER */
+ 
+ #endif	/* FREEZER_H_INCLUDED */
+-- 
+2.19.0
+

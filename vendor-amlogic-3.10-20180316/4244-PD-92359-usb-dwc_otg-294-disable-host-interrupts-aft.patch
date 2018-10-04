@@ -1,0 +1,85 @@
+From 3804cc577308d5c34cb77c905f924a3e5bbd269c Mon Sep 17 00:00:00 2001
+From: "qi.duan" <qi.duan@amlogic.com>
+Date: Wed, 28 May 2014 21:09:10 +0800
+Subject: [PATCH 4244/5965] PD #92359: usb: dwc_otg 294: disable host
+ interrupts after resume
+
+This commit fixed issue that meson8baby can't find usb devices after suspend/resume
+---
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c     |  2 +-
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_core_if.h |  1 +
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c     | 14 +++++++++++++-
+ 3 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
+index aa025398df54..8353dde510d1 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
+@@ -372,7 +372,7 @@ void dwc_otg_disable_global_interrupts(dwc_otg_core_if_t * core_if)
+  * @param core_if Programming view of the DWC_otg controller
+  *
+  */
+-static void dwc_otg_enable_common_interrupts(dwc_otg_core_if_t * core_if)
++void dwc_otg_enable_common_interrupts(dwc_otg_core_if_t * core_if)
+ {
+ 	dwc_otg_core_global_regs_t *global_regs = core_if->core_global_regs;
+ 	gintmsk_data_t intr_mask = {.d32 = 0 };
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_core_if.h b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_core_if.h
+index 179956c5135c..a3cbeb9920e9 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_core_if.h
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_core_if.h
+@@ -56,6 +56,7 @@ extern void dwc_otg_cil_remove(dwc_otg_core_if_t * _core_if);
+ 
+ extern void dwc_otg_enable_global_interrupts(dwc_otg_core_if_t * _core_if);
+ extern void dwc_otg_disable_global_interrupts(dwc_otg_core_if_t * _core_if);
++extern void dwc_otg_enable_common_interrupts(dwc_otg_core_if_t * core_if);
+ 
+ extern uint8_t dwc_otg_is_device_mode(dwc_otg_core_if_t * _core_if);
+ extern uint8_t dwc_otg_is_host_mode(dwc_otg_core_if_t * _core_if);
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+index 2e10ddd50d04..51dfc8a65de3 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+@@ -480,6 +480,7 @@ void dwc_otg_hcd_stop(dwc_otg_hcd_t * hcd)
+ 
+ 	dwc_mdelay(1);
+ }
++
+ static void dwc_otg_hcd_power_save(dwc_otg_hcd_t * hcd, int power_on)
+ {
+ 	usb_dbg_uart_data_t uart = {.d32 = 0 };
+@@ -498,12 +499,22 @@ static void dwc_otg_hcd_power_save(dwc_otg_hcd_t * hcd, int power_on)
+ 	
+ 	DWC_WRITE_REG32(hcd->core_if->pcgcctl, pcgcctl.d32);
+ 	if(!hcd->auto_pm_suspend_flag)
++	{
+ 		DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
++		if(power_on)
++		{
++			dwc_otg_enable_common_interrupts(hcd->core_if);
++			dwc_otg_enable_global_interrupts(hcd->core_if);
++		}
++		else
++		{
++			dwc_otg_disable_global_interrupts(hcd->core_if);
++		}
++	}
+ }
+ /** dwc_otg_hcd suspend */
+ int dwc_otg_hcd_suspend(dwc_otg_hcd_t * hcd)
+ {
+-
+ 	hcd->core_if->suspend_mode = 1;
+ 	DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD SUSPEND\n");
+ 	dwc_otg_hcd_power_save(hcd, 0);
+@@ -527,6 +538,7 @@ int dwc_otg_hcd_resume(dwc_otg_hcd_t *hcd)
+ 
+ 	hcd->core_if->suspend_mode = 0;
+ 	dwc_otg_hcd_power_save(hcd, 1);
++	
+ 	return 0;
+ }
+ 
+-- 
+2.19.0
+

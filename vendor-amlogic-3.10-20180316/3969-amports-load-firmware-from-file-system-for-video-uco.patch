@@ -1,0 +1,286 @@
+From afdd55a76ef3853e4ccae7aa11e9abf929fb7a9e Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Mon, 14 Apr 2014 17:36:27 +0800
+Subject: [PATCH 3969/5965] amports: load firmware from file system for video
+ ucode debug only...
+
+---
+ drivers/amlogic/amports/amports_priv.h |  2 +-
+ drivers/amlogic/amports/amstream.c     | 38 +++++++++++++-
+ drivers/amlogic/amports/amvdec.c       | 43 +++++++++++++++-
+ drivers/amlogic/amports/amvdec.h       |  3 +-
+ drivers/amlogic/amports/vh264.c        | 69 +++++++++++++++++++++++++-
+ 5 files changed, 150 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amports_priv.h b/drivers/amlogic/amports/amports_priv.h
+index cb7aa35bb9c1..39804e3092ec 100755
+--- a/drivers/amlogic/amports/amports_priv.h
++++ b/drivers/amlogic/amports/amports_priv.h
+@@ -10,7 +10,7 @@ int calculation_stream_ext_delayed_ms(u8 type);
+ int ext_get_cur_video_frame(vframe_t **vf,int *canvas_index);
+ int ext_put_video_frame(vframe_t *vf);
+ int ext_register_end_frame_callback(struct amvideocap_req *req);
+-
++int request_video_firmware(const char * file_name,char *buf,int size);
+ 
+ #endif
+ 
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index e2ce07042001..c29d0881e20f 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -65,6 +65,7 @@
+ #include "rmparser.h"
+ #include "amports_priv.h"
+ #include "amvideocap_priv.h"
++#include <linux/firmware.h>
+ 
+ #include <linux/of.h>
+ #include <linux/of_fdt.h>
+@@ -1826,7 +1827,42 @@ static struct class_attribute amstream_class_attrs[] = {
+ static struct class amstream_class = {
+         .name = "amstream",
+         .class_attrs = amstream_class_attrs,
+-    };
++};
++int request_video_firmware(const char * file_name,char *buf,int size)
++{
++	const struct firmware *firmware;
++	int err=0;
++	struct device *micro_dev;
++	printk("try load %s  ...",file_name);
++	micro_dev = device_create(&amstream_class,
++					    NULL, MKDEV(AMSTREAM_MAJOR, 100),
++					    NULL, "videodec");
++	if(micro_dev ==NULL ){
++		printk("device_create failed =%d\n",err);
++		return -1;
++	}
++	if((err=request_firmware(&firmware,file_name, micro_dev))<0)
++	{
++		printk("can't load the %s,err=%d\n",file_name,err);
++		goto error1;
++	}
++	if(firmware->size>size)
++	{
++		printk("not enough memory size for audiodsp code\n");
++		err=ENOMEM;
++		goto release;
++	}
++
++	memcpy(buf,(char*)firmware->data,firmware->size);
++    mb();
++	printk("load mcode size=%d\n mcode name %s\n",firmware->size,file_name);
++	err=firmware->size;
++release:	
++	release_firmware(firmware);
++error1:
++	device_destroy(&amstream_class, MKDEV(AMSTREAM_MAJOR, 100));
++	return err;
++}
+ 
+ static struct resource memobj;
+ static int  amstream_probe(struct platform_device *pdev)
+diff --git a/drivers/amlogic/amports/amvdec.c b/drivers/amlogic/amports/amvdec.c
+index be4e7a3c8471..0a4a289824b9 100755
+--- a/drivers/amlogic/amports/amvdec.c
++++ b/drivers/amlogic/amports/amvdec.c
+@@ -38,6 +38,7 @@
+ #ifdef CONFIG_WAKELOCK
+ #include <linux/wakelock.h>
+ #endif
++#include "amports_priv.h"
+ 
+ #include <mach/am_regs.h>
+ #include <mach/power_gate.h>
+@@ -198,6 +199,32 @@ int amvdec_wake_unlock(void)
+ #define amvdec_wake_unlock();
+ #endif
+ 
++
++
++static s32 am_loadmc_ex(const char*name,char *def,s32(* load)(const u32 *))
++{
++    char *mc_addr = kmalloc(4096 * 4, GFP_KERNEL);
++    char *pmc_addr=def;
++	int err;
++    if(mc_addr){
++        int loaded;
++        loaded=request_video_firmware(name,mc_addr,(4096 * 4));
++        if(loaded>0){
++            pmc_addr=mc_addr;
++        }
++    }
++	if(!pmc_addr){
++		kfree(mc_addr);
++		return -1;
++	}
++    if ((err=(*load)((u32*)pmc_addr)) < 0) {
++    	return err;
++    }
++    if(mc_addr)
++       kfree(mc_addr);
++	return err;
++}
++
+ s32 amvdec_loadmc(const u32 *p)
+ {
+     ulong timeout;
+@@ -250,6 +277,10 @@ s32 amvdec_loadmc(const u32 *p)
+ 
+     return ret;
+ }
++s32 amvdec_loadmc_ex(const char*name,char *def)
++{
++	return am_loadmc_ex(name,def,&amvdec_loadmc);
++}
+ 
+ #if HAS_VDEC2
+ s32 amvdec2_loadmc(const u32 *p)
+@@ -304,10 +335,15 @@ s32 amvdec2_loadmc(const u32 *p)
+ 
+     return ret;
+ }
++s32 amvdec2_loadmc_ex(const char*name,char *def)
++{
++       return am_loadmc_ex(name,def,&amvdec2_loadmc);
++}
++
+ #endif
+ 
+ #if HAS_HDEC
+-void amhcodec_loadmc(const u32 *p)
++s32 amhcodec_loadmc(const u32 *p)
+ {
+ #ifdef AMVDEC_USE_STATIC_MEMORY
+     if (mc_addr == NULL)
+@@ -338,6 +374,11 @@ void amhcodec_loadmc(const u32 *p)
+     kfree(mc_addr);
+ #endif
+ }
++s32 amhcodec_loadmc_ex(const char*name,char *def)
++{
++	return am_loadmc_ex(name,def,&amhcodec_loadmc);
++}
++
+ #endif
+ 
+ void amvdec_start(void)
+diff --git a/drivers/amlogic/amports/amvdec.h b/drivers/amlogic/amports/amvdec.h
+index 33eca3898ac5..0f66d0958a1e 100755
+--- a/drivers/amlogic/amports/amvdec.h
++++ b/drivers/amlogic/amports/amvdec.h
+@@ -33,6 +33,7 @@ extern void amvdec_start(void);
+ extern void amvdec_stop(void);
+ extern void amvdec_enable(void);
+ extern void amvdec_disable(void);
++s32 amvdec_loadmc_ex(const char*name,char *def);
+ 
+ #if HAS_VDEC2
+ extern  s32 amvdec2_loadmc(const u32 *p);
+@@ -43,7 +44,7 @@ extern void amvdec2_disable(void);
+ #endif
+ 
+ #if HAS_HDEC
+-extern void amhcodec_loadmc(const u32 *p);
++extern s32 amhcodec_loadmc(const u32 *p);
+ extern void amhcodec_start(void);
+ extern void amhcodec_stop(void);
+ #endif
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 78cf2365602a..64b3bd2894c3 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -218,6 +218,7 @@ static uint ucode_type = 0;
+ #ifdef DEBUG_PTS
+ static unsigned long pts_missed, pts_hit;
+ #endif
++static uint debugfirmware=0;
+ 
+ static atomic_t vh264_active = ATOMIC_INIT(0);
+ static struct work_struct error_wd_work;
+@@ -1502,7 +1503,70 @@ static s32 vh264_init(void)
+     }
+ 
+     amvdec_enable();
+-	
++    if(debugfirmware){
++        printk("start debug load firmware ...\n");
++        char *mbuf=kmalloc(4096 * 4*6, GFP_KERNEL);
++        if (!mbuf) {
++            printk("\nvh264_init: Cannot malloc mbuf  memory\n");
++            return -ENOMEM;
++        }
++        memset(mbuf,0,4096 * 4*6);
++        request_video_firmware("vh264_mc",mbuf,4096 * 4*6);
++        const char *pvh264_header_mc=mbuf+(0x800 + 0x400*2)*4;
++        const char *pvh264_data_mc=mbuf+(0x800 + 0x400*1)*4;
++        const char *pvh264_mmco_mc=mbuf+(0x800 + 0x400*4)*4;
++        const char *pvh264_list_mc=mbuf+(0x800 + 0x400*3)*4;
++        const char *pvh264_slice_mc=mbuf+(0x800 + 0x400*0)*4;
++        
++        char *mc=kmalloc(4096 * 4, GFP_KERNEL);
++        if (!mc) {
++            kfree(mbuf);
++            printk("\nvh264_init: Cannot malloc mbuf  memory\n");
++            return -ENOMEM;
++        }
++        memcpy(mc,mbuf,0x800*4);
++        memcpy(mc+0x800*4,pvh264_data_mc,0x400*4);
++        memcpy(mc+0x800*4+0x400*4,pvh264_list_mc,0x400*4);
++        if (amvdec_loadmc(mc) < 0) {
++            kfree(mbuf);
++            kfree(mc);
++            amvdec_disable();
++            return -EBUSY;
++        }
++        memcpy(p1,
++        pvh264_header_mc, 0x400*4);//vh264_header_mc   //0x4000
++        memcpy((void *)((ulong)p1 + 0x1000),
++        pvh264_data_mc, 0x400*4);//vh264_data_mc //0x3000
++        memcpy((void *)((ulong)p1 + 0x2000),
++        pvh264_mmco_mc, 0x400*4);//vh264_mmco_mc//0x6000
++        memcpy((void *)((ulong)p1 + 0x3000),
++        pvh264_list_mc, 0x400*4);//vh264_list_mc//0x5000
++        memcpy((void *)((ulong)p1 + 0x4000),
++        pvh264_slice_mc, 0x400*4);//vh264_slice_mc //0x2000
++        kfree(mbuf);
++        kfree(mc);
++    }else{
++        printk("start load firmware ...\n");
++        if (amvdec_loadmc(vh264_mc) < 0) {
++            amvdec_disable();
++            return -EBUSY;
++        }
++        
++        memcpy(p1,
++        vh264_header_mc, sizeof(vh264_header_mc));
++        
++        memcpy((void *)((ulong)p1 + 0x1000),
++        vh264_data_mc, sizeof(vh264_data_mc));
++        
++        memcpy((void *)((ulong)p1 + 0x2000),
++        vh264_mmco_mc, sizeof(vh264_mmco_mc));
++        
++        memcpy((void *)((ulong)p1 + 0x3000),
++        vh264_list_mc, sizeof(vh264_list_mc));
++        
++        memcpy((void *)((ulong)p1 + 0x4000),
++        vh264_slice_mc, sizeof(vh264_slice_mc));
++    }	
+     if (amvdec_loadmc(vh264_mc) < 0) { 
+         amvdec_disable();
+         return -EBUSY;
+@@ -1870,6 +1934,9 @@ module_param(max_refer_buf, uint, 0664);
+ MODULE_PARM_DESC(max_refer_buf, "\n amvdec_h264 decoder buffering or not for reference frame \n");
+ module_param(ucode_type, uint, 0664);
+ MODULE_PARM_DESC(ucode_type, "\n amvdec_h264 decoder buffering or not for reference frame \n");
++module_param(debugfirmware, uint, 0664);
++MODULE_PARM_DESC(debugfirmware, "\n amvdec_h264 debug load firmware \n");
++
+ module_init(amvdec_h264_driver_init_module);
+ module_exit(amvdec_h264_driver_remove_module);
+ 
+-- 
+2.19.0
+

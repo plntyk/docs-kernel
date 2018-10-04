@@ -1,0 +1,86 @@
+From 7608ea2efb0ee2c4cf7d622351c97445983916bf Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Tue, 8 Sep 2015 15:16:01 +0800
+Subject: [PATCH 5817/5965] PD#112362: lcd: optimize vbyone init flow
+
+Change-Id: I4ac3be570bb77d3549f65465205a98b148281403
+---
+ .../display/lcd/aml_tv_lcd_port/vbyone_drv.c  | 48 ++++++++++++-------
+ 1 file changed, 31 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+index b59044e39ca7..31993fbddf00 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+@@ -350,6 +350,12 @@ static void venc_set_vbyone(Lcd_Config_t *pConf)
+ 	aml_write_reg32(P_ENCL_VIDEO_EN, 1);
+ }
+ 
++static void venc_change_vbyone(Lcd_Config_t *pConf)
++{
++	aml_write_reg32(P_ENCL_VIDEO_MAX_PXCNT, pConf->lcd_basic.h_period - 1);
++	aml_write_reg32(P_ENCL_VIDEO_MAX_LNCNT, pConf->lcd_basic.v_period - 1);
++}
++
+ //clock seting for VX1
+ static void set_pll_vbyone(Lcd_Config_t *pConf)
+ {
+@@ -604,15 +610,13 @@ static void set_clk_vbyone(Lcd_Config_t *pConf)
+ {
+ 	unsigned int bit_rate;
+ 
+-	if (pConf->lcd_timing.frame_rate_adj_type) {
+-		bit_rate = pConf->lcd_control.vbyone_config->bit_rate / 1000000;
+-		//printk("bit rate change to %dMHz\n", bit_rate);
+-		if (VX1_PLL_ADJUST) {
+-			generate_clk_parameter(pConf);
+-			adjust_vx1_pll_by_parameters(pConf);
+-		} else {
+-			adjust_vx1_pll_by_bit_rate(bit_rate);
+-		}
++	bit_rate = pConf->lcd_control.vbyone_config->bit_rate / 1000000;
++	//printk("bit rate change to %dMHz\n", bit_rate);
++	if (VX1_PLL_ADJUST) {
++		generate_clk_parameter(pConf);
++		adjust_vx1_pll_by_parameters(pConf);
++	} else {
++		adjust_vx1_pll_by_bit_rate(bit_rate);
+ 	}
+ 	set_pll_vbyone(pConf);
+ }
+@@ -627,14 +631,24 @@ unsigned int vbyone_init(struct aml_lcd *pDev)
+ 	//write REG_VBO_GCLK_LANE[3:2] == 0x0 to open the aln_clk
+ 	aml_write_reg32(P_VBO_GCLK_LANE_L, 0);
+ 
+-	set_vbyone_config(pDev->pConf);
+-	set_clk_vbyone(pDev->pConf);
+-	venc_set_vbyone(pDev->pConf);
+-	set_control_vbyone(pDev->pConf);
+-	init_vbyone_phy(pDev->pConf);
+-	set_tcon_vbyone(pDev->pConf);
+-	set_vbyone_pinmux();
+-	_enable_vsync_interrupt();
++	switch (pDev->pConf->lcd_timing.frame_rate_adj_type) {
++	case 0: /* clk adjust */
++		set_vbyone_config(pDev->pConf);
++		set_clk_vbyone(pDev->pConf);
++		venc_set_vbyone(pDev->pConf);
++		set_control_vbyone(pDev->pConf);
++		init_vbyone_phy(pDev->pConf);
++		set_tcon_vbyone(pDev->pConf);
++		set_vbyone_pinmux();
++		_enable_vsync_interrupt();
++		break;
++	case 1: /* htotal adjust */
++	case 2: /* vtotal adjust */
++		venc_change_vbyone(pDev->pConf);
++		break;
++	default:
++		break;
++	}
+ 	vbyone_wait_stable();
+ 	vx1_init_flag = false;
+ 	mutex_unlock(&pDev->init_lock);
+-- 
+2.19.0
+

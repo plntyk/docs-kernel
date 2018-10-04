@@ -1,0 +1,198 @@
+From 8c350d47ddf27e24be697da013b15859ce8fc205 Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Tue, 19 Nov 2013 17:11:20 +0800
+Subject: [PATCH 1978/5965] add manual ae/af for api.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c     | 14 ++++++++++++--
+ drivers/amlogic/tvin/isp/isp_drv.h     |  9 ++++++++-
+ drivers/amlogic/tvin/isp/isp_sm.c      |  4 ++--
+ drivers/amlogic/tvin_v4l2/vdin_v4l2.c  |  6 ++++++
+ include/linux/amlogic/tvin/tvin_v4l2.h | 16 +++++++++++-----
+ 5 files changed, 39 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index d337b95be98e..4dc81f5a7de9 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -917,6 +917,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 	isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 	cam_parameter_t *param = (cam_parameter_t *)arg;
+ 	enum cam_command_e cmd;
++	cam_cmd_state_t ret = CAM_STATE_SUCCESS;
+ 	if(IS_ERR_OR_NULL(param)) {
+                 pr_err("[%s..]camera parameter can't be null.\n",DEVICE_NAME);
+                 return -1;
+@@ -928,6 +929,9 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 	switch(cmd) {
+                 case CAM_COMMAND_INIT:
+ 		        break;
++		case CAM_COMMAND_GET_STATE:
++			ret = devp->cmd_state;
++			break;
+                 case CAM_COMMAND_SCENES:
+ 		        devp->isp_ae_parm = &param->xml_scenes->ae;
+ 		        devp->isp_awb_parm = &param->xml_scenes->awb;
+@@ -961,12 +965,18 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+                 case CAM_COMMAND_AE_OFF:
+ 		        devp->flag &= (~ISP_FLAG_AE);
+ 		        break;
++		case CAM_COMMAND_SET_AE_LEVEL:
++			devp->ae_info.manul_level = devp->cam_param->exposure_level;
++			break;
+                 // af related
+                 case CAM_COMMAND_AF:
+ 			devp->flag |= ISP_FLAG_AF;
+ 		        break;
+                 case CAM_COMMAND_FULLSCAN:
+-			devp->capture_parm->af_mode = CAM_SCANMODE_FULL;
++			isp_set_af_scan_stat(0,0,devp->info.h_active-1,devp->info.v_active-1);
++			devp->flag |= ISP_FLAG_TOUCH_AF;
++			devp->cmd_state = CAM_STATE_DOING;
++			af_sm_init(devp);
+ 		        break;
+                 case CAM_COMMAND_TOUCH_FOCUS:
+ 			//devp->isp_af_parm = &param->xml_scenes->af;
+@@ -1009,7 +1019,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 	        default:
+ 		        break;
+ 	}
+-	return 0;
++	return ret;
+ }
+ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ {
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index c66a854a5bc5..6166966b14bf 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.17b"
++#define ISP_VER					"2013.11.19a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -71,6 +71,10 @@ typedef struct flash_property_s {
+                                  //false: low      high
+                                  //true:  high     low
+ } flash_property_t;
++/*parameters used for ae in sm or driver*/
++typedef struct isp_ae_info_s {
++	int manul_level;//each step 2db
++} isp_ae_info_t;
+ 
+ /*for af debug*/
+ typedef struct af_debug_s {
+@@ -152,6 +156,7 @@ typedef struct isp_dev_s{
+ 	struct task_struct     *kthread;
+ 
+ 	struct isp_ae_stat_s isp_ae;
++	struct isp_ae_info_s ae_info;
+ 	struct isp_awb_stat_s isp_awb;
+ 	struct isp_af_stat_s isp_af;
+ 	struct isp_af_info_s af_info;
+@@ -167,6 +172,8 @@ typedef struct isp_dev_s{
+ 	debug_t         debug;
+ 	/*test for af test win*/
+ 	af_debug_test_t af_test;
++	/*cmd state for camera*/
++	cam_cmd_state_t cmd_state;
+ }isp_dev_t;
+ 
+ typedef enum data_type_e{
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index adb220426153..623e99ab9eaa 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -199,7 +199,7 @@ unsigned int isp_ae_cal_new_para(isp_dev_t *devp)
+ 
+     //if (func && func->get_aet_gain_by_format)
+     //    aet_gain = func->get_aet_gain_by_format(ae_sens->new_step);
+-    format_gain_new = 52;
++    format_gain_new = devp->isp_ae_parm->aet_fmt_gain;
+     aet_gain_new = ((aet_gain_pre * format_gain_pre) / format_gain_new);
+     new_step = find_step(func, 0, aepa->max_step, aet_gain_new);
+ 
+@@ -216,7 +216,7 @@ int isp_ae_save_current_para(isp_dev_t *devp)
+         aet_gain_pre = func->get_aet_gain_by_step(ae_sens.new_step);
+     //if (func && func->get_aet_gain_by_format)
+     //    aet_gain = func->get_aet_gain_by_format(ae_sens->new_step);
+-    format_gain_pre = 150;
++    format_gain_pre = devp->isp_ae_parm->aet_fmt_gain;
+     pr_info("[isp] %s ae gain, aet_gain_pre:%d format_gain_pre:%d ... ...\n",
+                 __func__, aet_gain_pre, format_gain_pre);
+ 
+diff --git a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+index 2ce00d0a1e79..da37978a2ea8 100755
+--- a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
++++ b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+@@ -49,6 +49,9 @@ const char *cam_cmd_to_str(cam_command_t cmd)
+ 		case CAM_COMMAND_INIT:
+ 			return "CAM_COMMAND_INIT";
+ 		        break;
++		case CAM_COMMAND_GET_STATE:
++			return "CAM_COMMAND_GET_STATE";
++			break;
+                 case CAM_COMMAND_SCENES:
+ 			return "CAM_COMMAND_SCENES";
+ 			break;
+@@ -70,6 +73,9 @@ const char *cam_cmd_to_str(cam_command_t cmd)
+                 case CAM_COMMAND_AE_OFF:
+ 			return "CAM_COMMAND_AE_OFF";
+ 			break;
++		case CAM_COMMAND_SET_AE_LEVEL:
++			return "CAM_COMMAND_SET_AE_LEVEL";
++			break;
+                 case CAM_COMMAND_AF:
+ 			return "CAM_COMMAND_AF";
+ 			break;
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index 285273e43f1f..de4156c3f546 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -216,11 +216,18 @@ typedef enum cam_scanmode_e {
+         CAM_SCANMODE_PROBE,
+         CAM_SCANMODE_FULL,
+ } cam_scanmode_t;
++/*state for cmd*/
++typedef enum cam_cmd_state_e {
++	CAM_STATE_NULL,
++	CAM_STATE_DOING,
++	CAM_STATE_ERROR,
++	CAM_STATE_SUCCESS,
++} cam_cmd_state_t;
+ 
+ typedef enum cam_command_e {
+         // common
+-        CAM_COMMAND_INIT = 0,
+-        //CAM_COMMAND_FORMAT,
++        CAM_COMMAND_INIT = 0,        
++        CAM_COMMAND_GET_STATE,
+         CAM_COMMAND_SCENES,
+         CAM_COMMAND_EFFECT,
+         CAM_COMMAND_AWB,
+@@ -229,9 +236,7 @@ typedef enum cam_command_e {
+         // ae related
+         CAM_COMMAND_AE_ON,
+         CAM_COMMAND_AE_OFF,
+-        //CAM_COMMAND_EXPOSURE,
+-        //CAM_COMMAND_ISO_ANALOG,
+-        //CAM_COMMAND_ISO_DIGITAL,
++        CAM_COMMAND_SET_AE_LEVEL,
+         // af related
+         CAM_COMMAND_AF,
+         CAM_COMMAND_FULLSCAN,
+@@ -650,6 +655,7 @@ typedef struct cam_parameter_s {
+ 	unsigned int 		    level;//the torch light level
+ 	flash_mode_t                flash_mode;//the flash mode
+ 	camera_mode_t		    cam_mode;//set the isp work mode
++	         int		    exposure_level;//manual exposure level 2db by each step
+ } cam_parameter_t;
+ 
+ typedef struct isp_status_s {
+-- 
+2.19.0
+

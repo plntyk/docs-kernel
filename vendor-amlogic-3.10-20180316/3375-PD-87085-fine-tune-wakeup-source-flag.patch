@@ -1,0 +1,167 @@
+From 4e2fdb428a9ba24780266159127481576ff64515 Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Wed, 12 Feb 2014 18:56:28 +0800
+Subject: [PATCH 3375/5965] PD#87085: fine-tune wakeup source flag
+
+Conflicts:
+
+	drivers/amlogic/input/gpio_key/aml_gpiokey.c
+---
+ arch/arm/mach-meson8/pm.c                    |  8 ++---
+ arch/arm/plat-meson/include/plat/wakeup.h    | 35 ++++++++++++++++++++
+ drivers/amlogic/bluetooth/bt_wake_control.c  |  5 ++-
+ drivers/amlogic/input/gpio_key/aml_gpiokey.c | 19 ++++++-----
+ 4 files changed, 50 insertions(+), 17 deletions(-)
+ create mode 100755 arch/arm/plat-meson/include/plat/wakeup.h
+
+diff --git a/arch/arm/mach-meson8/pm.c b/arch/arm/mach-meson8/pm.c
+index 5f5b7d7abe5b..232950d7e068 100755
+--- a/arch/arm/mach-meson8/pm.c
++++ b/arch/arm/mach-meson8/pm.c
+@@ -30,7 +30,7 @@
+ #include <mach/clock.h>
+ #include <plat/regops.h>
+ #include <plat/io.h>
+-
++#include <plat/wakeup.h>
+ 
+ #ifdef CONFIG_SUSPEND_WATCHDOG
+ #include <mach/watchdog.h>
+@@ -264,7 +264,7 @@ static void meson_pm_suspend(void)
+ 	if(det_pwr_key())//get pwr key and wakeup im
+ 	{
+ 		clr_pwr_key();
+-		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0x1234abcd);
++		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, FLAG_WAKEUP_PWRKEY);
+ 	}else{
+ #ifdef CONFIG_MESON_SUSPEND
+ 		meson_power_suspend();
+@@ -277,16 +277,14 @@ static void meson_pm_suspend(void)
+ 			udelay(1000);
+ 		}while((aml_read_reg32(P_AO_GPIO_I)&(1<<3)));
+ #endif
+-		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0x1234abcd);
+ #endif
+ 	}
+ 	aml_set_reg32_mask(P_HHI_SYS_PLL_CNTL, (1 << 30)); //enable sys pll
+ 	printk(KERN_INFO "... wake up\n");
+-	WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0x1234abcd);
+ #if 1
+ 	if (aml_read_reg32(P_AO_RTC_ADDR1) & (1<<12)) {
+ 	// Woke from alarm, not power button. Set flag to inform key_input driver.
+-		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0x12345678);
++		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, FLAG_WAKEUP_ALARM);
+ 	}
+ 	// clear RTC interrupt
+ 	aml_write_reg32((P_AO_RTC_ADDR1),aml_read_reg32(P_AO_RTC_ADDR1)|(0xf000));
+diff --git a/arch/arm/plat-meson/include/plat/wakeup.h b/arch/arm/plat-meson/include/plat/wakeup.h
+new file mode 100755
+index 000000000000..b983686c1628
+--- /dev/null
++++ b/arch/arm/plat-meson/include/plat/wakeup.h
+@@ -0,0 +1,35 @@
++/*
++ * arch/arm/plat-meson/include/plat/cpu.h
++ *
++ * MESON wakeup source
++ *
++ * Copyright (C) 2012 Amlogic
++ *
++ *
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
++ *
++ */
++
++ /*Wake up source flag which be writen to AO_STATUS_REG2*/
++
++#define FLAG_WAKEUP_PWRKEY      0x1234abcd //IR, power key, low power, adapter plug in/out and so on, are all use this flag. 
++#define FLAG_WAKEUP_ALARM       0x12345678
++#define FLAG_WAKEUP_WIFI        0x12340001
++#define FLAG_WAKEUP_BT          0x12340002
++#define FLAG_WAKEUP_PWROFF      0x12340003
++
++/*add new wakeup source flag here...*/
++
+diff --git a/drivers/amlogic/bluetooth/bt_wake_control.c b/drivers/amlogic/bluetooth/bt_wake_control.c
+index 9ba6cb5b6932..b9d6310f6992 100755
+--- a/drivers/amlogic/bluetooth/bt_wake_control.c
++++ b/drivers/amlogic/bluetooth/bt_wake_control.c
+@@ -22,6 +22,7 @@
+ #include <mach/am_regs.h>
+ //#include <linux/gpio.h>
+ //#include <mach/msm_serial_hs.h>
++#include <plat/wakeup.h>
+ 
+ #include <net/bluetooth/bluetooth.h>
+ #include <net/bluetooth/hci_core.h> /* event notifications */
+@@ -74,8 +75,6 @@ static const struct of_device_id bt_sleep_match[]={
+ /* 1 second timeout */
+ #define TX_TIMER_INTERVAL	1
+ 
+-#define BT_WAKE_FLAG 0x12344331 
+-
+ static int ext_wake_active = 0;
+ static spinlock_t ext_wake_lock;
+ 
+@@ -456,7 +455,7 @@ static int btwake_control_suspend(struct platform_device *pdev, pm_message_t sta
+ 
+ static int btwake_control_resume(struct platform_device *pdev)
+ {
+-    if (READ_AOBUS_REG(AO_RTI_STATUS_REG2) == BT_WAKE_FLAG) {
++    if (READ_AOBUS_REG(AO_RTI_STATUS_REG2) == FLAG_WAKEUP_BT) {
+         wake_lock_timeout(&bsi->wake_lock, HZ * 5);
+         WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0);
+     }
+diff --git a/drivers/amlogic/input/gpio_key/aml_gpiokey.c b/drivers/amlogic/input/gpio_key/aml_gpiokey.c
+index f986b2c60a28..780f795577de 100755
+--- a/drivers/amlogic/input/gpio_key/aml_gpiokey.c
++++ b/drivers/amlogic/input/gpio_key/aml_gpiokey.c
+@@ -46,6 +46,7 @@
+ #include <linux/of.h>
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ #include <linux/switch.h>
++#include <plat/wakeup.h>
+ 
+ #define MOD_NAME       "gpio_key"
+ //#define USE_IRQ     1
+@@ -515,15 +516,15 @@ static int gpio_key_suspend(struct platform_device *dev, pm_message_t state)
+ static int gpio_key_resume(struct platform_device *dev)
+ {
+     printk("gpio_key_resume");
+-    if (READ_AOBUS_REG(AO_RTI_STATUS_REG2) == 0x1234abcd) {
+-	if( quick_boot_mode == 0 ) { 
+-        	// power button, not alarm
+-		//printk("gpio_key_resume send KEY_POWER\n");
+-        	input_report_key(gp_kp->input, KEY_POWER, 0);
+-        	input_sync(gp_kp->input);
+-        	input_report_key(gp_kp->input, KEY_POWER, 1);
+-        	input_sync(gp_kp->input);
+-	}	
++    if (READ_AOBUS_REG(AO_RTI_STATUS_REG2) == FLAG_WAKEUP_PWRKEY) {
++			if( quick_boot_mode == 0 ) { 
++		        	// power button, not alarm
++				//printk("gpio_key_resume send KEY_POWER\n");
++		        	input_report_key(gp_kp->input, KEY_POWER, 0);
++		        	input_sync(gp_kp->input);
++		        	input_report_key(gp_kp->input, KEY_POWER, 1);
++		        	input_sync(gp_kp->input);
++			}	
+ 
+         WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0);
+ 
+-- 
+2.19.0
+

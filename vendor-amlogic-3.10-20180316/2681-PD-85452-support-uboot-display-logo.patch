@@ -1,0 +1,320 @@
+From fd5abbd72caecb2822a63a5a7fb0d18b8751025d Mon Sep 17 00:00:00 2001
+From: "lei.qian" <lei.qian>
+Date: Sat, 21 Dec 2013 17:45:16 +0800
+Subject: [PATCH 2681/5965] PD#85452:support uboot display logo
+
+---
+ .../aml_logo/loader/logo_setup_uboot.c        | 21 ++++++++
+ .../aml_logo/logo_display/output_dev_osd.c    | 41 ++++++++------
+ drivers/amlogic/display/osd/osd_hw.c          |  2 +-
+ drivers/amlogic/display/osd/osd_main.c        | 54 +++++++++++++------
+ include/linux/amlogic/logo/logo.h             |  7 ++-
+ include/linux/amlogic/logo/logo_dev.h         |  2 +
+ include/linux/amlogic/logo/logo_dev_osd.h     |  4 ++
+ 7 files changed, 97 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c b/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
+index 529c05d9240a..4768bdd98797 100755
+--- a/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
++++ b/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
+@@ -144,6 +144,27 @@ logo_object_t*	 get_current_logo_obj(void)
+         aml_logo.dev->output_dev.osd.color_depth=32;
+ 	return &aml_logo;
+ }
++
++vmode_t get_resolution_vmode(void)
++{
++	logo_object_t *plogo=&aml_logo;
++
++	if (plogo != NULL)
++		return plogo->para.vout_mode;
++	else
++		return VMODE_1080P;
++}
++
++vmode_set_t get_current_mode_state(void)
++{
++	if(aml_logo.dev == NULL)
++	{
++		return VMODE_NOT_SETTED;
++	}else{
++		return VMODE_SETTED;
++	}
++}
++
+ int  __init  logo_setup(char *str)
+ {
+ 
+diff --git a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+index f5cc32d498cc..28d6603f3f8d 100755
+--- a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
++++ b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+@@ -7,11 +7,7 @@
+ #include	"amlogo_log.h" 
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/vout/vinfo.h>
+-
+-#define DisableVideoLayer() \
+-    do { aml_clr_reg32_mask(P_VPP_MISC, \
+-         VPP_VD1_PREBLEND | VPP_VD1_POSTBLEND); \
+-    } while (0)
++#include <linux/amlogic/vout/vout_notify.h>
+ 
+ static  logo_output_dev_t   output_osd0={
+ 	.idx=LOGO_DEV_OSD0,
+@@ -53,9 +49,9 @@ static  hdmi_only_info_t hdmi_only_info[PARA_HDMI_ONLY]={
+ };
+ 
+ static vmode_t hdmimode_hdmionly = VMODE_1080P;
+-static vmode_t cvbsmode_hdmionly = VMODE_480CVBS;
+ #endif
+ 
++static vmode_t cvbsmode_hdmionly = VMODE_480CVBS;
+ 
+ static  inline void  setup_color_mode(const color_bit_define_t *color,u32  reg)
+ {
+@@ -103,7 +99,6 @@ static int osd_hw_setup(logo_object_t *plogo)
+ 	osd_ctl.disp_start_y=0;
+ 	osd_ctl.disp_end_y=osd_ctl.yres-1;
+ 	osd_init_hw(0);
+-	DisableVideoLayer();
+ 	setup_color_mode(color,osd_ctl.index==0?P_VIU_OSD1_BLK0_CFG_W0:P_VIU_OSD2_BLK0_CFG_W0);
+ 	if(!plogo->para.loaded)
+ 	{
+@@ -137,6 +132,7 @@ static int osd0_init(logo_object_t *plogo)
+ 
+ 	if(plogo->para.output_dev_type==output_osd0.idx)
+ 	{
++		DisableVideoLayer();
+ 		if((plogo->platform_res[output_osd0.idx].mem_end - plogo->platform_res[output_osd0.idx].mem_start) ==0 ) 
+ 		{
+ 			return OUTPUT_DEV_UNFOUND;
+@@ -146,10 +142,8 @@ static int osd0_init(logo_object_t *plogo)
+ 			osd_init_hw(plogo->para.loaded);
+ 			plogo->para.vout_mode|=VMODE_LOGO_BIT_MASK;
+ 		}
+-#ifdef CONFIG_AM_HDMI_ONLY	
+-		if(plogo->para.vout_mode > VMODE_4K2K_SMPTE) {
+-			set_current_vmode(plogo->para.vout_mode);
+-		} else {
++#ifdef CONFIG_AM_HDMI_ONLY
++		{
+ 			extern int read_hpd_gpio(void);
+ 			hpd_state = read_hpd_gpio();
+     		
+@@ -180,6 +174,7 @@ static int osd1_init(logo_object_t *plogo)
+ 
+ 	if(plogo->para.output_dev_type==output_osd1.idx)
+ 	{
++		DisableVideoLayer();
+ 		if((plogo->platform_res[output_osd1.idx].mem_end - plogo->platform_res[output_osd1.idx].mem_start) ==0)
+ 		{
+ 			return OUTPUT_DEV_UNFOUND;
+@@ -189,17 +184,19 @@ static int osd1_init(logo_object_t *plogo)
+ 			osd_init_hw(plogo->para.loaded);
+ 			plogo->para.vout_mode|=VMODE_LOGO_BIT_MASK;
+ 		}
+-#ifdef CONFIG_AM_HDMI_ONLY	
+-		if(plogo->para.vout_mode > VMODE_4K2K_SMPTE) {
+-			set_current_vmode(plogo->para.vout_mode);
+-		} else {
++#ifdef CONFIG_AM_HDMI_ONLY
++		{
++			printk("**********vmode is HDMIONLY\n");
+ 			extern int read_hpd_gpio(void);
+ 			hpd_state = read_hpd_gpio();
+     		
+-			if (hpd_state == 0)
++			if (hpd_state == 0){
+ 			    set_current_vmode(cvbsmode_hdmionly);
+-			else
++			}
++			else{
++			    printk("********hdmi mode is %d\n", hdmimode_hdmionly);
+ 			    set_current_vmode(hdmimode_hdmionly);
++			}
+ 		}
+ #else
+ 		set_current_vmode(plogo->para.vout_mode);
+@@ -399,8 +396,17 @@ int dev_osd_setup(void)
+ 	return SUCCESS;
+ }
+ 
++vmode_t get_current_cvbs_vmode(void)
++{
++	return cvbsmode_hdmionly;
++}
+ 
+ #ifdef CONFIG_AM_HDMI_ONLY
++vmode_t get_current_hdmi_vmode(void)
++{
++	return hdmimode_hdmionly;
++}
++#endif
+ 
+ static int __init get_cvbs_mode(char *str)
+ {
+@@ -415,6 +421,7 @@ static int __init get_cvbs_mode(char *str)
+ }
+ __setup("cvbsmode=", get_cvbs_mode);
+ 
++#ifdef CONFIG_AM_HDMI_ONLY
+ static int __init get_hdmi_mode(char *str)
+ {
+     u32 i;
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index bb22bc9dcafa..2cb6bac6c609 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -2174,7 +2174,7 @@ void osd_init_hw(u32  logo_loaded)
+ 		data32 = 0x1 << 0;
+ 		#endif
+ 	    	data32 |= OSD_GLOBAL_ALPHA_DEF<< 12;
+-		data32 |= (1<<21)	;
++		data32 |= (1<<21);
+ 	    	aml_write_reg32(P_VIU_OSD1_CTRL_STAT , data32);
+ 		aml_write_reg32(P_VIU_OSD2_CTRL_STAT , data32);
+ 	}
+diff --git a/drivers/amlogic/display/osd/osd_main.c b/drivers/amlogic/display/osd/osd_main.c
+index 118a98219b84..31c43de341cc 100755
+--- a/drivers/amlogic/display/osd/osd_main.c
++++ b/drivers/amlogic/display/osd/osd_main.c
+@@ -49,6 +49,8 @@
+ #include <linux/of_fdt.h>
+ #include "osd_log.h"
+ #include <linux/amlogic/amlog.h>
++#include <linux/amlogic/logo/logo_dev.h>
++#include <linux/amlogic/logo/logo_dev_osd.h>
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+ #include <linux/earlysuspend.h>
+ static struct early_suspend early_suspend;
+@@ -1485,17 +1487,20 @@ osd_probe(struct platform_device *pdev)
+ {
+ 	int r;
+ 	int ret;
+-       	struct fb_info *fbi=NULL;
++    struct fb_info *fbi=NULL;
+ 	const vinfo_t *vinfo;
+-    	struct fb_var_screeninfo *var;
++    struct fb_var_screeninfo *var;
+   	struct fb_fix_screeninfo *fix;
+ 	struct resource *mem;
+ 	int  index,Bpp;
+ 	logo_object_t  *init_logo_obj=NULL;
+ 	int  logo_osd_index=0,i;
+ 	myfb_dev_t 	*fbdev = NULL;
++	vmode_t current_mode = VMODE_MASK;
++	vmode_t cvbs_mode = VMODE_MASK;
++	int hpd_state = 0;
+ 	const void *prop;
+-	int vmode,prop_idx=0;
++	int prop_idx=0;
+ 	int rotation = 0;
+ 	
+ 	vout_register_client(&osd_notifier_nb);
+@@ -1518,19 +1523,38 @@ osd_probe(struct platform_device *pdev)
+    	if (NULL==init_logo_obj )
+     	{
+     		prop = of_get_property(pdev->dev.of_node, "vmode", NULL);
+-		if(prop)
++			if(prop)
+ 			prop_idx = of_read_ulong(prop,1);
+-			if(prop_idx == 3)
+-				vmode = VMODE_1080P;
+-			else if(prop_idx == 1)
+-				vmode = VMODE_LCD;
+-			else if(prop_idx == 2)
+-				vmode = VMODE_LVDS_1080P;
+-			else
+-				vmode = VMODE_720P;
+-
+-    		set_current_vmode(vmode);
+-		osddev_init();
++			if(prop_idx == 3){
++				if(get_current_mode_state() == VMODE_SETTED){
++					amlog_level(LOG_LEVEL_HIGH,"vmode has setted in aml logo module\r\n");
++				}else{
++					DisableVideoLayer();
++					#ifdef CONFIG_AM_HDMI_ONLY
++						extern int read_hpd_gpio(void);
++						hpd_state = read_hpd_gpio();
++
++						cvbs_mode = get_current_cvbs_vmode();
++						current_mode = get_current_hdmi_vmode();
++						if (hpd_state == 0)
++							set_current_vmode(cvbs_mode);
++						else
++							set_current_vmode(current_mode);
++					#else
++						current_mode = get_resolution_vmode();
++						set_current_vmode(current_mode);
++					#endif
++				}
++			}
++			else if(prop_idx == 1){
++				current_mode = VMODE_LCD;
++				set_current_vmode(VMODE_LCD);
++			}
++			else if(prop_idx == 2){
++				current_mode = VMODE_LVDS_1080P;
++				set_current_vmode(VMODE_LVDS_1080P);
++			}
++			osddev_init();
+     	}
+ 	vinfo = get_current_vinfo();
+     	for (index=0;index<OSD_COUNT;index++)
+diff --git a/include/linux/amlogic/logo/logo.h b/include/linux/amlogic/logo/logo.h
+index 10e3152d8e8d..74e4bec02c6a 100755
+--- a/include/linux/amlogic/logo/logo.h
++++ b/include/linux/amlogic/logo/logo.h
+@@ -42,7 +42,10 @@ extern	logo_object_t  aml_logo;
+ #define   dev_to_platformdev(dev)   (container_of((dev), struct platform_device,dev) )
+ extern struct bus_type platform_bus_type;
+   	
+-
++typedef enum{
++	VMODE_SETTED = 0,
++	VMODE_NOT_SETTED,
++}vmode_set_t;
+ 
+ /***************************************************************
+ *********************  para define part  *****************************
+@@ -58,6 +61,8 @@ extern struct bus_type platform_bus_type;
+ ***************************************************************/
+ 
+ extern  logo_object_t* get_current_logo_obj(void);
++extern  vmode_t get_resolution_vmode(void);
++extern  vmode_set_t get_current_mode_state(void);
+ extern int  register_logo_parser(logo_parser_t* logo_parser) ;
+ extern int  register_logo_output_dev(logo_output_dev_t* new_dev);
+ 
+diff --git a/include/linux/amlogic/logo/logo_dev.h b/include/linux/amlogic/logo/logo_dev.h
+index bfe8c3dceb42..eabfcd8319e7 100755
+--- a/include/linux/amlogic/logo/logo_dev.h
++++ b/include/linux/amlogic/logo/logo_dev.h
+@@ -48,5 +48,7 @@ typedef  struct{
+ extern int  setup_output_device(logo_object_t *plogo);
+ extern int dev_osd_setup(void);
+ extern int dev_vid_setup(void) ;
++extern vmode_t get_current_cvbs_vmode(void);
++extern vmode_t get_current_hdmi_vmode(void);
+ 
+ #endif
+diff --git a/include/linux/amlogic/logo/logo_dev_osd.h b/include/linux/amlogic/logo/logo_dev_osd.h
+index 3cc01e25114c..2316b0ba2fcb 100755
+--- a/include/linux/amlogic/logo/logo_dev_osd.h
++++ b/include/linux/amlogic/logo/logo_dev_osd.h
+@@ -1,6 +1,10 @@
+ #ifndef  LOGO_DEV_OSD_H
+ #define LOGO_DEV_OSD_H
+ 
++#define DisableVideoLayer() \
++    do { aml_clr_reg32_mask(P_VPP_MISC, \
++	VPP_VD1_PREBLEND | VPP_VD1_POSTBLEND);  \
++    } while (0)
+ 
+ #ifdef CONFIG_AM_HDMI_ONLY
+ #define PARA_HDMI_ONLY    14
+-- 
+2.19.0
+

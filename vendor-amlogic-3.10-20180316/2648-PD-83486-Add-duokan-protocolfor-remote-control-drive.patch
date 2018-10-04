@@ -1,0 +1,377 @@
+From 8990a25cb117f1c914f8f3d9b5de7cfe8e5cf5f0 Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Fri, 29 Nov 2013 14:56:53 +0800
+Subject: [PATCH 2648/5965] PD#83486 Add duokan protocolfor remote control
+ driver
+
+PD#83486 fixed repeat for duokan
+---
+ .../amlogic/input/new_remote/remote_func.c    | 86 +++++++++++++++++--
+ .../amlogic/input/new_remote/remote_main.c    | 20 +++--
+ .../amlogic/input/new_remote/remote_main.h    | 29 ++++---
+ 3 files changed, 111 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/amlogic/input/new_remote/remote_func.c b/drivers/amlogic/input/new_remote/remote_func.c
+index 01ba1eddbf90..4ee9ff9972c0 100755
+--- a/drivers/amlogic/input/new_remote/remote_func.c
++++ b/drivers/amlogic/input/new_remote/remote_func.c
+@@ -16,7 +16,9 @@
+ #include <mach/am_regs.h>
+ #include "remote_main.h"
+ extern char *remote_log_buf;
+-static int repeat_count = 0;
++static int auto_repeat_count,repeat_count = 0;
++static void remote_rel_timer_sr(unsigned long data);
++static void remote_repeat_sr(unsigned long data);
+ static int dbg_printk(const char *fmt, ...)
+ {
+ 	char buf[100];
+@@ -86,12 +88,17 @@ void config_sw_init_window(struct remote *remote_data){
+ }
+ void kdb_send_key(struct input_dev *dev, unsigned int scancode,
+ 		unsigned int type,int event);
++
+ void set_remote_init(struct remote *remote_data)
+ {
+-	if(remote_data->work_mode <= DECODEMODE_MAX)
++	if(remote_data->work_mode <= DECODEMODE_MAX){
++		if(remote_data->work_mode > DECODEMODE_NEC){
++			setup_timer(&remote_data->repeat_timer, remote_repeat_sr, 0);
++			printk("enter in sw repeat mode \n");
++		}
+ 		return ;
++	}
+ 	config_sw_init_window(remote_data);
+-	//remote_data->remote_send_key = kdb_send_key;
+ }
+ void changeduokandecodeorder(struct remote *remote_data){
+ 	unsigned int scancode = remote_data->cur_lsbkeycode;
+@@ -302,6 +309,8 @@ unsigned int RC6_DOMAIN(struct remote *remote_data,int domain){
+  Header          Custom code              Data Code      Parity Code Stop Bit  */
+ 
+ unsigned int DUOKAN_DOMAIN(struct remote *remote_data,int domain){
++	if(remote_data->cur_lsbkeycode == 0x0003cccf)// power key
++			remote_data->cur_lsbkeycode =((remote_data->custom_code[0]&0xff)<<12)| 0xa0;
+ 	if(domain)
+ 		return ((remote_data->cur_lsbkeycode >>4) &0xff);
+ 	else 
+@@ -341,11 +350,12 @@ unsigned int (*get_cur_key_domian[])(struct remote *remote_data,int domain)={
+ 
+ int remote_hw_reprot_key(struct remote *remote_data)
+ {
+-	static int last_scan_code;
++	static int last_scan_code,scan_code;
+ 	int i;
+-	// 1        get  scan code
+ 	get_cur_scancode(remote_data);
+ 	get_cur_scanstatus(remote_data);
++	if(remote_data->status)// repeat enable & come in S timer is open
++		return;
+ 	if (remote_data->cur_lsbkeycode) {	//key first press
+ 		if(remote_data->ig_custom_enable)
+ 		{
+@@ -369,9 +379,26 @@ int remote_hw_reprot_key(struct remote *remote_data)
+ 		if (remote_data->timer.expires > jiffies) {
+ 			remote_data->remote_send_key(remote_data->input,remote_data->repeat_release_code , 0,0);
+ 		}
++
+ 		remote_data->remote_send_key(remote_data->input,get_cur_key_domian[remote_data->work_mode](remote_data,KEYDOMIAN), 1,0);
+ 		remote_data->repeat_release_code = get_cur_key_domian[remote_data->work_mode](remote_data,KEYDOMIAN);
+ 		remote_data->enable_repeat_falg = 1;
++		if((remote_data->work_mode > DECODEMODE_NEC) && remote_data->enable_repeat_falg){
++			if (remote_data->repeat_enable) {
++				remote_data->repeat_timer.data = (unsigned long)remote_data;
++				//here repeat  delay is time interval from the first frame end to first repeat end.
++				remote_data->repeat_tick = jiffies;
++				mod_timer(&remote_data->repeat_timer,  jiffies + msecs_to_jiffies(remote_data->repeat_delay));
++				remote_data->status = TIMER;
++			}
++			else{
++				setup_timer(&remote_data->rel_timer, remote_rel_timer_sr, 0);
++				mod_timer(&remote_data->timer,  jiffies );
++				remote_data->rel_timer.data = (unsigned long)remote_data;
++				mod_timer(&remote_data->rel_timer,  jiffies + msecs_to_jiffies(remote_data->relt_delay));
++				remote_data->status = TIMER;
++			}
++		}
+ 		for (i = 0; i < ARRAY_SIZE(remote_data->key_repeat_map[remote_data->map_num]); i++){
+ 			if (remote_data->key_repeat_map[remote_data->map_num][i] == remote_data->repeat_release_code) {
+ 				remote_data->want_repeat_enable = 1;
+@@ -380,9 +407,14 @@ int remote_hw_reprot_key(struct remote *remote_data)
+ 				remote_data->want_repeat_enable = 0;
+ 			}
+ 		}
++
+ 		if (remote_data->repeat_enable && remote_data->want_repeat_enable) {
+ 			remote_data->repeat_tick = jiffies + msecs_to_jiffies(remote_data->input->rep[REP_DELAY]);
+ 		}
++		if(remote_data->repeat_enable)
++			mod_timer(&remote_data->timer, jiffies + msecs_to_jiffies(remote_data->release_delay+remote_data->repeat_delay));
++		else
++			mod_timer(&remote_data->timer, jiffies + msecs_to_jiffies(remote_data->release_delay+remote_data->repeat_delay));
+ 	}
+ 	else if((remote_data->frame_status & REPEARTFLAG) && remote_data->enable_repeat_falg){	//repeate key
+ 		if (remote_data->repeat_enable) {
+@@ -398,12 +430,13 @@ int remote_hw_reprot_key(struct remote *remote_data)
+ 			}
+ 			return -1;
+ 		}
++		mod_timer(&remote_data->timer, jiffies + msecs_to_jiffies(remote_data->release_delay));
+ 	}
+ 	last_scan_code = remote_data->cur_lsbkeycode;
+ 	remote_data->cur_keycode = last_scan_code;
++	remote_data->cur_lsbkeycode = 0;
+ 	remote_data->timer.data = (unsigned long)remote_data;
+-	mod_timer(&remote_data->timer, jiffies + msecs_to_jiffies(remote_data->release_delay));
+-	return 0;
++	return 0;	
+ }
+ static inline void kbd_software_mode_remote_send_key(unsigned long data)
+ {
+@@ -452,7 +485,39 @@ static inline void kbd_software_mode_remote_send_key(unsigned long data)
+ 		}		
+ 	}
+ }
++static void remote_repeat_sr(unsigned long data)
++{
++	struct remote *remote_data = (struct remote *)data;
++	if(remote_data->cur_keycode == remote_data->cur_lsbkeycode){
++			auto_repeat_count++;
++			if(auto_repeat_count > 1)
++				remote_data->remote_send_key(remote_data->input,remote_data->repeat_release_code, 2,0);
++			remote_data->cur_lsbkeycode = 0;
++			remote_data->repeat_timer.data = (unsigned long)remote_data;
++			remote_data->timer.data = (unsigned long)remote_data;
++			mod_timer(&remote_data->timer, jiffies + msecs_to_jiffies(remote_data->release_delay+remote_data->repeat_peroid));
++			mod_timer(&remote_data->repeat_timer,  jiffies + msecs_to_jiffies(remote_data->repeat_peroid));
++			remote_data->status = TIMER;
++	}else{
++			remote_data->status = NORMAL;
++			remote_data->timer.data = (unsigned long)remote_data;
++			mod_timer(&remote_data->timer, jiffies+msecs_to_jiffies(1));
++	}
++}
++static void remote_rel_timer_sr(unsigned long data)
++{
++	struct remote *remote_data = (struct remote *)data;
++		if(remote_data->cur_keycode == remote_data->cur_lsbkeycode){
++			remote_data->cur_lsbkeycode = 0;
++			remote_data->rel_timer.data = (unsigned long)remote_data;
++			mod_timer(&remote_data->rel_timer,  jiffies + msecs_to_jiffies(remote_data->relt_delay));
++			remote_data->status = TIMER;
++		}
++		else
++		remote_data->status = NORMAL;
++
+ 
++}
+ static int get_pulse_width(struct remote *remote_data )
+ {
+ 	unsigned int pulse_width;
+@@ -628,6 +693,13 @@ void remote_nec_report_release_key(struct remote *remote_data){
+ 		remote_data->enable_repeat_falg = 0;
+ 	}
+ }
++void remote_duokan_report_release_key(struct remote *remote_data){
++	if(remote_data->enable_repeat_falg){
++		remote_data->remote_send_key(remote_data->input,remote_data->repeat_release_code,0,0);
++		remote_data->enable_repeat_falg = 0;
++		auto_repeat_count = 0;
++	}
++}
+ void remote_sw_reprot_release_key(struct remote *remote_data){
+ 	if(remote_data->enable_repeat_falg){
+ 		remote_data->remote_send_key(remote_data->input,remote_data->repeat_release_code,0,0);
+diff --git a/drivers/amlogic/input/new_remote/remote_main.c b/drivers/amlogic/input/new_remote/remote_main.c
+index f8d740e63c1e..136e27f5befc 100755
+--- a/drivers/amlogic/input/new_remote/remote_main.c
++++ b/drivers/amlogic/input/new_remote/remote_main.c
+@@ -232,6 +232,7 @@ int remote_reprot_key( struct remote * remote_data){
+ static void remote_release_timer_sr(unsigned long data)
+ {
+ 	struct remote *remote_data = (struct remote *)data;
++	//key report release use timer interrupt 
+ 	remote_data->key_release_report = remote_report_release_key[remote_data->work_mode];
+ 	remote_data->key_release_report(remote_data);
+ }
+@@ -245,7 +246,6 @@ static void remote_fiq_interrupt(unsigned long data)
+ {
+ 	struct remote *remote_data = (struct remote *)data;
+ 	remote_reprot_key(gp_remote);
+-//	WRITE_MPEG_REG(IRQ_CLR_REG(NEC_REMOTE_IRQ_NO), 1 << IRQ_BIT(NEC_REMOTE_IRQ_NO));
+ }
+ 
+ 
+@@ -313,7 +313,7 @@ static int work_mode_config(unsigned int cur_mode)
+ 	set_remote_init(gp_remote);
+ 	if(cur_mode == gp_remote->save_mode)
+ 		return 0;
+-	if(cur_mode <= DECODEMODE_MAX ){
++	if((cur_mode <= DECODEMODE_MAX)  && (gp_remote->save_mode > DECODEMODE_MAX) ){
+ 		unregister_fiq_bridge_handle(&gp_remote->fiq_handle_item);
+ 		free_fiq(NEC_REMOTE_IRQ_NO, &remote_fiq_interrupt);
+ 		ret = request_irq(NEC_REMOTE_IRQ_NO, remote_interrupt, IRQF_SHARED, "keypad", (void *)remote_interrupt);
+@@ -322,7 +322,7 @@ static int work_mode_config(unsigned int cur_mode)
+ 			return ret;
+ 		}
+ 	}
+-	else{
++	else if((cur_mode > DECODEMODE_MAX)  && (gp_remote->save_mode < DECODEMODE_MAX)){
+ 		free_irq(NEC_REMOTE_IRQ_NO, remote_interrupt);
+ 		gp_remote->fiq_handle_item.handle = remote_bridge_sw_isr[gp_remote->work_mode];
+ 		gp_remote->fiq_handle_item.key = (u32) gp_remote;
+@@ -331,8 +331,10 @@ static int work_mode_config(unsigned int cur_mode)
+ 		desc->depth++;
+ 		request_fiq(NEC_REMOTE_IRQ_NO, &remote_fiq_interrupt);
+ 	}
++	else{
++		printk("do nothing\n");
++	}
+ 	gp_remote->save_mode = cur_mode;
+-	del_timer(&gp_remote->repeat_timer);
+ 	return 0;
+ }
+ 
+@@ -386,6 +388,9 @@ static long remote_config_ioctl(struct file *filp, unsigned int cmd, unsigned lo
+ 			}
+ 			mouse_map[remote->map_num][val >> 16] = val & 0xff;
+ 			break;
++		case REMOTE_IOC_SET_RELT_DELAY:
++			ret = copy_from_user(&remote->relt_delay, argp, sizeof(long));
++			break;
+ 		case REMOTE_IOC_SET_REPEAT_DELAY:
+ 			ret = copy_from_user(&remote->repeat_delay, argp, sizeof(long));
+ 			break;
+@@ -560,7 +565,6 @@ static int remote_probe(struct platform_device *pdev)
+ 	gp_remote = remote;
+ 	remote->debug_enable = 1;
+ 	remote->ig_custom_enable = 1;
+-	//gp_remote->key_report = remote_report_key[DECODEMODE_NEC];
+ 	gp_remote->remote_send_key = remote_send_key;
+ 	input_dbg = remote_printk;
+ 	platform_set_drvdata(pdev, remote);
+@@ -645,7 +649,6 @@ err1:
+ 	input_free_device(input_dev);
+ 	return -EINVAL;
+ }
+-
+ static int remote_remove(struct platform_device *pdev)
+ {
+ 	struct remote *remote = platform_get_drvdata(pdev);
+@@ -695,11 +698,14 @@ static int remote_resume(struct platform_device * pdev)
+ 		WRITE_AOBUS_REG(AO_RTI_STATUS_REG2, 0);
+ 	}
+ 	return 0;
++}static int remote_suspend(struct platform_device * pdev)
++{
++	return 0;
+ }
+ static struct platform_driver remote_driver = {
+ 	.probe = remote_probe,
+ 	.remove = remote_remove,
+-	.suspend = NULL,
++	.suspend = remote_suspend,
+ 	.resume = remote_resume,
+ 	.driver = {
+ 		.name = "meson-remote",
+diff --git a/drivers/amlogic/input/new_remote/remote_main.h b/drivers/amlogic/input/new_remote/remote_main.h
+index 64b6de9e1319..80393f7fc461 100755
+--- a/drivers/amlogic/input/new_remote/remote_main.h
++++ b/drivers/amlogic/input/new_remote/remote_main.h
+@@ -23,6 +23,10 @@ typedef struct reg_s {
+ 	int reg;
+ 	unsigned int val;
+ } remotereg_t;
++typedef enum{
++	NORMAL = 0,
++	TIMER = 1 ,
++}repeat_status;
+ 
+ /*
+    Decode_mode.(format selection) 
+@@ -82,16 +86,16 @@ static const remotereg_t RDECODEMODE_NEC[] = {
+ };
+ /****************************************************************/
+ static const remotereg_t RDECODEMODE_DUOKAN[] = {
+-	{LDR_ACTIVE,52<<16 | 49<<0},
+-	{LDR_IDLE, 30<<16 | 26<<0},
++	{LDR_ACTIVE,53<<16 | 50<<0},
++	{LDR_IDLE, 31<<16 | 25<<0},
+ 	{LDR_REPEAT,30<<16 | 26<<0},
+-	{DURATION_REG0,60<<16 | 56<<0 },          
++	{DURATION_REG0,61<<16 | 55<<0 }, 
+ 	{OPERATION_CTRL_REG0,3<<28 |(0x5DC<<12)| 0x13}, //body frame 30ms         
+-	{DURATION_REG1_AND_STATUS,(75<<20) | 70<<10},        
+-	{OPERATION_CTRL_REG1,0xbe40},
+-	{OPERATION_CTRL_REG2,0xb},
+-	{DURATION_REG2,90<<16 | 80<<0},
+-	{DURATION_REG3,110<<16 | 100<<0},  
++	{DURATION_REG1_AND_STATUS,(76<<20) | 69<<10},
++	{OPERATION_CTRL_REG1,0x9300},
++	{OPERATION_CTRL_REG2,0x10b},
++	{DURATION_REG2,91<<16 | 79<<0},
++	{DURATION_REG3,111<<16 | 99<<0},
+ 	{CONFIG_END,            0      }
+ };
+ /****************************************************************/
+@@ -379,6 +383,7 @@ static unsigned int OK_KEY_SCANCODE = 0x3ff;
+ #define   REMOTE_IOC_SET_OK_KEY_SCANCODE     _IOW_BAD('I', 136, sizeof(short))
+ #define   REMOTE_IOC_SET_PAGEUP_KEY_SCANCODE _IOW_BAD('I', 137, sizeof(short))
+ #define   REMOTE_IOC_SET_PAGEDOWN_KEY_SCANCODE _IOW_BAD('I', 138, sizeof(short))
++#define   REMOTE_IOC_SET_RELT_DELAY	    _IOW_BAD('I',140,sizeof(short))
+ 
+ #define	REMOTE_HW_DECODER_STATUS_MASK		(0xf<<4)
+ #define	REMOTE_HW_DECODER_STATUS_OK			(0<<4)
+@@ -408,6 +413,7 @@ struct remote {
+ 	struct input_dev *input;
+ 	struct timer_list timer;  //release timer
+ 	struct timer_list repeat_timer;  //repeat timer
++	struct timer_list rel_timer;  //repeat timer
+ 	unsigned long repeat_tick;
+ 	int irq;
+ 	int save_mode;
+@@ -423,6 +429,7 @@ struct remote {
+ 	unsigned int repeate_flag;
+ 	unsigned int repeat_enable;
+ 	unsigned int debounce;
++	unsigned int status;
+ 	// we can only support 20 maptable
+ 	int map_num;
+ 	int ig_custom_enable;
+@@ -453,6 +460,7 @@ struct remote {
+ 	struct class *config_class;
+ 	struct device *config_dev;
+ 	unsigned int repeat_delay;
++	unsigned int relt_delay;
+ 	unsigned int repeat_peroid;
+ 	//
+ 	int (*remote_reprot_press_key)(struct remote *);
+@@ -472,6 +480,7 @@ extern irqreturn_t remote_bridge_isr(int irq, void *dev_id);
+ extern int remote_hw_reprot_key(struct remote *remote_data);
+ extern int remote_sw_reprot_key(struct remote *remote_data);
+ extern void remote_nec_report_release_key(struct remote *remote_data);
++extern void remote_duokan_report_release_key(struct remote *remote_data);
+ extern void remote_sw_reprot_release_key(struct remote *remote_data);
+ 
+ 
+@@ -502,7 +511,7 @@ static  irqreturn_t (*remote_bridge_sw_isr[])(int irq, void *dev_id)={
+ 
+ static  int (*remote_report_key[])(struct remote *remote_data)={
+ 	remote_hw_reprot_key,
+-	NULL,
++	remote_hw_reprot_key,
+ 	NULL,
+ 	NULL,
+ 	NULL,
+@@ -522,7 +531,7 @@ static  int (*remote_report_key[])(struct remote *remote_data)={
+ 
+ static  void (*remote_report_release_key[])(struct remote *remote_data)={
+ 	remote_nec_report_release_key,
+-	NULL,
++	remote_duokan_report_release_key,
+ 	NULL,
+ 	NULL,
+ 	NULL,
+-- 
+2.19.0
+

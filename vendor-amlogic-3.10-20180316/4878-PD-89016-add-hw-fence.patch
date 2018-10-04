@@ -1,0 +1,697 @@
+From 555fd077666600fb8d3f23e1028bd9e685959c92 Mon Sep 17 00:00:00 2001
+From: "wei.nie" <wei.nie@amlogic.com>
+Date: Tue, 16 Sep 2014 13:45:27 +0800
+Subject: [PATCH 4878/5965] PD#89016:add hw fence
+
+Squashed commit of the following:
+
+commit e140e2b2307150eb18c41f1857f27f177392acbb
+Author: wei.nie <wei.nie@amlogic.com>
+Date:   Mon Sep 15 23:04:32 2014 -0400
+
+    PD#89016:add config to enable osd sync fence
+
+commit 567b3d2482b46faa4674c1bc2e5b16dcbde4f6ac
+Author: wei.nie <wei.nie@amlogic.com>
+Date:   Wed Sep 10 22:11:46 2014 -0400
+
+    PD#89016:fence bug fix
+
+commit 0101ea22ff9457f1340d8be946067bfef5a5c148
+Author: wei.nie <wei.nie@amlogic.com>
+Date:   Wed Aug 27 05:19:37 2014 -0400
+
+    PD#89016:add hw fence
+
+Change-Id: I1f33ff1a1a5ad271ad1156440a36c42d20e31b2b
+---
+ arch/arm/configs/meson8_defconfig        |   2 +
+ arch/arm/configs/meson8b_defconfig       |   2 +
+ drivers/amlogic/display/osd/Kconfig      |   8 +
+ drivers/amlogic/display/osd/Makefile     |   3 +-
+ drivers/amlogic/display/osd/osd_dev.c    |   9 +-
+ drivers/amlogic/display/osd/osd_hw.c     | 292 +++++++++++++++++++++--
+ drivers/amlogic/display/osd/osd_hw_def.h |  29 +++
+ drivers/amlogic/display/osd/osd_main.c   |  29 ++-
+ drivers/amlogic/display/osd/osd_sync.h   |  17 ++
+ include/linux/amlogic/osd/osd_dev.h      |   2 +
+ include/linux/amlogic/osd/osd_hw.h       |   2 +
+ include/linux/amlogic/osd/osd_main.h     |   2 +-
+ 12 files changed, 376 insertions(+), 21 deletions(-)
+ create mode 100755 drivers/amlogic/display/osd/osd_sync.h
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index fd0ebfec89b0..47b6bc42df63 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -353,6 +353,8 @@ CONFIG_ANDROID_LOGGER=y
+ CONFIG_ANDROID_LOW_MEMORY_KILLER=y
+ CONFIG_ANDROID_INTF_ALARM_DEV=y
+ CONFIG_SYNC=y
++CONFIG_SW_SYNC=y
++CONFIG_SW_SYNC_USER=y
+ CONFIG_EXT2_FS=y
+ CONFIG_EXT3_FS=y
+ CONFIG_EXT3_FS_POSIX_ACL=y
+diff --git a/arch/arm/configs/meson8b_defconfig b/arch/arm/configs/meson8b_defconfig
+index 33a2697621ae..5b839addedf5 100755
+--- a/arch/arm/configs/meson8b_defconfig
++++ b/arch/arm/configs/meson8b_defconfig
+@@ -332,6 +332,8 @@ CONFIG_ANDROID_LOGGER=y
+ CONFIG_ANDROID_LOW_MEMORY_KILLER=y
+ CONFIG_ANDROID_INTF_ALARM_DEV=y
+ CONFIG_SYNC=y
++CONFIG_SW_SYNC=y
++CONFIG_SW_SYNC_USER=y
+ CONFIG_EXT2_FS=y
+ CONFIG_EXT3_FS=y
+ CONFIG_EXT3_FS_POSIX_ACL=y
+diff --git a/drivers/amlogic/display/osd/Kconfig b/drivers/amlogic/display/osd/Kconfig
+index 99645691e0ca..90ff405507ba 100755
+--- a/drivers/amlogic/display/osd/Kconfig
++++ b/drivers/amlogic/display/osd/Kconfig
+@@ -13,6 +13,13 @@ config FB_AM
+ 	help
+ 	  This is the frame buffer device driver.
+ 
++config FB_OSD_SUPPORT_SYNC_FENCE
++	bool "OSD SYNC FENCE"
++	default y
++	depends on  FB_AM
++	help
++	  Select to enable OSD SYNC FENCE.
++
+ config FB_OSD2_ENABLE
+ 	bool "osd2 layer enable"
+ 	default y
+@@ -26,6 +33,7 @@ config FB_OSD2_CURSOR
+ 	default n
+ 	help
+ 		Enables support for a mouse cursor using OSD2.
++
+ config FB_OSD2_DEFAULT_BITS_PER_PIXEL
+ 	depends on FB_OSD2_ENABLE
+ 	int "default OSD2 BPP"
+diff --git a/drivers/amlogic/display/osd/Makefile b/drivers/amlogic/display/osd/Makefile
+index 9c1fec04683f..186a7011ba2f 100755
+--- a/drivers/amlogic/display/osd/Makefile
++++ b/drivers/amlogic/display/osd/Makefile
+@@ -13,8 +13,7 @@ endif
+ 
+ obj-$(CONFIG_VSYNC_RDMA) += osd_rdma.o
+ 
+-EXTRA_CFLAGS += -Iinclude/linux/osd/
+-
++EXTRA_CFLAGS += -Iinclude/linux/osd/ -Idrivers/staging/android/
+ 
+ 
+ 
+diff --git a/drivers/amlogic/display/osd/osd_dev.c b/drivers/amlogic/display/osd/osd_dev.c
+index f0e657fa6d9e..89e727638314 100755
+--- a/drivers/amlogic/display/osd/osd_dev.c
++++ b/drivers/amlogic/display/osd/osd_dev.c
+@@ -213,7 +213,14 @@ void osddev_set_window_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
+ {
+ 	osd_set_window_axis_hw(index, x0, y0, x1, y1);
+ }
+-
++int osddev_sync_request( struct fb_info * info,u32 xoffset, u32 yoffset,s32 in_fence_fd)
++{
++	return osd_sync_request(info->node, info->var.yres,xoffset ,yoffset ,in_fence_fd);
++}
++int osddev_wait_for_vsync(void)
++{
++	return osd_wait_vsync_event();
++}
+ void osddev_get_osd_info(u32 index, s32 (*posdval)[4], u32 (*posdreg)[5], s32 info_flag)
+ {
+ 	osd_get_osd_info_hw(index, posdval, posdreg, info_flag);
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index 093b9e745b68..abc2340364fe 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -34,6 +34,12 @@
+ #include <linux/amlogic/osd/osd.h>
+ #include <linux/amlogic/vout/vout_notify.h>
+ #include <linux/amlogic/amports/canvas.h>
++#include <linux/fdtable.h>
++#include <linux/file.h>
++#include <linux/list.h>
++#include <linux/kthread.h>
++#include <sw_sync.h>
++#include <sync.h>
+ #include "osd_log.h"
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/amports/vframe_receiver.h>
+@@ -63,6 +69,22 @@ extern void osd_ext_clone_pan(u32 index);
+ #endif
+ extern void osd_clone_pan(u32 index, u32 yoffset, int debug_flag);
+ 
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++//add sync fence relative varible here.
++//we will limit all fence relative code in this driver file.
++static int  timeline_created=0;
++static struct  sw_sync_timeline *timeline;
++static u32  cur_streamline_val;
++//thread control part
++struct kthread_worker buffer_toggle_worker;
++struct task_struct *buffer_toggle_thread;
++struct kthread_work buffer_toggle_work;
++struct list_head	post_fence_list;
++struct mutex		post_fence_list_lock;
++
++void osd_pan_display_fence(osd_fence_map_t *fence_map);
++#endif
++
+ static struct vframe_provider_s osd_vf_prov;
+ static int  g_vf_visual_width;
+ static int  g_vf_width;
+@@ -193,6 +215,178 @@ static unsigned int osd_filter_coefs_3point_bspline[] = {
+ 
+ #define OSD_TYPE_TOP_FIELD 0
+ #define OSD_TYPE_BOT_FIELD 1
++
++/********************************************************************/
++/***********		osd fence relative code 	 			*****************/
++/********************************************************************/
++
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++static inline  int  find_buf_num(u32 yres,u32 yoffset)
++{
++	int n=yres;
++	int i;
++	for(i=0;i<MAX_BUF_NUM;i++)  //find current addr position.
++	{
++		if(yoffset  < (n))
++		break;
++		n+=yres;
++	}
++	return i;
++}
++
++/*void osd_wait_vsync_hw(void)
++{
++        vsync_hit = false;
++        wait_event_interruptible_timeout(osd_vsync_wq, vsync_hit, HZ);
++}*/
++
++//next we will process two osd layer in toggle buffer.
++static void osd_toggle_buffer(struct kthread_work *work)
++{
++	osd_fence_map_t *data, *next;
++	struct list_head saved_list;
++
++	mutex_lock(&post_fence_list_lock);
++	saved_list = post_fence_list;
++	list_replace_init(&post_fence_list, &saved_list);
++	mutex_unlock(&post_fence_list_lock);
++
++	list_for_each_entry_safe(data, next, &saved_list, list){
++		//printk("osd_toggle_buffer the save_list is not NULL\n");
++		osd_pan_display_fence(data);
++		if((data->in_fence) && (data->in_fd > 0)){
++			__close_fd(data->files, data->in_fd);
++			sync_fence_put(data->in_fence);
++		}
++		list_del(&data->list);
++		kfree(data);
++	}
++}
++
++static int out_fence_create(int *release_fence_fd, u32 *val, u32 buf_num)
++{
++	//the first time create out_fence_fd==0
++	//sw_sync_timeline_inc  will release fence and it's sync point
++	struct sync_pt * outer_sync_pt;
++	struct sync_fence * outer_fence;
++	int out_fence_fd = -1;
++
++	out_fence_fd = get_unused_fd();
++	if(out_fence_fd < 0) return -1;//no file descriptor could be used. Error.
++	if(!timeline_created)//timeline has not been created
++	{
++		timeline = sw_sync_timeline_create("osd_timeline");
++		cur_streamline_val=1;
++		if(NULL==timeline)
++		{
++			return -1;
++		}
++		init_kthread_worker(&buffer_toggle_worker);
++		buffer_toggle_thread= kthread_run(kthread_worker_fn,
++						&buffer_toggle_worker, "aml_buf_toggle");
++		init_kthread_work(&buffer_toggle_work,osd_toggle_buffer);
++		timeline_created=1;
++	}
++	//install fence map; first ,the simplest.
++	cur_streamline_val++;
++	*val=cur_streamline_val;
++
++	outer_sync_pt=sw_sync_pt_create(timeline,*val);
++	if(NULL == outer_sync_pt)
++	{
++		goto error_ret;
++	}
++
++	outer_fence=sync_fence_create("osd_fence_out", outer_sync_pt);//fence object will be released when no point 
++	if(NULL == outer_fence)
++	{
++		sync_pt_free(outer_sync_pt); //free sync point.
++		goto error_ret;
++	}
++
++	sync_fence_install(outer_fence,out_fence_fd);
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"---------------------------------------\n");
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"return out fence fd:%d\n",out_fence_fd);
++	*release_fence_fd = out_fence_fd;
++	return out_fence_fd;
++	
++error_ret:
++	cur_streamline_val--; //pt or fence fail,restore timeline value.
++	amlog_level(LOG_LEVEL_HIGH,"fence obj create fail\n");
++	put_unused_fd(out_fence_fd);
++	return -1;
++		
++}
++
++int osd_sync_request(u32 index, u32 yres, u32 xoffset,u32 yoffset,s32 in_fence_fd)
++{
++	int out_fence_fd = -1;
++	int buf_num = 0;
++
++	osd_fence_map_t *fence_map = kzalloc(sizeof(osd_fence_map_t), GFP_KERNEL);
++	buf_num = find_buf_num(yres, yoffset);
++
++	if (!fence_map) {
++		printk("could not allocate osd_fence_map\n");
++		return -ENOMEM;
++	}
++
++	mutex_lock(&post_fence_list_lock);
++	fence_map->fb_index = index;
++	fence_map->buf_num = buf_num;
++	fence_map->yoffset = yoffset;
++	fence_map->xoffset = xoffset;
++	fence_map->yres = yres;
++	fence_map->in_fd = in_fence_fd;
++	fence_map->in_fence = sync_fence_fdget(in_fence_fd);
++	fence_map->files = current->files;
++
++	fence_map->out_fd = out_fence_create(&out_fence_fd, &fence_map->val, buf_num);
++	list_add_tail(&fence_map->list, &post_fence_list);
++	mutex_unlock(&post_fence_list_lock);
++
++	queue_kthread_work(&buffer_toggle_worker, &buffer_toggle_work);
++
++	return  out_fence_fd;
++}
++
++static int  osd_wait_buf_ready(osd_fence_map_t *fence_map)
++{
++	s32 ret=-1;
++	struct sync_fence *buf_ready_fence = NULL;
++	
++	if(fence_map->in_fd <= 0)
++	{
++		ret =-1;
++		return ret;
++	}
++	
++	buf_ready_fence = fence_map->in_fence;
++	if(NULL == buf_ready_fence)
++	{
++		ret = -1;//no fence ,output directly.
++		return ret;
++	}
++
++	ret=sync_fence_wait(buf_ready_fence, -1);
++	if(ret < 0){
++		amlog_level(LOG_LEVEL_HIGH,"Sync Fence wait error:%d\n",ret);
++		printk("-----wait buf idx:[%d] ERROR\n-----on screen buf idx:[%d]\n",fence_map->buf_num, find_buf_num(fence_map->yres, osd_hw.pandata[fence_map->fb_index].y_start));
++	}else{
++		ret=1;
++	}
++
++	return ret;
++}
++
++#else
++int osd_sync_request(u32 index, u32 yres,u32 xoffset, u32 yoffset,s32 in_fence_fd)
++{
++	amlog_level(LOG_LEVEL_HIGH,"osd_sync_request not supported\n");
++	return -5566;
++}
++#endif
++
+ /********************************************************************/
+ /***********		osd psedu frame provider 			*****************/
+ /********************************************************************/
+@@ -342,7 +536,6 @@ static irqreturn_t osd_rdma_isr(int irq, void *dev_id)
+ 		wait_vsync_wakeup();
+ #endif
+ 	}
+-
+ 	aml_write_reg32(P_RDMA_CTRL, 1<<24);
+ 
+ 	return IRQ_HANDLED;
+@@ -492,8 +685,14 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ void osd_wait_vsync_hw(void)
+ {
+ 	vsync_hit = false;
++	wait_event_interruptible_timeout(osd_vsync_wq, vsync_hit,HZ);
++}
+ 
+-	wait_event_interruptible_timeout(osd_vsync_wq, vsync_hit, HZ);
++s32 osd_wait_vsync_event(void)
++{
++	vsync_hit = false;
++        wait_event_interruptible_timeout(osd_vsync_wq, vsync_hit,1); //waiting for 10ms.
++	return 0;
+ }
+ 
+ void osd_set_scan_mode(int index)
+@@ -681,6 +880,9 @@ void osddev_update_disp_axis_hw(
+ 	osd_wait_vsync_hw();
+ 
+ }
++//now , we will do overwrite ,if call osd_setup multi times between two vsync.
++//and the BUFFER will be released one by one ,i.e. only release one BUFFER ervery VSYNC.
++//I think if not skip frame , It will be smooth and better.
+ void osd_setup(struct osd_ctl_s *osd_ctl,
+ 		u32 xoffset,
+ 		u32 yoffset,
+@@ -710,7 +912,7 @@ void osd_setup(struct osd_ctl_s *osd_ctl,
+ 	pan_data.y_start=yoffset;
+ 	disp_data.x_start=disp_start_x;
+ 	disp_data.y_start=disp_start_y;
+-
++	amlog_level(LOG_LEVEL_HIGH,"!!!!!! call osd_setup:%d\n",yoffset);
+ 	if(likely(osd_hw.free_scale_enable[OSD1] && index==OSD1))
+ 	{
+ 		if(!osd_hw.free_scale_mode[OSD1]){
+@@ -893,7 +1095,6 @@ void osd_free_scale_enable_hw(u32 index,u32 enable)
+ 			mode_changed = 1;
+ #endif
+ #endif
+-
+ 		amlog_level(LOG_LEVEL_HIGH,"osd%d free scale %s\r\n",index,enable?"ENABLE":"DISABLE");
+ 		enable = (enable&0xffff?1:0);
+ 		osd_hw.free_scale_enable[index]=enable;
+@@ -1488,7 +1689,65 @@ void osd_get_prot_canvas_hw(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s
+ 	*y_end = osd_hw.rotation_pandata[index].y_end;
+ }
+ 
+-void osd_pan_display_hw(unsigned int xoffset, unsigned int yoffset,int index )
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++void osd_pan_display_fence(osd_fence_map_t *fence_map)
++{
++	s32 ret = 1;
++	long diff_x, diff_y;
++	u32 index = fence_map->fb_index;
++	u32 xoffset = fence_map->xoffset;
++	u32 yoffset = fence_map->yoffset;
++#if defined(CONFIG_FB_OSD2_CURSOR)
++	if (index >= 1)
++#else
++	if (index >= 2)
++#endif
++	return;
++
++	if(timeline_created) //out fence created success.
++	{
++		ret = osd_wait_buf_ready(fence_map);
++		if(ret < 0)
++		{
++			amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"fence wait ret %d\n",ret);
++		}
++	}
++
++	if(ret){
++		if(xoffset!=osd_hw.pandata[index].x_start || yoffset !=osd_hw.pandata[index].y_start)
++		{
++			diff_x = xoffset - osd_hw.pandata[index].x_start;
++			diff_y = yoffset - osd_hw.pandata[index].y_start;
++
++			osd_hw.pandata[index].x_start += diff_x;
++			osd_hw.pandata[index].x_end   += diff_x;
++			osd_hw.pandata[index].y_start += diff_y;
++			osd_hw.pandata[index].y_end   += diff_y;
++			add_to_update_list(index, DISP_GEOMETRY);
++			osd_wait_vsync_hw();
++		}
++	}
++
++	if(timeline_created){
++		if(ret){
++			sw_sync_timeline_inc(timeline, 1);
++		}else{
++			printk("------NOT signal out_fence ERROR\n");
++		}
++	}
++#ifdef CONFIG_AM_FB_EXT
++	if(ret){
++		osd_ext_clone_pan(index);
++	}
++#endif
++
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"offset[%d-%d]x[%d-%d]y[%d-%d]\n", \
++			xoffset,yoffset,osd_hw.pandata[index].x_start ,osd_hw.pandata[index].x_end , \
++			osd_hw.pandata[index].y_start ,osd_hw.pandata[index].y_end );
++}
++#endif
++
++void osd_pan_display_hw(unsigned int xoffset, unsigned int yoffset,int index)
+ {
+ 	long diff_x, diff_y;
+ 
+@@ -1508,19 +1767,17 @@ void osd_pan_display_hw(unsigned int xoffset, unsigned int yoffset,int index )
+ 		osd_hw.pandata[index].x_end   += diff_x;
+ 		osd_hw.pandata[index].y_start += diff_y;
+ 		osd_hw.pandata[index].y_end   += diff_y;
+-#if 0
+-		add_to_update_list(index,DISP_GEOMETRY);
+-
+-#ifdef CONFIG_AM_FB_EXT
+-		osd_ext_clone_pan(index);
+-#endif
++		add_to_update_list(index, DISP_GEOMETRY);
+ 		osd_wait_vsync_hw();
+-#endif
+-		amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"offset[%d-%d]x[%d-%d]y[%d-%d]\n", \
+-				xoffset,yoffset,osd_hw.pandata[index].x_start ,osd_hw.pandata[index].x_end , \
+-				osd_hw.pandata[index].y_start ,osd_hw.pandata[index].y_end );
+ 	}
++#ifdef CONFIG_AM_FB_EXT
++	osd_ext_clone_pan(index);
++#endif
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"offset[%d-%d]x[%d-%d]y[%d-%d]\n", \
++			xoffset,yoffset,osd_hw.pandata[index].x_start ,osd_hw.pandata[index].x_end , \
++			osd_hw.pandata[index].y_start ,osd_hw.pandata[index].y_end );
+ }
++
+ static  void  osd1_update_disp_scale_enable(void)
+ {
+ 	if(osd_hw.scale[OSD1].h_enable)
+@@ -2680,6 +2937,11 @@ void osd_init_hw(u32  logo_loaded)
+ 
+ 	memset(osd_hw.rotate,0,sizeof(osd_rotate_t));
+ 
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++	INIT_LIST_HEAD(&post_fence_list);
++	mutex_init(&post_fence_list_lock);
++#endif
++
+ #ifdef FIQ_VSYNC
+ 	osd_hw.fiq_handle_item.handle=vsync_isr;
+ 	osd_hw.fiq_handle_item.key=(u32)vsync_isr;
+diff --git a/drivers/amlogic/display/osd/osd_hw_def.h b/drivers/amlogic/display/osd/osd_hw_def.h
+index 89a02d7871ff..5dd4e5293eaa 100755
+--- a/drivers/amlogic/display/osd/osd_hw_def.h
++++ b/drivers/amlogic/display/osd/osd_hw_def.h
+@@ -3,12 +3,14 @@
+ #include <linux/amlogic/osd/osd_hw.h>
+ #include <linux/amlogic/amports/vframe_provider.h>
+ #include <plat/fiq_bridge.h>
++#include <linux/list.h>
+ 
+ /************************************************************************
+ **
+ **	macro  define  part
+ **
+ **************************************************************************/
++#define MAX_BUF_NUM	 3  /*fence relative*/
+ #define	LEFT		0
+ #define	RIGHT		1
+ #define	OSD_RELATIVE_BITS				0x33370
+@@ -111,6 +113,33 @@ typedef struct{
+ 	u32  angle;
+ }osd_rotate_t;
+ 
++//define osd fence map .
++typedef struct{
++	u32  xoffset;
++	u32  yoffset;
++	u32  yres;
++	s32  in_fd;
++	s32  out_fd;
++	u32  val;
++	struct sync_fence *in_fence;
++	struct files_struct * files;
++}osd_fen_map_t;
++
++typedef struct {
++	struct list_head list;
++
++	u32  fb_index;
++	u32  buf_num;
++	u32  xoffset;
++	u32  yoffset;
++	u32  yres;
++	s32  in_fd;
++	s32  out_fd;
++	u32  val;
++	struct sync_fence *in_fence;
++	struct files_struct * files;
++}osd_fence_map_t;
++
+ typedef  pandata_t  dispdata_t;
+ 
+ typedef  struct {
+diff --git a/drivers/amlogic/display/osd/osd_main.c b/drivers/amlogic/display/osd/osd_main.c
+index f24ddb156f61..953dcd1c5160 100755
+--- a/drivers/amlogic/display/osd/osd_main.c
++++ b/drivers/amlogic/display/osd/osd_main.c
+@@ -51,6 +51,9 @@
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/logo/logo_dev.h>
+ #include <linux/amlogic/logo/logo_dev_osd.h>
++#include <osd_sync.h>
++
++
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+ #include <linux/earlysuspend.h>
+ static struct early_suspend early_suspend;
+@@ -283,6 +286,8 @@ osd_ioctl(struct fb_info *info, unsigned int cmd,
+ 	 u32  block_mode;
+         unsigned long  ret;
+ 	 u32  flush_rate;
++	fb_sync_request_t  sync_request;
++
+ 
+     	switch (cmd)
+   	{
+@@ -298,6 +303,11 @@ osd_ioctl(struct fb_info *info, unsigned int cmd,
+ 		case FBIOPUT_OSD_SCALE_AXIS:
+ 			ret=copy_from_user(&osd_axis, argp, 4 * sizeof(s32));
+ 			break;
++		case FBIOPUT_OSD_SYNC_ADD:
++			ret=copy_from_user(&sync_request,argp,sizeof(fb_sync_request_t));
++			//printk("osd_mai request offset:%d\n", sync_request.offset);
++			break;
++		case FBIO_WAITFORVSYNC:
+ 		case FBIOGET_OSD_SCALE_AXIS:
+ 		case FBIOPUT_OSD_ORDER:
+ 		case FBIOGET_OSD_ORDER:
+@@ -458,13 +468,24 @@ osd_ioctl(struct fb_info *info, unsigned int cmd,
+ 		case FBIOPUT_OSD_WINDOW_AXIS:
+ 			osddev_set_window_axis(info->node, osd_dst_axis[0], osd_dst_axis[1], osd_dst_axis[2], osd_dst_axis[3]);
+ 			break;
++		 case FBIOPUT_OSD_SYNC_ADD:
++		 	sync_request.out_fen_fd=osddev_sync_request(info, sync_request.xoffset,sync_request.yoffset,sync_request.in_fen_fd);
++			ret=copy_to_user(argp, &sync_request, sizeof(fb_sync_request_t));
++			if(sync_request.out_fen_fd  <0 ) // fence create fail.
++			ret=-1;
++			break;
++		case FBIO_WAITFORVSYNC:
++			osddev_wait_for_vsync();
++			ret=1;
++			ret=copy_to_user(argp,&ret,sizeof(u32));
++
+ 		default:
+ 			break;
+     	}
+ 
+    	mutex_unlock(&fbdev->lock);
+ 	
+-	return  0;
++	return  ret;
+ }
+ static int osd_open(struct fb_info *info, int arg)
+ {
+@@ -1806,7 +1827,11 @@ osd_probe(struct platform_device *pdev)
+ 		set_default_display_axis(&fbdev->fb_info->var,&fbdev->osd_ctl,vinfo);
+ 		osd_check_var(var, fbi);
+     		register_framebuffer(fbi);
+-		if(NULL==init_logo_obj )//if we have init a logo object ,then no need to setup hardware . 
++		if(index == OSD0 && init_logo_obj != NULL)
++		{
++			osddev_set(fbdev);
++		}
++		else if(NULL==init_logo_obj)//if we have init a logo object ,then no need to setup hardware .
+ 		{
+ 			osddev_set(fbdev);
+ 		}
+diff --git a/drivers/amlogic/display/osd/osd_sync.h b/drivers/amlogic/display/osd/osd_sync.h
+new file mode 100755
+index 000000000000..ee4fc266f23d
+--- /dev/null
++++ b/drivers/amlogic/display/osd/osd_sync.h
+@@ -0,0 +1,17 @@
++#ifndef   _OSD_SYNC_H
++#define _OSD_SYNC_H
++#include  <sw_sync.h>
++#include  <sync.h>
++
++typedef  struct{
++	unsigned int  xoffset;
++	unsigned int  yoffset;
++	int  in_fen_fd;
++	int  out_fen_fd;
++}fb_sync_request_t;
++
++typedef  struct{
++	struct sw_sync_timeline  *timeline;
++}osd_sync_obj;
++
++#endif
+diff --git a/include/linux/amlogic/osd/osd_dev.h b/include/linux/amlogic/osd/osd_dev.h
+index a740c17298af..1252bac5a0d0 100755
+--- a/include/linux/amlogic/osd/osd_dev.h
++++ b/include/linux/amlogic/osd/osd_dev.h
+@@ -119,6 +119,8 @@ extern int osddev_setcolreg(unsigned regno, u16 red, u16 green, u16 blue,
+         u16 transp, struct myfb_dev *fbdev);
+ extern void osddev_init(void) ;        
+ extern void osddev_enable(int enable,int index);
++extern int osddev_sync_request( struct fb_info * info,u32 xoffset, u32 yoffset,s32 in_fence_fd);
++extern int osddev_wait_for_vsync(void);
+ 
+ extern void osddev_pan_display(struct fb_var_screeninfo *var,struct fb_info *fbi);
+ 
+diff --git a/include/linux/amlogic/osd/osd_hw.h b/include/linux/amlogic/osd/osd_hw.h
+index d7a6a3662cef..dfbf0f161b65 100755
+--- a/include/linux/amlogic/osd/osd_hw.h
++++ b/include/linux/amlogic/osd/osd_hw.h
+@@ -118,6 +118,8 @@ extern void osd_set_prot_canvas_hw(u32 index, s32 x_start, s32 y_start, s32 x_en
+ extern void osd_setpal_hw(unsigned regno, unsigned red, unsigned green, unsigned blue, unsigned transp,int index);
+ extern void osd_enable_hw(int enable,int index );
+ extern void osd_pan_display_hw(unsigned int xoffset, unsigned int yoffset,int index );
++extern int osd_sync_request(u32 index, u32 yres,u32 xoffset ,u32 yoffset,s32 in_fence_fd);
++extern s32  osd_wait_vsync_event(void);
+ #if defined(CONFIG_FB_OSD2_CURSOR)
+ extern void osd_cursor_hw(s16 x, s16 y, s16 xstart, s16 ystart, u32 osd_w, u32 osd_h, int index);
+ #endif
+diff --git a/include/linux/amlogic/osd/osd_main.h b/include/linux/amlogic/osd/osd_main.h
+index 6346df3970a9..17b88dad490d 100755
+--- a/include/linux/amlogic/osd/osd_main.h
++++ b/include/linux/amlogic/osd/osd_main.h
+@@ -160,7 +160,7 @@ typedef  struct {
+ #define  FBIOPUT_OSD_REVERSE		0x4515
+ #define  FBIOPUT_OSD_ROTATE_ON   	0x4516
+ #define  FBIOPUT_OSD_ROTATE_ANGLE	0x4517
+-
++#define  FBIOPUT_OSD_SYNC_ADD	0x4518
+ #define  OSD_INVALID_INFO   		0xffffffff
+ 
+ #define  OSD_FIRST_GROUP_START   	1
+-- 
+2.19.0
+

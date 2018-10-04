@@ -1,0 +1,130 @@
+From d469f06df05d32d385022180bfb5d2d2e52db0c9 Mon Sep 17 00:00:00 2001
+From: "hongwu.su" <hongwu.su@amlogic.com>
+Date: Fri, 28 Mar 2014 18:01:26 +0800
+Subject: [PATCH 3835/5965] PD#89407: update old nand driver for kernel 3.10
+
+commit a8ed1ff3b2d88c8518a653289ea8e1ec09eed333
+Author: hongwu.su <hongwu.su@amlogic.com>
+Date:   Fri Mar 28 14:57:42 2014 +0800
+
+    PD#89407: step3, add marco MX_REVD in nand.h
+
+commit 250f11b7937e71d5aee1bb8604d5a65f9592331e
+Author: hongwu.su <hongwu.su@amlogic.com>
+Date:   Fri Mar 28 14:36:07 2014 +0800
+
+    PD#89407: step2, add new nand support in nand.h
+
+commit c91e500339b653773995f9de3caa3d81f1de7e88
+Author: hongwu.su <hongwu.su@amlogic.com>
+Date:   Fri Mar 28 14:17:14 2014 +0800
+
+    PD#89407: move old nand driver to kernel 3.10
+---
+ arch/arm/mach-meson6/include/mach/nand.h | 15 ++++++++++-----
+ drivers/mtd/mtd_blkdevs.c                |  8 ++++++--
+ include/linux/mtd/blktrans.h             |  3 ++-
+ 3 files changed, 18 insertions(+), 8 deletions(-)
+ mode change 100644 => 100755 include/linux/mtd/blktrans.h
+
+diff --git a/arch/arm/mach-meson6/include/mach/nand.h b/arch/arm/mach-meson6/include/mach/nand.h
+index 09086bd9b9b2..7f0d731fa7c4 100755
+--- a/arch/arm/mach-meson6/include/mach/nand.h
++++ b/arch/arm/mach-meson6/include/mach/nand.h
+@@ -8,7 +8,7 @@
+ #include <linux/earlysuspend.h>
+ #include <mach/pinmux.h>
+ #include <linux/pinctrl/consumer.h>
+-
++#define MX_REVD
+ #ifdef CONFIG_CLK81_DFS
+ #include <linux/semaphore.h>
+ #define init_MUTEX(sem)             sema_init(sem, 1)
+@@ -322,8 +322,8 @@
+ #define NAND_CMD_DUMMY_PROGRAM			0x11
+ #define NAND_CMD_ERASE1_END				0xd1
+ #define NAND_CMD_MULTI_CHIP_STATUS		0x78
+-//#define NAND_CMD_SET_FEATURES			0xEF
+-//#define NAND_CMD_GET_FEATURES			0xEE
++#define NAND_CMD_SET_FEATURES			0xEF
++#define NAND_CMD_GET_FEATURES			0xEE
+ #define ONFI_TIMING_ADDR				0x01
+ 
+ #define MAX_CHIP_NUM		4
+@@ -481,8 +481,8 @@ struct aml_nand_bch_desc{
+ #define RETRY_NAND_COPY_NUM	4
+ 
+ #define	READ_RETRY_REG_NUM   	8
+-#define	READ_RETRY_CNT   		20
+-
++#define	READ_RETRY_CNT   		30
++#define	HYNIX_RETRY_CNT		20
+ 
+ #define	ENHANCE_SLC_REG_NUM   	5
+ 
+@@ -505,8 +505,10 @@ struct aml_nand_bch_desc{
+ #define	HYNIX_20NM_8GB 		3		//
+ #define	HYNIX_20NM_4GB 		4		//
+ #define	HYNIX_20NM_LGA_8GB 		5		//
++#define	HYNIX_1YNM_8GB 		6
+ //for Toshiba
+ #define	TOSHIBA_24NM 			20		//TC58NVG5D2HTA00
++#define	TOSHIBA_A19NM 			21	
+ 										//TC58NVG6D2GTA00
+ //for SAMSUNG
+ #define	SUMSUNG_2XNM 			30	
+@@ -516,6 +518,7 @@ struct aml_nand_bch_desc{
+ //for SANDISK
+ #define    SANDISK_19NM			50
+ #define     SANDISK_24NM			51
++#define     SANDISK_A19NM		52
+ 
+ #define      DYNAMIC_REG_NUM        3
+ #define      DYNAMIC_REG_INIT_NUM        9
+@@ -531,6 +534,8 @@ struct aml_nand_bch_desc{
+ #define	NAND_CMD_SANDISK_INIT_ONE				0x3B
+ #define	NAND_CMD_SANDISK_INIT_TWO				0xB9
+ 
++#define	NAND_CMD_SANDISK_DSP_ON					0x26
++#define	NAND_CMD_SANDISK_RETRY_STA					 0x5D
+ #define	NAND_CMD_SANDISK_LOAD_VALUE_ONE			0x53
+ #define	NAND_CMD_SANDISK_LOAD_VALUE_TWO			0x54
+ 
+diff --git a/drivers/mtd/mtd_blkdevs.c b/drivers/mtd/mtd_blkdevs.c
+index 284c73d73200..03995eb97443 100755
+--- a/drivers/mtd/mtd_blkdevs.c
++++ b/drivers/mtd/mtd_blkdevs.c
+@@ -302,8 +302,12 @@ static int blktrans_ioctl(struct block_device *bdev, fmode_t mode,
+ 		break;
+ 		//add this for m6 old nand driver
+ 	case BLKWIPEPART:
+-	ret =0;	
+-        break;
++	//printk("blktrans_ioctl BLKWIPEPART \n");
++	if(dev->tr->wipe_part){
++	printk("blktrans_ioctl dev->tr->wipe_part : \n");
++	ret = dev->tr->wipe_part(dev);
++	}
++	break;
+ 	default:
+ 		ret = -ENOTTY;
+ 	}
+diff --git a/include/linux/mtd/blktrans.h b/include/linux/mtd/blktrans.h
+old mode 100644
+new mode 100755
+index e93837f647de..4f82067de836
+--- a/include/linux/mtd/blktrans.h
++++ b/include/linux/mtd/blktrans.h
+@@ -80,7 +80,8 @@ struct mtd_blktrans_ops {
+ 	   of devices, with mtd_table_mutex held. */
+ 	void (*add_mtd)(struct mtd_blktrans_ops *tr, struct mtd_info *mtd);
+ 	void (*remove_dev)(struct mtd_blktrans_dev *dev);
+-
++	//add this for m6 erase nand
++	int(*wipe_part)(struct mtd_blktrans_dev *dev);
+ 	struct list_head devs;
+ 	struct list_head list;
+ 	struct module *owner;
+-- 
+2.19.0
+

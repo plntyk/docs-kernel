@@ -1,0 +1,527 @@
+From 6ed75b03dc3bcf37902d47042ddc9893a5e8d048 Mon Sep 17 00:00:00 2001
+From: Bo Yang <bo.yang@amlogic.com>
+Date: Thu, 10 Sep 2015 10:40:58 +0800
+Subject: [PATCH 5827/5965] PD#111969: jtag: add new jtag driver
+
+This new jtag driver support jtag setup.
+
+Use a new uboot parameter to setup jtag
+	jtag=<value>
+
+The available value is:
+	jtag=disable
+	jtag=aopad_aocpu
+	jtag=aopad_syscpu
+	jtag=aopad_mediacpu
+	jtag=eepad_aocpu
+	jtag=eepad_syscpu
+	jtag=eepad_mediacpu
+
+If you do not set parameter jtag=, the default value is disable.
+
+If jtag is setup, the watchdog will be disable defaultly.
+
+There two sysfs to debug jtag pinmux:
+	/sys/class/aml_jtag/debug
+	/sys/class/aml_jtag/setuup
+
+To support this feature, select the menu option:
+	CONFIG_AMLOGIC_JTAG=y
+	CONFIG_AML_JTAG_CONTROL=y
+
+This module support a new function:
+	is_jtag_disable()
+
+All the modules that multiplex with jtag should call the new
+function to prevent jtag function when jtag is setup.
+
+Change-Id: Ic0434d3f6b272ed421b988c01dce8ae9bb169513
+---
+ arch/arm/configs/mesong9tv_defconfig |   2 +
+ drivers/amlogic/Kconfig              |   1 +
+ drivers/amlogic/Makefile             |   1 +
+ drivers/amlogic/jtag/Kconfig         |  19 ++
+ drivers/amlogic/jtag/Makefile        |   1 +
+ drivers/amlogic/jtag/aml_jtag.c      | 345 +++++++++++++++++++++++++++
+ include/linux/amlogic/jtag.h         |  37 +++
+ 7 files changed, 406 insertions(+)
+ mode change 100644 => 100755 arch/arm/configs/mesong9tv_defconfig
+ mode change 100644 => 100755 drivers/amlogic/Kconfig
+ mode change 100644 => 100755 drivers/amlogic/Makefile
+ create mode 100755 drivers/amlogic/jtag/Kconfig
+ create mode 100755 drivers/amlogic/jtag/Makefile
+ create mode 100755 drivers/amlogic/jtag/aml_jtag.c
+ create mode 100755 include/linux/amlogic/jtag.h
+
+diff --git a/arch/arm/configs/mesong9tv_defconfig b/arch/arm/configs/mesong9tv_defconfig
+old mode 100644
+new mode 100755
+index 01201bf9c197..3848d1a3e1ee
+--- a/arch/arm/configs/mesong9tv_defconfig
++++ b/arch/arm/configs/mesong9tv_defconfig
+@@ -168,6 +168,8 @@ CONFIG_AML1220=y
+ CONFIG_SECURITYKEY=y
+ CONFIG_EFUSE=y
+ CONFIG_AML_PLATFORM_THERMAL=y
++CONFIG_AMLOGIC_JTAG=y
++CONFIG_AML_JTAG_CONTROL=y
+ CONFIG_INSTABOOT=y
+ CONFIG_INSTABOOT_MEM_MG=y
+ CONFIG_AMLOGIC_USB_3=y
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+old mode 100644
+new mode 100755
+index 56007b22bcec..e4c455425a20
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -26,6 +26,7 @@ source "drivers/amlogic/defendkey/Kconfig"
+ source "drivers/amlogic/smartcard/Kconfig"
+ source "drivers/amlogic/thermal/Kconfig"
+ source "drivers/amlogic/watchdog/Kconfig"
++source "drivers/amlogic/jtag/Kconfig"
+ source "drivers/amlogic/spi/Kconfig"
+ source "drivers/amlogic/instaboot/Kconfig"
+ 
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+old mode 100644
+new mode 100755
+index 281513465050..5ce0c52c92cf
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -125,6 +125,7 @@ obj-$(CONFIG_AML_REG_DEBUG) += regd/
+ 
+ obj-$(CONFIG_AML_WATCHDOG) += watchdog/
+ 
++obj-$(CONFIG_AMLOGIC_JTAG) += jtag/
+ ifneq ($(wildcard $(srctree)/../hardware/arm/gpu),)
+ 	obj-$(CONFIG_UMP) += ../../../hardware/arm/gpu/ump/
+ 	obj-$(CONFIG_MALI400) += ../../../hardware/arm/gpu/mali/
+diff --git a/drivers/amlogic/jtag/Kconfig b/drivers/amlogic/jtag/Kconfig
+new file mode 100755
+index 000000000000..7ce48fd6937a
+--- /dev/null
++++ b/drivers/amlogic/jtag/Kconfig
+@@ -0,0 +1,19 @@
++menu "Amlogic JTAG Support"
++
++
++config AMLOGIC_JTAG
++	bool "Amlogic JTAG Support"
++	default n
++	help
++		Amlogic JTAG support.
++
++if AMLOGIC_JTAG
++config AML_JTAG_CONTROL
++	bool "jtag control support"
++	default n
++	help
++		Amlogic jtag control module.
++
++endif
++
++endmenu
+diff --git a/drivers/amlogic/jtag/Makefile b/drivers/amlogic/jtag/Makefile
+new file mode 100755
+index 000000000000..cba08ae1a4da
+--- /dev/null
++++ b/drivers/amlogic/jtag/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_AML_JTAG_CONTROL)		+= aml_jtag.o
+diff --git a/drivers/amlogic/jtag/aml_jtag.c b/drivers/amlogic/jtag/aml_jtag.c
+new file mode 100755
+index 000000000000..d5d49a5e4b58
+--- /dev/null
++++ b/drivers/amlogic/jtag/aml_jtag.c
+@@ -0,0 +1,345 @@
++/*
++ * drivers/amlogic/display/aml_jtag.c
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/sysfs.h>
++#include <linux/device.h>
++#include <linux/slab.h>
++#include <linux/platform_device.h>
++#include <linux/of.h>
++#include <linux/string.h>
++#include <linux/printk.h>
++
++#include <mach/register.h>
++#include <mach/io.h>
++#include <plat/io.h>
++#include <linux/amlogic/jtag.h>
++#include <linux/amlogic/aml_wdt.h>
++
++
++
++#undef pr_fmt
++#define pr_fmt(fmt) "jtag: "fmt
++#define INFO(format, arg...) pr_info(format, ## arg)
++#define ERR(format,  arg...)  pr_err(format, ## arg)
++
++
++#define AML_JTAG_NAME		"aml_jtag"
++
++
++static struct class jtag_cls;
++static unsigned int jtag_select = AML_JTAG_DISABLE;
++
++bool is_jtag_disable(void)
++{
++	if (jtag_select == AML_JTAG_DISABLE)
++		return true;
++	else
++		return false;
++}
++
++
++static void jtag_clean_other_pinmux_aopad(void)
++{
++	// clean GPIOAO_8
++	aml_clr_reg32_mask(P_AO_RTI_PIN_MUX_REG,
++		(1<<17) | (1<<14) | (1<<16) | (1<<28));
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_11, (1<<26));
++	// clean GPIOAO_9
++	aml_clr_reg32_mask(P_AO_RTI_PIN_MUX_REG,
++		(1<<27) | (1<<13) | (1<<15) | (1<<27));
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_11, (1<<25));
++	// clean GPIOAO_11
++	aml_clr_reg32_mask(P_AO_RTI_PIN_MUX_REG, (1<<22) | (1<<28));
++}
++
++
++static void jtag_clean_other_pinmux_eepad(void)
++{
++	// clean CARD_0
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_2, (1<<14) | (1<<7));
++	// clean CARD_1
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_2, (1<<15) | (1<<6));
++	// clean CARD_2
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_2, (1<<11) | (1<<5));
++	// clean CARD_3
++	aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_2, (1<<10) | (1<<4));
++}
++
++
++static void jtag_setup(void)
++{
++	switch (jtag_select) {
++	case AML_JTAG_DISABLE:
++		// 0x0
++		aml_write_reg32(P_AO_SECURE_REG1, 0x0);
++		break;
++	case AML_JTAG_AOPAD_AOCPU:
++		// 0x5
++		aml_write_reg32(P_AO_SECURE_REG1, (0x01<<0) | (0x01<<2));
++		// clean other pinmux
++		jtag_clean_other_pinmux_aopad();
++		break;
++	case AML_JTAG_AOPAD_SYSCPU:
++		// 0x102
++		aml_write_reg32(P_AO_SECURE_REG1, (0x02<<0) | (0x01<<8));
++		// clean other pinmux
++		jtag_clean_other_pinmux_aopad();
++		break;
++	case AML_JTAG_AOPAD_MEDIACPU:
++		// 0x43
++		aml_write_reg32(P_AO_SECURE_REG1, (0x03<<0) | (0x01<<6));
++		// clean other pinmux
++		jtag_clean_other_pinmux_aopad();
++		break;
++	case AML_JTAG_EEPAD_AOCPU:
++		// 0x18
++		aml_write_reg32(P_AO_SECURE_REG1, (0x01<<4) | (0x02<<2));
++		// clean other pinmux
++		jtag_clean_other_pinmux_eepad();
++		break;
++	case AML_JTAG_EEPAD_SYSCPU:
++		// 0x220
++		aml_write_reg32(P_AO_SECURE_REG1, (0x02<<4) | (0x02<<8));
++		// clean other pinmux
++		jtag_clean_other_pinmux_eepad();
++		break;
++	case AML_JTAG_EEPAD_MEDIACPU:
++		// 0xb0
++		aml_write_reg32(P_AO_SECURE_REG1, (0x03<<4) | (0x02<<6));
++		// clean other pinmux
++		jtag_clean_other_pinmux_eepad();
++		break;
++	default: /* none */
++		aml_write_reg32(P_AO_SECURE_REG1, 0x0);
++		break;
++	}
++}
++
++static void jtag_disable_watchdog(void)
++{
++
++	switch (jtag_select) {
++	case AML_JTAG_AOPAD_AOCPU:
++	case AML_JTAG_AOPAD_SYSCPU:
++	case AML_JTAG_AOPAD_MEDIACPU:
++	case AML_JTAG_EEPAD_AOCPU:
++	case AML_JTAG_EEPAD_SYSCPU:
++	case AML_JTAG_EEPAD_MEDIACPU:
++		disable_watchdog();
++		break;
++	default:
++		break;
++	}
++}
++
++static int __init setup_jtag(char *p)
++{
++	INFO("%s\n", p);
++
++	if (!strncmp(p, "disable", 7))
++		jtag_select = AML_JTAG_DISABLE;
++	else if (!strncmp(p, "aopad_aocpu", 11))
++		jtag_select = AML_JTAG_AOPAD_AOCPU;
++	else if (!strncmp(p, "aopad_syscpu", 12))
++		jtag_select = AML_JTAG_AOPAD_SYSCPU;
++	else if (!strncmp(p, "aopad_mediacpu", 14))
++		jtag_select = AML_JTAG_AOPAD_MEDIACPU;
++	else if (!strncmp(p, "eepad_aocpu", 11))
++		jtag_select = AML_JTAG_EEPAD_AOCPU;
++	else if (!strncmp(p, "eepad_syscpu", 12))
++		jtag_select = AML_JTAG_EEPAD_SYSCPU;
++	else if (!strncmp(p, "eepad_mediacpu", 14))
++		jtag_select = AML_JTAG_EEPAD_MEDIACPU;
++	else
++		jtag_select = AML_JTAG_DISABLE;
++
++	return 0;
++}
++__setup("jtag=", setup_jtag);
++
++
++
++static ssize_t jtag_setup_show(struct class *cls,
++			struct class_attribute *attr, char *buf)
++{
++	unsigned int len = 0;
++	len += sprintf(buf + len, "jtag select %d\n", jtag_select);
++	len += sprintf(buf + len, "\n");
++	len += sprintf(buf + len, "usage:\n");
++	len += sprintf(buf + len, "    echo <n> > setup\n");
++	len += sprintf(buf + len, "\n");
++	len += sprintf(buf + len, "the value of <n> is:\n");
++	len += sprintf(buf + len, "    0 - disable\n");
++	len += sprintf(buf + len, "    1 - aopad_aocpu\n");
++	len += sprintf(buf + len, "    2 - aopad_syscpu\n");
++	len += sprintf(buf + len, "    3 - aopad_mediacpu\n");
++	len += sprintf(buf + len, "    4 - eepad_aocpu\n");
++	len += sprintf(buf + len, "    5 - eepad_syscpu\n");
++	len += sprintf(buf + len, "    6 - eepad_mediacpu\n");
++	return len;
++}
++
++
++static ssize_t jtag_setup_store(struct class *cls,
++			 struct class_attribute *attr,
++			 const char *buffer, size_t count)
++{
++	unsigned int sel;
++
++	sel = simple_strtol(buffer, NULL, 10);
++	if ((sel < AML_JTAG_DISABLE) || (sel > AML_JTAG_EEPAD_MEDIACPU)) {
++		INFO("invalid value\n");
++		return count;
++	}
++
++	jtag_select = sel;
++	/* setup jtag */
++	jtag_disable_watchdog();
++	jtag_setup();
++
++
++	return count;
++}
++
++
++static ssize_t jtag_debug_show(struct class *cls,
++			struct class_attribute *attr, char *buf)
++{
++	unsigned int mux_ao, mux_11, mux_2, sec_1;
++	unsigned int len = 0;
++
++	mux_ao = aml_read_reg32(P_AO_RTI_PIN_MUX_REG);
++	mux_11 = aml_read_reg32(P_PERIPHS_PIN_MUX_11);
++	mux_2  = aml_read_reg32(P_PERIPHS_PIN_MUX_2);
++	sec_1  = aml_read_reg32(P_AO_SECURE_REG1);
++
++	len += sprintf(buf + len, "P_AO_RTI_PIN_MUX_REG = 0x%x\n", mux_ao);
++	len += sprintf(buf + len, "P_PERIPHS_PIN_MUX_11 = 0x%x\n", mux_11);
++	len += sprintf(buf + len, "P_PERIPHS_PIN_MUX_2  = 0x%x\n", mux_2);
++	len += sprintf(buf + len, "P_AO_SECURE_REG1     = 0x%x\n", sec_1);
++	len += sprintf(buf + len, "\n");
++	len += sprintf(buf + len, "JTAG_AO_PAD  Secure[1:0] = %u\n",
++		(sec_1 & (0x3 << 0)) >> 0);
++	len += sprintf(buf + len, "JTAG_EE_PAD  Secure[5:4] = %u\n",
++		(sec_1 & (0x3 << 4)) >> 4);
++	len += sprintf(buf + len, "JTAG_SYS_CPU Secure[9:8] = %u\n",
++		(sec_1 & (0x3 << 8)) >> 8);
++	len += sprintf(buf + len, "JTAG_AO_CPU  Secure[3:2] = %u\n",
++		(sec_1 & (0x3 << 2)) >> 2);
++	len += sprintf(buf + len, "JTAG_MED_CPU Secure[7:6] = %u\n",
++		(sec_1 & (0x3 << 6)) >> 6);
++
++	// HDMI_CEC_AO bit[17]
++	len += sprintf(buf + len, "GPIOAO_8\n");
++	len += sprintf(buf + len, "HDMI_CEC_AO  ao_reg[17] = %u\n",
++		(mux_ao & (1 << 17)) >> 17);
++	len += sprintf(buf + len, "HDMITX_CEC   ao_reg[14] = %u\n",
++		(mux_ao & (1 << 17)) >> 17);
++	len += sprintf(buf + len, "HDMITX_CEC   reg11[26]  = %u\n",
++		(mux_11 & (1 << 26)) >> 26);
++	len += sprintf(buf + len, "HDMIRX_CEC   ao_reg[16] = %u\n",
++		(mux_ao & (1 << 16)) >> 16);
++	len += sprintf(buf + len, "HDMIRX_CEC   ao_reg[28] = %u\n",
++		(mux_ao & (1 << 28)) >> 28);
++
++	len += sprintf(buf + len, "GPIOAO_9\n");
++	len += sprintf(buf + len, "HDMI_CEC_AO  ao_reg[27] = %u\n",
++		(mux_ao & (1 << 27)) >> 27);
++	len += sprintf(buf + len, "HDMITX_CEC   ao_reg[13] = %u\n",
++		(mux_ao & (1 << 13)) >> 13);
++	len += sprintf(buf + len, "HDMITX_CEC   reg11[25]  = %u\n",
++		(mux_11 & (1 << 25)) >> 25);
++	len += sprintf(buf + len, "HDMIRX_CEC   ao_reg[15] = %u\n",
++		(mux_ao & (1 << 15)) >> 15);
++	len += sprintf(buf + len, "HDMIRX_CEC   ao_reg[27] = %u\n",
++		(mux_ao & (1 << 27)) >> 27);
++
++	len += sprintf(buf + len, "GPIOAO_10\n");
++	len += sprintf(buf + len, "GPIOAO_11\n");
++	len += sprintf(buf + len, "PWM_AO_A     ao_reg[22] = %u\n",
++		(mux_ao & (1 << 22)) >> 22);
++	len += sprintf(buf + len, "PWM_F        ao_reg[28] = %u\n",
++		(mux_ao & (1 << 28)) >> 28);
++
++	len += sprintf(buf + len, "CARD_0\n");
++	len += sprintf(buf + len, "SD_D1_B      reg2[14]   = %u\n",
++		(mux_2 & (1 << 14)) >> 14);
++	len += sprintf(buf + len, "SDXC_D1_B    reg2[7]    = %u\n",
++		(mux_2 & (1 << 7)) >> 7);
++
++	len += sprintf(buf + len, "CARD_1\n");
++	len += sprintf(buf + len, "SD_D0_B      reg2[15]   = %u\n",
++		(mux_2 & (1 << 15)) >> 15);
++	len += sprintf(buf + len, "SDXC_D0_B    reg2[6]    = %u\n",
++		(mux_2 & (1 << 6)) >> 6);
++
++	len += sprintf(buf + len, "CARD_2\n");
++	len += sprintf(buf + len, "SD_CLK_B     reg2[11]   = %u\n",
++		(mux_2 & (1 << 11)) >> 11);
++	len += sprintf(buf + len, "SDXC_CLK_B   reg2[5]    = %u\n",
++		(mux_2 & (1 << 5)) >> 5);
++
++	len += sprintf(buf + len, "CARD_3\n");
++	len += sprintf(buf + len, "SD_CMD_B     reg2[10]   = %u\n",
++		(mux_2 & (1 << 10)) >> 10);
++	len += sprintf(buf + len, "SDXC_CMD_B   reg2[4]    = %u\n",
++		(mux_2 & (1 << 4)) >> 4);
++	return len;
++}
++
++
++static struct class_attribute aml_jtag_attrs[] = {
++	__ATTR(debug,  0644, jtag_debug_show, NULL),
++	__ATTR(setup,  0644, jtag_setup_show, jtag_setup_store),
++	__ATTR_NULL,
++};
++
++
++static int __init aml_jtag_init(void)
++{
++	/* create class attributes */
++	jtag_cls.name = AML_JTAG_NAME;
++	jtag_cls.owner = THIS_MODULE;
++	jtag_cls.class_attrs = aml_jtag_attrs;
++	class_register(&jtag_cls);
++
++	/* setup jtag */
++	jtag_disable_watchdog();
++	jtag_setup();
++
++	INFO("module init ok\n");
++	return 0;
++}
++
++
++static void __exit aml_jtag_exit(void)
++{
++	class_unregister(&jtag_cls);
++	INFO("module exit\n");
++}
++
++
++module_init(aml_jtag_init);
++module_exit(aml_jtag_exit);
++
++MODULE_DESCRIPTION("Meson JTAG Driver");
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Amlogic, Inc.");
++
+diff --git a/include/linux/amlogic/jtag.h b/include/linux/amlogic/jtag.h
+new file mode 100755
+index 000000000000..476756de1eb7
+--- /dev/null
++++ b/include/linux/amlogic/jtag.h
+@@ -0,0 +1,37 @@
++/*
++ * include/linux/amlogic/jtag.h
++ *
++ * Copyright (C) 2015 Amlogic, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __INCLUDE_AMLOGIC_JTAG_H
++#define __INCLUDE_AMLOGIC_JTAG_H
++
++#include <linux/types.h>
++
++enum {
++	AML_JTAG_DISABLE = 0,
++	AML_JTAG_AOPAD_AOCPU,
++	AML_JTAG_AOPAD_SYSCPU,
++	AML_JTAG_AOPAD_MEDIACPU,
++	AML_JTAG_EEPAD_AOCPU,
++	AML_JTAG_EEPAD_SYSCPU,
++	AML_JTAG_EEPAD_MEDIACPU,
++};
++
++#ifdef CONFIG_AML_JTAG_CONTROL
++extern bool is_jtag_disable(void);
++#else
++static inline bool is_jtag_disable(void) {return true;}
++#endif
++
++#endif
+-- 
+2.19.0
+

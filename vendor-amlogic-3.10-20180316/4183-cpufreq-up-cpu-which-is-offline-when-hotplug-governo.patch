@@ -1,0 +1,106 @@
+From 364f013870d1fe9f046b7709f7bfd350f5b09e38 Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Fri, 23 May 2014 14:58:29 +0800
+Subject: [PATCH 4183/5965] cpufreq: up cpu which is offline when hotplug
+ governor exit
+
+---
+ drivers/cpufreq/cpufreq.c             | 13 +++++++++++++
+ drivers/cpufreq/cpufreq_governor.c    |  2 ++
+ drivers/cpufreq/cpufreq_interactive.c |  2 ++
+ drivers/cpufreq/cpufreq_performance.c |  2 ++
+ include/linux/cpufreq.h               |  1 +
+ 5 files changed, 20 insertions(+)
+
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+index 43969cb210d7..55b889e62b63 100755
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -95,6 +95,7 @@ static int __cpufreq_governor(struct cpufreq_policy *policy,
+ 		unsigned int event);
+ static unsigned int __cpufreq_get(unsigned int cpu);
+ static void handle_update(struct work_struct *work);
++static void handle_up_cpu(struct work_struct *work);
+ 
+ /**
+  * Two notifier lists: the "policy" list is involved in the
+@@ -924,6 +925,7 @@ static int cpufreq_add_dev(struct device *dev, struct subsys_interface *sif)
+ 
+ 	init_completion(&policy->kobj_unregister);
+ 	INIT_WORK(&policy->update, handle_update);
++	INIT_WORK(&policy->up_cpu, handle_up_cpu);
+ 
+ 	/* call driver. From then on the cpufreq must be able
+ 	 * to accept all calls to ->verify and ->setpolicy for this CPU
+@@ -1142,6 +1144,17 @@ static void handle_update(struct work_struct *work)
+ 	pr_debug("handle_update for cpu %u called\n", cpu);
+ 	cpufreq_update_policy(cpu);
+ }
++static void handle_up_cpu(struct work_struct *work)
++{
++	int i;
++
++	for(i = 0; i < NR_CPUS; i++){
++		if(cpu_online(i))
++			continue;
++		cpu_up(i);
++		break;
++	}
++}
+ 
+ /**
+  *	cpufreq_out_of_sync - If actual and saved CPU frequency differs, we're in deep trouble.
+diff --git a/drivers/cpufreq/cpufreq_governor.c b/drivers/cpufreq/cpufreq_governor.c
+index 59092fdda71a..1e35a2d1cdfd 100755
+--- a/drivers/cpufreq/cpufreq_governor.c
++++ b/drivers/cpufreq/cpufreq_governor.c
+@@ -472,6 +472,8 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 			gov_queue_work(dbs_data, policy,
+ 					delay_for_sampling_rate(sampling_rate), true);
+ 
++		if((dbs_data->cdata->governor != GOV_HOTPLUG) && (num_online_cpus() < NR_CPUS))
++			schedule_work(&policy->up_cpu);
+ 		break;
+ 
+ 	case CPUFREQ_GOV_STOP:
+diff --git a/drivers/cpufreq/cpufreq_interactive.c b/drivers/cpufreq/cpufreq_interactive.c
+index 90958fdd64dc..a8c435857f59 100644
+--- a/drivers/cpufreq/cpufreq_interactive.c
++++ b/drivers/cpufreq/cpufreq_interactive.c
+@@ -1119,6 +1119,8 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
+ 		cpufreq_register_notifier(
+ 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
+ 		mutex_unlock(&gov_lock);
++		if(num_online_cpus() < NR_CPUS)
++			schedule_work(&policy->up_cpu);
+ 		break;
+ 
+ 	case CPUFREQ_GOV_STOP:
+diff --git a/drivers/cpufreq/cpufreq_performance.c b/drivers/cpufreq/cpufreq_performance.c
+index ceee06849b91..1644397aba0d 100644
+--- a/drivers/cpufreq/cpufreq_performance.c
++++ b/drivers/cpufreq/cpufreq_performance.c
+@@ -23,6 +23,8 @@ static int cpufreq_governor_performance(struct cpufreq_policy *policy,
+ {
+ 	switch (event) {
+ 	case CPUFREQ_GOV_START:
++		if(num_online_cpus() < NR_CPUS)
++			schedule_work(&policy->up_cpu);
+ 	case CPUFREQ_GOV_LIMITS:
+ 		pr_debug("setting to %u kHz because of event %u\n",
+ 						policy->max, event);
+diff --git a/include/linux/cpufreq.h b/include/linux/cpufreq.h
+index 0e2805da4070..922461006f58 100755
+--- a/include/linux/cpufreq.h
++++ b/include/linux/cpufreq.h
+@@ -116,6 +116,7 @@ struct cpufreq_policy {
+ 
+ 	struct kobject		kobj;
+ 	struct completion	kobj_unregister;
++	struct work_struct	up_cpu;
+ };
+ 
+ #define CPUFREQ_ADJUST			(0)
+-- 
+2.19.0
+

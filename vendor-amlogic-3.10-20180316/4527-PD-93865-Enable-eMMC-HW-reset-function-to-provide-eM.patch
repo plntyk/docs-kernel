@@ -1,0 +1,474 @@
+From 14b32c88b88d395f336b911f089510130dfe805a Mon Sep 17 00:00:00 2001
+From: "benjamin.zhao" <benjamin.zhao@amlogic.com>
+Date: Thu, 3 Jul 2014 00:40:50 +0800
+Subject: [PATCH 4527/5965] PD#93865: Enable eMMC HW reset function to provide
+ eMMC reset and reinit in eMMC chip internal error case
+
+---
+ .../dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd |  4 +-
+ .../dts/amlogic/meson8_k200b_1G_emmc_sdio.dtd |  4 +-
+ arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd |  4 +-
+ .../boot/dts/amlogic/meson8_k200b_2G_4k2k.dtd |  4 +-
+ .../dts/amlogic/meson8_k200b_2G_hdmiin.dtd    |  2 +-
+ arch/arm/boot/dts/amlogic/meson8b_m100_1G.dtd |  4 +-
+ .../boot/dts/amlogic/meson8b_m101_512M.dtd    |  4 +-
+ arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd |  4 +-
+ arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd |  4 +-
+ arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd |  4 +-
+ .../boot/dts/amlogic/meson8b_m202_512M.dtd    |  4 +-
+ arch/arm/boot/dts/amlogic/meson8b_skt.dtd     |  4 +-
+ drivers/amlogic/mmc/aml_sdhc_m8.c             |  1 +
+ drivers/amlogic/mmc/aml_sdio.c                |  1 +
+ drivers/amlogic/mmc/amlsd.c                   | 37 +++++++++++++++++++
+ drivers/amlogic/mmc/amlsd.h                   |  5 ++-
+ drivers/mmc/card/block.c                      | 13 ++++---
+ drivers/mmc/core/core.c                       |  7 +++-
+ drivers/mmc/core/mmc.c                        | 20 ++++++++++
+ 19 files changed, 98 insertions(+), 32 deletions(-)
+ mode change 100644 => 100755 drivers/amlogic/mmc/amlsd.c
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
+index 4687b5a6693f..b2e17d4812b6 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
+@@ -502,7 +502,7 @@ sdio{
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -599,7 +599,7 @@ sdio{
+             port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+             f_min = <300000>;
+             f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdio.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdio.dtd
+index 68f775998e37..27a9448e87cc 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdio.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdio.dtd
+@@ -502,7 +502,7 @@ sdio{
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+@@ -599,7 +599,7 @@ sdio{
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ //            f_min = <300000>;
+ //            f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
+index 002d88ccaa01..3ebbf3976f0b 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
+@@ -478,7 +478,7 @@ sdio{
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+@@ -575,7 +575,7 @@ sdio{
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            max_req_size = <0x20000>;          /**128KB*/
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_2G_4k2k.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_2G_4k2k.dtd
+index cee5131b2698..fb0f0336ced0 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_2G_4k2k.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_2G_4k2k.dtd
+@@ -478,7 +478,7 @@ sdio{
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+@@ -575,7 +575,7 @@ sdio{
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            max_req_size = <0x20000>;          /**128KB*/
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_2G_hdmiin.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_2G_hdmiin.dtd
+index 260676731ba5..1803a7c26a03 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_2G_hdmiin.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_2G_hdmiin.dtd
+@@ -483,7 +483,7 @@ sdio{
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m100_1G.dtd
+index 087c11e4954d..c7cac64835ff 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m100_1G.dtd
+@@ -481,7 +481,7 @@ void root_func(){
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -582,7 +582,7 @@ void root_func(){
+             port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <40000000>;
+             max_req_size = <0x20000>;          /**128KB*/
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+index 93704ae2ec95..df7f35bebf2f 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+@@ -460,7 +460,7 @@ void root_func(){
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -556,7 +556,7 @@ void root_func(){
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ //            f_min = <300000>;
+ //            f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+index ec77837b4f08..177c4371a9df 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+@@ -439,7 +439,7 @@ void root_func(){
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -535,7 +535,7 @@ void root_func(){
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ //            f_min = <300000>;
+ //            f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
+index c26fc6edd43f..ef3d32a220fe 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m200_1G.dtd
+@@ -491,7 +491,7 @@ void root_func(){
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -592,7 +592,7 @@ void root_func(){
+             port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ 	        f_min = <300000>;
+             f_max = <150000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
+index 48bd33470d7c..74d0490237f8 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
+@@ -491,7 +491,7 @@ void root_func(){
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+@@ -588,7 +588,7 @@ void root_func(){
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ //            f_min = <300000>;
+ //            f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m202_512M.dtd b/arch/arm/boot/dts/amlogic/meson8b_m202_512M.dtd
+index 962e709e66d6..a1200ace94cd 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m202_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m202_512M.dtd
+@@ -483,7 +483,7 @@ void root_func(){
+             port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <50000000>;
+             f_max_w = <50000000>;
+@@ -580,7 +580,7 @@ void root_func(){
+ //            port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x00200080>; // 3.3:0x200000, 1.8+3.3:0x00200080
+-//            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            caps2 = "MMC_CAP2_HS200_1_8V_SDR";
+ //            f_min = <300000>;
+ //            f_max = <100000000>;
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_skt.dtd b/arch/arm/boot/dts/amlogic/meson8b_skt.dtd
+index b30e8b61f412..b31fc67343e6 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_skt.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_skt.dtd
+@@ -442,7 +442,7 @@ void root_func(){
+ //            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+ //            pinname = "emmc";
+ //            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++//            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+ //            f_min = <300000>;
+ //            f_max = <50000000>;
+ //            f_max_w = <50000000>;
+@@ -532,7 +532,7 @@ void root_func(){
+             port = <5>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+             pinname = "emmc";
+             ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            caps = "MMC_CAP_8_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE","MMC_CAP_ERASE", "MMC_CAP_HW_RESET"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+             f_min = <300000>;
+             f_max = <40000000>;
+             max_req_size = <0x20000>;          /**128KB*/
+diff --git a/drivers/amlogic/mmc/aml_sdhc_m8.c b/drivers/amlogic/mmc/aml_sdhc_m8.c
+index 00ce5fd7e8b2..7b80a0d03139 100755
+--- a/drivers/amlogic/mmc/aml_sdhc_m8.c
++++ b/drivers/amlogic/mmc/aml_sdhc_m8.c
+@@ -2174,6 +2174,7 @@ static const struct mmc_host_ops aml_sdhc_ops = {
+     .start_signal_voltage_switch = aml_signal_voltage_switch,
+     .card_busy = aml_sdhc_card_busy,
+     .execute_tuning = aml_sdhc_execute_tuning,
++    .hw_reset = aml_emmc_hw_reset,
+ };
+ 
+ /*for multi host claim host*/
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 40353b2c7eaf..2ed2c832d83f 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -1194,6 +1194,7 @@ static const struct mmc_host_ops aml_sdio_ops = {
+     .enable_sdio_irq = aml_sdio_enable_irq,
+     .get_cd = aml_sdio_get_cd,
+     .get_ro = aml_sdio_get_ro,
++	.hw_reset = aml_emmc_hw_reset,
+ };
+ 
+ static ssize_t sdio_debug_func(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+old mode 100644
+new mode 100755
+index 9b47cc3b03d8..b547ab07420c
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -1311,6 +1311,43 @@ int aml_sd_voltage_switch (struct amlsd_platform* pdata, char signal_voltage)
+     return 0;
+ }
+ 
++// boot9 here
++void aml_emmc_hw_reset(struct mmc_host *mmc)
++{
++    struct amlsd_platform * pdata = mmc_priv(mmc);
++
++    if(!aml_card_type_mmc(pdata)){
++        return;
++    }
++
++    printk("%s %d\n", __func__, __LINE__);
++
++#if ((defined CONFIG_ARCH_MESON6) ||(defined CONFIG_ARCH_MESON8) || (defined CONFIG_ARCH_MESON8B))
++    //boot_9 used as eMMC hw_rst pin here.
++
++    //clr nand ce1 pinmux
++    aml_clr_reg32_mask(P_PERIPHS_PIN_MUX_2, (1<<24));
++
++    //set out    
++    aml_clr_reg32_mask(P_PREG_PAD_GPIO3_EN_N, (1<<9));
++
++    //high
++    aml_set_reg32_mask(P_PREG_PAD_GPIO3_O, (1<<9));
++    mdelay(1);
++
++    //low
++    aml_clr_reg32_mask(P_PREG_PAD_GPIO3_O, (1<<9));
++    mdelay(2);
++
++    //high
++    aml_set_reg32_mask(P_PREG_PAD_GPIO3_O, (1<<9));
++    mdelay(1);
++ #endif
++ 
++    return; 
++}
++
++
+ /*-------------------debug---------------------*/
+ 
+ unsigned int sdhc_debug=0x0; // 0xffffffff;
+diff --git a/drivers/amlogic/mmc/amlsd.h b/drivers/amlogic/mmc/amlsd.h
+index 83d315731eeb..704a7b3668fd 100755
+--- a/drivers/amlogic/mmc/amlsd.h
++++ b/drivers/amlogic/mmc/amlsd.h
+@@ -5,9 +5,9 @@
+ 
+ 
+ #define AML_MMC_MAJOR_VERSION   1
+-#define AML_MMC_MINOR_VERSION   06
++#define AML_MMC_MINOR_VERSION   07
+ #define AML_MMC_VERSION         ((AML_MMC_MAJOR_VERSION << 8) | AML_MMC_MINOR_VERSION)
+-#define AML_MMC_VER_MESSAGE     "2014-06-24: sdhc rx fifo setting improve"
++#define AML_MMC_VER_MESSAGE     "2014-06-30: eMMC add hw reset function"
+ 
+ extern unsigned sdhc_debug;
+ extern unsigned sdio_debug;
+@@ -146,6 +146,7 @@ void aml_cs_dont_care (struct amlsd_platform * pdata); // chip select don't care
+ bool is_emmc_exist (struct amlsd_host* host); // is eMMC/tSD exist
+ void aml_devm_pinctrl_put (struct amlsd_host* host);
+ // void of_init_pins (struct amlsd_platform* pdata);
++extern void aml_emmc_hw_reset(struct mmc_host *mmc);
+ 
+ void aml_snprint (char **pp, int *left_size,  const char *fmt, ...);
+ 
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index ebb68b08870d..df6e173873b2 100755
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -842,8 +842,8 @@ static int mmc_blk_cmd_recovery(struct mmc_card *card, struct request *req,
+ 			break;
+ 
+ 		prev_cmd_status_valid = false;
+-		pr_err("%s: error %d sending status command, %sing\n",
+-		       req->rq_disk->disk_name, err, retry ? "retry" : "abort");
++		pr_err("%s: error %d sending status command, %sing, %s\n",
++		       req->rq_disk->disk_name, err, retry ? "retry" : "abort", __func__);
+ 	}
+ 
+ 	/* We couldn't get a response from the card.  Give up. */
+@@ -933,8 +933,11 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
+ {
+ 	int err;
+ 
+-	if (md->reset_done & type)
++	if (md->reset_done & type){
++        pr_err("%s %d reset error md->reset_done:%d and type:%d\n", 
++            __func__, __LINE__, md->reset_done, type);
+ 		return -EEXIST;
++	}
+ 
+ 	md->reset_done |= type;
+ 	err = mmc_hw_reset(host);
+@@ -1286,8 +1289,8 @@ static int mmc_blk_packed_err_check(struct mmc_card *card,
+ 	check = mmc_blk_err_check(card, areq);
+ 	err = get_card_status(card, &status, 0);
+ 	if (err) {
+-		pr_err("%s: error %d sending status command\n",
+-		       req->rq_disk->disk_name, err);
++		pr_err("%s: error %d sending status command %s\n",
++		       req->rq_disk->disk_name, err, __func__);
+ 		return MMC_BLK_ABORT;
+ 	}
+ 
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 8a91211130c7..98f0b5c691c8 100755
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -2216,9 +2216,12 @@ int mmc_can_reset(struct mmc_card *card)
+ 
+ 	if (!mmc_card_mmc(card))
+ 		return 0;
++    
+ 	rst_n_function = card->ext_csd.rst_n_function;
+-	if ((rst_n_function & EXT_CSD_RST_N_EN_MASK) != EXT_CSD_RST_N_ENABLED)
+-		return 0;
++	if ((rst_n_function & EXT_CSD_RST_N_EN_MASK) != EXT_CSD_RST_N_ENABLED){
++        pr_err("###Detect hw reset function disabled here, rst_n_function:%d\n", rst_n_function);
++        return 0;
++	}
+ 	return 1;
+ }
+ EXPORT_SYMBOL(mmc_can_reset);
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index 9f7aa2062904..6f0a67ca2bec 100755
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -492,6 +492,26 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
+ 
+ 		card->ext_csd.rel_param = ext_csd[EXT_CSD_WR_REL_PARAM];
+ 		card->ext_csd.rst_n_function = ext_csd[EXT_CSD_RST_N_FUNCTION];
++        
++        if ((card->ext_csd.rst_n_function & EXT_CSD_RST_N_EN_MASK) != EXT_CSD_RST_N_ENABLED){
++
++            pr_err("Enable hw reset function here, only once, rst_n_function:%d\n", card->ext_csd.rst_n_function);
++            //add enable hw reset function here, only run once for eMMC            
++            err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_RST_N_FUNCTION,
++                    EXT_CSD_RST_N_ENABLED,
++                    10);
++            if (err){
++                pr_err("Enable hw reset function ERROR here, ret:%d\n", err);
++                //return 0;
++            }
++            else{
++                card->ext_csd.rst_n_function |= EXT_CSD_RST_N_ENABLED;
++            }
++        }
++        else{
++            pr_err("###check hw reset function is already enabled here\n");          
++
++        }
+ 
+ 		/*
+ 		 * RPMB regions are defined in multiples of 128K.
+-- 
+2.19.0
+

@@ -1,0 +1,171 @@
+From 4522f3e9f341fdabe118caf0fd59d52a25472256 Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Wed, 13 Nov 2013 16:42:53 +0800
+Subject: [PATCH 1932/5965] disable auto foucus as only touch focus enable.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c | 34 ++++++++++++++----------------
+ drivers/amlogic/tvin/isp/isp_drv.h |  5 ++++-
+ drivers/amlogic/tvin/isp/isp_sm.c  | 14 +++++++-----
+ 3 files changed, 29 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 0f15657f1ca2..e2902fe1a490 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -49,7 +49,6 @@ static struct class *isp_clsp;
+ static unsigned int isp_debug = 0;
+ static unsigned int ae_enable = 1;
+ static unsigned int awb_enable = 1;
+-static unsigned int af_enable = 1;
+ static unsigned int af_pr = 0;
+ static unsigned int ioctl_debug = 0;
+ static unsigned int isr_debug = 0;
+@@ -652,7 +651,7 @@ static int isp_thread(isp_dev_t *devp) {
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+ 		af_stat(devp->af_dbg,func);
+ 	}
+-	if(devp->flag&ISP_FLAG_AF) {
++	if(devp->flag & ISP_AF_SM_MASK) {
+ 		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
+ 			atomic_set(&devp->af_info.writeable,0);
+ 			func->set_af_new_step(devp->af_info.cur_step);
+@@ -787,9 +786,11 @@ static void isp_fe_close(struct tvin_frontend_s *fe)
+ 			kfree(devp->isp_af_parm);
+ 	if(devp->isp_fe)
+ 		devp->isp_fe->dec_ops->close(devp->isp_fe);
+-	switch_vpu_mem_pd_vmod(VPU_ISP,VPU_MEM_POWER_DOWN);
+         memset(&devp->info,0,sizeof(isp_info_t));
+-        /*close the isp to vdin path*/
++	devp->flag &= (~ISP_FLAG_AF);
++	devp->flag &= (~ISP_FLAG_TOUCH_AF);
++	/*power down isp hw*/
++	switch_vpu_mem_pd_vmod(VPU_ISP,VPU_MEM_POWER_DOWN);
+ 
+ }
+ 
+@@ -902,12 +903,14 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 				pr_info("focus win: center(%u,%u) left(%u %u) right(%u,%u).\n",devp->isp_af_parm->x,
+ 					devp->isp_af_parm->y,x0,y0,x1,y1);
+ 			isp_set_blenr_stat(x0,y0,x1,y1);
+-			devp->flag |= (ISP_FLAG_AF|ISP_FLAG_TOUCH_AF);
++			devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			af_sm_init(devp);
+ 		        break;
+                 case CAM_COMMAND_CONTINUOUS_FOCUS_ON:
++			devp->flag |= ISP_FLAG_AF;
+ 		        break;
+                 case CAM_COMMAND_CONTINUOUS_FOCUS_OFF:
++			devp->flag &= (~ISP_FLAG_AF);
+ 		        break;
+                 case CAM_COMMAND_BACKGROUND_FOCUS_ON:
+ 		        break;
+@@ -945,8 +948,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+         if(devp->flag & ISP_FLAG_AE)
+ 	        isp_get_ae_stat(&devp->isp_ae);
+ 	}
+-	if(af_enable){
+-	if(devp->flag & ISP_FLAG_AF)
++	if(devp->flag & ISP_AF_SM_MASK){
+ 	        isp_get_blnr_stat(&af_info->isr_af_data);
+ 	}
+ 	if(devp->flag & ISP_FLAG_SET_EFFECT){
+@@ -1007,16 +1009,15 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ static void isp_tasklet(unsigned long arg)
+ {
+ 	isp_dev_t *devp = (isp_dev_t *)arg;
+-    if(ae_enable){
+-	if(devp->flag & ISP_FLAG_AE)
+-	        isp_ae_sm(devp);
+-    }
++        if(ae_enable){
++                if(devp->flag & ISP_FLAG_AE)
++	                isp_ae_sm(devp);
++        }
+ 	if(awb_enable){
+-	if(devp->flag & ISP_FLAG_AWB)
+-                isp_awb_sm(devp);
++		if(devp->flag & ISP_FLAG_AWB)
++                        isp_awb_sm(devp);
+ 	}
+-	if(af_enable){
+-	if(devp->flag & ISP_FLAG_AF)
++	if(devp->flag & ISP_AF_SM_MASK){
+ 		isp_af_detect(devp);
+ 	}
+ }
+@@ -1218,9 +1219,6 @@ MODULE_PARM_DESC(ae_enable,"\n ae_enable.\n");
+ module_param(awb_enable,uint,0664);
+ MODULE_PARM_DESC(awb_enable,"\n awb_enable.\n");
+ 
+-module_param(af_enable,uint,0664);
+-MODULE_PARM_DESC(af_enable,"\n af_enable.\n");
+-
+ module_param(ae_flag,uint,0664);
+ MODULE_PARM_DESC(ae_flag,"\n debug flag for ae_flag.\n");
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 2c6d22a7e8cd..5a8caf51c4f1 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.12a"
++#define ISP_VER					"2013.11.13a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -48,6 +48,9 @@
+ #define ISP_TEST_FOR_AF_WIN			0x00001000	
+ #define ISP_FLAG_TOUCH_AF			0x00002000
+ #define ISP_FLAG_SKIP_BUF			0x00004000
++
++#define ISP_AF_SM_MASK				ISP_FLAG_AF|ISP_FLAG_TOUCH_AF
++
+ typedef struct isp_info_s {
+ 	tvin_port_t fe_port;
+ 	unsigned int h_active;
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 51402f3a24b5..b1caebbd450d 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -141,7 +141,7 @@ void af_sm_init(isp_dev_t *devp)
+ 	/*init for af*/
+ 	if(sm_state.af_state)
+ 		devp->flag |= devp->af_info.flag_bk;
+-	if(devp->flag & ISP_FLAG_AF){
++	if(devp->flag & ISP_AF_SM_MASK){
+     	        sm_state.af_state = AF_INIT;
+ 	}
+ 	devp->af_info.fv_aft_af = 0;
+@@ -1187,8 +1187,10 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
+-					devp->flag &=(~ISP_FLAG_TOUCH_AF);
+-					sm_state.af_state = AF_DETECT_INIT;
++					if(devp->flag & ISP_FLAG_AF)
++						sm_state.af_state = AF_DETECT_INIT;
++					else
++						sm_state.af_state = AF_NULL;
+ 					isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+ 				} else {/*af success*/
+ 					/*enable awb,enable af*/
+@@ -1196,8 +1198,10 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
+-					devp->flag &=(~ISP_FLAG_TOUCH_AF);
+-					sm_state.af_state = AF_DETECT_INIT;
++					if(devp->flag & ISP_FLAG_AF)
++						sm_state.af_state = AF_DETECT_INIT;
++					else
++						sm_state.af_state = AF_NULL;
+ 					isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+ 				}
+ 			}
+-- 
+2.19.0
+

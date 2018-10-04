@@ -1,0 +1,1681 @@
+From 1637e4ef4a7f2595fb7bf76fb7b1427a8f8f59ed Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Tue, 29 Apr 2014 16:21:12 +0800
+Subject: [PATCH 3991/5965] PD#90682: add external backlight control driver
+
+---
+ arch/arm/boot/dts/amlogic/aml_top.dtd         |   2 +
+ arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd  |  42 ++-
+ arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd  |  42 ++-
+ arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd  |  42 ++-
+ .../arm/boot/dts/amlogic/meson8_k101_512M.dtd |  42 ++-
+ arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd  |  42 ++-
+ arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd  |  42 ++-
+ arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd  |  42 ++-
+ drivers/amlogic/display/backlight/Makefile    |   1 +
+ drivers/amlogic/display/backlight/aml.dtd     |   7 +-
+ drivers/amlogic/display/backlight/aml_bl.c    |  68 +++-
+ .../display/backlight/aml_bl_extern/Makefile  |   5 +
+ .../display/backlight/aml_bl_extern/aml.dtd   |  43 +++
+ .../backlight/aml_bl_extern/aml_bl_extern.c   | 198 ++++++++++
+ .../backlight/aml_bl_extern/i2c_lp8556.c      | 342 ++++++++++++++++++
+ .../backlight/aml_bl_extern/pmu_aml1218.c     | 287 +++++++++++++++
+ drivers/amlogic/display/vout/lcdoutc.c        |   7 +-
+ include/linux/amlogic/aml_bl_extern.h         |  56 +++
+ include/linux/amlogic/aml_lcd_bl.h            |   2 +-
+ 19 files changed, 1295 insertions(+), 17 deletions(-)
+ create mode 100644 drivers/amlogic/display/backlight/aml_bl_extern/Makefile
+ create mode 100755 drivers/amlogic/display/backlight/aml_bl_extern/aml.dtd
+ create mode 100644 drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+ create mode 100755 drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
+ create mode 100755 drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+ create mode 100755 include/linux/amlogic/aml_bl_extern.h
+
+diff --git a/arch/arm/boot/dts/amlogic/aml_top.dtd b/arch/arm/boot/dts/amlogic/aml_top.dtd
+index bc026a08fb35..d9368d2fef3e 100755
+--- a/arch/arm/boot/dts/amlogic/aml_top.dtd
++++ b/arch/arm/boot/dts/amlogic/aml_top.dtd
+@@ -295,6 +295,8 @@ sub_file /drivers/amlogic/usb/aml.dtd
+ //$$ MODULE="LCD"
+ #device backlight
+ sub_file /drivers/amlogic/display/backlight/aml.dtd
++#device backlight_extern
++sub_file /drivers/amlogic/display/backlight/aml_bl_extern/aml.dtd
+ #device lcd
+ sub_file /drivers/amlogic/display/vout/aml_lcd.dtd
+ #device lcd_extern
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+index fa8010ae34c6..60fa0847c330 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+@@ -896,7 +896,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<200>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -911,6 +911,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+index ff7c216091d3..1644766140ce 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+@@ -906,7 +906,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<200>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -921,6 +921,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+index 3e26c5773e92..c1d7de07e356 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+@@ -848,7 +848,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<100>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<3>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<3>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -863,6 +863,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+index e1540a18e432..72ad4cb4c33a 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+@@ -849,7 +849,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<100>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<3>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<3>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -864,6 +864,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+index 8abba24f1a03..35d63bfa1cc0 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+@@ -905,7 +905,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<100>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -920,6 +920,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+index f022249cc886..d245512a224c 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+@@ -868,7 +868,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<100>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -883,6 +883,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
+index 3d6acd55026a..3ba9ddc031f9 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
+@@ -888,7 +888,7 @@ sdio{
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<200>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<0>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<4>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive, 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -903,6 +903,46 @@ sdio{
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 96 89>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 10>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "okay"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
+ //$$ DEVICE="lcd"
+ //$$ L2 PROP_STR = "status"
+ 
+diff --git a/drivers/amlogic/display/backlight/Makefile b/drivers/amlogic/display/backlight/Makefile
+index c5d6419f18f6..5d6910e37282 100755
+--- a/drivers/amlogic/display/backlight/Makefile
++++ b/drivers/amlogic/display/backlight/Makefile
+@@ -1,4 +1,5 @@
+ obj-$(CONFIG_AMLOGIC_BACKLIGHT)			+= aml_bl.o
++obj-$(CONFIG_AML_LCD_BACKLIGHT_SUPPORT)	+= aml_bl_extern/
+ 
+ obj-$(CONFIG_AML_LOCAL_DIMMING)			+= aml_local_dimming.o
+ aml_local_dimming-objs := localdimming.o ld_notify.o aml_ldim_drv.o
+diff --git a/drivers/amlogic/display/backlight/aml.dtd b/drivers/amlogic/display/backlight/aml.dtd
+index c73ca018a7f4..c0e5097a23fd 100755
+--- a/drivers/amlogic/display/backlight/aml.dtd
++++ b/drivers/amlogic/display/backlight/aml.dtd
+@@ -1,4 +1,5 @@
+ #ifdef CONFIG_AMLOGIC_BACKLIGHT
++#ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
+ //$$ DEVICE="backlight"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_CHOICE "Bl_pin_0_match" = "pinctrl-0"
+@@ -18,7 +19,7 @@
+ //$$ L2 PROP_STR 2 = "bl_pwm_combo_low_port_method"
+ //$$ L2 PROP_U32 3 = "bl_pwm_combo_high_freq_duty_max_min"
+ //$$ L2 PROP_U32 3 = "bl_pwm_combo_low_freq_duty_max_min"
+-     backlight{
++	backlight{
+ 		compatible = "amlogic,backlight";
+ 		dev_name = "backlight";
+ 		status = "okay";
+@@ -32,7 +33,7 @@
+ 		
+ 		/* backlight power ctrl */
+ 		bl_power_on_delay=<200>; /** delay time before backlight power on(unit: ms) */
+-		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive. 3=pwm_combo. decided by hardware design) */
++		bl_ctrl_method=<1>;	/** backlight control method(0=gpio, 1=pwm_negative, 2=pwm_positive. 3=pwm_combo. 4=extern. decided by hardware design) */
+ 		
+ 		bl_gpio_port="GPIODV_28";	/** backlight control gpio port */
+ 		bl_gpio_dim_max_min=<0x0 0xf>;	/** brightness diming level_max, level_min : (0x0~0xf, negative logic, only for gpio control method) */
+@@ -47,4 +48,6 @@
+ 		bl_pwm_combo_high_freq_duty_max_min=<300000 90 50>;	/** backlight pwm_combo level_high port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 		bl_pwm_combo_low_freq_duty_max_min=<10000 100 50>;	/** backlight pwm_combo level_low port frequency(unit: Hz), duty_max, duty_min : (unit: %, positive logic) */
+ 	};
++
++#endif
+ #endif
+\ No newline at end of file
+diff --git a/drivers/amlogic/display/backlight/aml_bl.c b/drivers/amlogic/display/backlight/aml_bl.c
+index f0e2425ccc30..27c6db7455e8 100755
+--- a/drivers/amlogic/display/backlight/aml_bl.c
++++ b/drivers/amlogic/display/backlight/aml_bl.c
+@@ -41,6 +41,7 @@
+ #include <linux/delay.h>
+ #ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
+ #include <linux/amlogic/aml_lcd_bl.h>
++#include <linux/amlogic/aml_bl_extern.h>
+ #endif
+ 
+ //#define MESON_BACKLIGHT_DEBUG
+@@ -68,7 +69,8 @@ typedef enum {
+     BL_CTL_PWM_NEGATIVE = 1,
+     BL_CTL_PWM_POSITIVE = 2,
+     BL_CTL_PWM_COMBO = 3,
+-    BL_CTL_MAX = 4,
++    BL_CTL_EXTERN = 4,
++    BL_CTL_MAX = 5,
+ } BL_Ctrl_Method_t;
+ 
+ static const char* bl_ctrl_method_table[]={
+@@ -76,6 +78,7 @@ static const char* bl_ctrl_method_table[]={
+     "pwm_negative",
+     "pwm_positive",
+     "pwm_combo",
++    "extern",
+     "null"
+ };
+ 
+@@ -140,10 +143,17 @@ static int bl_real_status = 1;
+ 
+ #define FIN_FREQ				(24 * 1000)
+ 
++void get_bl_ext_level(struct bl_extern_config_t *bl_ext_cfg)
++{
++    bl_ext_cfg->level_min = bl_config.level_min;
++    bl_ext_cfg->level_max = bl_config.level_max;
++}
++
+ static DEFINE_MUTEX(bl_power_mutex);
+ static void power_on_bl(void)
+ {
+     struct pinctrl_state *s;
++    struct aml_bl_extern_driver_t *bl_extern_driver;
+     int ret;
+ 
+     mutex_lock(&bl_power_mutex);
+@@ -288,6 +298,24 @@ static void power_on_bl(void)
+                 goto exit_power_on_bl;
+             }
+             break;
++        case BL_CTL_EXTERN:
++            bl_extern_driver = aml_bl_extern_get_driver();
++            if (bl_extern_driver == NULL) {
++                printk("no bl_extern driver\n");
++            }
++            else {
++                if (bl_extern_driver->power_on) {
++                    ret = bl_extern_driver->power_on();
++                    if (ret) {
++                        printk("[bl_extern] power on error\n");
++                        goto exit_power_on_bl;
++                    }
++                }
++                else {
++                    printk("[bl_extern] power on is null\n");
++                }
++            }
++            break;
+         default:
+             printk("wrong backlight control method\n");
+             goto exit_power_on_bl;
+@@ -332,6 +360,7 @@ void bl_power_on(int bl_flag)
+ 
+ void bl_power_off(int bl_flag)
+ {
++    struct aml_bl_extern_driver_t *bl_extern_driver;
+     int ret;
+ 
+     mutex_lock(&bl_power_mutex);
+@@ -406,6 +435,22 @@ void bl_power_off(int bl_flag)
+                     break;
+             }
+             break;
++        case BL_CTL_EXTERN:
++            bl_extern_driver = aml_bl_extern_get_driver();
++            if (bl_extern_driver == NULL) {
++                printk("no bl_extern driver\n");
++            }
++            else {
++                if (bl_extern_driver->power_off) {
++                    ret = bl_extern_driver->power_off();
++                    if (ret)
++                        printk("[bl_extern] power off error\n");
++                }
++                else {
++                    printk("[bl_extern] power off is null\n");
++                }
++            }
++            break;
+         default:
+             break;
+     }
+@@ -418,11 +463,12 @@ static DEFINE_MUTEX(bl_level_mutex);
+ static void set_backlight_level(unsigned level)
+ {
+     unsigned pwm_hi = 0, pwm_lo = 0;
++    struct aml_bl_extern_driver_t *bl_extern_driver;
+     int ret;
+ 
+     mutex_lock(&bl_level_mutex);
+ 
+-    DPRINT("set_backlight_level: %u, last level: %u\n", level, bl_level);
++    DPRINT("set_backlight_level: %u, last level: %u, bl_status: %u, bl_real_status: %u\n", level, bl_level, bl_status, bl_real_status);
+     level = (level > bl_config.level_max ? bl_config.level_max : (level < bl_config.level_min ? (level < BL_LEVEL_OFF ? 0 : bl_config.level_min) : level));
+     bl_level = level;
+ 
+@@ -581,6 +627,22 @@ static void set_backlight_level(unsigned level)
+                     }
+                 }
+                 break;
++            case BL_CTL_EXTERN:
++                bl_extern_driver = aml_bl_extern_get_driver();
++                if (bl_extern_driver == NULL) {
++                    printk("no bl_extern driver\n");
++                }
++                else {
++                    if (bl_extern_driver->set_level) {
++                        ret = bl_extern_driver->set_level(level);
++                        if (ret)
++                            printk("[bl_extern] set_level error\n");
++                    }
++                    else {
++                        printk("[bl_extern] set_level is null\n");
++                    }
++                }
++                break;
+             default:
+                 break;
+         }
+@@ -590,7 +652,7 @@ static void set_backlight_level(unsigned level)
+     mutex_unlock(&bl_level_mutex);
+ }
+ 
+-static unsigned get_backlight_level(void)
++unsigned get_backlight_level(void)
+ {
+     DPRINT("%s: %d\n", __FUNCTION__, bl_level);
+     return bl_level;
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/Makefile b/drivers/amlogic/display/backlight/aml_bl_extern/Makefile
+new file mode 100644
+index 000000000000..d826c1ef08a1
+--- /dev/null
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/Makefile
+@@ -0,0 +1,5 @@
++
++obj-y	+= aml_bl_extern.o
++obj-y	+= i2c_lp8556.o
++obj-y	+= pmu_aml1218.o
++
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/aml.dtd b/drivers/amlogic/display/backlight/aml_bl_extern/aml.dtd
+new file mode 100755
+index 000000000000..d0e0fb5238db
+--- /dev/null
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/aml.dtd
+@@ -0,0 +1,43 @@
++#ifdef CONFIG_AMLOGIC_BACKLIGHT
++#ifdef CONFIG_AML_LCD_BACKLIGHT_SUPPORT
++//******************************************************************************
++//bl extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "bl_extern_pmu_aml1218"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_pmu_aml1218{
++		compatible = "amlogic,bl_pmu_aml1218";
++		dev_name ="bl_pmu_aml1218";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <2>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		dim_max_min = <0x1 0x1b>;
++	};
++
++//$$ DEVICE = "bl_extern_i2c_lp8556"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR 2 = "gpio_enable"
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 2 = "dim_max_min"
++	bl_extern_i2c_lp8556{
++		compatible = "amlogic,bl_i2c_lp8556";
++		dev_name ="bl_i2c_lp8556";
++		status = "disabled"; /** "disabled" or "okay" */
++
++		gpio_enable = "GPIODV_28"; /** "n" for none */
++		type = <0>;	/** bl_extern_driver type: 0=i2c, 1=spi, 2=other */
++		i2c_address = <0x2c>; /** 7bit i2c address */
++		i2c_bus = "i2c_bus_b";
++		dim_max_min = <255 10>;
++	};
++
++//******************************************************************************
++
++#endif
++#endif
+\ No newline at end of file
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c b/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+new file mode 100644
+index 000000000000..499c0fb36d3b
+--- /dev/null
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+@@ -0,0 +1,198 @@
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/i2c.h>
++#include <linux/i2c-aml.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include <linux/of.h>
++#include <mach/am_regs.h>
++#include <mach/gpio.h>
++#include <linux/amlogic/aml_bl_extern.h>
++
++//#define BL_EXT_DEBUG_INFO
++#ifdef BL_EXT_DEBUG_INFO
++#define DBG_PRINT(...)		printk(__VA_ARGS__)
++#else
++#define DBG_PRINT(...)
++#endif
++
++static struct aml_bl_extern_driver_t bl_ext_driver = {
++    .type = BL_EXTERN_MAX,
++    .name = NULL,
++    .power_on = NULL,
++    .power_off = NULL,
++    .set_level = NULL,
++
++};
++
++struct aml_bl_extern_driver_t* aml_bl_extern_get_driver(void)
++{
++    return &bl_ext_driver;
++}
++
++int bl_extern_driver_check(void)
++{
++    struct aml_bl_extern_driver_t* bl_ext;
++
++    bl_ext = aml_bl_extern_get_driver();
++    if (bl_ext) {
++        if (bl_ext->type < BL_EXTERN_MAX) {
++            printk("[warning]: bl_extern has already exist (%s)\n", bl_ext->name);
++            return -1;
++        }
++    }
++    else {
++        printk("get bl_extern_driver failed\n");
++    }
++    
++    return 0;
++}
++
++int get_bl_extern_dt_data(struct device_node* of_node, struct bl_extern_config_t *pdata)
++{
++    int ret;
++    int val;
++    unsigned int bl_para[2];
++    const char *str;
++
++    ret = of_property_read_string(of_node, "dev_name", &pdata->name);
++    if (ret) {
++        pdata->name = "aml_bl_extern";
++        printk("warning: get dev_name failed\n");
++    }
++
++    ret = of_property_read_u32(of_node, "type", &pdata->type);
++    if (ret) {
++        pdata->type = BL_EXTERN_MAX;
++        printk("%s warning: get type failed, exit\n", pdata->name);
++        return -1;
++    }
++    pdata->gpio_used = 0;
++    pdata->gpio = GPIO_MAX;
++    ret = of_property_read_string(of_node, "gpio_enable", &str);
++    if (ret) {
++        printk("%s warning: get gpio_enable failed\n", pdata->name);
++    }
++    else {
++        if (strncmp(str, "G", 1) == 0) {//"GPIO_xx"
++                pdata->gpio_used = 1;
++                val = amlogic_gpio_name_map_num(str);
++                ret = bl_extern_gpio_request(val);
++                if (ret) {
++                    printk("%s warning: faild to alloc gpio (%s)\n", pdata->name, str);
++                }
++                pdata->gpio = val;
++        }
++        DBG_PRINT("%s: gpio_enable %s\n", pdata->name, ((pdata->gpio_used) ? str:"none"));
++    }
++    switch (pdata->type) {
++        case BL_EXTERN_I2C:
++            ret = of_property_read_u32(of_node,"i2c_address",&pdata->i2c_addr);
++            if (ret) {
++                printk("%s warning: get i2c_address failed\n", pdata->name);
++                pdata->i2c_addr = 0;
++            }
++            DBG_PRINT("%s: i2c_address=0x%02x\n", pdata->name, pdata->i2c_addr);
++          
++            ret = of_property_read_string(of_node, "i2c_bus", &str);
++            if (ret) {
++                printk("%s warning: get i2c_bus failed, use default i2c bus\n", pdata->name);
++                pdata->i2c_bus = AML_I2C_MASTER_A;
++            }
++            else {
++                if (strncmp(str, "i2c_bus_a", 9) == 0)
++                    pdata->i2c_bus = AML_I2C_MASTER_A;
++                else if (strncmp(str, "i2c_bus_b", 9) == 0)
++                    pdata->i2c_bus = AML_I2C_MASTER_B;
++                else if (strncmp(str, "i2c_bus_c", 9) == 0)
++                    pdata->i2c_bus = AML_I2C_MASTER_C;
++                else if (strncmp(str, "i2c_bus_d", 9) == 0)
++                    pdata->i2c_bus = AML_I2C_MASTER_D;
++                else if (strncmp(str, "i2c_bus_ao", 10) == 0)
++                    pdata->i2c_bus = AML_I2C_MASTER_AO;
++                else
++                    pdata->i2c_bus = AML_I2C_MASTER_A; 
++            }
++            DBG_PRINT("%s: i2c_bus=%s[%d]\n", pdata->name, str, pdata->i2c_bus);
++            break;
++        case BL_EXTERN_SPI:
++            ret = of_property_read_string(of_node,"gpio_spi_cs", &str);
++            if (ret) {
++                printk("%s warning: get spi gpio_spi_cs failed\n", pdata->name);
++                pdata->spi_cs = -1;
++            }
++            else {
++                val = amlogic_gpio_name_map_num(str);
++                if (val > 0) {
++                    ret = bl_extern_gpio_request(val);
++                    if (ret) {
++                        printk("faild to alloc spi_cs gpio (%s)!\n", str);
++                    }
++                    pdata->spi_cs = val;
++                    DBG_PRINT("spi_cs gpio = %s(%d)\n", str, pdata->spi_cs);
++                }
++                else {
++                    pdata->spi_cs = -1;
++                }
++            }
++            ret = of_property_read_string(of_node,"gpio_spi_clk", &str);
++            if (ret) {
++                printk("%s warning: get spi gpio_spi_clk failed\n", pdata->name);
++                pdata->spi_clk = -1;
++            }
++            else {
++                val = amlogic_gpio_name_map_num(str);
++                if (val > 0) {
++                    ret = bl_extern_gpio_request(val);
++                    if (ret) {
++                        printk("%s: faild to alloc spi_clk gpio (%s)!\n", pdata->name, str);
++                    }
++                    pdata->spi_clk = val;
++                    DBG_PRINT("%s: spi_clk gpio = %s(%d)\n", pdata->name, str, pdata->spi_clk);
++                }
++                else {
++                    pdata->spi_clk = -1;
++                }
++            }
++            ret = of_property_read_string(of_node,"gpio_spi_data", &str);
++            if (ret) {
++                printk("%s warning: get spi gpio_spi_data failed\n", pdata->name);
++                pdata->spi_data = -1;
++            }
++            else {
++                val = amlogic_gpio_name_map_num(str);
++                if (val > 0) {
++                    ret = bl_extern_gpio_request(val);
++                    if (ret) {
++                        printk("%s: faild to alloc spi_data gpio (%s)!\n", pdata->name, str);
++                    }
++                    pdata->spi_data = val;
++                    DBG_PRINT("%s: spi_data gpio = %s(%d)\n", pdata->name, str, pdata->spi_data);
++                }
++                else {
++                    pdata->spi_data = -1;
++                }
++            }
++            break;
++        case BL_EXTERN_OTHER:
++            break;
++        default:
++            break;
++    }
++    ret = of_property_read_u32_array(of_node,"dim_max_min", &bl_para[0], 2);
++    if(ret){
++            printk("%s warning: get dim_max_min failed\n", pdata->name);
++            pdata->dim_max = 0;
++            pdata->dim_min = 0;
++        }
++        else {
++            pdata->dim_max = bl_para[0];
++            pdata->dim_min = bl_para[1];
++        }
++        DBG_PRINT("%s dim_min = %d, dim_max = %d\n", pdata->name, pdata->dim_min, pdata->dim_max);
++
++    return 0;
++}
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c b/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
+new file mode 100755
+index 000000000000..0d1923fc287c
+--- /dev/null
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
+@@ -0,0 +1,342 @@
++/*
++ * AMLOGIC backlight external driver.
++ *
++ * Communication protocol:
++ * I2C 
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/jiffies.h> 
++#include <linux/i2c.h>
++#include <linux/i2c-aml.h>
++#include <linux/miscdevice.h>
++#include <linux/mutex.h>
++#include <linux/mm.h>
++#include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/delay.h>
++#include <linux/sysctl.h>
++#include <asm/uaccess.h>
++#include <mach/pinmux.h>
++#include <mach/gpio.h>
++#include <linux/amlogic/aml_bl_extern.h>
++
++static struct bl_extern_config_t *bl_ext_config = NULL;
++
++static struct i2c_client *aml_lp8556_i2c_client;
++
++//#define BL_EXT_DEBUG_INFO
++#ifdef BL_EXT_DEBUG_INFO
++#define DBG_PRINT(...)		printk(__VA_ARGS__)
++#else
++#define DBG_PRINT(...)
++#endif
++
++#define BL_EXTERN_NAME			"bl_i2c_lp8556"
++static unsigned int bl_status = 1;
++static unsigned int bl_level = 0;
++
++static unsigned char i2c_init_table[][2] = {
++    {0xa1, 0x76}, //hight bit(8~11)(0~0X66e set backlight)
++    {0xa0, 0x66},  //low bit(0~7)  20mA
++    {0x16, 0x1F}, // 5channel LED enable 0x1F
++    {0xa9, 0xA0}, //VBOOST_MAX 25V
++    {0x9e, 0x12},
++    {0xa2, 0x23}, //23
++    {0x01, 0x05}, //0x03 pwm+I2c set brightness,0x5 I2c set brightness
++    {0xff, 0xff},//ending flag
++};
++
++static int aml_i2c_write(struct i2c_client *i2client,unsigned char *buff, unsigned len)
++{
++    int res = 0;
++    struct i2c_msg msg[] = {
++        {
++        .addr = i2client->addr,
++        .flags = 0,
++        .len = len,
++        .buf = buff,
++        }
++    };
++    
++    res = i2c_transfer(i2client->adapter, msg, 1);
++    if (res < 0) {
++        printk("%s: i2c transfer failed [addr 0x%02x]\n", __FUNCTION__, i2client->addr);
++    }
++    
++    return res;
++}
++
++static int aml_i2c_read(struct i2c_client *i2client,unsigned char *buff, unsigned len)
++{
++    int res = 0;
++    struct i2c_msg msgs[] = {
++        {
++            .addr = i2client->addr,
++            .flags = 0,
++            .len = 1,
++            .buf = buff,
++        },
++        {
++            .addr = i2client->addr,
++            .flags = I2C_M_RD,
++            .len = len,
++            .buf = buff,
++        }
++    };
++    res = i2c_transfer(i2client->adapter, msgs, 2);
++    if (res < 0) {
++        printk("%s: i2c transfer failed [addr 0x%02x]\n", __FUNCTION__, i2client->addr);
++    }
++
++    return res;
++}
++
++static int bl_extern_set_level(unsigned int level)
++{
++    unsigned char tData[3];
++    int ret = 0;
++
++    bl_level = level;
++
++    if (bl_ext_config == NULL) {
++        printk("no %s driver\n", BL_EXTERN_NAME);
++        return -1;
++    }
++    get_bl_ext_level(bl_ext_config);
++    level = bl_ext_config->dim_min - ((level - bl_ext_config->level_min) * (bl_ext_config->dim_min - bl_ext_config->dim_max)) / (bl_ext_config->level_max - bl_ext_config->level_min);
++    level &= 0xff;
++
++    if (bl_status) {
++        tData[0] = 0x0;
++        tData[1] = level;
++        ret = aml_i2c_write(aml_lp8556_i2c_client, tData, 2);
++    }
++
++    return ret;
++}
++
++static int bl_extern_power_on(void)
++{
++    unsigned char tData[3];
++    int i=0, ending_flag=0;
++    int ret=0;
++
++    if (bl_ext_config->gpio_used > 0) {
++        bl_extern_gpio_direction_output(bl_ext_config->gpio, 1);
++    }
++
++    while (ending_flag == 0) {
++        if (i2c_init_table[i][0] == 0xff) {    //special mark
++            if (i2c_init_table[i][1] == 0xff) { //ending flag
++                ending_flag = 1;
++            }
++            else { //delay flag
++                mdelay(i2c_init_table[i][1]);
++            }
++        }
++        else {
++            tData[0]=i2c_init_table[i][0];
++            tData[1]=i2c_init_table[i][1];
++            ret = aml_i2c_write(aml_lp8556_i2c_client, tData, 2);
++        }
++        i++;
++    }
++    bl_status = 1;
++    bl_extern_set_level(bl_level);//recover bl level
++
++    printk("%s\n", __FUNCTION__);
++    return ret;
++}
++
++static int bl_extern_power_off(void)
++{
++    bl_status = 0;
++    if (bl_ext_config->gpio_used > 0) {
++        bl_extern_gpio_direction_output(bl_ext_config->gpio, 0);
++    }
++
++    printk("%s\n", __FUNCTION__);
++    return 0;
++}
++
++static int bl_extern_driver_update(void)
++{
++    struct aml_bl_extern_driver_t* bl_ext;
++
++    bl_ext = aml_bl_extern_get_driver();
++    if (bl_ext) {
++        bl_ext->type      = bl_ext_config->type;
++        bl_ext->name      = bl_ext_config->name;
++        bl_ext->power_on  = bl_extern_power_on;
++        bl_ext->power_off = bl_extern_power_off;
++        bl_ext->set_level = bl_extern_set_level;
++    }
++    else {
++        printk("[error] %s get bl_extern_driver failed\n", bl_ext_config->name);
++    }
++
++    return 0;
++}
++
++static int aml_lp8556_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
++{
++
++    if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
++        printk("[error] %s: functionality check failed\n", __FUNCTION__);
++        return -ENODEV;
++    }
++    else {
++        aml_lp8556_i2c_client = client;
++        bl_extern_driver_update();
++    }
++
++    printk("%s OK\n", __FUNCTION__);
++    return 0;
++}
++
++static int aml_lp8556_i2c_remove(struct i2c_client *client)
++{
++    return 0;
++}
++
++static const struct i2c_device_id aml_lp8556_i2c_id[] = {
++    {BL_EXTERN_NAME, 0},
++    { }
++};
++// MODULE_DEVICE_TABLE(i2c, aml_lp8556_id);
++
++static struct i2c_driver aml_lp8556_i2c_driver = {
++    .probe    = aml_lp8556_i2c_probe,
++    .remove   = aml_lp8556_i2c_remove,
++    .id_table = aml_lp8556_i2c_id,
++    .driver = {
++        .name = BL_EXTERN_NAME,
++        .owner =THIS_MODULE,
++    },
++};
++
++static int aml_lp8556_probe(struct platform_device *pdev)
++{
++    struct i2c_board_info i2c_info;
++    struct i2c_adapter *adapter;
++    struct i2c_client *i2c_client;
++    int ret = 0;
++
++    if (bl_extern_driver_check()) {
++        return -1;
++    }
++    if (bl_ext_config == NULL)
++        bl_ext_config = kzalloc(sizeof(*bl_ext_config), GFP_KERNEL);
++    if (bl_ext_config == NULL) {
++        printk("[error] %s probe: failed to alloc data\n", BL_EXTERN_NAME);
++        return -1;
++    }
++
++    pdev->dev.platform_data = bl_ext_config;
++
++    if (get_bl_extern_dt_data(pdev->dev.of_node, bl_ext_config) != 0) {
++        printk("[error] %s probe: failed to get dt data\n", BL_EXTERN_NAME);
++        goto bl_extern_probe_failed;
++    }
++
++    memset(&i2c_info, 0, sizeof(i2c_info));
++
++    adapter = i2c_get_adapter(bl_ext_config->i2c_bus);
++    if (!adapter) {
++        printk("[error] %s£ºfailed to get i2c adapter\n", BL_EXTERN_NAME);
++        goto bl_extern_probe_failed;
++    }
++
++    strncpy(i2c_info.type, bl_ext_config->name, I2C_NAME_SIZE);
++    i2c_info.addr = bl_ext_config->i2c_addr;
++    i2c_info.platform_data = bl_ext_config;
++    i2c_info.flags=0;
++    if(i2c_info.addr>0x7f)
++        i2c_info.flags=0x10;
++    i2c_client = i2c_new_device(adapter, &i2c_info);
++    if (!i2c_client) {
++        printk("[error] %s :failed to new i2c device\n", BL_EXTERN_NAME);
++        goto bl_extern_probe_failed;
++    }
++    else{
++        DBG_PRINT("[error] %s: new i2c device succeed\n",((struct bl_extern_data_t *)(i2c_client->dev.platform_data))->name);
++    }
++
++    if (!aml_lp8556_i2c_client) {
++        ret = i2c_add_driver(&aml_lp8556_i2c_driver);
++        if (ret) {
++            printk("[error] %s probe: add i2c_driver failed\n" BL_EXTERN_NAME);
++            goto bl_extern_probe_failed;
++        }
++    }
++
++    printk("%s ok\n", __FUNCTION__);
++    return ret;
++
++bl_extern_probe_failed:
++    if (bl_ext_config)
++        kfree(bl_ext_config);
++    return -1;
++}
++
++static int aml_lp8556_remove(struct platform_device *pdev)
++{
++    if (pdev->dev.platform_data)
++        kfree (pdev->dev.platform_data);
++    return 0;
++}
++
++#ifdef CONFIG_USE_OF
++static const struct of_device_id aml_lp8556_dt_match[]={
++    {
++        .compatible = "amlogic,bl_i2c_lp8556",
++    },
++    {},
++};
++#else
++#define aml_lp8556_dt_match NULL
++#endif
++
++static struct platform_driver aml_lp8556_driver = {
++    .probe  = aml_lp8556_probe,
++    .remove = aml_lp8556_remove,
++    .driver = {
++        .name  = BL_EXTERN_NAME,
++        .owner = THIS_MODULE,
++#ifdef CONFIG_USE_OF
++        .of_match_table = aml_lp8556_dt_match,
++#endif
++    },
++};
++
++static int __init aml_lp8556_init(void)
++{
++    int ret;
++    DBG_PRINT("%s\n", __FUNCTION__);
++
++    ret = platform_driver_register(&aml_lp8556_driver);
++    if (ret) {
++        printk("[error] %s failed to register bl extern driver module\n", __FUNCTION__);
++        return -ENODEV;
++    }
++    return ret;
++}
++
++static void __exit aml_lp8556_exit(void)
++{
++    platform_driver_unregister(&aml_lp8556_driver);
++}
++
++//late_initcall(aml_lp8556_init);
++module_init(aml_lp8556_init);
++module_exit(aml_lp8556_exit);
++
++MODULE_AUTHOR("AMLOGIC");
++MODULE_DESCRIPTION("BL Extern driver for LP8556");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+new file mode 100755
+index 000000000000..933a32182fa4
+--- /dev/null
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+@@ -0,0 +1,287 @@
++/*
++ * AMLOGIC backlight external driver.
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/jiffies.h> 
++#include <linux/i2c.h>
++#include <linux/i2c-aml.h>
++#include <linux/miscdevice.h>
++#include <linux/mutex.h>
++#include <linux/mm.h>
++#include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/delay.h>
++#include <linux/sysctl.h>
++#include <asm/uaccess.h>
++#include <mach/pinmux.h>
++#include <mach/gpio.h>
++#include <linux/amlogic/aml_bl_extern.h>
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++#include <linux/amlogic/aml_pmu_common.h>
++#endif
++
++static struct bl_extern_config_t *bl_ext_config = NULL;
++
++//#define BL_EXT_DEBUG_INFO
++#ifdef BL_EXT_DEBUG_INFO
++#define DBG_PRINT(...)		printk(__VA_ARGS__)
++#else
++#define DBG_PRINT(...)
++#endif
++
++#define BL_EXTERN_NAME			"bl_pmu_aml1218"
++
++static int bl_extern_set_level(unsigned int level)
++{
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    struct aml_pmu_driver *pmu_driver;
++#endif
++    unsigned char temp;
++    int ret;
++
++    if (bl_ext_config == NULL) {
++        printk("no %s driver\n", BL_EXTERN_NAME);
++        return -1;
++    }
++    get_bl_ext_level(bl_ext_config);
++    level = bl_ext_config->dim_min - ((level - bl_ext_config->level_min) * (bl_ext_config->dim_min - bl_ext_config->dim_max)) / (bl_ext_config->level_max - bl_ext_config->level_min);
++    level &= 0x1f;
++
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    pmu_driver = aml_pmu_get_driver();
++    if (pmu_driver == NULL) {
++        printk("no pmu driver\n");
++        return -1;
++    }
++    else {
++        if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
++            ret = pmu_driver->pmu_reg_read(0x005f, &temp);
++            ret = pmu_driver->pmu_reg_write(0x005f, ((temp & ~(0x3f << 2)) | (level << 2)));
++        }
++        else {
++            printk("no pmu_reg_read/write\n");
++            return -1;
++        }
++    }
++#endif
++    return 0;
++}
++
++static int bl_extern_power_on(void)
++{
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    struct aml_pmu_driver *pmu_driver;
++#endif
++    unsigned char temp;
++    int ret;
++
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    pmu_driver = aml_pmu_get_driver();
++    if (pmu_driver == NULL) {
++        printk("no pmu driver\n");
++        return -1;
++    }
++    else {
++        if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
++            ret = pmu_driver->pmu_reg_read(0x005d, &temp);
++            ret = pmu_driver->pmu_reg_write(0x005d, (temp | (1 << 1)));//DCEXT_IREF_ENLV2
++            ret = pmu_driver->pmu_reg_read(0x005e, &temp);
++            ret = pmu_driver->pmu_reg_write(0x005e, (temp | (1 << 7)));//DCEXT_IREF_ADJLV2_EN
++        }
++        else {
++            printk("no pmu_reg_read/write\n");
++            return -1;
++        }
++    }
++#endif
++    if (bl_ext_config->gpio_used > 0) {
++        bl_extern_gpio_direction_output(bl_ext_config->gpio, 1);
++    }
++
++    printk("%s\n", __FUNCTION__);
++    return 0;
++}
++
++static int bl_extern_power_off(void)
++{
++    if (bl_ext_config->gpio_used > 0) {
++        bl_extern_gpio_direction_output(bl_ext_config->gpio, 0);
++    }
++
++    printk("%s\n", __FUNCTION__);
++    return 0;
++}
++
++static int bl_extern_driver_update(void)
++{
++    struct aml_bl_extern_driver_t* bl_ext;
++
++    bl_ext = aml_bl_extern_get_driver();
++    if (bl_ext) {
++        bl_ext->type      = bl_ext_config->type;
++        bl_ext->name      = bl_ext_config->name;
++        bl_ext->power_on  = bl_extern_power_on;
++        bl_ext->power_off = bl_extern_power_off;
++        bl_ext->set_level = bl_extern_set_level;
++    }
++    else {
++        printk("[error] %s get bl_extern_driver failed\n", bl_ext_config->name);
++    }
++
++    return 0;
++}
++
++//***********************************************//
++static ssize_t bl_extern_debug(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
++{
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    struct aml_pmu_driver *pmu_driver;
++#endif
++    unsigned char temp;
++    unsigned int t[2];
++    int ret = 0;
++
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    pmu_driver = aml_pmu_get_driver();
++    if (pmu_driver == NULL) {
++        printk("no pmu driver\n");
++        return -EINVAL;
++    }
++
++    switch (buf[0]) {
++        case 'r': //read
++            ret = sscanf(buf, "r %x", &t[0]);
++            if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
++                ret = pmu_driver->pmu_reg_read(t[0], &temp);
++                printk("read pmu reg: 0x%x=0x%x\n", t[0], temp);
++            }
++            break;
++        case 'w': //write
++            ret = sscanf(buf, "w %x %x", &t[0], &t[1]);
++            if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
++                ret = pmu_driver->pmu_reg_write(t[0], t[1]);
++                ret = pmu_driver->pmu_reg_read(t[0], &temp);
++                printk("write pmu reg 0x%x: 0x%x, readback: 0x%x\n", t[0], t[1], temp);
++            }
++            break;
++        default:
++            printk("wrong format of command.\n");
++            break;
++    }
++#endif
++    if (ret != 1 || ret !=2)
++        return -EINVAL;
++
++    return count;
++    //return 0;
++}
++
++static struct class_attribute bl_extern_debug_class_attrs[] = {
++    __ATTR(debug, S_IRUGO | S_IWUSR, NULL, bl_extern_debug),
++    __ATTR_NULL
++};
++
++static struct class bl_extern_debug_class = {
++    .name = "bl_ext",
++    .class_attrs = bl_extern_debug_class_attrs,
++};
++//*********************************************************//
++
++static int aml_aml1218_probe(struct platform_device *pdev)
++{
++    int ret = 0;
++
++    if (bl_extern_driver_check()) {
++        return -1;
++    }
++    if (bl_ext_config == NULL)
++        bl_ext_config = kzalloc(sizeof(*bl_ext_config), GFP_KERNEL);
++    if (bl_ext_config == NULL) {
++        printk("[error] %s probe: failed to alloc data\n", BL_EXTERN_NAME);
++        return -1;
++    }
++
++    pdev->dev.platform_data = bl_ext_config;
++
++    if (get_bl_extern_dt_data(pdev->dev.of_node, bl_ext_config) != 0) {
++        printk("[error] %s probe: failed to get dt data\n", BL_EXTERN_NAME);
++        goto bl_extern_probe_failed;
++    }
++
++    bl_extern_driver_update();
++
++    ret = class_register(&bl_extern_debug_class);
++    if(ret){
++        printk("class register bl_extern_debug_class fail!\n");
++    }
++
++    printk("%s ok\n", __FUNCTION__);
++    return ret;
++
++bl_extern_probe_failed:
++    if (bl_ext_config)
++        kfree(bl_ext_config);
++    return -1;
++}
++
++static int aml_aml1218_remove(struct platform_device *pdev)
++{
++    if (pdev->dev.platform_data)
++        kfree (pdev->dev.platform_data);
++    return 0;
++}
++
++#ifdef CONFIG_USE_OF
++static const struct of_device_id aml_aml1218_dt_match[]={
++    {
++        .compatible = "amlogic,bl_pmu_aml1218",
++    },
++    {},
++};
++#else
++#define aml_aml1218_dt_match NULL
++#endif
++
++static struct platform_driver aml_aml1218_driver = {
++    .probe  = aml_aml1218_probe,
++    .remove = aml_aml1218_remove,
++    .driver = {
++        .name  = BL_EXTERN_NAME,
++        .owner = THIS_MODULE,
++#ifdef CONFIG_USE_OF
++        .of_match_table = aml_aml1218_dt_match,
++#endif
++    },
++};
++
++static int __init aml_aml1218_init(void)
++{
++    int ret;
++    DBG_PRINT("%s\n", __FUNCTION__);
++
++    ret = platform_driver_register(&aml_aml1218_driver);
++    if (ret) {
++        printk("[error] %s failed to register bl extern driver module\n", __FUNCTION__);
++        return -ENODEV;
++    }
++    return ret;
++}
++
++static void __exit aml_aml1218_exit(void)
++{
++    platform_driver_unregister(&aml_aml1218_driver);
++}
++
++//late_initcall(aml_aml1218_init);
++module_init(aml_aml1218_init);
++module_exit(aml_aml1218_exit);
++
++MODULE_AUTHOR("AMLOGIC");
++MODULE_DESCRIPTION("BL Extern driver for aml1218");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index f1d65cd6c8db..bc45ad8341c3 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -97,6 +97,8 @@ typedef struct {
+ static lcd_dev_t *pDev = NULL;
+ static spinlock_t gamma_write_lock;
+ static spinlock_t lcd_clk_lock;
++static Bool_t data_status = ON;
++static int bl_status = 0;
+ 
+ static inline void lcd_mdelay(int n)
+ {
+@@ -104,9 +106,6 @@ static inline void lcd_mdelay(int n)
+ }
+ 
+ #ifdef CONFIG_USE_OF
+-static Bool_t data_status = ON;
+-int bl_status = 1;
+-
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+ static DSI_Config_t lcd_mipi_config = {
+     .lane_num = 4,
+@@ -430,7 +429,6 @@ static void lcd_ports_ctrl(Bool_t status)
+ 
+ static void backlight_power_ctrl(Bool_t status)
+ {
+-	DBG_PRINT("%s(): bl_status=%s, data_status=%s\n", __FUNCTION__, (bl_status ? "ON" : "OFF"), (data_status ? "ON" : "OFF"));
+ 	if( status == ON ){
+ 		if ((data_status == OFF) || (bl_status == ON))
+ 			return;
+@@ -441,6 +439,7 @@ static void backlight_power_ctrl(Bool_t status)
+ 			return;
+ 		bl_power_off(LCD_BL_FLAG);
+ 	}
++	DBG_PRINT("%s(%s): bl_status=%s, data_status=%s\n", __FUNCTION__, (status ? "ON" : "OFF"), (bl_status ? "ON" : "OFF"), (data_status ? "ON" : "OFF"));
+ 	bl_status = status;
+ }
+ 
+diff --git a/include/linux/amlogic/aml_bl_extern.h b/include/linux/amlogic/aml_bl_extern.h
+new file mode 100755
+index 000000000000..ca9104b57a4a
+--- /dev/null
++++ b/include/linux/amlogic/aml_bl_extern.h
+@@ -0,0 +1,56 @@
++
++#ifndef __AMLOGIC_BL_EXTERN_H_
++#define __AMLOGIC_BL_EXTERN_H_
++
++#include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/pinctrl/consumer.h>
++
++typedef enum {
++	BL_EXTERN_I2C = 0,
++	BL_EXTERN_SPI,
++	BL_EXTERN_OTHER,//panel, pmu, etc...
++	BL_EXTERN_MAX,
++} Bl_Extern_Type_t;
++
++//global API
++struct aml_bl_extern_driver_t {
++	char *name;
++	Bl_Extern_Type_t type;
++	int (*power_on) (void);
++	int (*power_off)(void);
++	int (*set_level)(unsigned int level);
++};
++
++struct bl_extern_config_t {
++	char *name;
++	Bl_Extern_Type_t type;
++	unsigned int gpio_used;
++	int gpio;
++	int i2c_addr;
++	int i2c_bus;
++	int spi_cs;
++	int spi_clk;
++	int spi_data;
++	unsigned int dim_min;
++	unsigned int dim_max;
++	unsigned int level_min;
++	unsigned int level_max;
++};
++
++#define BL_EXTERN_DRIVER		"bl_extern"
++
++#define bl_extern_gpio_request(gpio)                amlogic_gpio_request(gpio, BL_EXTERN_DRIVER)
++#define bl_extern_gpio_free(gpio)                   amlogic_gpio_free(gpio, BL_EXTERN_DRIVER)
++#define bl_extern_gpio_direction_input(gpio)        amlogic_gpio_direction_input(gpio, BL_EXTERN_DRIVER)
++#define bl_extern_gpio_direction_output(gpio, val)  amlogic_gpio_direction_output(gpio, val, BL_EXTERN_DRIVER)
++#define bl_extern_gpio_get_value(gpio)              amlogic_get_value(gpio, BL_EXTERN_DRIVER)
++#define bl_extern_gpio_set_value(gpio,val)          amlogic_set_value(gpio, val, BL_EXTERN_DRIVER)
++
++extern struct aml_bl_extern_driver_t* aml_bl_extern_get_driver(void);
++extern int bl_extern_driver_check(void);
++extern int get_bl_extern_dt_data(struct device_node* of_node, struct bl_extern_config_t *pdata);
++
++extern void get_bl_ext_level(struct bl_extern_config_t *bl_ext_cfg);
++
++#endif
++
+diff --git a/include/linux/amlogic/aml_lcd_bl.h b/include/linux/amlogic/aml_lcd_bl.h
+index 78b76beb27b0..149f18f46864 100755
+--- a/include/linux/amlogic/aml_lcd_bl.h
++++ b/include/linux/amlogic/aml_lcd_bl.h
+@@ -1 +1 @@
+-/* * AMLOGIC lcd backlight support header file for backlight driver. * * * Author:  Evoke Zhang <evoke.zhang@amlogic.com> * */#ifndef __AML_LCD_BACKLIGHT_H#define __AML_LCD_BACKLIGHT_H#define	DRV_BL_FLAG		0#define LCD_BL_FLAG		1#define BL_LEVEL_MAX    		255#define BL_LEVEL_MIN    		10#define BL_LEVEL_OFF			1#define BL_LEVEL_MID    		128#define BL_LEVEL_MID_MAPPED		102extern void bl_power_on(int bl_flag);extern void bl_power_off(int bl_flag);#endif
+\ No newline at end of file
++/* * AMLOGIC lcd backlight support header file for backlight driver. * * * Author:  Evoke Zhang <evoke.zhang@amlogic.com> * */#ifndef __AML_LCD_BACKLIGHT_H#define __AML_LCD_BACKLIGHT_H#define	DRV_BL_FLAG		0#define LCD_BL_FLAG		1#define BL_LEVEL_MAX    		255#define BL_LEVEL_MIN    		10#define BL_LEVEL_OFF			1#define BL_LEVEL_MID    		128#define BL_LEVEL_MID_MAPPED		102extern void bl_power_on(int bl_flag);extern void bl_power_off(int bl_flag);extern unsigned get_backlight_level(void);#endif
+\ No newline at end of file
+-- 
+2.19.0
+

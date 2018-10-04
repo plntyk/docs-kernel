@@ -1,0 +1,161 @@
+From f05cf727bbe7b306567e7707bdd301bbd1e07bee Mon Sep 17 00:00:00 2001
+From: "qi.duan" <qi.duan@amlogic.com>
+Date: Mon, 11 Nov 2013 15:19:41 +0800
+Subject: [PATCH 1812/5965] add usb autosuspend function
+
+---
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c |  5 +--
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.h |  3 ++
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c | 39 +++++++++++++------
+ .../usb/dwc_otg/310/dwc_otg_hcd_intr.c        |  3 ++
+ drivers/usb/core/hub.c                        |  3 +-
+ 5 files changed, 37 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
+index e1238ddb5014..71573062d1ce 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.c
+@@ -1659,11 +1659,10 @@ void dwc_otg_core_dev_init(dwc_otg_core_if_t * core_if)
+ 	//hwcfg3_data_t hwcfg3 = {.d32 = 0 };
+ 	gotgctl_data_t gotgctl = {.d32 = 0 };
+ 
+-	/* Restart the Phy Clock */
++	/* Stop the Phy Clock, for power save */
+ 	pcgcctl_data_t pcgcctl = {.d32 = 0 };
+-	/* Restart the Phy Clock */
+ 	pcgcctl.b.stoppclk = 1;
+-	DWC_MODIFY_REG32(core_if->pcgcctl, pcgcctl.d32, 0);
++	DWC_MODIFY_REG32(core_if->pcgcctl, 0, pcgcctl.d32);
+ 	dwc_udelay(10);
+ 
+ 	/* Device configuration register */
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.h b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.h
+index ce829b82c3b1..4928dd129b87 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.h
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_cil.h
+@@ -1011,6 +1011,9 @@ struct dwc_otg_core_if {
+ 	/** ADP structure object */
+ 	dwc_otg_adp_t adp;
+ 
++	/** suspend mode */
++	int suspend_mode;
++
+ 	/** hibernation/suspend flag */
+ 	int hibernation_suspend;
+ 
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+index dbd28cc468b8..93103f43ab85 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+@@ -441,6 +441,7 @@ static int dwc_otg_hcd_rem_wakeup_cb(void *p)
+ 
+ 	if (hcd->core_if->lx_state == DWC_OTG_L2) {
+ 		hcd->flags.b.port_suspend_change = 1;
++		dwc_otg_hcd_start_cb(p);
+ 	}
+ #ifdef CONFIG_USB_DWC_OTG_LPM
+ 	else {
+@@ -479,18 +480,32 @@ void dwc_otg_hcd_stop(dwc_otg_hcd_t * hcd)
+ 
+ 	dwc_mdelay(1);
+ }
++static void dwc_otg_hcd_power_save(dwc_otg_hcd_t * hcd, int power_on)
++{
++	usb_dbg_uart_data_t uart = {.d32 = 0 };
++	pcgcctl_data_t pcgcctl = {.d32 = 0 };
+ 
++	uart.d32 = DWC_READ_REG32(&hcd->core_if->usb_peri_reg->dbg_uart);
++	pcgcctl.d32 = DWC_READ_REG32(&hcd->core_if->pcgcctl);
+ 
++	if(power_on){
++		pcgcctl.b.stoppclk = 0;
++		uart.b.set_iddq = 0;
++	}else{
++		pcgcctl.b.stoppclk = 1;
++		uart.b.set_iddq = 1;
++	}
++	
++	DWC_WRITE_REG32(&hcd->core_if->pcgcctl, pcgcctl.d32);
++//	DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
++}
+ /** dwc_otg_hcd suspend */
+ int dwc_otg_hcd_suspend(dwc_otg_hcd_t * hcd)
+ {
+-	usb_dbg_uart_data_t uart = {.d32 = 0 };
+ 
++	hcd->core_if->suspend_mode = 1;
+ 	DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD SUSPEND\n");
+-
+-	uart.d32 = DWC_READ_REG32(&hcd->core_if->usb_peri_reg->dbg_uart);
+-	uart.b.set_iddq = 1;
+-	DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
++	dwc_otg_hcd_power_save(hcd, 0);
+ 
+  	return 0;
+ }
+@@ -499,19 +514,18 @@ extern void dwc_otg_power_notifier_call(char is_power_on);
+ /** dwc_otg_hcd resume  */
+ int dwc_otg_hcd_resume(dwc_otg_hcd_t *hcd)
+ {
+-	usb_dbg_uart_data_t uart = {.d32 = 0 };
+-	
++
+ 	DWC_DEBUGPL(DBG_HCD, "DWC OTG HCD RESUME\n");
+ 
+ 	hcd->ssplit_lock = 0;
+-	if (hcd->core_if->vbus_power_pin!=-1)
++	if (hcd->core_if->vbus_power_pin != -1)
+ 	{
+ 		if(dwc_otg_is_host_mode(hcd->core_if))
+ 			dwc_otg_power_notifier_call(1);
+ 	}
+-	uart.d32 = DWC_READ_REG32(&hcd->core_if->usb_peri_reg->dbg_uart);
+-	uart.b.set_iddq = 0;
+-	DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
++
++	hcd->core_if->suspend_mode = 0;
++	dwc_otg_hcd_power_save(hcd, 1);
+ 	return 0;
+ }
+ 
+@@ -1083,7 +1097,8 @@ static void dwc_otg_hcd_reinit(dwc_otg_hcd_t * hcd)
+ 	dwc_hc_t *channel;
+ 	dwc_hc_t *channel_tmp;
+ 
+-	hcd->flags.d32 = 0;
++	if(!hcd->core_if->suspend_mode)
++		hcd->flags.d32 = 0;
+ 
+ 	hcd->non_periodic_qh_ptr = &hcd->non_periodic_sched_active;
+ 	hcd->non_periodic_channels = 0;
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_intr.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_intr.c
+index f856404fc480..db3839a28638 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_intr.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_intr.c
+@@ -366,6 +366,9 @@ int32_t dwc_otg_hcd_handle_port_intr(dwc_otg_hcd_t * dwc_otg_hcd)
+ 				hprt0.b.prtrst = 0;
+ 				DWC_WRITE_REG32(dwc_otg_hcd->core_if->host_if->hprt0, hprt0.d32);
+ 			}
++			if(dwc_otg_hcd->core_if->suspend_mode == 1){
++				cil_hcd_start(dwc_otg_hcd->core_if);
++			}
+ 	
+ 			/* B-Device has connected, Delete the connection timer. */
+ 			DWC_TIMER_CANCEL(dwc_otg_hcd->conn_timer);
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index da2905a1a18b..19cba93ec37a 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -1665,7 +1665,8 @@ static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
+ 	 *   suspend timer for hub, also may decrease power consumption
+ 	 *   of USB bus.
+ 	 */
+-	pm_runtime_set_autosuspend_delay(&hdev->dev, 0);
++	 /* for Amlogic dwc_otg usb controller, change to 100ms */
++	pm_runtime_set_autosuspend_delay(&hdev->dev, 100);
+ 
+ 	/* Hubs have proper suspend/resume support. */
+ 	usb_enable_autosuspend(hdev);
+-- 
+2.19.0
+

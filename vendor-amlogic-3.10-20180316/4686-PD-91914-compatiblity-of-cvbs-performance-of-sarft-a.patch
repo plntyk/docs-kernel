@@ -1,0 +1,128 @@
+From 211b6f179e91f60dc920d2c6199cf954a6cf4148 Mon Sep 17 00:00:00 2001
+From: "jets.yan" <jets.yan@amlogic.com>
+Date: Wed, 6 Aug 2014 19:52:16 +0800
+Subject: [PATCH 4686/5965] PD #91914: compatiblity of cvbs performance of
+ sarft and telecom.
+
+Change-Id: I8ced1e7f192dca4482484e6fe8e7065018eb6e93
+---
+ arch/arm/mach-meson8/include/mach/tvregs.h | 28 +++++++++++++++++++
+ drivers/amlogic/display/vout/tvconf.c      | 12 +++++++++
+ drivers/amlogic/display/vout/tvoutc.c      | 31 ++++++++++++++++++++++
+ 3 files changed, 71 insertions(+)
+
+diff --git a/arch/arm/mach-meson8/include/mach/tvregs.h b/arch/arm/mach-meson8/include/mach/tvregs.h
+index ae511c5b3796..76bb67cc441e 100755
+--- a/arch/arm/mach-meson8/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8/include/mach/tvregs.h
+@@ -59,6 +59,34 @@ static const  reg_t tvreg_vclk_hd[]={
+     {P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_25},//HD,25
+ };
+ 
++static const reg_t tvregs_576cvbs_china_sarft[] =
++{
++	{MREG_END_MARKER,            	0      }
++};
++
++static const reg_t tvregs_576cvbs_china_telecom[] =
++{
++	{P_ENCI_SYNC_ADJ,				0x8060	},
++    {P_ENCI_VIDEO_SAT,              0xfe	},
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,   0xf850	},
++	{MREG_END_MARKER,            	0		}
++};
++
++static const reg_t tvregs_576cvbs_china_mobile[] =
++{
++	{P_ENCI_SYNC_ADJ,				0x8060	},
++    {P_ENCI_VIDEO_SAT,              0xfe	},
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,   0xf850	},
++	{MREG_END_MARKER,            	0       }
++};
++
++static const reg_t *tvregs_576cvbs_performance[] =
++{
++	tvregs_576cvbs_china_sarft,
++	tvregs_576cvbs_china_telecom,
++	tvregs_576cvbs_china_mobile
++};
++
+ static const  reg_t tvregs_720p[] = {
+     {P_VENC_VDAC_SETTING,          0xff,  },
+ 
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 9a8befb2cd04..3b8e6a317067 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -644,7 +644,19 @@ static int __init vdac_config_bootargs_setup(char* line)
+     return 1;
+ }
+ 
++extern void cvbs_performance_config(unsigned int index);
++static int __init cvbs_performance_setup(char* line)
++{
++	unsigned int cfg = 0x1;
++
++	printk("cvbs performance line = %s\n", line);
++	cfg = simple_strtoul(line, NULL, 10);
++
++	cvbs_performance_config(cfg);
++}
++
+ __setup("vdaccfg=", vdac_config_bootargs_setup);
++__setup("cvbsdrv=", cvbs_performance_setup);
+ #endif
+ 
+ arch_initcall(tv_init_module);
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index fb7cd00497fe..55f8332d7aa7 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -351,6 +351,35 @@ void cvbs_cntl_output(unsigned int open)
+ }
+ #endif
+ 
++static unsigned int cvbs_performance_index = 0xff;// 0xff for none config from uboot
++void cvbs_performance_config(unsigned int index)
++{
++	cvbs_performance_index = index;
++	return ;
++}
++
++static void cvbs_performance_enhancement(tvmode_t mode)
++{
++	const reg_t *s;
++	unsigned int index = cvbs_performance_index;
++	unsigned int max = sizeof(tvregs_576cvbs_performance)/sizeof(reg_t*);
++
++	if( TVMODE_576CVBS != mode )
++		return ;
++
++	if( 0xff == index )
++		return ;
++
++	index = (index>=max)?0:index;
++	printk("cvbs performance use table = %d\n", index);
++	s = tvregs_576cvbs_performance[index];
++	while (MREG_END_MARKER != s->reg)
++	{
++    	setreg(s++);
++	}
++	return ;
++}
++
+ int tvoutc_setmode(tvmode_t mode)
+ {
+     const  reg_t *s;
+@@ -415,6 +444,8 @@ int tvoutc_setmode(tvmode_t mode)
+         setreg(s++);
+     printk("%s[%d]\n", __func__, __LINE__);
+ 
++	cvbs_performance_enhancement(mode);
++
+     if(mode >= TVMODE_VGA && mode <= TVMODE_SXGA){
+         aml_write_reg32(P_PERIPHS_PIN_MUX_0,aml_read_reg32(P_PERIPHS_PIN_MUX_0)|(3<<20));
+     }else{
+-- 
+2.19.0
+

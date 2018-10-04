@@ -1,0 +1,497 @@
+From d2ecd80922ec043114735509af0b81d3bd9b7040 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Thu, 26 Dec 2013 14:05:01 +0800
+Subject: [PATCH 2662/5965] PD#: 84246 fix prot out display bug & black display
+ bug
+
+---
+ drivers/amlogic/amports/video.c            | 138 +++++++++------------
+ drivers/amlogic/amports/video_prot.c       |  68 ++++++----
+ drivers/amlogic/amports/vpp.c              |  37 ++++++
+ include/linux/amlogic/amports/video_prot.h |   8 +-
+ 4 files changed, 139 insertions(+), 112 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 25bc7784012d..e6eb91f3ae2a 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -198,8 +198,10 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+ #else
+ #define VD1_MEM_POWER_ON()
+ #define VD2_MEM_POWER_ON()
++#define PROT_MEM_POWER_ON()
+ #define VD1_MEM_POWER_OFF()
+ #define VD2_MEM_POWER_OFF()
++#define PROT_MEM_POWER_OFF()
+ #endif
+ 
+ #define VIDEO_LAYER_ON() \
+@@ -221,7 +223,10 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+ #define EnableVideoLayer()  \
+     do { \
+          VD1_MEM_POWER_ON(); \
+-         video_prot.angle_changed |= 0x4; \
++         if (video_prot.power_on == 0) { \
++             video_prot.angle_changed = 1; \
++             video_prot.power_on = 1; \
++         } \
+          VIDEO_LAYER_ON(); \
+     } while (0)
+ 
+@@ -243,7 +248,6 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+     do { \
+          VIDEO_LAYER_OFF(); \
+          VD1_MEM_POWER_OFF(); \
+-         video_prot.angle_changed |= 0x4; \
+          video_prot.power_down = 1; \
+          if(debug_flag& DEBUG_FLAG_BLACKOUT){  \
+             printk("DisableVideoLayer()\n"); \
+@@ -370,13 +374,16 @@ static int content_top = 0, content_left = 0, content_w = 0, content_h = 0;
+ static int scaler_pos_changed = 0;
+ #endif
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++static u32 use_prot = 1;
++#else
+ static u32 use_prot = 0;
+-static u32 prot_axis_changed = 0;
++#endif
+ static video_prot_t video_prot;
+ static u32 video_angle = 0;
+-int get_prot_status(void) { return video_prot.status; }
++u32 get_prot_status(void) { return video_prot.status; }
+ EXPORT_SYMBOL(get_prot_status);
+-u32 get_video_angle(void) { return video_prot.angle; }
++u32 get_video_angle(void) { return video_angle; }
+ EXPORT_SYMBOL(get_video_angle);
+ extern void prot_get_parameter(u32 wide_mode, vframe_t * vf, vpp_frame_par_t * next_frame_par, const vinfo_t *vinfo);
+ 
+@@ -852,21 +859,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+     unsigned long flags;
+ 
+     if (use_prot) {
+-        if (video_prot.angle_changed & 0x2) {
+-            first_picture = 1;
+-        }
+         video_prot_revert_vframe(&video_prot, vf);
+-        if (prot_axis_changed & 0x1) {
+-            static vpp_frame_par_t prot_parms;
+-            prot_get_parameter(wide_setting, vf, &prot_parms, vinfo);
+-            video_prot_axis(&video_prot, video_angle, prot_parms.VPP_hd_start_lines_, prot_parms.VPP_hd_end_lines_, prot_parms.VPP_vd_start_lines_, prot_parms.VPP_vd_end_lines_);
+-            prot_axis_changed = 0x2;
+-        }
+-#if 0
+-        if (video_prot.status) {
+-            video_prot_set_canvas(vf);
+-        }
+-#endif
+     }
+     frame_count++;
+     if(debug_flag& DEBUG_FLAG_PRINT_TOGGLE_FRAME){
+@@ -1052,8 +1045,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+         (cur_dispbuf->height != vf->height) ||
+         (cur_dispbuf->ratio_control != vf->ratio_control) ||
+         ((cur_dispbuf->type_backup & VIDTYPE_INTERLACE) !=
+-         (vf->type_backup & VIDTYPE_INTERLACE)) ||
+-         prot_axis_changed & 0x2) {
++         (vf->type_backup & VIDTYPE_INTERLACE))) {
+         amlog_mask(LOG_MASK_FRAMEINFO,
+                    "%s %dx%d ar=0x%x\n",
+                    ((vf->type & VIDTYPE_TYPEMASK) == VIDTYPE_INTERLACE_TOP) ?
+@@ -1064,27 +1056,29 @@ static void vsync_toggle_frame(vframe_t *vf)
+                    vf->width,
+                    vf->height,
+                    vf->ratio_control);
+-
+         next_frame_par = (&frame_parms[0] == next_frame_par) ?
+                          &frame_parms[1] : &frame_parms[0];
++        if (use_prot && video_prot.status) {
++            static vpp_frame_par_t prot_parms;
++            prot_get_parameter(wide_setting, vf, &prot_parms, vinfo);
++            video_prot_axis(&video_prot, prot_parms.VPP_hd_start_lines_, prot_parms.VPP_hd_end_lines_, prot_parms.VPP_vd_start_lines_, prot_parms.VPP_vd_end_lines_);
++        }
+         vpp_set_filters(wide_setting, vf, next_frame_par, vinfo);
+-        if (prot_axis_changed & 0x2 && use_prot) {
+-            u32 angle_orientation = (video_angle + video_prot.src_vframe_orientation) % 4;
+-            prot_axis_changed &= 0x1;
+-            if (next_frame_par->VPP_hd_start_lines_ > 0 && (angle_orientation & 1)) {
+-                next_frame_par->VPP_line_in_length_ = next_frame_par->VPP_hd_end_lines_ - next_frame_par->VPP_hd_start_lines_ + 1;
++        if (use_prot && video_prot.status) {
++            u32 tmp_line_in_length_ = next_frame_par->VPP_hd_end_lines_ - next_frame_par->VPP_hd_start_lines_ + 1;
++            u32 tmp_pic_in_height_ = next_frame_par->VPP_vd_end_lines_ - next_frame_par->VPP_vd_start_lines_ + 1;
++            if (tmp_line_in_length_ < vf->width) {
++                next_frame_par->VPP_line_in_length_ = tmp_line_in_length_ / (next_frame_par->hscale_skip_count + 1);
+                 next_frame_par->VPP_hd_start_lines_ = 0;
+                 next_frame_par->VPP_hf_ini_phase_ = 0;
+-                next_frame_par->VPP_hd_end_lines_ = next_frame_par->VPP_line_in_length_ - 1;
++                next_frame_par->VPP_hd_end_lines_ = tmp_line_in_length_ - 1;
+             }
+-            if (next_frame_par->VPP_vd_start_lines_ > 0 && (angle_orientation & 1)) {
+-                next_frame_par->VPP_pic_in_height_ = next_frame_par->VPP_vd_end_lines_ - next_frame_par->VPP_vd_start_lines_ + 1;
++            if (tmp_pic_in_height_ < vf->height) {
++                next_frame_par->VPP_pic_in_height_ = tmp_pic_in_height_ / (next_frame_par->vscale_skip_count + 1);
+                 next_frame_par->VPP_vd_start_lines_ = 0;
+                 next_frame_par->VPP_hf_ini_phase_ = 0;
+-                next_frame_par->VPP_vd_end_lines_ = next_frame_par->VPP_pic_in_height_ - 1;
++                next_frame_par->VPP_vd_end_lines_ = tmp_pic_in_height_ - 1;
+             }
+-            //printk("h start:%d start_line:%d end:%d\n", next_frame_par->VPP_hsc_startp, next_frame_par->VPP_hd_start_lines_, next_frame_par->VPP_hd_end_lines_);
+-            //printk("v start:%d start_line:%d end:%d\n", next_frame_par->VPP_vsc_startp, next_frame_par->VPP_vd_start_lines_, next_frame_par->VPP_vd_end_lines_);
+         }
+         /* apply new vpp settings */
+         frame_par_ready_to_set = 1;
+@@ -1175,7 +1169,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0,0,1);
+     }
+     if (use_prot) {
+-        if ((video_prot.angle + video_prot.src_vframe_orientation) % 4 == 2) {
++        if (video_prot.angle == 2) {
+             VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0xf, 2, 4);
+         } else {
+             VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0, 2, 4);
+@@ -1252,9 +1246,6 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 1, 17, 1);
+-        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
+-        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
+-        VSYNC_WR_MPEG_REG_BITS(VIU_VD2_FMT_CTRL + cur_dev->viu_off, 1, 17, 1);
+     }
+ 
+     /* LOOP/SKIP pattern */
+@@ -1733,7 +1724,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+     unsigned long flags;
+     vdin_v4l2_ops_t *vdin_ops = NULL;
+     vdin_arg_t arg;
+-	
++
+ #ifdef CONFIG_AM_VIDEO_LOG
+     int toggle_cnt;
+ #endif
+@@ -1891,34 +1882,20 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+     }
+ #endif
+     if (use_prot) {
+-        if (video_prot.angle_changed & 0x2) {
+-            if ((video_prot.angle + video_prot.src_vframe_orientation) % 4 == 1 || (video_prot.angle + video_prot.src_vframe_orientation) % 4 == 3) {
+-                PROT_MEM_POWER_ON();
+-            }
+-            video_prot_reset(&video_prot);
+-            video_prot.angle_changed &= 0x1;
+-            if (video_prot.power_down) {
+-                video_prot.power_down = 0;
+-                video_prot.power_on = 0;
+-            }
++        if (video_prot.power_down) {
++            video_prot_set_angle(&video_prot, 0);
++            video_prot_gate(0);
++            PROT_MEM_POWER_OFF();
++            video_prot.power_down = 0;
++            video_prot.power_on = 0;
+         }
+-        if (video_prot.angle_changed & 0x1) {
+-            video_prot.angle_changed = 0x2;
++        if (video_prot.angle_changed) {
++            u32 angle_orientation = (video_angle + video_prot.src_vframe_orientation) % 4;
++            video_prot.angle_changed = 0;
++            PROT_MEM_POWER_ON();
++            video_prot_set_angle(&video_prot, angle_orientation);
++            video_prot_gate(video_prot.status);
+             video_property_changed = 1;
+-            video_prot_set_angle(&video_prot, video_angle);
+-        }
+-        if (video_prot.angle_changed & 0x4) {
+-            if (video_prot.power_down) {
+-                video_prot_set_angle(&video_prot, 0);
+-                video_property_changed = 1;
+-                video_prot.angle_changed = 0x2;
+-            } else {
+-                if (video_prot.power_on == 0) {
+-                    video_prot_set_angle(&video_prot, video_angle);
+-                    video_prot.angle_changed = 0x2;
+-                    video_prot.power_on = 1;
+-                }
+-            }
+         }
+     }
+     if (osd_prov && osd_prov->ops && osd_prov->ops->get){
+@@ -1998,13 +1975,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             }
+ #endif
+             vf = video_vf_get();
+-            if (video_prot.video_started || (video_prot.src_vframe_width != vf->width) || (video_prot.src_vframe_height != vf->height)) {
+-                use_prot = get_use_prot();
+-                if (use_prot) {
+-                    video_prot_init(&video_prot, vf);
+-                    video_prot.angle_changed |= 0x1;
+-                    video_prot.video_started = 0;
+-                }
++            if (use_prot && video_prot.video_started) {
++                video_prot_init(&video_prot, vf);
++                video_prot.angle_changed = 1;
++                video_prot.video_started = 0;
++            }
++            if (use_prot && (video_prot.src_vframe_width != vf->width || video_prot.src_vframe_height != vf->height)) {
++                video_property_changed = true;
+             }
+             force_blackout = 0;
+ 
+@@ -2062,13 +2039,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                 }
+ #endif
+                 vf = video_vf_get();
+-                if (video_prot.video_started || (video_prot.src_vframe_width != vf->width) || (video_prot.src_vframe_height != vf->height)) {
+-                    use_prot = get_use_prot();
+-                    if (use_prot) {
+-                        video_prot_init(&video_prot, vf);
+-                        video_prot.angle_changed |= 0x1;
+-                        video_prot.video_started = 0;
+-                    }
++                if (use_prot && video_prot.video_started) {
++                    video_prot_init(&video_prot, vf);
++                    video_prot.angle_changed = 1;
++                    video_prot.video_started = 0;
++                }
++                if (use_prot && (video_prot.src_vframe_width != vf->width || video_prot.src_vframe_height != vf->height)) {
++                    video_property_changed = true;
+                 }
+                 vsync_toggle_frame(vf);
+                 frame_repeat_count = 0;
+@@ -2897,7 +2874,6 @@ static void _set_video_window(int *p)
+     int w, h;
+     int *parsed = p;
+ 
+-    prot_axis_changed |= 0x1;
+     if (parsed[0] < 0 && parsed[2] < 2) {
+         parsed[2] = 2;
+         parsed[0] = 0;
+@@ -4090,14 +4066,14 @@ static ssize_t fps_info_show(struct class *cla, struct class_attribute *attr, ch
+ void set_video_angle(u32 s_value) {
+     if ((s_value >= 0 && s_value <= 3) && (video_angle != s_value)) {
+         video_angle = s_value;
+-        video_prot.angle_changed |= 0x1;
++        video_prot.angle_changed = 1;
+         printk("video_prot angle:%d\n", video_angle);
+     }
+ }
+ EXPORT_SYMBOL(set_video_angle);
+ 
+ static ssize_t video_angle_show(struct class *cla, struct class_attribute *attr, char *buf) {
+-    return snprintf(buf, 40, "%d\n", video_prot.angle);
++    return snprintf(buf, 40, "%d\n", video_angle);
+ }
+ 
+ static ssize_t video_angle_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count) {
+diff --git a/drivers/amlogic/amports/video_prot.c b/drivers/amlogic/amports/video_prot.c
+index d1179b40c1fd..1855d02f8054 100755
+--- a/drivers/amlogic/amports/video_prot.c
++++ b/drivers/amlogic/amports/video_prot.c
+@@ -176,13 +176,13 @@ static int set_prot_444(u32 x_start, u32 x_end, u32 y_start, u32 y_end, u32 y_st
+     return 0;
+ }
+ 
+-void video_prot_reset(video_prot_t* video_prot) {
++void video_prot_gate(u32 on) {
+ 
+-    VSYNC_WR_MPEG_REG(VPU_PROT2_CLK_GATE, video_prot->status);
+-    VSYNC_WR_MPEG_REG(VPU_PROT3_CLK_GATE, video_prot->status);
+-    VSYNC_WR_MPEG_REG(VD1_IF0_PROT_CNTL, (video_prot->status) << 31 | 1080 << 16 | 1080);
+-    VSYNC_WR_MPEG_REG_BITS(VPU_PROT2_MMC_CTRL, video_prot->status, 12, 3);
+-    VSYNC_WR_MPEG_REG_BITS(VPU_PROT3_MMC_CTRL, video_prot->status, 12, 3);
++    VSYNC_WR_MPEG_REG(VPU_PROT2_CLK_GATE, on);
++    VSYNC_WR_MPEG_REG(VPU_PROT3_CLK_GATE, on);
++    VSYNC_WR_MPEG_REG(VD1_IF0_PROT_CNTL, on << 31 | 1080 << 16 | 1080);
++    VSYNC_WR_MPEG_REG_BITS(VPU_PROT2_MMC_CTRL, on, 12, 3);
++    VSYNC_WR_MPEG_REG_BITS(VPU_PROT3_MMC_CTRL, on, 12, 3);
+ 
+ }
+ 
+@@ -206,16 +206,10 @@ void video_prot_init(video_prot_t* video_prot, vframe_t *vf) {
+     video_prot->y_end = vf->height - 1;
+     video_prot->viu_type = vf->type;
+     video_prot->src_vframe_orientation = vf->orientation;
+-    video_prot->power_on = 1;
+ 
+ }
+ 
+-void video_prot_set_angle(video_prot_t* video_prot, u32 angle) {
+-
+-    u32 angle_orientation = (angle + video_prot->src_vframe_orientation) % 4;
+-
+-    video_prot->angle = angle;
+-
++void video_prot_set_angle(video_prot_t* video_prot, u32 angle_orientation) {
+     if (video_prot->viu_type & VIDTYPE_VIU_NV21) {
+         set_prot_NV21(video_prot->x_start, video_prot->x_end, video_prot->y_start, video_prot->y_end, video_prot->y_step, angle_orientation, video_prot->pat_val);
+     } else if (video_prot->viu_type & VIDTYPE_VIU_422) {
+@@ -225,11 +219,12 @@ void video_prot_set_angle(video_prot_t* video_prot, u32 angle) {
+     } else {
+         set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, 0, video_prot->pat_val);
+     }
++    video_prot->angle = angle_orientation;
+     video_prot->status = angle_orientation % 2;
+ }
+ 
+ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf) {
+-    u32 angle_orientation = (video_prot->angle + video_prot->src_vframe_orientation) % 4;
++    u32 angle_orientation = video_prot->angle;
+ 
+     if (video_prot->viu_type & (VIDTYPE_VIU_444 | VIDTYPE_VIU_422 | VIDTYPE_VIU_NV21)) {
+         if (angle_orientation == 1 || angle_orientation == 3) {
+@@ -253,7 +248,6 @@ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf) {
+             }
+         }
+     }
+-
+ }
+ 
+ void video_prot_set_canvas(vframe_t *vf) {
+@@ -262,30 +256,50 @@ void video_prot_set_canvas(vframe_t *vf) {
+         VSYNC_WR_MPEG_REG_BITS(VPU_PROT3_DDR, (vf->canvas0Addr >> 8) & 0xff, 0, 8);
+     }
+ }
+-void video_prot_axis (video_prot_t* video_prot, u32 video_angle, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end) {
++void video_prot_axis (video_prot_t* video_prot, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end) {
+     u32 reset_axis = 0;
+-    u32 angle_orientation = (video_angle + video_prot->src_vframe_orientation) % 4;
++    u32 angle_orientation = video_prot->angle;
+ 
+     if (vd_start > 0 || hd_start > 0) {
+         if (angle_orientation == 1) {
+-            video_prot->x_start = vd_start;
+-            video_prot->x_end = vd_end;
+-            video_prot->y_start = 0;
+-            video_prot->y_end = hd_end - hd_start;
++            if (video_prot->is_4k2k) {
++                video_prot->x_start = vd_start << 1;
++                video_prot->x_end = video_prot->src_vframe_width - 1;
++                video_prot->y_start = 0;
++                video_prot->y_end = (video_prot->src_vframe_height - hd_start - 1) * (video_prot->y_step + 1);
++            } else {
++                video_prot->x_start = vd_start;
++                video_prot->x_end = video_prot->src_vframe_width - 1;
++                video_prot->y_start = 0;
++                video_prot->y_end = video_prot->src_vframe_height - hd_start - 1;
++            }
+             reset_axis = 1;
+         } else if (angle_orientation == 3) {
+-            video_prot->x_start = 0;
+-            video_prot->x_end = vd_end - vd_start;
+-            video_prot->y_start = hd_start;
+-            video_prot->y_end = hd_end;
+-            reset_axis = 0x1;
++            if (video_prot->is_4k2k) {
++                video_prot->x_start = 0;
++                video_prot->x_end = (video_prot->src_vframe_width - vd_start) << 1;
++                video_prot->y_start = hd_start * (video_prot->y_step + 1);
++                video_prot->y_end = video_prot->src_vframe_height - 1;
++            } else {
++                video_prot->x_start = 0;
++                video_prot->x_end = video_prot->src_vframe_width - vd_start;
++                video_prot->y_start = hd_start;
++                video_prot->y_end = video_prot->src_vframe_height - 1;
++            }
++            reset_axis = 1;
++        }
++        if ((s32)video_prot->x_end < (s32)video_prot->x_start) {
++            video_prot->x_end = video_prot->x_start;
++        }
++        if ((s32)video_prot->y_end < (s32)video_prot->y_start) {
++            video_prot->y_end = video_prot->y_start;
+         }
+     } else {
+         video_prot->x_start = 0;
+         video_prot->y_start = 0;
+         video_prot->x_end = video_prot->src_vframe_width - 1;
+         video_prot->y_end = video_prot->src_vframe_height - 1;
+-        reset_axis = 0x1;
++        reset_axis = 1;
+     }
+     //printk("x :%d :%d y :%d :%d\n", video_prot->x_start, video_prot->x_end, video_prot->y_start, video_prot->y_end);
+     if (reset_axis) {
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+index 862b2cc491a2..b1f365f2d95f 100755
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -326,6 +326,7 @@ vpp_set_filters2(u32 width_in,
+     u32 video_width, video_height;
+     u32 ratio_x = 0;
+     u32 ratio_y = 0;
++    u32 tmp_ratio_y = 0;
+     vppfilter_mode_t *filter = &next_frame_par->vpp_filter;
+     u32 wide_mode;
+     s32 height_shift = 0;
+@@ -544,6 +545,7 @@ RESTART:
+     }
+ 
+     /* set filter co-efficients */
++    tmp_ratio_y = ratio_y;
+     ratio_y <<= height_shift;
+     ratio_y = ratio_y / (next_frame_par->vscale_skip_count + 1);
+ 
+@@ -679,6 +681,41 @@ RESTART:
+     }
+ 
+     next_frame_par->VPP_hf_ini_phase_ = vpp_zoom_center_x & 0xff;
++    if (get_prot_status()){
++        s32 tmp_height = (((s32)next_frame_par->VPP_vd_end_lines_ + 1) << 18) / tmp_ratio_y;
++        s32 tmp_top = 0;
++        s32 tmp_bottom = 0;
++
++        //printk("height_out %d video_height %d\n", height_out, video_height);
++        //printk("vf1 %d %d %d %d vs %d %d\n", next_frame_par->VPP_hd_start_lines_, next_frame_par->VPP_hd_end_lines_,
++        //        next_frame_par->VPP_vd_start_lines_, next_frame_par->VPP_vd_end_lines_,
++        //        next_frame_par->hscale_skip_count, next_frame_par->vscale_skip_count);
++        if ((s32)video_height > tmp_height) {
++            tmp_top = (s32)video_top + (((s32)video_height - tmp_height) >> 1);
++        } else {
++            tmp_top = (s32)video_top;
++        }
++        tmp_bottom = tmp_top + (((s32)next_frame_par->VPP_vd_end_lines_ + 1) << 18) / (s32)tmp_ratio_y;
++        if(tmp_bottom > (s32)height_out && tmp_top < (s32)height_out) {
++            s32 tmp_end = (s32)next_frame_par->VPP_vd_end_lines_ - ((tmp_bottom - (s32)height_out) * (s32)tmp_ratio_y >> 18);
++            if (tmp_end < (s32)next_frame_par->VPP_vd_end_lines_) {
++                next_frame_par->VPP_vd_end_lines_ = tmp_end;
++            }
++
++        } else if(tmp_bottom > (s32)height_out && tmp_top >= (s32)height_out){
++            next_frame_par->VPP_vd_end_lines_ = 1;
++        }
++        next_frame_par->VPP_vd_end_lines_ = next_frame_par->VPP_vd_end_lines_ - h_in /  height_out;
++        if ((s32)next_frame_par->VPP_vd_end_lines_ < (s32)next_frame_par->VPP_vd_start_lines_) {
++            next_frame_par->VPP_vd_end_lines_ = next_frame_par->VPP_vd_start_lines_;
++        }
++        if ((s32)next_frame_par->VPP_hd_end_lines_ < (s32)next_frame_par->VPP_hd_start_lines_) {
++            next_frame_par->VPP_hd_end_lines_ = next_frame_par->VPP_hd_start_lines_;
++        }
++        //printk("tmp_top %d tmp_bottom %d tmp_height %d\n", tmp_top, tmp_bottom, tmp_height);
++        //printk("vf2 %d %d %d %d\n", next_frame_par->VPP_hd_start_lines_, next_frame_par->VPP_hd_end_lines_,
++        //        next_frame_par->VPP_vd_start_lines_, next_frame_par->VPP_vd_end_lines_);
++    }
+ }
+ 
+ void
+diff --git a/include/linux/amlogic/amports/video_prot.h b/include/linux/amlogic/amports/video_prot.h
+index add797e1d373..9c61696b262b 100755
+--- a/include/linux/amlogic/amports/video_prot.h
++++ b/include/linux/amlogic/amports/video_prot.h
+@@ -44,12 +44,12 @@ typedef struct {
+ 
+ //extern void early_init_prot();
+ void video_prot_init(video_prot_t* video_prot, vframe_t *vf);
+-void video_prot_set_angle(video_prot_t* video_prot, u32 angle);
++void video_prot_set_angle(video_prot_t* video_prot, u32 angle_orientation);
+ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf);
+ void video_prot_set_canvas(vframe_t *vf);
+-void video_prot_reset(video_prot_t* video_prot);
++void video_prot_gate(u32 on);
+ u32 get_video_angle(void);
+-int get_prot_status(void);
++u32 get_prot_status(void);
+ void set_video_angle(u32 s_value);
+-void video_prot_axis (video_prot_t* video_prot, u32 video_angle, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end);
++void video_prot_axis (video_prot_t* video_prot, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end);
+ #endif
+-- 
+2.19.0
+

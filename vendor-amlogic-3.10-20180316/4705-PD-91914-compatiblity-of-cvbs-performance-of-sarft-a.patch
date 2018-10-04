@@ -1,0 +1,144 @@
+From fda7d206497cf89f99893f54f5ef84905663e371 Mon Sep 17 00:00:00 2001
+From: "jets.yan" <jets.yan@amlogic.com>
+Date: Wed, 13 Aug 2014 14:54:09 +0800
+Subject: [PATCH 4705/5965] PD #91914: compatiblity of cvbs performance of
+ sarft and telecom.
+
+Change-Id: I290c8eca1fbaaa44a4744705f90b6e3691cca953
+---
+ arch/arm/mach-meson8/include/mach/tvregs.h | 33 ++++++++++++++++++++
+ drivers/amlogic/display/vout/tvconf.c      | 12 ++++++++
+ drivers/amlogic/display/vout/tvoutc.c      | 36 ++++++++++++++++++++++
+ 3 files changed, 81 insertions(+)
+
+diff --git a/arch/arm/mach-meson8/include/mach/tvregs.h b/arch/arm/mach-meson8/include/mach/tvregs.h
+index ae511c5b3796..95c636785949 100755
+--- a/arch/arm/mach-meson8/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8/include/mach/tvregs.h
+@@ -28,6 +28,7 @@
+ #include "am_regs.h"
+ #define MREG_END_MARKER 0xffff
+ 
++#define CONFIG_CVBS_PERFORMANCE_COMPATIBLITY_SUPPORT	1
+ 
+ 	#define VIDEO_CLOCK_HD_25	0x00101529
+ 	#define VIDEO_CLOCK_SD_25	0x00500a6c
+@@ -59,6 +60,38 @@ static const  reg_t tvreg_vclk_hd[]={
+     {P_HHI_VID_PLL_CNTL,VIDEO_CLOCK_HD_25},//HD,25
+ };
+ 
++#ifdef CONFIG_CVBS_PERFORMANCE_COMPATIBLITY_SUPPORT
++
++static const reg_t tvregs_576cvbs_china_sarft[] =
++{
++	{MREG_END_MARKER,            	0      }
++};
++
++static const reg_t tvregs_576cvbs_china_telecom[] =
++{
++	{P_ENCI_SYNC_ADJ,				0x8060	},
++    {P_ENCI_VIDEO_SAT,              0xfe	},
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,   0xf850	},
++	{MREG_END_MARKER,            	0		}
++};
++
++static const reg_t tvregs_576cvbs_china_mobile[] =
++{
++	{P_ENCI_SYNC_ADJ,				0x8060	},
++    {P_ENCI_VIDEO_SAT,              0xfe	},
++    {P_VENC_VDAC_DAC0_FILT_CTRL1,   0xf850	},
++	{MREG_END_MARKER,            	0       }
++};
++
++static const reg_t *tvregs_576cvbs_performance[] =
++{
++	tvregs_576cvbs_china_sarft,
++	tvregs_576cvbs_china_telecom,
++	tvregs_576cvbs_china_mobile
++};
++
++#endif
++
+ static const  reg_t tvregs_720p[] = {
+     {P_VENC_VDAC_SETTING,          0xff,  },
+ 
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 9a8befb2cd04..e822ad6bc943 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -647,6 +647,18 @@ static int __init vdac_config_bootargs_setup(char* line)
+ __setup("vdaccfg=", vdac_config_bootargs_setup);
+ #endif
+ 
++extern void cvbs_performance_config(unsigned int index);
++static int __init cvbs_performance_setup(char* line)
++{
++	unsigned int cfg = 0x1;
++
++	printk("cvbs performance line = %s\n", line);
++	cfg = simple_strtoul(line, NULL, 10);
++
++	cvbs_performance_config(cfg);
++}
++__setup("cvbsdrv=", cvbs_performance_setup);
++
+ arch_initcall(tv_init_module);
+ module_exit(tv_exit_module);
+ 
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index fb7cd00497fe..4cffba02e225 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -351,6 +351,38 @@ void cvbs_cntl_output(unsigned int open)
+ }
+ #endif
+ 
++static unsigned int cvbs_performance_index = 0xff;// 0xff for none config from uboot
++void cvbs_performance_config(unsigned int index)
++{
++	cvbs_performance_index = index;
++	return ;
++}
++
++#ifdef CONFIG_CVBS_PERFORMANCE_COMPATIBLITY_SUPPORT
++static void cvbs_performance_enhancement(tvmode_t mode)
++{
++	const reg_t *s;
++	unsigned int index = cvbs_performance_index;
++	unsigned int max = sizeof(tvregs_576cvbs_performance)/sizeof(reg_t*);
++
++	if( TVMODE_576CVBS != mode )
++		return ;
++
++	if( 0xff == index )
++		return ;
++
++	index = (index>=max)?0:index;
++	printk("cvbs performance use table = %d\n", index);
++	s = tvregs_576cvbs_performance[index];
++	while (MREG_END_MARKER != s->reg)
++	{
++    	setreg(s++);
++	}
++	return ;
++}
++
++#endif// end of CVBS_PERFORMANCE_COMPATIBLITY_SUPPORT
++
+ int tvoutc_setmode(tvmode_t mode)
+ {
+     const  reg_t *s;
+@@ -415,6 +447,10 @@ int tvoutc_setmode(tvmode_t mode)
+         setreg(s++);
+     printk("%s[%d]\n", __func__, __LINE__);
+ 
++#ifdef CONFIG_CVBS_PERFORMANCE_COMPATIBLITY_SUPPORT
++	cvbs_performance_enhancement(mode);
++#endif
++
+     if(mode >= TVMODE_VGA && mode <= TVMODE_SXGA){
+         aml_write_reg32(P_PERIPHS_PIN_MUX_0,aml_read_reg32(P_PERIPHS_PIN_MUX_0)|(3<<20));
+     }else{
+-- 
+2.19.0
+

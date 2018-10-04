@@ -1,0 +1,80 @@
+From aa09850a8a18c8d9ae1184c1ba3590afbec4e7f2 Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Mon, 11 Nov 2013 20:15:32 +0800
+Subject: [PATCH 1823/5965] PD82365: return error if any host indeed happen.
+
+---
+ drivers/amlogic/mmc/aml_sdio.c | 35 +++++++++++++++++++++++++++++-----
+ 1 file changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 907d362bb396..e30a0168346d 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -884,22 +884,45 @@ static irqreturn_t aml_irq_cdout_thread(int irq, void *data)
+ 
+ static int aml_sdio_suspend(struct platform_device *pdev, pm_message_t state)
+ {
++    int ret;
++    int i;
+ 	struct amlsd_host *host = platform_get_drvdata(pdev);
+ 	struct mmc_host* mmc;
+ 	struct amlsd_platform* pdata;
+ 
+ 	printk("***Entered %s:%s\n", __FILE__,__func__);
++    i = 0;
+ 	list_for_each_entry(pdata, &host->sibling, sibling){
+ 		mmc = pdata->mmc;
+ 		//mmc_power_save_host(mmc);
+-		mmc_suspend_host(mmc);
++		ret = mmc_suspend_host(mmc);
++        if (ret)
++            break;
++
++        i++;
+ 	}
+-	printk("***Exited %s:%s\n", __FILE__,__func__);
+-	return 0;
++
++    if (ret) {
++        list_for_each_entry(pdata, &host->sibling, sibling) {
++            i--;
++            if (i < 0) {
++                break;
++            }
++            if(aml_card_type_sdio(pdata)) { // sdio_wifi
++                wifi_setup_dt();
++            }
++            mmc = pdata->mmc;
++            mmc_resume_host(mmc);
++        }
++    }
++    printk("***Exited %s:%s\n", __FILE__,__func__);
++
++    return ret;
+ }
+ 
+ static int aml_sdio_resume(struct platform_device *pdev)
+ {
++    int ret;
+ 	struct amlsd_host *host = platform_get_drvdata(pdev);
+ 	struct mmc_host* mmc;
+ 	struct amlsd_platform* pdata;
+@@ -912,10 +935,12 @@ static int aml_sdio_resume(struct platform_device *pdev)
+         }
+ 		mmc = pdata->mmc;
+ 		//mmc_power_restore_host(mmc);
+-		mmc_resume_host(mmc);
++		ret = mmc_resume_host(mmc);
++        if (ret)
++            break;
+ 	}
+ 	printk("***Exited %s:%s\n", __FILE__,__func__);
+-	return 0;
++	return ret;
+ }
+ 
+ #else
+-- 
+2.19.0
+

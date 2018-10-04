@@ -1,0 +1,151 @@
+From f5ab02e60e35330a09a7bb488615a96fc13570bd Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Fri, 1 Nov 2013 17:26:20 +0800
+Subject: [PATCH 1623/5965] m8: reboot enable
+
+---
+ arch/arm/kernel/process.c   | 70 ++++++++++++++++++++++++++++++++++++-
+ include/uapi/linux/reboot.h | 28 ++++++++++++++-
+ 2 files changed, 96 insertions(+), 2 deletions(-)
+ mode change 100644 => 100755 arch/arm/kernel/process.c
+ mode change 100644 => 100755 include/uapi/linux/reboot.h
+
+diff --git a/arch/arm/kernel/process.c b/arch/arm/kernel/process.c
+old mode 100644
+new mode 100755
+index c86ad0d5a495..bfda3b5a3201
+--- a/arch/arm/kernel/process.c
++++ b/arch/arm/kernel/process.c
+@@ -41,6 +41,14 @@
+ #include <asm/stacktrace.h>
+ #include <asm/mach/time.h>
+ 
++#if defined (CONFIG_PLAT_MESON)
++#include <asm/cacheflush.h>
++#include <plat/sram.h>
++#include <plat/io.h>
++#endif /* CONFIG_PLAT_MESON */
++#include <mach/system.h>
++#include <mach/register.h>
++
+ #ifdef CONFIG_CC_STACKPROTECTOR
+ #include <linux/stackprotector.h>
+ unsigned long __stack_chk_guard __read_mostly;
+@@ -154,13 +162,73 @@ static void null_restart(char mode, const char *cmd)
+ {
+ }
+ 
++void arm_machine_restart(char mode, const char *cmd)
++{
++#if defined (CONFIG_PLAT_MESON) && !defined(CONFIG_ARCH_MESON2)
++    u32 reboot_reason = MESON_NORMAL_BOOT;
++    if (cmd) {
++        if (strcmp(cmd, "charging_reboot") == 0)
++            reboot_reason = MESON_CHARGING_REBOOT;
++        else if (strcmp(cmd, "recovery") == 0 || strcmp(cmd, "factory_reset") == 0)
++            reboot_reason = MESON_FACTORY_RESET_REBOOT;
++        else if (strcmp(cmd, "update") == 0)
++            reboot_reason = MESON_UPDATE_REBOOT;
++        else if (strcmp(cmd, "report_crash") == 0)
++            reboot_reason = MESON_CRASH_REBOOT;
++        else if (strcmp(cmd, "factory_testl_reboot") == 0)
++            reboot_reason = MESON_FACTORY_TEST_REBOOT;
++        else if (strcmp(cmd, "switch_system") == 0)
++            reboot_reason = MESON_SYSTEM_SWITCH_REBOOT;
++        else if (strcmp(cmd, "safe_mode") == 0)
++            reboot_reason = MESON_SAFE_REBOOT;
++        else if (strcmp(cmd, "lock_system") == 0)
++            reboot_reason = MESON_LOCK_REBOOT;
++        else if (strcmp(cmd, "usb_burner_reboot") == 0)
++            reboot_reason = MESON_USB_BURNER_REBOOT;
++	}
++    aml_write_reg32(P_AO_RTI_STATUS_REG1, reboot_reason);
++    printk("reboot_reason(0x%x) = 0x%x\n", P_AO_RTI_STATUS_REG1, aml_read_reg32(P_AO_RTI_STATUS_REG1));
++#endif /* CONFIG_PLAT_MESON */
++
++    /* Flush the console to make sure all the relevant messages make it
++     * out to the console drivers */
++    arm_machine_flush_console();
++
++    /* Disable interrupts first */
++    local_irq_disable();
++    local_fiq_disable();
++
++    /*
++     * Tell the mm system that we are going to reboot -
++     * we may need it to insert some 1:1 mappings so that
++     * soft boot works.
++     */
++    setup_mm_for_reboot();
++
++    /* Clean and invalidate caches */
++    flush_cache_all();
++
++    /* Turn off caching */
++    cpu_proc_fin();
++
++    /* Push out any further dirty data, and ensure cache is empty */
++    flush_cache_all();
++
++    /*
++     * Now call the architecture specific reboot code.
++     */
++    arch_reset(mode, cmd);
++
++}
++
+ /*
+  * Function pointers to optional machine specific functions
+  */
+ void (*pm_power_off)(void);
+ EXPORT_SYMBOL(pm_power_off);
+ 
+-void (*arm_pm_restart)(char str, const char *cmd) = null_restart;
++//void (*arm_pm_restart)(char str, const char *cmd) = null_restart;
++void (*arm_pm_restart)(char str, const char *cmd) = arm_machine_restart;
+ EXPORT_SYMBOL_GPL(arm_pm_restart);
+ 
+ /*
+diff --git a/include/uapi/linux/reboot.h b/include/uapi/linux/reboot.h
+old mode 100644
+new mode 100755
+index 09d056d4fc50..973bf3207c70
+--- a/include/uapi/linux/reboot.h
++++ b/include/uapi/linux/reboot.h
+@@ -34,6 +34,32 @@
+ #define	LINUX_REBOOT_CMD_SW_SUSPEND	0xD000FCE2
+ #define	LINUX_REBOOT_CMD_KEXEC		0x45584543
+ 
+-
++#if defined (CONFIG_PLAT_MESON)
++/*
++ * Commands accepted by the arm_machine_restart() system call.
++ *
++ * MESON_NORMAL_BOOT     			Restart system normally.
++ * MESON_FACTORY_RESET_REBOOT      Restart system into recovery factory reset.
++ * MESON_UPDATE_REBOOT			Restart system into recovery update.
++ * MESON_CHARGING_REBOOT     		Restart system into charging.
++ * MESON_CRASH_REBOOT   			Restart system with system crach.
++ * MESON_FACTORY_TEST_REBOOT    	Restart system into factory test.
++ * MESON_SYSTEM_SWITCH_REBOOT  	Restart system for switch other OS.
++ * MESON_SAFE_REBOOT       			Restart system into safe mode.
++ * MESON_LOCK_REBOOT  			Restart system into lock mode.
++ * elvis.yu---elvis.yu@amlogic.com
++ */
++#define	MESON_CHARGING_REBOOT					0x0
++#define	MESON_NORMAL_BOOT				0x01010101
++#define	MESON_FACTORY_RESET_REBOOT		0x02020202
++#define	MESON_UPDATE_REBOOT				0x03030303
++#define	MESON_CRASH_REBOOT				0x04040404
++#define	MESON_FACTORY_TEST_REBOOT		0x05050505
++#define	MESON_SYSTEM_SWITCH_REBOOT		0x06060606
++#define	MESON_SAFE_REBOOT				0x07070707
++#define	MESON_LOCK_REBOOT				0x08080808
++#define	MESON_USB_BURNER_REBOOT			0x09090909
++#define	MESON_REBOOT_CLEAR				0xdeaddead
++#endif /* CONFIG_PLAT_MESON */
+ 
+ #endif /* _UAPI_LINUX_REBOOT_H */
+-- 
+2.19.0
+

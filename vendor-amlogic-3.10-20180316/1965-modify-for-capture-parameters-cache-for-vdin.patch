@@ -1,0 +1,153 @@
+From 57ba09c3b9483d3a0033be2bf41af80f35f6e9b9 Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Mon, 18 Nov 2013 14:09:48 +0800
+Subject: [PATCH 1965/5965] modify for capture parameters,cache for vdin.
+
+---
+ drivers/amlogic/camera/common/config_parser.c |  9 ++++-----
+ drivers/amlogic/tvin/isp/isp_drv.c            |  8 ++------
+ drivers/amlogic/tvin/isp/isp_parm.c           |  2 --
+ drivers/amlogic/tvin/isp/isp_sm.c             | 12 +++++-------
+ drivers/amlogic/tvin/vdin/vdin_drv.c          |  5 +++--
+ 5 files changed, 14 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/config_parser.c b/drivers/amlogic/camera/common/config_parser.c
+index 2f5a6ccd0f84..d145c30eda93 100755
+--- a/drivers/amlogic/camera/common/config_parser.c
++++ b/drivers/amlogic/camera/common/config_parser.c
+@@ -1248,12 +1248,11 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+             return 	-ENOMEM;
+         }
+         capture = para->xml_capture;
+-        capture->ae_en = (unsigned int)(cf->capture.capture[pindex.capture_index].export[0]);
+-        capture->awb_en = (unsigned int)(cf->capture.capture[pindex.capture_index].export[1]);
+-        capture->af_mode = (cam_scanmode_t)(cf->capture.capture[pindex.capture_index].export[2]);
+-        capture->sigle_count = (unsigned int)(cf->capture.capture[pindex.capture_index].export[3]);
++        capture->ae_try_max_cnt = (unsigned int)(cf->capture.capture[pindex.capture_index].export[0]);
++		capture->sigle_count = (unsigned int)(cf->capture.capture[pindex.capture_index].export[3]);
+         capture->skip_step = (unsigned int)(cf->capture.capture[pindex.capture_index].export[4]);
+-        capture->multi_capture_num = (unsigned int)(cf->capture.capture[pindex.capture_index].export[5]);
++		capture->multi_capture_num = (unsigned int)(cf->capture.capture[pindex.capture_index].export[5]);
++		capture->af_mode = (cam_scanmode_t)(cf->capture.capture[pindex.capture_index].export[2]);
+         capture->eyetime = (unsigned int)(cf->capture.capture[pindex.capture_index].export[6]);
+         capture->pretime = (unsigned int)(cf->capture.capture[pindex.capture_index].export[7]);
+         capture->postime = (unsigned int)(cf->capture.capture[pindex.capture_index].export[8]);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 77b50fba74f7..d337b95be98e 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -940,12 +940,10 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 		        break;
+                 case CAM_COMMAND_AWB:
+ 	                devp->flag |= ISP_FLAG_AWB;
+-			devp->capture_parm->awb_en = 1;
+ 		        break;
+ 		case CAM_COMMAND_MWB:
+ 			devp->flag &= (~ISP_FLAG_AWB);
+ 	                devp->flag |= ISP_FLAG_MWB;
+-			devp->capture_parm->awb_en = 0;
+ 		        break;
+ 		case CAM_COMMAND_SET_WORK_MODE:
+ 			if(devp->cam_param->cam_mode == CAMERA_CAPTURE)
+@@ -959,11 +957,9 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+                 case CAM_COMMAND_AE_ON:
+ 		        isp_sm_init(devp);
+ 		        devp->flag |= ISP_FLAG_AE;
+-		        devp->capture_parm->ae_en = 1;
+ 		        break;
+                 case CAM_COMMAND_AE_OFF:
+ 		        devp->flag &= (~ISP_FLAG_AE);
+-		        devp->capture_parm->ae_en = 0;
+ 		        break;
+                 // af related
+                 case CAM_COMMAND_AF:
+@@ -1080,10 +1076,10 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 		devp->flag &= (~ISP_FLAG_SET_COMB4);
+ 	}
+ 	if(devp->isp_fe)
+-		ret |= devp->isp_fe->dec_ops->decode_isr(devp->isp_fe,0);
++		ret = devp->isp_fe->dec_ops->decode_isr(devp->isp_fe,0);
+ 	
+ 	if(devp->flag & ISP_FLAG_CAPTURE)
+-		ret |= isp_capture_sm(devp);
++		ret = max(isp_capture_sm(devp),ret);
+ 	if(isr_debug&&ret)
+ 		pr_info("%s isp %d buf.\n",__func__,ret);
+ 	
+diff --git a/drivers/amlogic/tvin/isp/isp_parm.c b/drivers/amlogic/tvin/isp/isp_parm.c
+index 4ccd3b5702ea..ce31687836e2 100755
+--- a/drivers/amlogic/tvin/isp/isp_parm.c
++++ b/drivers/amlogic/tvin/isp/isp_parm.c
+@@ -249,8 +249,6 @@ void set_cap_parm(struct xml_capture_s *cap_sw,char **parm)
+ {
+ 	int len = CAP_PARM_NUM;
+ 	isp_param_t cap[CAP_PARM_NUM]={
+-		{"ae_en",      	     &cap_sw->ae_en,      	   1, ISP_U32},
+-		{"awb_en",           &cap_sw->awb_en,      	   1, ISP_U32},
+ 		{"ae_try_max_cnt",   &cap_sw->ae_try_max_cnt,      1, ISP_U32},
+ 		{"af_mode",          &cap_sw->af_mode,      	   1, ISP_U32},
+ 		{"sigle_count",      &cap_sw->sigle_count,         1, ISP_U32},
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index f07132243176..b4e4feec4088 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -1400,8 +1400,6 @@ void capture_sm_init(isp_dev_t *devp)
+ {
+ 	struct isp_capture_sm_s *cap_sm = &sm_state.cap_sm;
+ 		
+-	devp->capture_parm->ae_en = 1;
+-	devp->capture_parm->awb_en = 1;
+ 	devp->capture_parm->ae_try_max_cnt = 15;
+ 	devp->capture_parm->sigle_count = 0;
+ 	devp->capture_parm->skip_step = 0;
+@@ -1583,16 +1581,17 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case CAPTURE_SINGLE:
+-			if(cap_sm->adj_cnt < parm->sigle_count){
++			if(cap_sm->adj_cnt <= parm->sigle_count){
+ 				for(j=0;j<4;j++)
+ 					cur_ac += devp->blnr_stat.ac[j];
++					if(capture_debug)
++						pr_info("[cap_sm] field[%u] ac_sum %u.\n",cap_sm->adj_cnt,cur_ac);
+ 					if(cur_ac > cap_sm->max_ac_sum){
+ 						cap_sm->max_ac_sum = cur_ac;
+ 						ret = TVIN_BUF_TMP;
+ 					}
+ 			}else{
+-				//ret = TVIN_BUF_RECYCLE_TMP;
+-				ret = TVIN_BUF_NULL;
++				ret = TVIN_BUF_RECYCLE_TMP;
+ 				if(parm->multi_capture_num > 0){
+ 					cap_sm->capture_state = CAPTURE_MULTI;
+ 					cap_sm->adj_cnt = 1;
+@@ -1618,8 +1617,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case CAPTURE_END:
+-			//ret = TVIN_BUF_RECYCLE_TMP;
+-			ret = TVIN_BUF_NULL;
++			ret = TVIN_BUF_RECYCLE_TMP;
+ 			devp->flag &= (~ISP_FLAG_CAPTURE);
+ 			break;
+ 		default:
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index c77940e60982..39d4bbde4dcd 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -1366,9 +1366,10 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 		        goto irq_handled;
+                 }
+ 	}
+-	curr_wr_vfe->flag |= VF_FLAG_NORMAL_FRAME;
+-	if(curr_wr_vfe)
++	if(curr_wr_vfe){
++		curr_wr_vfe->flag |= VF_FLAG_NORMAL_FRAME;
+ 		provider_vf_put(curr_wr_vfe, devp->vfp);
++	}
+ 
+ 	/* prepare for next input data */
+ 	next_wr_vfe = provider_vf_get(devp->vfp);
+-- 
+2.19.0
+

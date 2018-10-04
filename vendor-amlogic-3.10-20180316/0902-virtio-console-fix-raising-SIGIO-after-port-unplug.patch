@@ -1,0 +1,49 @@
+From 2817b99f91475b84c23cd353741ea485564f4562 Mon Sep 17 00:00:00 2001
+From: Amit Shah <amit.shah@redhat.com>
+Date: Mon, 29 Jul 2013 14:21:32 +0930
+Subject: [PATCH 0902/5965] virtio: console: fix raising SIGIO after port
+ unplug
+
+commit 92d3453815fbe74d539c86b60dab39ecdf01bb99 upstream.
+
+SIGIO should be sent when a port gets unplugged.  It should only be sent
+to prcesses that have the port opened, and have asked for SIGIO to be
+delivered.  We were clearing out guest_connected before calling
+send_sigio_to_port(), resulting in a sigio not getting sent to
+processes.
+
+Fix by setting guest_connected to false after invoking the sigio
+function.
+
+Signed-off-by: Amit Shah <amit.shah@redhat.com>
+Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/char/virtio_console.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/char/virtio_console.c b/drivers/char/virtio_console.c
+index 4e684faee10b..e4845f1c9a0b 100644
+--- a/drivers/char/virtio_console.c
++++ b/drivers/char/virtio_console.c
+@@ -1551,12 +1551,14 @@ static void unplug_port(struct port *port)
+ 	spin_unlock_irq(&port->portdev->ports_lock);
+ 
+ 	if (port->guest_connected) {
++		/* Let the app know the port is going down. */
++		send_sigio_to_port(port);
++
++		/* Do this after sigio is actually sent */
+ 		port->guest_connected = false;
+ 		port->host_connected = false;
+-		wake_up_interruptible(&port->waitqueue);
+ 
+-		/* Let the app know the port is going down. */
+-		send_sigio_to_port(port);
++		wake_up_interruptible(&port->waitqueue);
+ 	}
+ 
+ 	if (is_console_port(port)) {
+-- 
+2.19.0
+

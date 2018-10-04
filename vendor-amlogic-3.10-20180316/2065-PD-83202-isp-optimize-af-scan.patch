@@ -1,0 +1,116 @@
+From a1214333ea70ed2b60792fbc4efeaf0cd15ea0e9 Mon Sep 17 00:00:00 2001
+From: "frank.zhao" <frank.zhao@amlogic.com>
+Date: Mon, 25 Nov 2013 14:05:56 +0800
+Subject: [PATCH 2065/5965] PD #83202: isp,optimize af scan
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c | 9 +++++----
+ drivers/amlogic/tvin/isp/isp_drv.h | 2 +-
+ drivers/amlogic/tvin/isp/isp_sm.c  | 9 +++++++--
+ 3 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 556ce76bda30..56b4b54d1305 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -829,7 +829,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		isp_set_manual_wb(devp->cam_param->xml_wb_manual);
+ 		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_af_t),GFP_KERNEL);
+ 		memset(devp->isp_af_parm,0,sizeof(xml_algorithm_af_t));
+-		devp->isp_af_parm->valid_step_cnt = 16;
++		devp->isp_af_parm->valid_step_cnt = 8;
+ 		devp->isp_af_parm->af_fail_ratio = 120;
+ 		devp->isp_af_parm->af_step_mid_thre= 250;
+ 		devp->isp_af_parm->af_step_max_thre = 550;
+@@ -852,8 +852,8 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->isp_af_parm->step[15] = 550;
+ 		if(af_ave_step_en){
+ 			int temp;
+-			for(temp=0;temp<16;temp++)
+-				devp->isp_af_parm->step[temp] = 100+30*temp;
++			for(temp=0;temp<8;temp++)
++				devp->isp_af_parm->step[temp] = 100+60*temp;
+ 		}
+ 		devp->isp_af_parm->jump_offset = 100;
+ 		devp->isp_af_parm->field_delay = 2;
+@@ -1008,7 +1008,8 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			devp->flag |= ISP_FLAG_AF;
+ 		        break;
+                 case CAM_COMMAND_FULLSCAN:
+-			isp_set_af_scan_stat(0,0,devp->info.h_active-1,devp->info.v_active-1);
++				//isp_set_af_scan_stat(0,0,devp->info.h_active-1,devp->info.v_active-1);
++				isp_set_af_scan_stat(devp->af_info.x0,devp->af_info.y0,devp->af_info.x1,devp->af_info.y1);
+ 			devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			devp->cmd_state = CAM_STATE_DOING;
+ 			af_sm_init(devp);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 62717c4e4899..8c749224dc68 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.23a"
++#define ISP_VER					"2013.11.24a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 2b38fbd33fc1..2621f5a7136a 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -1314,6 +1314,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AF_CALC_GREAT:
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+ 			af_info->great_step = get_best_step(af_info,af_alg);
+ 			af_info->cur_step = (af_info->great_step > af_alg->jump_offset) ? (af_info->great_step - af_alg->jump_offset) : 0;
+ 			if(af_sm_dg&1)
+@@ -1321,6 +1322,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 			atomic_set(&af_info->writeable,1);
+ 			af_delay = 0;
+ 			sm_state.af_state = AF_GET_FINE_INFO;
++			}
+ 			break;
+ 		case AF_GET_FINE_INFO:
+ 			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+@@ -1333,7 +1335,8 @@ void isp_af_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AF_SUCCESS:
+-			if(af_delay >= 2){
++			//if(af_delay >= 2){
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= 5)){
+ 				/*get last blnr*/
+ 				memcpy(&af_info->last_blnr,&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+ 		                /* get last fv */
+@@ -1371,6 +1374,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
++					af_delay = 0;
+ 					if(devp->flag & ISP_FLAG_TOUCH_AF)
+ 						devp->flag &= (~ISP_FLAG_TOUCH_AF);
+ 					if(devp->flag & ISP_FLAG_AF)
+@@ -1386,6 +1390,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
++					af_delay = 0;
+ 					af_info->cur_step= af_info->last_great_step;
+ 					if(af_sm_dg&0x1)
+ 						pr_info("[af_sm..]:af_info->final_step:%d.\n",af_info->cur_step);
+@@ -1413,7 +1418,7 @@ void isp_af_save_current_para(isp_dev_t *devp)
+ 	af_info->adj_duration_cnt = 0;
+ 	af_info->last_move = false;
+ 	sm_state.af_state = AF_NULL;
+-	if(sm_state.af_state < AF_INIT)
++	if(sm_state.af_state == AF_SUCCESS)
+ 		af_info->capture_step = af_info->cur_step;
+ 	else
+ 		af_info->capture_step = 0;
+-- 
+2.19.0
+

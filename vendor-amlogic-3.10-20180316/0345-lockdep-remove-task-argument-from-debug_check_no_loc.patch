@@ -1,0 +1,110 @@
+From 0f7aff8620c7f70532937a236a12ded5f28cde91 Mon Sep 17 00:00:00 2001
+From: Colin Cross <ccross@android.com>
+Date: Mon, 6 May 2013 23:50:08 +0000
+Subject: [PATCH 0345/5965] lockdep: remove task argument from
+ debug_check_no_locks_held
+
+The only existing caller to debug_check_no_locks_held calls it
+with 'current' as the task, and the freezer needs to call
+debug_check_no_locks_held but doesn't already have a current
+task pointer, so remove the argument.  It is already assuming
+that the current task is relevant by dumping the current stack
+trace as part of the warning.
+
+This was originally part of 6aa9707099c (lockdep: check that
+no locks held at freeze time) which was reverted in
+dbf520a9d7d4.
+
+Change-Id: Idbaf1332ce6c80dc49c1d31c324c7fbf210657c5
+Original-author: Mandeep Singh Baines <msb@chromium.org>
+Acked-by: Pavel Machek <pavel@ucw.cz>
+Acked-by: Tejun Heo <tj@kernel.org>
+Signed-off-by: Colin Cross <ccross@android.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+---
+ include/linux/debug_locks.h |  4 ++--
+ kernel/exit.c               |  2 +-
+ kernel/lockdep.c            | 17 ++++++++---------
+ 3 files changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/include/linux/debug_locks.h b/include/linux/debug_locks.h
+index 21ca773f77bf..822c1354f3a6 100644
+--- a/include/linux/debug_locks.h
++++ b/include/linux/debug_locks.h
+@@ -51,7 +51,7 @@ struct task_struct;
+ extern void debug_show_all_locks(void);
+ extern void debug_show_held_locks(struct task_struct *task);
+ extern void debug_check_no_locks_freed(const void *from, unsigned long len);
+-extern void debug_check_no_locks_held(struct task_struct *task);
++extern void debug_check_no_locks_held(void);
+ #else
+ static inline void debug_show_all_locks(void)
+ {
+@@ -67,7 +67,7 @@ debug_check_no_locks_freed(const void *from, unsigned long len)
+ }
+ 
+ static inline void
+-debug_check_no_locks_held(struct task_struct *task)
++debug_check_no_locks_held(void)
+ {
+ }
+ #endif
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 7bb73f9d09db..6a057750ebbb 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -835,7 +835,7 @@ void do_exit(long code)
+ 	/*
+ 	 * Make sure we are holding no locks:
+ 	 */
+-	debug_check_no_locks_held(tsk);
++	debug_check_no_locks_held();
+ 	/*
+ 	 * We can do this unlocked here. The futex code uses this flag
+ 	 * just to verify whether the pi state cleanup has been done
+diff --git a/kernel/lockdep.c b/kernel/lockdep.c
+index 1f3186b37fd5..e16c45b9ee77 100644
+--- a/kernel/lockdep.c
++++ b/kernel/lockdep.c
+@@ -4090,7 +4090,7 @@ void debug_check_no_locks_freed(const void *mem_from, unsigned long mem_len)
+ }
+ EXPORT_SYMBOL_GPL(debug_check_no_locks_freed);
+ 
+-static void print_held_locks_bug(struct task_struct *curr)
++static void print_held_locks_bug(void)
+ {
+ 	if (!debug_locks_off())
+ 		return;
+@@ -4099,22 +4099,21 @@ static void print_held_locks_bug(struct task_struct *curr)
+ 
+ 	printk("\n");
+ 	printk("=====================================\n");
+-	printk("[ BUG: lock held at task exit time! ]\n");
++	printk("[ BUG: %s/%d still has locks held! ]\n",
++	       current->comm, task_pid_nr(current));
+ 	print_kernel_ident();
+ 	printk("-------------------------------------\n");
+-	printk("%s/%d is exiting with locks still held!\n",
+-		curr->comm, task_pid_nr(curr));
+-	lockdep_print_held_locks(curr);
+-
++	lockdep_print_held_locks(current);
+ 	printk("\nstack backtrace:\n");
+ 	dump_stack();
+ }
+ 
+-void debug_check_no_locks_held(struct task_struct *task)
++void debug_check_no_locks_held(void)
+ {
+-	if (unlikely(task->lockdep_depth > 0))
+-		print_held_locks_bug(task);
++	if (unlikely(current->lockdep_depth > 0))
++		print_held_locks_bug();
+ }
++EXPORT_SYMBOL_GPL(debug_check_no_locks_held);
+ 
+ void debug_show_all_locks(void)
+ {
+-- 
+2.19.0
+

@@ -1,0 +1,190 @@
+From f9a893712669001b64d3ecad65332fad5796d4c0 Mon Sep 17 00:00:00 2001
+From: Dezhi Kong <dezhi.kong@amlogic.com>
+Date: Wed, 14 Oct 2015 17:49:24 +0800
+Subject: [PATCH 5879/5965] PD#113978: atv: optimize atvdemod setting for
+ nonstd signal
+
+Change-Id: Iea853efed3e12f3eedc146becffa15a24b5d9232
+---
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        | 122 +++++++++++++++++-
+ .../dvb_tv/amlatvdemod/atvdemod_func.h        |   7 +
+ 2 files changed, 123 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index ea751e996d15..bba8ae3b4b41 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -79,6 +79,14 @@ static unsigned int atvdemod_timer_en = 0;
+ module_param( atvdemod_timer_en, uint, 0644);
+ MODULE_PARM_DESC( atvdemod_timer_en, "\n atvdemod_timer_en\n");
+ 
++static unsigned int atvdemod_afc_en = 0;
++module_param( atvdemod_afc_en, uint, 0644);
++MODULE_PARM_DESC( atvdemod_afc_en, "\n atvdemod_afc_en\n");
++
++static unsigned int atvdemod_monitor_en = 0;
++module_param( atvdemod_monitor_en, uint, 0644);
++MODULE_PARM_DESC( atvdemod_monitor_en, "\n atvdemod_monitor_en\n");
++
+ static unsigned int pwm_kp = 0x19;
+ module_param(pwm_kp, uint, 0644) ;
+ MODULE_PARM_DESC(pwm_kp, "\n pwm_kp\n");
+@@ -270,6 +278,8 @@ void atv_dmd_misc(void)
+ #if (defined CONFIG_AM_MXL661)
+     atv_dmd_wr_long(0x0c,0x04,0xbffa0000) ;//test in sky
+     atv_dmd_wr_long(0x0c,0x00,0x5a4000);//test in sky
++    //guanzhong@20151013 fix nonstd def is:0x0c010301;0x0c020601(test001)
++    atv_dmd_wr_long(APB_BLOCK_ADDR_CARR_RCVY,0x24,0x0c030901);
+ #else
+     atv_dmd_wr_long(0x0c,0x04,0xc8fa0000);//zhuangwei//0xdafa0000
+     atv_dmd_wr_long(0x0c,0x00,0x554000);//zhuangwei
+@@ -1148,15 +1158,12 @@ void retrieve_fh_frequency(int *fh)
+ 	data2 = data2 >> 3;
+ 	*fh = data1 + data2;
+ }
+-void atvdemod_timer_hander(unsigned long arg)
++/*tune mix to adapt afc*/
++void atvdemod_afc_tune(void)
+ {
+ 	//int adc_level,lock,freq_offset,fh;
+ 	int freq_offset,lock,mix1_freq_cur,delta_mix1_freq;
+-	if (atvdemod_timer_en == 0) {
+-		return;
+-	}
+-	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*10;//100ms timer
+-	add_timer(&atvdemod_timer);
++
+ 	//retrieve_adc_power(&adc_level);
+ 	//pr_info("adc_level: 0x%x\n",adc_level);
+ 	retrieve_vpll_carrier_lock(&lock);
+@@ -1188,6 +1195,109 @@ void atvdemod_timer_hander(unsigned long arg)
+ 	}
+ 	//retrieve_fh_frequency(&fh);
+ 	//pr_info("horizontal frequency:%d Hz\n",fh*190735/100000);
++
++}
++static amlatvdemod_snr_level_t aml_atvdemod_get_snr_level(void)
++{
++	unsigned int snr_val,i,snr_d[8];
++	amlatvdemod_snr_level_t ret;
++	unsigned long fsnr;
++	snr_val = atv_dmd_rd_long(APB_BLOCK_ADDR_VDAGC,0x50)>>8;
++	fsnr = snr_val;
++	for (i = 1;i < 8;i++) {
++		snr_d[i] = snr_d[i-1];
++		fsnr = fsnr + snr_d[i];
++	}
++	snr_d[0] = snr_val;
++	fsnr = fsnr >> 3;
++	if (fsnr < 316)
++		ret = high;
++	else if (fsnr < 31600)
++		ret = ok_plus;
++	else if (fsnr < 158000)
++		ret = ok_minus;
++	else if (fsnr < 700000)
++		ret = low;
++	else
++		ret = very_low;
++	return ret;
++}
++
++void atvdemod_monitor_serice(void)
++{
++	amlatvdemod_snr_level_t snr_level;
++	unsigned int vagc_bw_typ,vagc_bw_fast,vpll_kptrack,vpll_kitrack,agc_pll_kptrack,agc_pll_kitrack;
++	unsigned int agc_register,vfmat_reg;
++	/*1.get current snr*/
++	snr_level = aml_atvdemod_get_snr_level();
++	/*2.*/
++	if (snr_level > very_low) {
++		vagc_bw_typ = 0x1818;
++		vagc_bw_fast = (snr_level==low) ? 0x18:0x10;
++		vpll_kptrack = 0x05;
++		vpll_kitrack = 0x0c;
++		agc_pll_kptrack = 0x6;
++		agc_pll_kitrack = 0xc;
++	} else {
++		vagc_bw_typ = 0x6f6f;
++		vagc_bw_fast = 0x6f;
++		vpll_kptrack = 0x06;
++		vpll_kitrack = 0x0e;
++		agc_pll_kptrack = 0x8;
++		agc_pll_kitrack = 0xf;
++	}
++	atv_dmd_wr_word(APB_BLOCK_ADDR_VDAGC,0x3c,vagc_bw_typ);
++	atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x3e,vagc_bw_fast);
++	atv_dmd_wr_byte(APB_BLOCK_ADDR_CARR_RCVY,0x23,vpll_kptrack);
++	atv_dmd_wr_byte(APB_BLOCK_ADDR_CARR_RCVY,0x24,vpll_kitrack);
++	atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x0c,((atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x0c)&0xf0)|agc_pll_kptrack));
++	atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x0d,((atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x0d)&0xf0)|agc_pll_kitrack));
++	/*3.*/
++	agc_register = atv_dmd_rd_long(APB_BLOCK_ADDR_VDAGC,0x28);
++	if (snr_level < low) {
++		agc_register = ((agc_register&0xff80fe03) | (25 << 16) | (15 << 2));
++		atv_dmd_wr_long(APB_BLOCK_ADDR_VDAGC,0x28,agc_register);
++	} else if (snr_level > low) {
++		agc_register = ((agc_register&0xff80fe03) | (38 << 16) | (30 << 2));
++		atv_dmd_wr_long(APB_BLOCK_ADDR_VDAGC,0x28,agc_register);
++	}
++	/*4.*/
++	if (snr_level < ok_minus)
++		atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x47,(atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x47) & 0x7f));
++	else
++		atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x47,(atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x47) | 0x80));
++	/*5.vformat*/
++	if (snr_level < ok_minus) {
++		if (atv_dmd_rd_byte(APB_BLOCK_ADDR_VFORMAT,0xe) != 0xf)
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_VFORMAT,0xe,0xf);
++	} else if (snr_level > ok_minus) {
++		vfmat_reg = atv_dmd_rd_word(APB_BLOCK_ADDR_VFORMAT,0x16);
++		if ((vfmat_reg << 4) < 0xf000) {
++			if (atv_dmd_rd_byte(APB_BLOCK_ADDR_VFORMAT,0xe) == 0x0f)
++				atv_dmd_wr_byte(APB_BLOCK_ADDR_VFORMAT,0xe,0x6);
++			else
++				atv_dmd_wr_byte(APB_BLOCK_ADDR_VFORMAT,0xe,0x6);
++		}
++	} else {
++		if (atv_dmd_rd_byte(APB_BLOCK_ADDR_VFORMAT,0xe) == 0x0f)
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_VFORMAT,0xe,0xe);
++		else
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_VFORMAT,0xe,0xe);
++	}
++}
++void atvdemod_timer_hander(unsigned long arg)
++{
++	if (atvdemod_timer_en == 0) {
++		return;
++	}
++	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*10;//100ms timer
++	add_timer(&atvdemod_timer);
++	if (atvdemod_afc_en) {
++		atvdemod_afc_tune();
++	}
++	if (atvdemod_monitor_en) {
++		atvdemod_monitor_serice();
++	}
+ }
+ int atvdemod_init(void)
+ {
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+index 39d019f2ddbe..e57d5ddb16ab 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+@@ -190,6 +190,13 @@ vs_freq==60,freq_hz=15734,freq_hz_cvrt=0x101c9
+ #define AML_ATV_DEMOD_FREQ_50HZ_VERT	0xffff//65535
+ #define AML_ATV_DEMOD_FREQ_60HZ_VERT	0x101c9//65993
+ 
++typedef enum amlatvdemod_snr_level_e{
++	very_low = 1,
++	low,
++	ok_minus,
++	ok_plus,
++	high,
++}amlatvdemod_snr_level_t;
+ 
+ typedef struct amlatvdemod_device_s{
+ 	struct class 	*clsp;
+-- 
+2.19.0
+

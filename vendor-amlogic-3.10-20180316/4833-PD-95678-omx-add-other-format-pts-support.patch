@@ -1,0 +1,328 @@
+From 4f87b68e53077e47e5604a431a07b4c0876ad412 Mon Sep 17 00:00:00 2001
+From: "jintao.xu" <jintao.xu@amlogic.com>
+Date: Fri, 29 Aug 2014 19:07:38 +0800
+Subject: [PATCH 4833/5965] PD #95678: omx add other format pts support
+
+Change-Id: Ie29902176056e8404c94b61ba1962b0b2a7c19ce
+---
+ drivers/amlogic/amports/vmjpeg.c  |  6 +++++-
+ drivers/amlogic/amports/vmpeg12.c |  6 +++++-
+ drivers/amlogic/amports/vmpeg4.c  | 17 ++++++++++++++++-
+ drivers/amlogic/amports/vvc1.c    | 28 +++++++++++++++++++++++++++-
+ 4 files changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vmjpeg.c b/drivers/amlogic/amports/vmjpeg.c
+index a80f13b1d7e6..741a998559ed 100755
+--- a/drivers/amlogic/amports/vmjpeg.c
++++ b/drivers/amlogic/amports/vmjpeg.c
+@@ -160,6 +160,7 @@ static irqreturn_t vmjpeg_isr(int irq, void *dev_id)
+ {
+     u32 reg, offset, pts, pts_valid = 0;
+     vframe_t *vf = NULL;
++    u64 pts_us64;
+ 
+     WRITE_VREG(ASSIST_MBOX1_CLR_REG, 1);
+ 
+@@ -168,7 +169,7 @@ static irqreturn_t vmjpeg_isr(int irq, void *dev_id)
+     if (reg & PICINFO_BUF_IDX_MASK) {
+         offset = READ_VREG(MREG_FRAME_OFFSET);
+ 
+-        if (pts_lookup_offset(PTS_TYPE_VIDEO, offset, &pts, 0) == 0) {
++        if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, offset, &pts, 0, &pts_us64) == 0) {
+             pts_valid = 1;
+         }
+ 
+@@ -195,6 +196,7 @@ static irqreturn_t vmjpeg_isr(int irq, void *dev_id)
+ #endif
+             vf->canvas0Addr = vf->canvas1Addr = index2canvas0(index);
+             vf->pts = (pts_valid) ? pts : 0;
++            vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
+ 			vf->orientation = 0 ;
+             vfbuf_use[index]++;
+ 
+@@ -262,8 +264,10 @@ static irqreturn_t vmjpeg_isr(int irq, void *dev_id)
+ 			vf->orientation = 0 ;
+             if (pts_valid) {
+                 vf->pts = pts;
++                vf->pts_us64 = pts_us64;
+             } else {
+                 vf->pts = 0;
++                vf->pts_us64 = 0;
+             }
+ 
+             vfbuf_use[index]++;
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index 2200ab8ccb52..5739c2321aa4 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -246,6 +246,7 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+     u32 reg, info, seqinfo, offset, pts, pts_valid = 0;
+     vframe_t *vf;
+     ulong flags;
++    u64 pts_us64 = 0;;
+ 
+     WRITE_VREG(ASSIST_MBOX1_CLR_REG, 1);
+ 
+@@ -260,7 +261,7 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+         offset = READ_VREG(MREG_FRAME_OFFSET);
+ 
+         if ((((info & PICINFO_TYPE_MASK) == PICINFO_TYPE_I) || ((info & PICINFO_TYPE_MASK) == PICINFO_TYPE_P))
+-             && (pts_lookup_offset(PTS_TYPE_VIDEO, offset, &pts, 0) == 0)) {
++             && (pts_lookup_offset_us64(PTS_TYPE_VIDEO, offset, &pts, 0, &pts_us64) == 0)) {
+             pts_valid = 1;
+         }
+ 
+@@ -336,6 +337,7 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+             vf->canvas0Addr = vf->canvas1Addr = index2canvas(index);
+             vf->orientation = 0 ;
+             vf->pts = (pts_valid) ? pts : 0;
++            vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
+ 
+             vfbuf_use[index] = 1;
+ 
+@@ -389,6 +391,7 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+             vf->orientation = 0 ;
+             vf->canvas0Addr = vf->canvas1Addr = index2canvas(index);
+             vf->pts = (pts_valid) ? pts : 0;
++            vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
+ 
+             if (error_skip(info, vf)) {
+                 vfq_push(&recycle_q, vf);
+@@ -415,6 +418,7 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
+             vf->orientation = 0 ;
+             vf->canvas0Addr = vf->canvas1Addr = index2canvas(index);
+             vf->pts = 0;
++            vf->pts_us64 = 0;
+ 
+             if (error_skip(info, vf)) {
+                 vfq_push(&recycle_q, vf);
+diff --git a/drivers/amlogic/amports/vmpeg4.c b/drivers/amlogic/amports/vmpeg4.c
+index fc1fa93f88ec..7d4fac82d93c 100755
+--- a/drivers/amlogic/amports/vmpeg4.c
++++ b/drivers/amlogic/amports/vmpeg4.c
+@@ -150,6 +150,8 @@ static u32 vmpeg4_rotation;
+ static u32 total_frame;
+ static u32 last_vop_time_inc, last_duration;
+ static u32 last_anch_pts, vop_time_inc_since_last_anch, frame_num_since_last_anch;
++static u64 last_anch_pts_us64;
++
+ #ifdef CONFIG_AM_VDEC_MPEG4_LOG
+ u32 pts_hit, pts_missed, pts_i_hit, pts_i_missed;
+ #endif
+@@ -252,6 +254,7 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+     u32 picture_type;
+     u32 buffer_index;
+     u32 pts, pts_valid = 0, offset = 0;
++    u64 pts_us64 = 0;
+     u32 rate, vop_time_inc, repeat_cnt, duration = 3200;
+ 
+     reg = READ_VREG(MREG_BUFFEROUT);
+@@ -329,9 +332,10 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+                  may have av sync problem.can changed small later.
+ 		 263 may need small?
+            */
+-            if (pts_lookup_offset(PTS_TYPE_VIDEO, offset, &pts, 3000) == 0) {
++            if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, offset, &pts, 3000, &pts_us64) == 0) {
+                 pts_valid = 1;
+                 last_anch_pts = pts;
++                last_anch_pts_us64 = pts_us64;
+ #ifdef CONFIG_AM_VDEC_MPEG4_LOG
+                 pts_hit++;
+ #endif
+@@ -347,10 +351,12 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+ 
+         if (pts_valid) {
+             last_anch_pts = pts;
++            last_anch_pts_us64 = pts_us64;
+             frame_num_since_last_anch = 0;
+             vop_time_inc_since_last_anch = 0;
+         } else {
+             pts = last_anch_pts;
++            pts_us64 = last_anch_pts_us64;
+ 
+             if ((rate != 0) && ((rate >> 16) == 0) && vmpeg4_amstream_dec_info.rate==0) {
+                 /* variable PTS rate */
+@@ -364,20 +370,24 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+                 }
+ 
+                 pts += vop_time_inc_since_last_anch * PTS_UNIT / rate;
++                pts_us64 += (vop_time_inc_since_last_anch * PTS_UNIT / rate) * 100 / 9;
+ 
+                 if (vop_time_inc_since_last_anch > (1 << 14)) {
+                     /* avoid overflow */
+                     last_anch_pts = pts;
++                    last_anch_pts_us64 = pts_us64;
+                     vop_time_inc_since_last_anch = 0;
+                 }
+             } else {
+                 /* fixed VOP rate */
+                 frame_num_since_last_anch++;
+                 pts += DUR2PTS(frame_num_since_last_anch * vmpeg4_amstream_dec_info.rate);
++                pts_us64 += DUR2PTS(frame_num_since_last_anch * vmpeg4_amstream_dec_info.rate) * 100 / 9;
+ 
+                 if (frame_num_since_last_anch > (1 << 15)) {
+                     /* avoid overflow */
+                     last_anch_pts = pts;
++                    last_anch_pts_us64 = pts_us64;
+                     frame_num_since_last_anch = 0;
+                 }
+             }
+@@ -395,6 +405,7 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+             vf->bufWidth = 1920;
+             vf->orientation = vmpeg4_rotation;
+             vf->pts = pts;
++            vf->pts_us64 = pts_us64;
+             vf->duration = duration >> 1;
+             vf->duration_pulldown = 0;
+             vf->type = (reg & BOTTOM_FIELD_FIRST_FLAG) ? VIDTYPE_INTERLACE_BOTTOM : VIDTYPE_INTERLACE_TOP;
+@@ -423,6 +434,7 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+             vf->orientation = vmpeg4_rotation;
+ 
+             vf->pts = 0;
++            vf->pts_us64 = 0;
+             vf->duration = duration >> 1;
+ 
+             vf->duration_pulldown = 0;
+@@ -456,6 +468,7 @@ static irqreturn_t vmpeg4_isr(int irq, void *dev_id)
+             vf->bufWidth = 1920;
+             vf->orientation = vmpeg4_rotation;
+             vf->pts = pts;
++            vf->pts_us64 = pts_us64;
+             vf->duration = duration;
+             vf->duration_pulldown = repeat_cnt * duration;
+ #ifdef NV21
+@@ -748,6 +761,8 @@ static void vmpeg4_local_init(void)
+ 
+     last_anch_pts = 0;
+ 
++    last_anch_pts_us64 = 0;
++
+     last_vop_time_inc = last_duration = 0;
+ 
+     vop_time_inc_since_last_anch = 0;
+diff --git a/drivers/amlogic/amports/vvc1.c b/drivers/amlogic/amports/vvc1.c
+index af2db4f80780..a64a701ef8bc 100755
+--- a/drivers/amlogic/amports/vvc1.c
++++ b/drivers/amlogic/amports/vvc1.c
+@@ -121,6 +121,8 @@ static u32 intra_output;
+ static u32 pts_by_offset = 1;
+ static u32 total_frame;
+ static u32 next_pts;
++static u64 next_pts_us64;
++
+ #ifdef DEBUG_PTS
+ static u32 pts_hit, pts_missed, pts_i_hit, pts_i_missed;
+ #endif
+@@ -242,6 +244,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
+     u32 buffer_index;
+     unsigned int pts, pts_valid = 0, offset;
+     u32 v_width, v_height;
++    u64 pts_us64 = 0;
+ 
+     reg = READ_VREG(VC1_BUFFEROUT);
+ 
+@@ -260,7 +263,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
+         
+         if (pts_by_offset) {
+             offset = READ_VREG(VC1_OFFSET_REG);
+-            if (pts_lookup_offset(PTS_TYPE_VIDEO, offset, &pts, 0) == 0) {
++            if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, offset, &pts, 0, &pts_us64) == 0) {
+                 pts_valid = 1;
+ #ifdef DEBUG_PTS
+                 pts_hit++;
+@@ -353,23 +356,31 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
+ 
+             if (pts_valid) {
+                 vf->pts = pts;
++                vf->pts_us64 = pts_us64;
+                 if ((repeat_count > 1) && avi_flag) {
+                     vf->duration = vvc1_amstream_dec_info.rate * repeat_count >> 1;
+                     next_pts = pts + (vvc1_amstream_dec_info.rate * repeat_count >> 1) * 15 / 16;
++                    next_pts_us64 = pts_us64 + ((vvc1_amstream_dec_info.rate * repeat_count >> 1) * 15 / 16) * 100 / 9;
+                 } else {
+                     vf->duration = vvc1_amstream_dec_info.rate >> 1;
+                     next_pts = 0;
++                    next_pts_us64 = 0;
+                 }
+             } else {
+                 vf->pts = next_pts;
++                vf->pts_us64 = next_pts_us64;
+                 if ((repeat_count > 1) && avi_flag) {
+                     vf->duration = vvc1_amstream_dec_info.rate * repeat_count >> 1;
+                     if (next_pts != 0) {
+                         next_pts += ((vf->duration) - ((vf->duration) >> 4));
+                     }
++                    if (next_pts_us64 != 0) {
++                        next_pts_us64 += ((vf->duration) - ((vf->duration) >> 4)) * 100 / 9;
++                    }
+                 } else {
+                     vf->duration = vvc1_amstream_dec_info.rate >> 1;
+                     next_pts = 0;
++                    next_pts_us64 = 0;
+                 }
+             }
+ 
+@@ -399,14 +410,19 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
+             vf->bufWidth = 1920;
+ 
+             vf->pts = next_pts;
++            vf->pts_us64 = next_pts_us64;
+             if ((repeat_count > 1) && avi_flag) {
+                 vf->duration = vvc1_amstream_dec_info.rate * repeat_count >> 1;
+                 if (next_pts != 0) {
+                     next_pts += ((vf->duration) - ((vf->duration) >> 4));
+                 }
++                if (next_pts_us64 != 0) {
++                    next_pts_us64 += ((vf->duration) - ((vf->duration) >> 4)) * 100 / 9;
++                }
+             } else {
+                 vf->duration = vvc1_amstream_dec_info.rate >> 1;
+                 next_pts = 0;
++                next_pts_us64 = 0;
+             }
+ 
+             vf->duration_pulldown = 0;
+@@ -436,23 +452,31 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
+ 
+             if (pts_valid) {
+                 vf->pts = pts;
++                vf->pts_us64 = pts_us64;
+                 if ((repeat_count > 1) && avi_flag) {
+                     vf->duration = vvc1_amstream_dec_info.rate * repeat_count;
+                     next_pts = pts + (vvc1_amstream_dec_info.rate * repeat_count) * 15 / 16;
++                    next_pts_us64 = pts_us64 + ((vvc1_amstream_dec_info.rate * repeat_count) * 15 / 16) * 100 / 9;
+                 } else {
+                     vf->duration = vvc1_amstream_dec_info.rate;
+                     next_pts = 0;
++                    next_pts_us64 = 0;
+                 }
+             } else {
+                 vf->pts = next_pts;
++                vf->pts_us64 = next_pts_us64;
+                 if ((repeat_count > 1) && avi_flag) {
+                     vf->duration = vvc1_amstream_dec_info.rate * repeat_count;
+                     if (next_pts != 0) {
+                         next_pts += ((vf->duration) - ((vf->duration) >> 4));
+                     }
++                    if (next_pts_us64 != 0) {
++                        next_pts_us64 += ((vf->duration) - ((vf->duration) >> 4)) * 100 / 9;
++                    }
+                 } else {
+                     vf->duration = vvc1_amstream_dec_info.rate;
+                     next_pts = 0;
++                    next_pts_us64 = 0;
+                 }
+             }
+ 
+@@ -721,6 +745,8 @@ static void vvc1_local_init(void)
+ 
+     next_pts = 0;
+ 
++    next_pts_us64 = 0;
++
+ #ifdef DEBUG_PTS
+     pts_hit = pts_missed = pts_i_hit = pts_i_missed = 0;
+ #endif
+-- 
+2.19.0
+

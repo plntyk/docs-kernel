@@ -1,0 +1,3812 @@
+From 92339078f55ebdee37d2e0e55ac4708a26bea310 Mon Sep 17 00:00:00 2001
+From: "sunny.luo" <sunny.luo@amlogic.com>
+Date: Thu, 21 Aug 2014 18:44:42 +0800
+Subject: [PATCH 4734/5965]  PD #90324: add Goodix gt811 touchscreen
+
+Conflicts:
+
+	drivers/amlogic/input/touchscreen/Makefile
+
+Change-Id: Icdfb43d120ba07fa2f16767bee683732e5fd7193
+---
+ drivers/amlogic/input/touchscreen/Makefile    |    3 +-
+ .../amlogic/input/touchscreen/gt811/Makefile  |    2 +
+ .../input/touchscreen/gt811/goodix_tool.c     |  548 ++++++
+ .../amlogic/input/touchscreen/gt811/gt811.c   | 1467 +++++++++++++++++
+ .../amlogic/input/touchscreen/gt811/gt811.h   |  241 +++
+ .../input/touchscreen/gt811/gt811_firmware.h  |  292 ++++
+ .../input/touchscreen/gt811/gt811_update.c    | 1183 +++++++++++++
+ 7 files changed, 3735 insertions(+), 1 deletion(-)
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/Makefile
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/goodix_tool.c
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/gt811.c
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/gt811.h
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/gt811_firmware.h
+ create mode 100755 drivers/amlogic/input/touchscreen/gt811/gt811_update.c
+
+diff --git a/drivers/amlogic/input/touchscreen/Makefile b/drivers/amlogic/input/touchscreen/Makefile
+index 15a66a18276f..b62d07978ff1 100755
+--- a/drivers/amlogic/input/touchscreen/Makefile
++++ b/drivers/amlogic/input/touchscreen/Makefile
+@@ -16,6 +16,7 @@ obj-$(CONFIG_MESON_INPUT_TOUCHSCREEN) += gt9xx/
+ obj-$(CONFIG_MESON_INPUT_TOUCHSCREEN) += ct36x_ts/
+ obj-$(CONFIG_MESON_INPUT_TOUCHSCREEN) += ft5x02/
+ obj-$(CONFIG_MESON_INPUT_TOUCHSCREEN) += gslx680/
+-obj-y += gt9xx/
++#obj-y += gt9xx/
++obj-y += gt811/
+ obj-y += ct36x_ts/
+ obj-y += ft5x02/
+diff --git a/drivers/amlogic/input/touchscreen/gt811/Makefile b/drivers/amlogic/input/touchscreen/gt811/Makefile
+new file mode 100755
+index 000000000000..5f43f41e2f5c
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/Makefile
+@@ -0,0 +1,2 @@
++obj-y	+= gt811.o 
++#goodix_tool.o gt811_update.o
+\ No newline at end of file
+diff --git a/drivers/amlogic/input/touchscreen/gt811/goodix_tool.c b/drivers/amlogic/input/touchscreen/gt811/goodix_tool.c
+new file mode 100755
+index 000000000000..e977bd93d454
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/goodix_tool.c
+@@ -0,0 +1,548 @@
++/* drivers/input/touchscreen/goodix_tool.c
++ *
++ * 2010 - 2012 Goodix Technology.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be a reference
++ * to you, when you are integrating the GOODiX's CTP IC into your system,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * Version:1.2
++ *        V1.0:2012/05/01,create file.
++ *        V1.2:2012/06/08,modify some warning.
++ *
++ */
++
++#include "gt811.h"
++
++//#define IC_TYPE_NAME        "GT813" //Default
++#define DATA_LENGTH_UINT    512
++#define CMD_HEAD_LENGTH     (sizeof(st_cmd_head) - sizeof(u8*))
++#define GOODIX_ENTRY_NAME   "goodix_tool"
++
++#define UPDATE_FUNCTIONS
++
++#ifdef UPDATE_FUNCTIONS
++extern s32 gup_enter_update_mode(struct i2c_client *client);
++extern void gup_leave_update_mode(void);
++extern s32 gup_update_proc(void *dir);
++#endif
++
++extern void gt811_irq_disable(struct goodix_ts_data *);
++extern void gt811_irq_enable(struct goodix_ts_data *);
++
++#pragma pack(1)
++typedef struct{
++    u8  wr;         //write read flag，0:R  1:W  2:PID 3:
++    u8  flag;       //0:no need flag/int 1: need flag  2:need int
++    u8 flag_addr[2];  //flag address
++    u8  flag_val;   //flag val
++    u8  flag_relation;  //flag_val:flag 0:not equal 1:equal 2:> 3:<
++    u16 circle;     //polling cycle
++    u8  times;      //plling times
++    u8  retry;      //I2C retry times
++    u16 delay;      //delay befor read or after write
++    u16 data_len;   //data length
++    u8  addr_len;   //address length
++    u8  addr[2];    //address
++    u8  res[3];     //reserved
++    u8* data;       //data pointer
++}st_cmd_head;
++#pragma pack()
++st_cmd_head cmd_head;
++
++static struct i2c_client *gt_client = NULL;
++
++static struct proc_dir_entry *goodix_proc_entry;
++
++static s32 goodix_tool_write(struct file *filp, const char __user *buff, unsigned long len, void *data);
++static s32 goodix_tool_read( char *page, char **start, off_t off, int count, int *eof, void *data );
++static s32 (*tool_i2c_read)(u8 *, u16);
++static s32 (*tool_i2c_write)(u8 *, u16);
++
++s32 DATA_LENGTH = 0;
++s8 IC_TYPE[16] = {0};
++
++static s32 tool_i2c_read_no_extra(u8* buf, u16 len)
++{
++    s32 ret = -1;
++    s32 i = 0;
++    struct i2c_msg msgs[2];
++
++    msgs[0].flags = !I2C_M_RD;
++    msgs[0].addr  = gt_client->addr;
++    msgs[0].len   = cmd_head.addr_len;
++    msgs[0].buf   = &buf[0];
++
++    msgs[1].flags = I2C_M_RD;
++    msgs[1].addr  = gt_client->addr;
++    msgs[1].len   = len;
++    msgs[1].buf   = &buf[GTP_ADDR_LENGTH];
++
++    for (i = 0; i < cmd_head.retry; i++)
++    {
++        ret=i2c_transfer(gt_client->adapter, msgs, 2);
++        if (ret > 0)
++        {
++            break;
++        }
++    }
++    return ret;
++}
++
++static s32 tool_i2c_write_no_extra(u8* buf, u16 len)
++{
++    s32 ret = -1;
++    s32 i = 0;
++    struct i2c_msg msg;
++
++    msg.flags = !I2C_M_RD;
++    msg.addr  = gt_client->addr;
++    msg.len   = len;
++    msg.buf   = buf;
++
++    for (i = 0; i < cmd_head.retry; i++)
++    {
++        ret=i2c_transfer(gt_client->adapter, &msg, 1);
++        if (ret > 0)
++        {
++            break;
++        }
++    }
++    return ret;
++}
++
++static s32 tool_i2c_read_with_extra(u8* buf, u16 len)
++{
++    s32 ret = -1;
++    u8 pre[2] = {0x0f, 0xff};
++    u8 end[2] = {0x80, 0x00};
++
++    tool_i2c_write_no_extra(pre, 2);
++    ret = tool_i2c_read_no_extra(buf, len);
++    tool_i2c_write_no_extra(end, 2);
++
++    return ret;
++}
++
++static s32 tool_i2c_write_with_extra(u8* buf, u16 len)
++{
++    s32 ret = -1;
++    u8 pre[2] = {0x0f, 0xff};
++    u8 end[2] = {0x80, 0x00};
++
++    tool_i2c_write_no_extra(pre, 2);
++    ret = tool_i2c_write_no_extra(buf, len);
++    tool_i2c_write_no_extra(end, 2);
++
++    return ret;
++}
++
++static void register_i2c_func(void)
++{
++//    if (!strncmp(IC_TYPE, "GT818", 5) || !strncmp(IC_TYPE, "GT816", 5)
++//        || !strncmp(IC_TYPE, "GT811", 5) || !strncmp(IC_TYPE, "GT818F", 6)
++//        || !strncmp(IC_TYPE, "GT827", 5) || !strncmp(IC_TYPE,"GT828", 5)
++//        || !strncmp(IC_TYPE, "GT813", 5))
++    if (strncmp(IC_TYPE, "GT8110", 6) && strncmp(IC_TYPE, "GT8105", 6)
++        && strncmp(IC_TYPE, "GT801", 5) && strncmp(IC_TYPE, "GT800", 5)
++        && strncmp(IC_TYPE, "GT801PLUS", 9) && strncmp(IC_TYPE, "GT811", 5)
++        && strncmp(IC_TYPE, "GTxxx", 5))
++    {
++        tool_i2c_read = tool_i2c_read_with_extra;
++        tool_i2c_write = tool_i2c_write_with_extra;
++        GTP_DEBUG("I2C function: with pre and end cmd!");
++    }
++    else
++    {
++        tool_i2c_read = tool_i2c_read_no_extra;
++        tool_i2c_write = tool_i2c_write_no_extra;
++        GTP_INFO("I2C function: without pre and end cmd!");
++    }
++}
++
++static void unregister_i2c_func(void)
++{
++    tool_i2c_read = NULL;
++    tool_i2c_write = NULL;
++    GTP_INFO("I2C function: unregister i2c transfer function!");
++}
++
++
++s32 init_wr_node(struct i2c_client *client)
++{
++    s32 i;
++
++    gt_client = client;
++    memset(&cmd_head, 0, sizeof(cmd_head));
++    cmd_head.data = NULL;
++
++    i = 5;
++    while ((!cmd_head.data) && i)
++    {
++        cmd_head.data = kzalloc(i * DATA_LENGTH_UINT, GFP_KERNEL);
++        if (NULL != cmd_head.data)
++        {
++            break;
++        }
++        i--;
++    }
++    if (i)
++    {
++        DATA_LENGTH = i * DATA_LENGTH_UINT + GTP_ADDR_LENGTH;
++        GTP_INFO("Applied memory size:%d.", DATA_LENGTH);
++    }
++    else
++    {
++        GTP_ERROR("Apply for memory failed.");
++        return FAIL;
++    }
++
++    cmd_head.addr_len = 2;
++    cmd_head.retry = 5;
++
++    register_i2c_func();
++
++    goodix_proc_entry = create_proc_entry(GOODIX_ENTRY_NAME, 0666, NULL);
++    if (goodix_proc_entry == NULL)
++    {
++        GTP_ERROR("Couldn't create proc entry!");
++        return FAIL;
++    }
++    else
++    {
++        GTP_INFO("Create proc entry success!");
++        goodix_proc_entry->write_proc = goodix_tool_write;
++        goodix_proc_entry->read_proc = goodix_tool_read;
++    }
++
++    return SUCCESS;
++}
++
++void uninit_wr_node(void)
++{
++    kfree(cmd_head.data);
++    cmd_head.data = NULL;
++    unregister_i2c_func();
++    remove_proc_entry(GOODIX_ENTRY_NAME, NULL);
++}
++
++static u8 relation(u8 src, u8 dst, u8 rlt)
++{
++    u8 ret = 0;
++
++    switch (rlt)
++    {
++    case 0:
++        ret = (src != dst) ? true : false;
++        break;
++
++    case 1:
++        ret = (src == dst) ? true : false;
++        GTP_DEBUG("equal:src:0x%02x   dst:0x%02x   ret:%d\n", src, dst, (s32)ret);
++        break;
++
++    case 2:
++        ret = (src > dst) ? true : false;
++        break;
++
++    case 3:
++        ret = (src < dst) ? true : false;
++        break;
++
++    case 4:
++        ret = (src & dst) ? true : false;
++        break;
++
++    case 5:
++        ret = (!(src | dst)) ? true : false;
++        break;
++
++    default:
++        ret = false;
++        break;
++    }
++
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Comfirm function.
++Input:
++  None.
++Output:
++	Return write length.
++********************************************************/
++static u8 comfirm(void)
++{
++    s32 i = 0;
++    u8 buf[32];
++
++//    memcpy(&buf[GTP_ADDR_LENGTH - cmd_head.addr_len], &cmd_head.flag_addr, cmd_head.addr_len);
++//    memcpy(buf, &cmd_head.flag_addr, cmd_head.addr_len);//Modified by Scott, 2012-02-17
++    memcpy(buf, cmd_head.flag_addr, cmd_head.addr_len);
++
++    for (i = 0; i < cmd_head.times; i++)
++    {
++        if (tool_i2c_read(buf, 1) <= 0)
++        {
++            GTP_ERROR("Read flag data failed!");
++            return FAIL;
++        }
++        if (true == relation(buf[GTP_ADDR_LENGTH], cmd_head.flag_val, cmd_head.flag_relation))
++        {
++            GTP_DEBUG("value at flag addr:0x%02x\n", buf[GTP_ADDR_LENGTH]);
++            GTP_DEBUG("flag value:0x%02x\n", cmd_head.flag_val);
++            break;
++        }
++
++        msleep(cmd_head.circle);
++    }
++
++    if (i >= cmd_head.times)
++    {
++        GTP_ERROR("Didn't get the flag to continue!");
++        return FAIL;
++    }
++
++    return SUCCESS;
++}
++
++/*******************************************************
++Function:
++	Goodix tool write function.
++Input:
++  standard proc write function param.
++Output:
++	Return write length.
++********************************************************/
++static s32 goodix_tool_write(struct file *filp, const char __user *buff, unsigned long len, void *data)
++{
++    u64 ret = 0;
++    GTP_DEBUG_FUNC();
++    GTP_DEBUG_ARRAY((u8*)buff, len);
++
++    ret = copy_from_user(&cmd_head, buff, CMD_HEAD_LENGTH);
++    if(!ret)
++    {
++        GTP_ERROR("copy_from_user failed.");
++    }
++
++    GTP_DEBUG("wr  :0x%02x\n", cmd_head.wr);
++    GTP_DEBUG("flag:0x%02x\n", cmd_head.flag);
++    GTP_DEBUG("flag addr:0x%02x%02x\n", cmd_head.flag_addr[0], cmd_head.flag_addr[1]);
++    GTP_DEBUG("flag val:0x%02x\n", cmd_head.flag_val);
++    GTP_DEBUG("flag rel:0x%02x\n", cmd_head.flag_relation);
++    GTP_DEBUG("circle  :%d\n", (s32)cmd_head.circle);
++    GTP_DEBUG("times   :%d\n", (s32)cmd_head.times);
++    GTP_DEBUG("retry   :%d\n", (s32)cmd_head.retry);
++    GTP_DEBUG("delay   :%d\n", (s32)cmd_head.delay);
++    GTP_DEBUG("data len:%d\n", (s32)cmd_head.data_len);
++    GTP_DEBUG("addr len:%d\n", (s32)cmd_head.addr_len);
++    GTP_DEBUG("addr:0x%02x%02x\n", cmd_head.addr[0], cmd_head.addr[1]);
++    GTP_DEBUG("len:%d\n", (s32)len);
++    GTP_DEBUG("buf[20]:0x%02x\n", buff[CMD_HEAD_LENGTH]);
++
++    if (1 == cmd_head.wr)
++    {
++      //  copy_from_user(&cmd_head.data[cmd_head.addr_len], &buff[CMD_HEAD_LENGTH], cmd_head.data_len);
++        ret = copy_from_user(&cmd_head.data[GTP_ADDR_LENGTH], &buff[CMD_HEAD_LENGTH], cmd_head.data_len);
++        if(!ret)
++        {
++            GTP_ERROR("copy_from_user failed.");
++        }
++        memcpy(&cmd_head.data[GTP_ADDR_LENGTH - cmd_head.addr_len], cmd_head.addr, cmd_head.addr_len);
++
++        GTP_DEBUG_ARRAY(cmd_head.data, cmd_head.data_len + cmd_head.addr_len);
++        GTP_DEBUG_ARRAY((u8*)&buff[CMD_HEAD_LENGTH], cmd_head.data_len);
++
++        if (1 == cmd_head.flag)
++        {
++            if (FAIL == comfirm())
++            {
++                GTP_ERROR("[WRITE]Comfirm fail!");
++                return FAIL;
++            }
++        }
++        else if (2 == cmd_head.flag)
++        {
++            //Need interrupt!
++        }
++        if (tool_i2c_write(&cmd_head.data[GTP_ADDR_LENGTH - cmd_head.addr_len],
++            cmd_head.data_len + cmd_head.addr_len) <= 0)
++        {
++            GTP_ERROR("[WRITE]Write data failed!");
++            return FAIL;
++        }
++
++        GTP_DEBUG_ARRAY(&cmd_head.data[GTP_ADDR_LENGTH - cmd_head.addr_len],cmd_head.data_len + cmd_head.addr_len);
++        if (cmd_head.delay)
++        {
++            msleep(cmd_head.delay);
++        }
++
++        return cmd_head.data_len + CMD_HEAD_LENGTH;
++    }
++    else if (3 == cmd_head.wr)  //Write ic type
++    {
++        memcpy(IC_TYPE, cmd_head.data, cmd_head.data_len);
++        register_i2c_func();
++
++        return cmd_head.data_len + CMD_HEAD_LENGTH;
++    }
++    else if (5 == cmd_head.wr)
++    {
++        //memcpy(IC_TYPE, cmd_head.data, cmd_head.data_len);
++
++        return cmd_head.data_len + CMD_HEAD_LENGTH;
++    }
++    else if (7 == cmd_head.wr)//disable irq!
++    {
++        gtp_irq_disable(i2c_get_clientdata(gt_client));
++
++        return CMD_HEAD_LENGTH;
++    }
++    else if (9 == cmd_head.wr) //enable irq!
++    {
++        gtp_irq_enable(i2c_get_clientdata(gt_client));
++
++        return CMD_HEAD_LENGTH;
++    }
++#ifdef UPDATE_FUNCTIONS
++    else if (11 == cmd_head.wr)//Enter update mode!
++    {
++        if (FAIL == gup_enter_update_mode(gt_client))
++        {
++            return FAIL;
++        }
++    }
++    else if (13 == cmd_head.wr)//Leave update mode!
++    {
++        gup_leave_update_mode();
++    }
++    else if (15 == cmd_head.wr) //Update firmware!
++    {
++        memset(cmd_head.data, 0, cmd_head.data_len + 1);
++        memcpy(cmd_head.data, &buff[CMD_HEAD_LENGTH], cmd_head.data_len);
++
++        if (FAIL == gup_update_proc((void*)cmd_head.data))
++        {
++            return FAIL;
++        }
++    }
++#endif
++
++    return CMD_HEAD_LENGTH;
++}
++
++/*******************************************************
++Function:
++	Goodix tool read function.
++Input:
++  standard proc read function param.
++Output:
++	Return read length.
++********************************************************/
++static s32 goodix_tool_read( char *page, char **start, off_t off, int count, int *eof, void *data )
++{
++    GTP_DEBUG_FUNC();
++
++    if (cmd_head.wr % 2)
++    {
++        return FAIL;
++    }
++    else if (!cmd_head.wr)
++    {
++        u16 len = 0;
++        s16 data_len = 0;
++        u16 loc = 0;
++
++        if (1 == cmd_head.flag)
++        {
++            if (FAIL == comfirm())
++            {
++                GTP_ERROR("[READ]Comfirm fail!");
++                return FAIL;
++            }
++        }
++        else if (2 == cmd_head.flag)
++        {
++            //Need interrupt!
++        }
++
++        memcpy(cmd_head.data, cmd_head.addr, cmd_head.addr_len);
++
++        GTP_DEBUG("[CMD HEAD DATA] ADDR:0x%02x%02x\n", cmd_head.data[0], cmd_head.data[1]);
++        GTP_DEBUG("[CMD HEAD ADDR] ADDR:0x%02x%02x\n", cmd_head.addr[0], cmd_head.addr[1]);
++
++        if (cmd_head.delay)
++        {
++            msleep(cmd_head.delay);
++        }
++
++        data_len = cmd_head.data_len;
++        while(data_len > 0)
++        {
++            if (data_len > DATA_LENGTH)
++            {
++                len = DATA_LENGTH;
++            }
++            else
++            {
++                len = data_len;
++            }
++            data_len -= DATA_LENGTH;
++
++            if (tool_i2c_read(cmd_head.data, len) <= 0)
++            {
++                GTP_ERROR("[READ]Read data failed!");
++                return FAIL;
++            }
++            memcpy(&page[loc], &cmd_head.data[GTP_ADDR_LENGTH], len);
++            loc += len;
++
++            //GTP_DEBUG_ARRAY(&cmd_head.data[GTP_ADDR_LENGTH], len);
++            GTP_DEBUG_ARRAY(page, len);
++        }
++    }
++    else if (2 == cmd_head.wr)
++    {
++    //    memcpy(page, "gt8", cmd_head.data_len);
++       // memcpy(page, "GT818", 5);
++      //  page[5] = 0;
++
++        GTP_DEBUG("Return ic type:%s len:%d\n", page, (s32)cmd_head.data_len);
++        return cmd_head.data_len;
++        //return sizeof(IC_TYPE_NAME);
++    }
++    else if (4 == cmd_head.wr)
++    {
++        page[0] = show_len >> 8;
++        page[1] = show_len & 0xff;
++        page[2] = total_len >> 8;
++        page[3] = total_len & 0xff;
++
++        return cmd_head.data_len;
++    }
++    else if (6 == cmd_head.wr)
++    {
++        //Read error code!
++    }
++    else if (8 == cmd_head.wr)  //Read driver version
++    {
++       // memcpy(page, GTP_DRIVER_VERSION, strlen(GTP_DRIVER_VERSION));
++       s32 tmp_len;
++       tmp_len = strlen(GTP_DRIVER_VERSION);
++       memcpy(page, GTP_DRIVER_VERSION, tmp_len);
++       page[tmp_len] = 0;
++    }
++
++    return cmd_head.data_len;
++}
+diff --git a/drivers/amlogic/input/touchscreen/gt811/gt811.c b/drivers/amlogic/input/touchscreen/gt811/gt811.c
+new file mode 100755
+index 000000000000..85050d9b67ae
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/gt811.c
+@@ -0,0 +1,1467 @@
++/* drivers/input/touchscreen/gt811.c
++ *
++ * 2010 - 2012 Goodix Technology.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be a reference
++ * to you, when you are integrating the GOODiX's CTP IC into your system,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * Version:1.2
++ * Author:andrew@goodix.com
++ * Release Date:2012/06/08
++ * Revision record:
++ *      V1.0:2012/05/01,create file,by andrew
++ *      V1.2:2012/06/08,add end_cmd in probe function;
++ *                      correct the GTP_ESD_PROTECT macro;
++ *                      correct INT wakeup sleep mode;
++ *                      correct SENSOR ID from bit1~bit0 to bit7~bit6 of the register 0x721;
++ *                      add slot report mode.
++ *
++ */
++
++//#include <linux/irq.h>
++
++#include "gt811.h"
++
++#if GTP_ICS_SLOT_REPORT
++#include <linux/input/mt.h>
++#endif
++
++static const char *goodix_ts_name = "Goodix Capacitive TouchScreen";
++static struct workqueue_struct *goodix_wq;
++struct i2c_client * i2c_connect_client = NULL;
++static u8 config[GTP_CONFIG_LENGTH + GTP_ADDR_LENGTH]
++                = {GTP_REG_CONFIG_DATA >> 8, GTP_REG_CONFIG_DATA & 0xff};
++
++#if GTP_HAVE_TOUCH_KEY
++	static const u16 touch_key_array[] = GTP_KEY_TAB;
++	#define GTP_MAX_KEY_NUM	 (sizeof(touch_key_array)/sizeof(touch_key_array[0]))
++#endif
++
++static s8 gtp_i2c_test(struct i2c_client *client);
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static void goodix_ts_early_suspend(struct early_suspend *h);
++static void goodix_ts_late_resume(struct early_suspend *h);
++#endif
++
++#if GTP_CREATE_WR_NODE
++extern s32 init_wr_node(struct i2c_client*);
++extern void uninit_wr_node(void);
++#endif
++
++#if GTP_AUTO_UPDATE
++extern u8 gup_init_update_proc(struct goodix_ts_data *);
++#endif
++
++#if GTP_ESD_PROTECT
++static struct delayed_work gtp_esd_check_work;
++static struct workqueue_struct * gtp_esd_check_workqueue = NULL;
++static void gtp_esd_check_func(struct work_struct *);
++#endif
++
++//struct goodix_i2c_rmi_platform_data * goodix_pdata;
++unsigned gtp_gpio_rst;
++unsigned gtp_gpio_irq;
++/*******************************************************
++Function:
++	Read data from the i2c slave device.
++
++Input:
++	client:	i2c device.
++	buf[0]:operate address.
++	buf[1]~buf[len]:read data buffer.
++	len:operate length.
++
++Output:
++	numbers of i2c_msgs to transfer
++*********************************************************/
++s32 gtp_i2c_read(struct i2c_client *client, u8 *buf, s32 len)
++{
++    struct i2c_msg msgs[2];
++    s32 ret=-1;
++    s32 retries = 0;
++
++    GTP_DEBUG_FUNC();
++
++    msgs[0].flags = !I2C_M_RD;
++    msgs[0].addr  = client->addr;
++    msgs[0].len   = GTP_ADDR_LENGTH;
++    msgs[0].buf   = &buf[0];
++
++    msgs[1].flags = I2C_M_RD;
++    msgs[1].addr  = client->addr;
++    msgs[1].len   = len - GTP_ADDR_LENGTH;
++    msgs[1].buf   = &buf[GTP_ADDR_LENGTH];
++
++    while(retries < 5)
++    {
++        ret = i2c_transfer(client->adapter, msgs, 2);
++        if (ret == 2)break;
++        retries++;
++    }
++    return ret;
++}
++
++/*******************************************************
++Function:
++	write data to the i2c slave device.
++
++Input:
++	client:	i2c device.
++	buf[0]:operate address.
++	buf[1]~buf[len]:write data buffer.
++	len:operate length.
++
++Output:
++	numbers of i2c_msgs to transfer.
++*********************************************************/
++s32 gtp_i2c_write(struct i2c_client *client,u8 *buf,s32 len)
++{
++    struct i2c_msg msg;
++    s32 ret=-1;
++    s32 retries = 0;
++
++    GTP_DEBUG_FUNC();
++
++    msg.flags = !I2C_M_RD;
++    msg.addr  = client->addr;
++    msg.len   = len;
++    msg.buf   = buf;
++
++    while(retries < 5)
++    {
++        ret = i2c_transfer(client->adapter, &msg, 1);
++        if (ret == 1)break;
++        retries++;
++    }
++    return ret;
++}
++
++/*******************************************************
++Function:
++	write i2c end cmd.
++
++Input:
++	client:	i2c device.
++
++Output:
++	numbers of i2c_msgs to transfer.
++*********************************************************/
++s32 gtp_i2c_end_cmd(struct i2c_client *client)
++{
++    s32 ret = -1;
++    u8 end_cmd_data[2]={0x80, 0x00};
++
++    GTP_DEBUG_FUNC();
++
++    ret = gtp_i2c_write(client, end_cmd_data, 2);
++
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Send config Function.
++
++Input:
++	client:	i2c client.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++s32 gtp_send_cfg(struct i2c_client *client)
++{
++    s32 ret = -1;
++#if GTP_DRIVER_SEND_CFG
++    s32 retry = 0;
++
++    for (retry = 0; retry < 5; retry++)
++    {
++        ret = gtp_i2c_write(client, config , GTP_CONFIG_LENGTH + GTP_ADDR_LENGTH);
++        gtp_i2c_end_cmd(client);
++
++        if (ret > 0)
++        {
++            break;
++        }
++    }
++#endif
++
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Enable IRQ Function.
++
++Input:
++	ts:	i2c client private struct.
++
++Output:
++	None.
++*******************************************************/
++void gtp_irq_disable(struct goodix_ts_data *ts)
++{
++    unsigned long irqflags;
++
++    GTP_DEBUG_FUNC();
++
++    spin_lock_irqsave(&ts->irq_lock, irqflags);
++    if (!ts->irq_is_disable)
++    {
++        ts->irq_is_disable = 1;
++        disable_irq_nosync(ts->client->irq);
++    }
++    spin_unlock_irqrestore(&ts->irq_lock, irqflags);
++}
++
++/*******************************************************
++Function:
++	Disable IRQ Function.
++
++Input:
++	ts:	i2c client private struct.
++
++Output:
++	None.
++*******************************************************/
++void gtp_irq_enable(struct goodix_ts_data *ts)
++{
++    unsigned long irqflags;
++
++    GTP_DEBUG_FUNC();
++
++    spin_lock_irqsave(&ts->irq_lock, irqflags);
++    if (ts->irq_is_disable)
++    {
++        enable_irq(ts->client->irq);
++        ts->irq_is_disable = 0;
++    }
++    spin_unlock_irqrestore(&ts->irq_lock, irqflags);
++}
++
++/*******************************************************
++Function:
++	Touch down report function.
++
++Input:
++	ts:private data.
++	id:tracking id.
++	x:input x.
++	y:input y.
++	w:input weight.
++
++Output:
++	None.
++*******************************************************/
++static void gtp_touch_down(struct goodix_ts_data* ts,s32 id,s32 x,s32 y,s32 w)
++{
++    if (ts_com->pol&1)
++        x = ts->abs_x_max - x;
++    if (ts_com->pol&2)
++        y = ts->abs_y_max - y;
++
++#if MAL_EDGE_CAL_PERCENT
++    u8 i, j;
++    u16 max_res, cal_range, cal_max_offset, cal_offset;
++    u16 * curr_res;
++
++    for (i = 0; i < 2; i++)
++    {
++        max_res = (i == 0) ? ts->abs_x_max : ts->abs_y_max;
++        curr_res = (i == 0) ? &x : &y;
++        cal_range = max_res * MAL_EDGE_CAL_PERCENT / 100;
++
++        cal_max_offset = cal_range / MAL_EDGE_CAL_OFFSET_RATE;
++
++        for (j = 0; j < 2; j++)
++        {
++            if (j != 0)		// process right end
++            {
++                *curr_res = max_res - *curr_res;
++            }
++            if (*curr_res < cal_range)
++            {
++                if (*curr_res < cal_max_offset)
++                {
++                    if (*curr_res > 7)
++                        *curr_res = (*curr_res * 8 - 40) / 3;
++                }
++                else
++                {
++                    cal_offset = cal_max_offset - *curr_res / MAL_EDGE_CAL_OFFSET_RATE;
++                    *curr_res += cal_offset;
++                }
++            }
++            if (j != 0)
++            {
++                *curr_res = max_res - *curr_res;
++            }
++        }
++    }
++
++    GTP_DEBUG("<YLM>, max_res:%d, curr_res:%d, cal_range:%d, cal_offset:%d.", max_res, *curr_res, cal_range, cal_offset);
++#endif
++
++#if MAL_FIX_EDGE_POINT
++    if (x < MAL_FIX_EDGE_POINT)
++        x = MAL_FIX_EDGE_POINT;
++    if (x > ts->abs_x_max - MAL_FIX_EDGE_POINT)
++        x = ts->abs_x_max - MAL_FIX_EDGE_POINT;
++    if (y < MAL_FIX_EDGE_POINT)
++        y = MAL_FIX_EDGE_POINT;
++    if (y > ts->abs_y_max - MAL_FIX_EDGE_POINT)
++        y = ts->abs_y_max - MAL_FIX_EDGE_POINT;
++#endif
++
++#if GTP_CHANGE_X2Y
++    GTP_SWAP(x, y);
++#else
++    if (ts_com->pol&4)
++        GTP_SWAP(x, y);
++#endif
++
++#if GTP_ICS_SLOT_REPORT
++    input_mt_slot(ts->input_dev, id);
++    input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, id);
++    input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x);
++    input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y);
++    input_report_abs(ts->input_dev, ABS_MT_PRESSURE, w);
++#else
++    input_report_abs(ts->input_dev, ABS_MT_POSITION_X, x);
++    input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, y);
++    input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, w);
++    input_report_abs(ts->input_dev, ABS_MT_WIDTH_MAJOR, w);
++    input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, id);
++    input_mt_sync(ts->input_dev);
++#endif
++    GTP_DEBUG("ID:%d, X:%d, Y:%d, W:%d", id, x, y, w);
++}
++
++/*******************************************************
++Function:
++	Touch up report function.
++
++Input:
++	ts:private data.
++
++Output:
++	None.
++*******************************************************/
++static void gtp_touch_up(struct goodix_ts_data* ts, s32 id)
++{
++#if GTP_ICS_SLOT_REPORT
++    input_mt_slot(ts->input_dev, id);
++    input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID, -1);
++    GTP_DEBUG("Touch id[%2d] release!", id);
++#else
++    input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0);
++    input_report_abs(ts->input_dev, ABS_MT_WIDTH_MAJOR, 0);
++    input_mt_sync(ts->input_dev);
++#endif
++}
++
++/*******************************************************
++Function:
++	Goodix touchscreen work function.
++
++Input:
++	work:	work_struct of goodix_wq.
++
++Output:
++	None.
++*******************************************************/
++static void goodix_ts_work_func(struct work_struct *work)
++{
++    u8  point_data[GTP_READ_BYTES] = {(u8)(GTP_REG_COOR>>8),(u8)GTP_REG_COOR,0};
++    u8  check_sum = 0;
++    u8  read_position = 0;
++    u8  track_id[GTP_MAX_TOUCH];
++    u8  point_index = 0;
++    u8  point_tmp = 0;
++    u8  touch_num = 0;
++    u8  key_value = 0;
++    u8  input_w = 0;
++    u8 point_num = 0;
++    u16 input_x = 0;
++    u16 input_y = 0;
++    u32 count = 0;
++    u32 position = 0;
++    s32 ret = -1;
++#if GTP_ICS_SLOT_REPORT
++    static u8 last_point_num = 0;
++    static u8 last_point_index = 0;
++    u8 report_num = 0;
++    u8 touch_count = 0;
++#endif
++
++    struct goodix_ts_data *ts;
++
++    GTP_DEBUG_FUNC();
++
++    ts = container_of(work, struct goodix_ts_data, work);
++
++    if(ts->enter_update)
++    {
++        goto exit_work_func;
++    }
++    ret = gtp_i2c_read(ts->client, point_data, sizeof(point_data)/sizeof(point_data[0]));
++    if (ret < 0)
++    {
++        goto exit_work_func;
++    }
++    GTP_DEBUG_ARRAY(point_data, sizeof(point_data)/sizeof(point_data[0]));
++    if(point_data[GTP_ADDR_LENGTH]&0x20)
++    {
++        if(point_data[3]==0xF0)
++        {
++            GTP_DEBUG("Reload config!");
++            ret = gtp_send_cfg(ts->client);
++            if (ret < 0)
++            {
++                GTP_ERROR("Send config error.");
++            }
++            goto exit_work_func;
++        }
++    }
++
++    point_index = point_data[2]&0x1f;
++    point_tmp = point_index;
++    for(position=0; (position<GTP_MAX_TOUCH)&&point_tmp; position++)
++    {
++        if(point_tmp&0x01)
++        {
++            track_id[touch_num++] = position;
++        }
++        point_tmp >>= 1;
++    }
++    point_num = position;
++    GTP_DEBUG("Touch num:%d", touch_num);
++
++    if(touch_num)
++    {
++        switch(point_data[2]& 0x1f)
++        {
++            case 0:
++                read_position = 3;
++                break;
++            case 1:
++                for (count=2; count<9; count++)
++                {
++                    check_sum += (s32)point_data[count];
++                }
++                read_position = 9;
++                break;
++            case 2:
++            case 3:
++                for (count=2; count<14;count++)
++                {
++                    check_sum += (s32)point_data[count];
++                }
++                read_position = 14;
++                break;
++            //touch number more than 3 fingers
++            default:
++                for (count=2; count<35;count++)
++                {
++                    check_sum += (s32)point_data[count];
++                }
++                read_position = 35;
++        }
++        if (check_sum != point_data[read_position])
++        {
++            GTP_DEBUG("Cal_chksum:%d,  Read_chksum:%d", check_sum, point_data[read_position]);
++            GTP_ERROR("Coordinate checksum error!");
++            goto exit_work_func;
++        }
++    }
++
++    key_value = point_data[3]&0x0F;
++#if GTP_HAVE_TOUCH_KEY
++    for (count = 0; count < GTP_MAX_KEY_NUM; count++)
++    {
++        input_report_key(ts->input_dev, touch_key_array[count], !!(key_value&(0x01<<count)));
++    }
++#endif
++
++#if GTP_ICS_SLOT_REPORT
++    report_num = (point_num>last_point_num) ? point_num : last_point_num;
++    last_point_num = point_num;
++
++    for(count=0,touch_count=0; count<report_num; count++)
++    {
++        if(point_index&(0x01<<count))
++        {
++            if(track_id[touch_count]!=3)
++            {
++                if(track_id[touch_count]<3)
++                {
++                    position = 4+track_id[touch_count]*5;
++                }
++                else
++                {
++                    position = 30;
++                }
++                input_x = (u16)(point_data[position]<<8)+(u16)point_data[position+1];
++                input_y = (u16)(point_data[position+2]<<8)+(u16)point_data[position+3];
++                input_w = point_data[position+4];
++            }
++            else
++            {
++                input_x = (u16)(point_data[19]<<8)+(u16)point_data[26];
++                input_y = (u16)(point_data[27]<<8)+(u16)point_data[28];
++                input_w = point_data[29];
++            }
++            touch_count++;
++
++            gtp_touch_down(ts, count, input_x, input_y, input_w);
++        }
++        else if(last_point_index&(0x01<<count))
++        {
++            gtp_touch_up(ts, count);
++        }
++    }
++    last_point_index = point_index;
++#else
++    if(touch_num)
++    {
++        for(count=0; count<touch_num; count++)
++        {
++            if(track_id[count]!=3)
++            {
++                if(track_id[count]<3)
++                {
++                    position = 4+track_id[count]*5;
++                }
++                else
++                {
++                    position = 30;
++                }
++                input_x = (u16)(point_data[position]<<8)+(u16)point_data[position+1];
++                input_y = (u16)(point_data[position+2]<<8)+(u16)point_data[position+3];
++                input_w = point_data[position+4];
++            }
++            else
++            {
++                input_x = (u16)(point_data[19]<<8)+(u16)point_data[26];
++                input_y = (u16)(point_data[27]<<8)+(u16)point_data[28];
++                input_w = point_data[29];
++            }
++
++            if ((input_x > ts->abs_x_max)||(input_y > ts->abs_y_max))
++            {
++                GTP_ERROR("Coor overflow:X=%d, Y=%d", input_x, input_y);
++                continue;
++            }
++            gtp_touch_down(ts,track_id[count],input_x,input_y,input_w);
++        }
++    }
++    else
++    {
++        GTP_DEBUG("Touch Release!");
++        gtp_touch_up(ts, 0);
++    }
++
++    input_report_key(ts->input_dev, BTN_TOUCH, (touch_num || key_value));
++#endif
++    input_sync(ts->input_dev);
++
++exit_work_func:
++    if (ts->use_irq)
++    {
++        gtp_irq_enable(ts);
++    }
++}
++
++/*******************************************************
++Function:
++	Timer interrupt service routine.
++
++Input:
++	timer:	timer struct pointer.
++
++Output:
++	Timer work mode. HRTIMER_NORESTART---not restart mode
++*******************************************************/
++static enum hrtimer_restart goodix_ts_timer_handler(struct hrtimer *timer)
++{
++    struct goodix_ts_data *ts = container_of(timer, struct goodix_ts_data, timer);
++
++    GTP_DEBUG_FUNC();
++
++    queue_work(goodix_wq, &ts->work);
++    hrtimer_start(&ts->timer, ktime_set(0, (GTP_POLL_TIME+6)*1000000), HRTIMER_MODE_REL);
++    return HRTIMER_NORESTART;
++}
++
++/*******************************************************
++Function:
++	External interrupt service routine.
++
++Input:
++	irq:	interrupt number.
++	dev_id: private data pointer.
++
++Output:
++	irq execute status.
++*******************************************************/
++static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
++{
++    struct goodix_ts_data *ts = dev_id;
++
++    GTP_DEBUG_FUNC();
++
++    gtp_irq_disable(ts);
++    queue_work(goodix_wq, &ts->work);
++
++    return IRQ_HANDLED;
++}
++
++/*******************************************************
++Function:
++	Reset chip Function.
++
++Input:
++	ms:reset time.
++
++Output:
++	None.
++*******************************************************/
++void gtp_reset_guitar(s32 ms)
++{
++    GTP_DEBUG_FUNC();
++    GTP_GPIO_OUTPUT(gtp_gpio_rst, 0);
++    msleep(ms);
++
++    //GTP_GPIO_AS_INPUT(gtp_gpio_rst);
++    GTP_GPIO_OUTPUT(gtp_gpio_rst, 1);
++    msleep(50);
++
++    return;
++}
++
++/*******************************************************
++Function:
++	Eter sleep function.
++
++Input:
++	ts:private data.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_enter_sleep(struct goodix_ts_data * ts)
++{
++    s8 ret = -1;
++    s8 retry = 0;
++    u8 i2c_control_buf[3] = {(u8)(GTP_REG_SLEEP >> 8), (u8)GTP_REG_SLEEP, 0x01};
++
++    GTP_DEBUG_FUNC();
++
++    while(retry++ < 5)
++    {
++        ret = gtp_i2c_write(ts->client, i2c_control_buf, 3);
++        gtp_i2c_end_cmd(ts->client);
++        if (ret > 0)
++        {
++            GTP_DEBUG("GTP enter sleep!");
++            return ret;
++        }
++        msleep(10);
++    }
++    GTP_ERROR("GTP send sleep cmd failed.");
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Wakeup from sleep mode Function.
++
++Input:
++	ts:	private data.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_wakeup_sleep(struct goodix_ts_data * ts)
++{
++    u8 retry = 0;
++    s8 ret = -1;
++
++    GTP_DEBUG_FUNC();
++
++#if GTP_POWER_CTRL_SLEEP
++    while(retry++ < 5)
++    {
++        gtp_reset_guitar(20);
++        ret = gtp_send_cfg(ts->client);
++        if (ret > 0)
++        {
++            GTP_DEBUG("Wakeup sleep send config success.");
++            return ret;
++        }
++    }
++#else
++    GTP_GPIO_OUTPUT(gtp_gpio_irq, 0);
++    msleep(2);
++    GTP_GPIO_AS_INPUT(gtp_gpio_irq);
++    msleep(2);
++    GTP_GPIO_OUTPUT(gtp_gpio_irq, 0);
++    msleep(2);
++    GTP_GPIO_AS_INT(gtp_gpio_irq);
++    msleep(50);
++    while(retry++ < 10)
++    {
++        ret = gtp_i2c_test(ts->client);
++        if (ret > 0)
++        {
++            GTP_DEBUG("GTP wakeup sleep.");
++            ret = gtp_send_cfg(ts->client);
++            if (ret > 0)
++            {
++                GTP_DEBUG("Wakeup sleep send config success.");
++                return ret;
++            }
++            return ret;
++        }
++        gtp_reset_guitar(20);
++    }
++#endif
++
++    GTP_ERROR("GTP wakeup sleep failed.");
++    return ret;
++}
++
++/*******************************************************
++Function:
++	GTP initialize function.
++
++Input:
++	ts:	i2c client private struct.
++
++Output:
++	Executive outcomes.0---succeed.
++*******************************************************/
++s32 gtp_init_panel(struct goodix_ts_data *ts)
++{
++    s32 ret = -1;
++
++#if GTP_DRIVER_SEND_CFG
++    u8 rd_cfg_buf[16];
++
++    u8 cfg_info_group1[] = CTP_CFG_GROUP1;
++    u8 cfg_info_group2[] = CTP_CFG_GROUP2;
++    u8 cfg_info_group3[] = CTP_CFG_GROUP3;
++    u8 *send_cfg_buf[3] = {cfg_info_group1, cfg_info_group2, cfg_info_group3};
++    u8 cfg_info_len[3] = {sizeof(cfg_info_group1)/sizeof(cfg_info_group1[0]),
++                          sizeof(cfg_info_group2)/sizeof(cfg_info_group2[0]),
++                          sizeof(cfg_info_group3)/sizeof(cfg_info_group3[0])};
++    GTP_DEBUG("len1=%d,len2=%d,len3=%d",cfg_info_len[0],cfg_info_len[1],cfg_info_len[2]);
++    if ((!cfg_info_len[1]) && (!cfg_info_len[2]))
++    {
++        rd_cfg_buf[GTP_ADDR_LENGTH] = 0;
++    }
++    else
++    {
++        rd_cfg_buf[0] = GTP_REG_SENSOR_ID >> 8;
++        rd_cfg_buf[1] = GTP_REG_SENSOR_ID & 0xff;
++        ret = gtp_i2c_read(ts->client, rd_cfg_buf, 3);
++        gtp_i2c_end_cmd(ts->client);
++        if (ret < 0)
++        {
++            GTP_ERROR("Read SENSOR ID failed,default use group1 config!");
++            rd_cfg_buf[GTP_ADDR_LENGTH] = 0;
++        }
++        rd_cfg_buf[GTP_ADDR_LENGTH] >>= 6;
++        rd_cfg_buf[GTP_ADDR_LENGTH] &= 0x03;
++    }
++    GTP_DEBUG("SENSOR ID:%d", rd_cfg_buf[GTP_ADDR_LENGTH]);
++    memcpy(&config[GTP_ADDR_LENGTH], send_cfg_buf[rd_cfg_buf[GTP_ADDR_LENGTH]], GTP_CONFIG_LENGTH);
++
++#if GTP_CUSTOM_CFG
++    config[RESOLUTION_LOC]     = (u8)(GTP_MAX_WIDTH);
++    config[RESOLUTION_LOC + 1] = (u8)(GTP_MAX_WIDTH>>8);
++    config[RESOLUTION_LOC + 2] = (u8)GTP_MAX_HEIGHT;
++    config[RESOLUTION_LOC + 3] = (u8)(GTP_MAX_HEIGHT>>8);
++#endif  //endif GTP_CUSTOM_CFG
++
++    if (GTP_INT_TRIGGER == 0)  //FALLING
++    {
++        config[TRIGGER_LOC] &= 0xf7;
++    }
++    else if (GTP_INT_TRIGGER == 1)  //RISING
++    {
++        config[TRIGGER_LOC] |= 0x08;
++    }
++
++#else //else DRIVER NEED NOT SEND CONFIG
++
++    ret = gtp_i2c_read(ts->client, config, GTP_CONFIG_LENGTH + GTP_ADDR_LENGTH);
++    gtp_i2c_end_cmd(ts->client);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP read resolution & max_touch_num failed, use default value!");
++        ts->abs_x_max = GTP_MAX_WIDTH;
++        ts->abs_y_max = GTP_MAX_HEIGHT;
++        ts->int_trigger_type = GTP_INT_TRIGGER;
++    }
++#endif //endif GTP_DRIVER_SEND_CFG
++
++    GTP_DEBUG_FUNC();
++
++    ts->abs_x_max = (config[RESOLUTION_LOC + 1] << 8) + config[RESOLUTION_LOC];
++    ts->abs_y_max = (config[RESOLUTION_LOC + 3] << 8) + config[RESOLUTION_LOC + 2];
++    ts->int_trigger_type = (config[TRIGGER_LOC] >> 3) & 0x01;
++    if ((!ts->abs_x_max)||(!ts->abs_y_max))
++    {
++        GTP_ERROR("GTP resolution & max_touch_num invalid, use default value!");
++        ts->abs_x_max = GTP_MAX_WIDTH;
++        ts->abs_y_max = GTP_MAX_HEIGHT;
++    }
++
++    ret = gtp_send_cfg(ts->client);
++    if (ret < 0)
++    {
++        GTP_ERROR("Send config error. ret = %d", ret);
++    }
++
++    GTP_DEBUG("X_MAX = %d,Y_MAX = %d,TRIGGER = 0x%02x",
++             ts->abs_x_max,ts->abs_y_max,ts->int_trigger_type);
++
++    msleep(10);
++
++    return 0;
++}
++
++/*******************************************************
++Function:
++	Read goodix touchscreen version function.
++
++Input:
++	client:	i2c client struct.
++	version:address to store version info
++
++Output:
++	Executive outcomes.0---succeed.
++*******************************************************/
++s32 gtp_read_version(struct goodix_ts_data *ts)
++{
++    s32 ret = -1;
++    s32 count = 0;
++    u8 version_data[6] = {(u8)(GTP_REG_VERSION>>8), (u8)GTP_REG_VERSION, 0, 0, 0, 0};
++    u8 version_comfirm[6] = {(u8)(GTP_REG_VERSION>>8), (u8)GTP_REG_VERSION, 0, 0, 0, 0};
++
++    GTP_DEBUG_FUNC();
++
++    ret = gtp_i2c_read(ts->client,version_data, 6);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP read version failed");
++        return ret;
++    }
++    GTP_DEBUG("Read version:%02x%02x", version_data[4], version_data[5]);
++
++    while(count++ < 10)
++    {
++        gtp_i2c_read(ts->client, version_comfirm, 6);
++        if((version_data[4] !=version_comfirm[4])||(version_data[5] != version_comfirm[5]))
++        {
++            GTP_DEBUG("Comfirm version:%02x%02x", version_comfirm[4], version_comfirm[5]);
++            version_data[4] = version_comfirm[4];
++            version_data[5] = version_comfirm[5];
++            break;
++        }
++        msleep(5);
++    }
++    if(count == 11)
++    {
++        GTP_INFO("GTP chip version:%02x%02x_%02x%02x", version_data[3], version_data[2], version_data[4], version_data[5]);
++        ts->version = (version_data[4]<<8)+version_data[5];
++        ret = 0;
++    }
++    else
++    {
++        GTP_ERROR("GTP read version confirm error!");
++        ret = 1;
++    }
++    return ret;
++}
++
++/*******************************************************
++Function:
++	I2c test Function.
++
++Input:
++	client:i2c client.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_i2c_test(struct i2c_client *client)
++{
++    u8 retry = 0;
++    s8 ret = -1;
++
++    GTP_DEBUG_FUNC();
++
++    while(retry++ < 5)
++    {
++        ret = gtp_i2c_end_cmd(client);
++        if (ret > 0)
++        {
++            return ret;
++        }
++        GTP_ERROR("GTP i2c test failed time %d.",retry);
++        msleep(10);
++    }
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Request gpio Function.
++
++Input:
++	ts:private data.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_request_io_port(struct goodix_ts_data *ts)
++{
++    s32 ret = 0;
++
++//		gpio_set_status(gtp_gpio_irq, gpio_status_in);
++//    ret = gpio_irq_set(gtp_gpio_irq, GPIO_IRQ( (ts->client->irq -INT_GPIO_0), GPIO_IRQ_FALLING));
++//    if (ret < 0)
++//    {
++//        GTP_ERROR("Failed to request GPIO:%d, ERRNO:%d", (s32)gtp_gpio_irq, ret);
++//        ret = -ENODEV;
++//    }
++
++    ret = GTP_GPIO_REQUEST(gtp_gpio_rst, "GTP_RST_PORT");
++    if (ret < 0)
++    {
++        GTP_ERROR("Failed to request GPIO:%d, ERRNO:%d",(s32)gtp_gpio_rst,ret);
++        ret = -ENODEV;
++    }
++
++    GTP_GPIO_AS_INPUT(gtp_gpio_rst);
++    gtp_reset_guitar(20);
++
++    if(ret < 0)
++    {
++        GTP_GPIO_FREE(gtp_gpio_rst);
++        GTP_GPIO_FREE(gtp_gpio_irq);
++    }
++
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Request irq Function.
++
++Input:
++	ts:private data.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_request_irq(struct goodix_ts_data *ts)
++{
++    s32 ret = -1;
++    //const u8 irq_table[2] = GTP_IRQ_TAB;
++
++    GTP_DEBUG("INT trigger type:%x", ts->int_trigger_type);
++
++    ret  = request_irq(ts->client->irq,
++                       goodix_ts_irq_handler,
++                       0,
++                       ts->client->name,
++                       ts);
++    if (ret)
++    {
++        GTP_ERROR("Request IRQ failed!ERRNO:%d.", ret);
++        GTP_GPIO_AS_INPUT(gtp_gpio_irq);
++        GTP_GPIO_FREE(gtp_gpio_irq);
++
++        hrtimer_init(&ts->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++        ts->timer.function = goodix_ts_timer_handler;
++        hrtimer_start(&ts->timer, ktime_set(1, 0), HRTIMER_MODE_REL);
++        return -1;
++    }
++    else
++    {
++        gtp_irq_disable(ts);
++        ts->use_irq = 1;
++        return 0;
++    }
++}
++
++/*******************************************************
++Function:
++	Request input device Function.
++
++Input:
++	ts:private data.
++
++Output:
++	Executive outcomes.0--success,non-0--fail.
++*******************************************************/
++static s8 gtp_request_input_dev(struct goodix_ts_data *ts)
++{
++    s8 ret = -1;
++    s8 phys[32];
++    u16 report_max_x = 0;
++    u16 report_max_y = 0;
++#if GTP_HAVE_TOUCH_KEY
++    u8 index = 0;
++#endif
++
++    GTP_DEBUG_FUNC();
++
++    ts->input_dev = input_allocate_device();
++    if (ts->input_dev == NULL)
++    {
++        GTP_ERROR("Failed to allocate input device.");
++        return -ENOMEM;
++    }
++
++    ts->input_dev->evbit[0] = BIT_MASK(EV_SYN) | BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS) ;
++    ts->input_dev->absbit[0] = BIT(ABS_X) | BIT(ABS_Y) | BIT(ABS_PRESSURE);
++#if GTP_ICS_SLOT_REPORT
++    __set_bit(INPUT_PROP_DIRECT, ts->input_dev->propbit);
++    input_mt_init_slots(ts->input_dev, 16, 0);
++#else
++    ts->input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
++#endif
++
++#if GTP_HAVE_TOUCH_KEY
++    for (index = 0; index < GTP_MAX_KEY_NUM; index++)
++    {
++        input_set_capability(ts->input_dev,EV_KEY,touch_key_array[index]);
++    }
++#endif
++
++    report_max_x = ts->abs_x_max;
++    report_max_y = ts->abs_y_max;
++#if GTP_CHANGE_X2Y
++    GTP_SWAP(report_max_x, report_max_y);
++#else
++    if (ts_com->pol&4)
++        GTP_SWAP(report_max_x, report_max_y);
++#endif
++
++    input_set_abs_params(ts->input_dev, ABS_X, 0, report_max_x, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_Y, 0, report_max_y, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_PRESSURE, 0, 255, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_POSITION_X, 0, report_max_x, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y, 0, report_max_y, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_WIDTH_MAJOR, 0, 255, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, 255, 0, 0);
++    input_set_abs_params(ts->input_dev, ABS_MT_TRACKING_ID, 0, 5, 0, 0);
++
++    sprintf(phys, "input/ts");
++    ts->input_dev->name = goodix_ts_name;
++    ts->input_dev->phys = phys;
++    ts->input_dev->id.bustype = BUS_I2C;
++    ts->input_dev->id.vendor = 0xDEAD;
++    ts->input_dev->id.product = 0xBEEF;
++    ts->input_dev->id.version = 10427;
++
++    ret = input_register_device(ts->input_dev);
++    if (ret)
++    {
++        GTP_ERROR("Register %s input device failed", ts->input_dev->name);
++        return -ENODEV;
++    }
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    ts->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
++    ts->early_suspend.suspend = goodix_ts_early_suspend;
++    ts->early_suspend.resume = goodix_ts_late_resume;
++    register_early_suspend(&ts->early_suspend);
++#endif
++
++    return 0;
++}
++
++/*******************************************************
++Function:
++	Goodix touchscreen probe function.
++
++Input:
++	client:	i2c device struct.
++	id:device id.
++
++Output:
++	Executive outcomes. 0---succeed.
++*******************************************************/
++static int goodix_ts_probe(struct i2c_client *client, const struct i2c_device_id *id)
++{
++    s32 ret = -1;
++    struct goodix_ts_data *ts;
++
++
++    GTP_DEBUG_FUNC();
++    client->addr = 0x5d;
++
++    //do NOT remove these output log
++    GTP_INFO("GTP Driver Version:%s",GTP_DRIVER_VERSION);
++    GTP_INFO("GTP Driver build@%s,%s", __TIME__,__DATE__);
++    GTP_INFO("GTP I2C address:0x%02x", client->addr);
++
++
++	if (ts_com->owner != NULL) 
++		return -ENODEV;
++	memset(ts_com, 0 ,sizeof(struct touch_pdata));
++	ts_com = (struct touch_pdata*)client->dev.platform_data;
++	printk("ts_com->owner = %s\n", ts_com->owner);
++	if (request_touch_gpio(ts_com) != ERR_NO)
++			goto err_XX_req_gpio_err;
++	client->irq = ts_com->irq;		
++    //goodix_pdata = client->dev.platform_data;
++
++    gtp_gpio_rst = ts_com->gpio_reset;
++    gtp_gpio_irq = ts_com->gpio_interrupt;
++
++    GTP_INFO("GT811 reset pin is  %d, INT pin is %d. \n ", gtp_gpio_rst, gtp_gpio_irq);
++    i2c_connect_client = client;
++    if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
++    {
++        GTP_ERROR("I2C check functionality failed.");
++        return -ENODEV;
++    }
++    ts = kzalloc(sizeof(*ts), GFP_KERNEL);
++    if (ts == NULL)
++    {
++        GTP_ERROR("Alloc GFP_KERNEL memory failed.");
++        return -ENOMEM;
++    }
++
++    memset(ts, 0, sizeof(*ts));
++    INIT_WORK(&ts->work, goodix_ts_work_func);
++    ts->client = client;
++    i2c_set_clientdata(client, ts);
++    spin_lock_init(&ts->irq_lock);
++
++    ret = gtp_request_io_port(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP request IO port failed.");
++        kfree(ts);
++        return ret;
++    }
++
++
++    ret = gtp_i2c_test(client);
++    if (ret < 0)
++    {
++        GTP_ERROR("I2C communication ERROR!");
++    }
++
++#if GTP_AUTO_UPDATE
++    ret = gup_init_update_proc(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("Create update thread error.");
++    }
++#endif
++
++    ret = gtp_init_panel(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP init panel failed.");
++    }
++
++    ret = gtp_request_input_dev(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP request input dev failed");
++    }
++
++    ret = gtp_request_irq(ts);
++    if (ret < 0)
++    {
++        GTP_INFO("GTP works in polling mode.");
++    }
++    else
++    {
++        GTP_INFO("GTP works in interrupt mode.");
++    }
++
++    ret = gtp_read_version(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("Read version failed.");
++    }
++
++    gtp_irq_enable(ts);
++
++#if GTP_CREATE_WR_NODE
++    init_wr_node(client);
++#endif
++
++#if GTP_ESD_PROTECT
++    INIT_DELAYED_WORK(&gtp_esd_check_work, gtp_esd_check_func);
++    gtp_esd_check_workqueue = create_workqueue("gtp_esd_check");
++    queue_delayed_work(gtp_esd_check_workqueue, &gtp_esd_check_work, GTP_ESD_CHECK_CIRCLE);
++#endif
++
++    return 0;
++err_XX_req_gpio_err:
++	free_touch_gpio(ts_com);
++	ts_com->owner = NULL;
++    i2c_unregister_device(client);
++    return -ENODEV;
++}
++
++
++/*******************************************************
++Function:
++	Goodix touchscreen driver release function.
++
++Input:
++	client:	i2c device struct.
++
++Output:
++	Executive outcomes. 0---succeed.
++*******************************************************/
++static int goodix_ts_remove(struct i2c_client *client)
++{
++    struct goodix_ts_data *ts = i2c_get_clientdata(client);
++
++    GTP_DEBUG_FUNC();
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    unregister_early_suspend(&ts->early_suspend);
++#endif
++
++#if GTP_CREATE_WR_NODE
++    uninit_wr_node();
++#endif
++
++#if GTP_ESD_PROTECT
++    destroy_workqueue(gtp_esd_check_workqueue);
++#endif
++
++    if (ts)
++    {
++        if (ts->use_irq)
++        {
++            GTP_GPIO_AS_INPUT(gtp_gpio_irq);
++            GTP_GPIO_FREE(gtp_gpio_irq);
++            free_irq(client->irq, ts);
++        }
++        else
++        {
++            hrtimer_cancel(&ts->timer);
++        }
++    }
++
++    GTP_INFO("GTP driver is removing...");
++    i2c_set_clientdata(client, NULL);
++    input_unregister_device(ts->input_dev);
++    kfree(ts);
++
++    free_touch_gpio(ts_com);
++	  ts_com->owner = NULL;
++    i2c_unregister_device(client);
++
++    return 0;
++}
++
++/*******************************************************
++Function:
++	Early suspend function.
++
++Input:
++	h:early_suspend struct.
++
++Output:
++	None.
++*******************************************************/
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static void goodix_ts_early_suspend(struct early_suspend *h)
++{
++    struct goodix_ts_data *ts;
++    s8 ret = -1;
++    ts = container_of(h, struct goodix_ts_data, early_suspend);
++
++    GTP_DEBUG_FUNC();
++
++#if GTP_ESD_PROTECT
++    ts->gtp_is_suspend = 1;
++    cancel_delayed_work_sync(&gtp_esd_check_work);
++#endif
++
++    if (ts->use_irq)
++    {
++        gtp_irq_disable(ts);
++    }
++    else
++    {
++        hrtimer_cancel(&ts->timer);
++    }
++    ret = gtp_enter_sleep(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP early suspend failed.");
++    }
++}
++
++/*******************************************************
++Function:
++	Late resume function.
++
++Input:
++	h:early_suspend struct.
++
++Output:
++	None.
++*******************************************************/
++static void goodix_ts_late_resume(struct early_suspend *h)
++{
++    struct goodix_ts_data *ts;
++    s8 ret = -1;
++    ts = container_of(h, struct goodix_ts_data, early_suspend);
++
++    GTP_DEBUG_FUNC();
++
++    ret = gtp_wakeup_sleep(ts);
++    if (ret < 0)
++    {
++        GTP_ERROR("GTP later resume failed.");
++    }
++
++    if (ts->use_irq)
++    {
++        gtp_irq_enable(ts);
++    }
++    else
++    {
++        hrtimer_start(&ts->timer, ktime_set(1, 0), HRTIMER_MODE_REL);
++    }
++
++#if GTP_ESD_PROTECT
++    ts->gtp_is_suspend = 0;
++    queue_delayed_work(gtp_esd_check_workqueue, &gtp_esd_check_work, GTP_ESD_CHECK_CIRCLE);
++#endif
++}
++#endif
++
++#if GTP_ESD_PROTECT
++static void gtp_esd_check_func(struct work_struct *work)
++{
++    int i;
++    int ret = -1;
++    struct goodix_ts_data *ts = NULL;
++
++    GTP_DEBUG_FUNC();
++
++    ts = i2c_get_clientdata(i2c_connect_client);
++
++    if (ts->gtp_is_suspend)
++    {
++        return;
++    }
++
++    for (i = 0; i < 3; i++)
++    {
++        ret = gtp_i2c_end_cmd(i2c_connect_client);
++	    if (ret >= 0)
++	    {
++	        break;
++	    }
++	}
++
++    if (i >= 3)
++    {
++        gtp_reset_guitar(50);
++    }
++
++    if(!ts->gtp_is_suspend)
++    {
++        queue_delayed_work(gtp_esd_check_workqueue, &gtp_esd_check_work, GTP_ESD_CHECK_CIRCLE);
++    }
++
++    return;
++}
++#endif
++
++static const struct i2c_device_id goodix_ts_id[] = {
++    { GOODIX_I2C_NAME, 0 },
++    { }
++};
++
++static struct i2c_driver goodix_ts_driver = {
++    .probe      = goodix_ts_probe,
++    .remove     = goodix_ts_remove,
++#ifndef CONFIG_HAS_EARLYSUSPEND
++    .suspend    = goodix_ts_early_suspend,
++    .resume     = goodix_ts_later_resume,
++#endif
++    .id_table   = goodix_ts_id,
++    .driver = {
++        .name     = GOODIX_I2C_NAME,
++        .owner    = THIS_MODULE,
++    },
++};
++
++/*******************************************************
++Function:
++	Driver Install function.
++Input:
++  None.
++Output:
++	Executive Outcomes. 0---succeed.
++********************************************************/
++static int goodix_ts_init(void)
++{
++    s32 ret;
++
++    GTP_DEBUG_FUNC();
++    GTP_INFO("GTP driver install.");
++    goodix_wq = create_singlethread_workqueue("goodix_wq");
++    if (!goodix_wq)
++    {
++        GTP_ERROR("Creat workqueue failed.");
++        return -ENOMEM;
++    }
++    ret = i2c_add_driver(&goodix_ts_driver);
++    return ret;
++}
++
++/*******************************************************
++Function:
++	Driver uninstall function.
++Input:
++  None.
++Output:
++	Executive Outcomes. 0---succeed.
++********************************************************/
++static void goodix_ts_exit(void)
++{
++    GTP_DEBUG_FUNC();
++    GTP_INFO("GTP driver exited.");
++    i2c_del_driver(&goodix_ts_driver);
++    if (goodix_wq)
++    {
++        destroy_workqueue(goodix_wq);
++    }
++}
++
++late_initcall(goodix_ts_init);
++module_exit(goodix_ts_exit);
++
++MODULE_DESCRIPTION("GTP Series Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/input/touchscreen/gt811/gt811.h b/drivers/amlogic/input/touchscreen/gt811/gt811.h
+new file mode 100755
+index 000000000000..36b8d778dd01
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/gt811.h
+@@ -0,0 +1,241 @@
++/* drivers/input/touchscreen/gt811.h
++ *
++ * 2010 - 2012 Goodix Technology.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be a reference
++ * to you, when you are integrating the GOODiX's CTP IC into your system,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * Version:1.2
++ *      V1.0:2012/05/01,creat file,by andrew
++ *      V1.2:2012/06/08,add some macro define.
++ */
++
++#ifndef 	_LINUX_GT811_H
++#define		_LINUX_GT811_H
++
++#include "linux/amlogic/input/common.h"
++extern struct touch_pdata *ts_com;
++
++extern s32 gup_update_proc(void*);
++extern struct i2c_client * i2c_connect_client;
++extern s32 gtp_i2c_read(struct i2c_client *client, u8 *buf, s32 len);
++extern s32 gtp_i2c_write(struct i2c_client *client,u8 *data,s32 len);
++extern u16 show_len;
++extern u16 total_len;
++
++struct goodix_ts_data {
++    spinlock_t irq_lock;
++    struct i2c_client *client;
++    struct input_dev  *input_dev;
++    struct hrtimer timer;
++    struct work_struct  work;
++    struct early_suspend early_suspend;
++    s32 irq_is_disable;
++    s32 use_irq;
++    u16 abs_x_max;
++    u16 abs_y_max;
++    u16 version;
++    u8  max_touch_num;
++    u8  int_trigger_type;
++    u8  green_wake_mode;
++    u8  chip_type;
++    u8  enter_update;
++    u8  gtp_is_suspend;
++};
++
++extern s32 gtp_read_version(struct goodix_ts_data *ts);
++extern s32 gup_downloader( struct goodix_ts_data *ts, u8 *data);
++extern s32 gtp_init_panel(struct goodix_ts_data *ts);
++extern void gtp_irq_disable(struct goodix_ts_data *ts);
++extern void gtp_irq_enable(struct goodix_ts_data *ts);
++
++//***************************PART1:ON/OFF define*******************************
++#define GTP_DEBUG_ON          0
++#define GTP_DEBUG_ARRAY_ON    0
++#define GTP_DEBUG_FUNC_ON     0
++#define GTP_CUSTOM_CFG        0
++#define GTP_DRIVER_SEND_CFG   1
++#define GTP_HAVE_TOUCH_KEY    0
++#define GTP_POWER_CTRL_SLEEP  0
++#define GTP_AUTO_UPDATE       0
++#define GTP_CHANGE_X2Y        0
++#define GTP_ESD_PROTECT       0
++#define GTP_CREATE_WR_NODE    0
++#define GTP_ICS_SLOT_REPORT   1
++#define GUP_USE_HEADER_FILE   1
++#define MAL_FIX_EDGE_POINT      19
++#define MAL_EDGE_CAL_PERCENT    10
++#define MAL_EDGE_CAL_OFFSET_RATE    5
++//***************************PART2:TODO define**********************************
++//STEP_1(REQUIRED):Change config table.
++/*TODO: puts the config info corresponded to your TP here, the following is just
++a sample config, send this config should cause the chip cannot work normally*/
++
++// GT811_Config_20130315_396kHz.cfg
++#define CTP_CFG_GROUP1 {\
++    0x12,0x10,0x0E,0x0C,0x0A,0x08,0x06,0x04,\
++    0x02,0x00,0x07,0x77,0x16,0x66,0x26,0x66,\
++    0x37,0x67,0x47,0x76,0x57,0x66,0x67,0x76,\
++    0x77,0x77,0x86,0x77,0x96,0x76,0xA5,0x66,\
++    0xB5,0x66,0xC5,0x55,0xD8,0x88,0xE8,0x88,\
++    0xF4,0x44,0x07,0x03,0xA8,0xA8,0xA8,0x34,\
++    0x34,0x34,0x0F,0x0F,0x0A,0x40,0x22,0x0F,\
++    0x03,0x00,0x05,0x58,0x02,0x00,0x04,0x00,\
++    0x00,0x38,0x33,0x35,0x30,0x00,0x00,0x26,\
++    0x20,0x02,0x08,0x00,0x00,0x00,0x00,0x00,\
++    0x14,0x10,0x20,0x03,0x00,0x00,0x00,0x00,\
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
++    0x00,0x01\
++	}
++//TODO puts your group2 config info here,if need.
++#define CTP_CFG_GROUP2 {\
++    }
++//TODO puts your group3 config info here,if need.
++#define CTP_CFG_GROUP3 {\
++    }
++
++// STEP_2(REQUIRED): Customize your I/O ports & I/O operations
++#define GTP_RST_PORT    (ts_com->gpio_reset)	
++#define GTP_INT_PORT    (ts_com->gpio_interrupt)
++#define GTP_INT_IRQ     (ts_com->irq)
++//#define GTP_INT_CFG     S3C_GPIO_SFN(0xF)
++
++#define GTP_GPIO_AS_INPUT(pin)          do{\
++                                            aml_gpio_direction_input(pin);\
++                                        }while(0)
++#define GTP_GPIO_AS_INT(pin)            do{\
++                                            aml_gpio_direction_input(pin);\
++                                            aml_gpio_to_irq(pin, GTP_INT_IRQ-INT_GPIO_0, ts_com->irq_edge);\
++                                        }while(0)
++#define GTP_GPIO_OUTPUT(pin,level)	    do{\
++                                            aml_gpio_direction_output(pin, level);\
++                                        }while(0)
++//#define GTP_GPIO_GET_VALUE(pin)         gpio_get_value(pin)
++#define GTP_GPIO_REQUEST(pin, label)    0//gpio_request(pin, label)
++#define GTP_GPIO_FREE(pin)              //gpio_free(pin)
++#define GTP_IRQ_TAB                     {IRQ_TYPE_EDGE_RISING, IRQ_TYPE_EDGE_FALLING, IRQ_TYPE_LEVEL_LOW, IRQ_TYPE_LEVEL_HIGH}
++
++//STEP_3(optional):Custom set some config by themself,if need.
++#if GTP_CUSTOM_CFG
++    #define GTP_MAX_WIDTH    4096
++    #define GTP_MAX_HEIGHT   4096
++    #define GTP_MAX_TOUCH    5
++    #define GTP_INT_TRIGGER  1
++    #define GTP_REFRESH      0
++#else
++    #define GTP_MAX_WIDTH    4096
++    #define GTP_MAX_HEIGHT   4096
++    #define GTP_MAX_TOUCH    5
++    #define GTP_INT_TRIGGER  1
++    #define GTP_REFRESH      0
++#endif
++#define GTP_ESD_CHECK_CIRCLE  2000
++
++
++//STEP_4(optional):If this project have touch key,Set touch key config.
++#if GTP_HAVE_TOUCH_KEY
++#define GTP_KEY_TAB {KEY_MENU, KEY_HOME, KEY_SEND}
++#endif
++
++//***************************PART3:OTHER define*********************************
++#define GTP_DRIVER_VERSION    "V1.2<2012/06/08>"
++#define GOODIX_I2C_NAME          "Goodix811-TS"
++#define GTP_POLL_TIME	      10
++#define GTP_ADDR_LENGTH       2
++#define GTP_CONFIG_LENGTH     106
++#define FAIL                  0
++#define SUCCESS               1
++
++#if GTP_MAX_TOUCH <= 3
++#define GTP_READ_BYTES 2+2+GTP_MAX_TOUCH*5
++#elif GTP_MAX_TOUCH == 4
++#define GTP_READ_BYTES 2+28
++#elif GTP_MAX_TOUCH == 5
++#define GTP_READ_BYTES 2+34
++#endif
++//Register define
++#define GTP_REG_CONFIG_DATA   0x6A2
++#define GTP_REG_COOR          0x721
++#define GTP_REG_SLEEP         0x692
++#define GTP_REG_SENSOR_ID     0x721
++#define GTP_REG_VERSION       0x715
++#define RESOLUTION_LOC        61
++#define TRIGGER_LOC           57
++//Log define
++#define GTP_INFO(fmt,arg...)           printk("<<-GTP-INFO->>[%d]"fmt"\n", __LINE__, ##arg)
++#define GTP_ERROR(fmt,arg...)          printk("<<-GTP-ERROR->>[%d]"fmt"\n", __LINE__, ##arg)
++#define GTP_DEBUG(fmt,arg...)          do{\
++                                         if(GTP_DEBUG_ON)\
++                                         printk("<<-GTP-DEBUG->> [%d]"fmt"\n",__LINE__, ##arg);\
++                                       }while(0)
++#define GTP_DEBUG_ARRAY(array, num)    do{\
++                                         s32 i;\
++                                         u8* a = array;\
++                                         if(GTP_DEBUG_ARRAY_ON)\
++                                         {\
++                                            printk("<<-GTP-DEBUG-ARRAY->>\n");\
++                                            for (i = 0; i < (num); i++)\
++                                            {\
++                                                printk("%02x   ", (a)[i]);\
++                                                if ((i + 1 ) %10 == 0)\
++                                                {\
++                                                    printk("\n");\
++                                                }\
++                                            }\
++                                            printk("\n");\
++                                        }\
++                                       }while(0)
++#define GTP_DEBUG_FUNC()               do{\
++                                         if(GTP_DEBUG_FUNC_ON)\
++                                         printk("<<-GTP-FUNC->>[%d]Func:%s\n",__LINE__,__func__);\
++                                       }while(0)
++#define GTP_SWAP(x, y)                 do{\
++                                         typeof(x) z = x;\
++                                         x = y;\
++                                         y = z;\
++                                       }while (0)
++
++//****************************PART4:UPDATE define*******************************
++
++#define PACK_SIZE            64                    //update file package size
++#define SEARCH_FILE_TIMES    50
++#define UPDATE_FILE_PATH_2   "/data/goodix/_goodix_update_.bin"
++#define UPDATE_FILE_PATH_1   "/sdcard/goodix/_goodix_update_.bin"
++
++//Error no
++#define ERROR_NO_FILE           2   //ENOENT
++#define ERROR_FILE_READ         23  //ENFILE
++#define ERROR_FILE_TYPE         21  //EISDIR
++#define ERROR_GPIO_REQUEST      4   //EINTR
++#define ERROR_I2C_TRANSFER      5   //EIO
++#define ERROR_NO_RESPONSE       16  //EBUSY
++#define ERROR_TIMEOUT           110 //ETIMEDOUT
++
++//*****************************End of Part III********************************
++
++struct goodix_i2c_rmi_platform_data {
++	uint32_t version;	/* Use this entry for panels with */
++	uint16_t abs_x_max;
++	uint16_t abs_y_max;
++	u8 swap_xy;
++	u8 xpol;
++	u8 ypol;
++    unsigned gpio_pwr;
++    unsigned gpio_rst;
++    unsigned gpio_irq;
++    bool irq_edge; /* 0:rising edge, 1:falling edge */
++
++	int (*reset)(int on);
++	int (*irq_init)(void);
++	//reservation
++};
++#endif /* _LINUX_GT811_H */
+diff --git a/drivers/amlogic/input/touchscreen/gt811/gt811_firmware.h b/drivers/amlogic/input/touchscreen/gt811/gt811_firmware.h
+new file mode 100755
+index 000000000000..a98f1f073cdc
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/gt811_firmware.h
+@@ -0,0 +1,292 @@
++/* drivers/input/touchscreen/gt818x_update.c
++ *
++ * 2010 - 2012 Goodix Technology.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be a reference
++ * to you, when you are integrating the GOODiX's CTP IC into your system,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * Firmware verison:2010.
++ * Caution:do NOT modify this file
++ *
++ */
++
++#ifndef _LINUX_GT811_FIRMWARE_H
++#define	_LINUX_GT811_FIRMWARE_H
++
++#ifdef HEADER_UPDATE_DATA
++#undef HEADER_UPDATE_DATA
++#endif
++#define HEADER_UPDATE_DATA goodix_gt811_firmware
++
++u8 goodix_gt811_firmware[] = {
++    0x11,
++    0x10,0x20,
++    0x46,0x00,0x00,0x00,
++    0x40,0x40,
++    0x0f,0xb0,
++    0x04,0xc8,0xb9,
++    /*0x47,0x4f,0x4f,0x44,0x49,0x58,*/
++    0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x4f,0xce,0x01,0x00,0x20,0x03,0xa7,0x00,0x08,0x8c,0x05,0xc7,
++    0x26,0xf8,0x8e,0x05,0xc7,0xbd,0x41,0x16,0x20,0xfe,0x0f,0xbd,0xc4,0x49,0x8d,0x0b,
++    0x8d,0x22,0xbd,0xf7,0xb9,0xfd,0x08,0x34,0x7e,0xc1,0xaa,0xce,0x06,0x92,0xcc,0x00,
++    0x00,0xe7,0x81,0xa7,0x82,0xcc,0xf8,0x11,0xe7,0x83,0xa7,0x84,0xcc,0x10,0x20,0xe7,
++    0x85,0xa7,0x86,0x39,0x3c,0x18,0x3c,0x18,0xce,0x05,0xc8,0xce,0x41,0x5e,0xec,0x00,
++    0x18,0xed,0x00,0x08,0x08,0x18,0x08,0x18,0x08,0x8c,0x42,0x00,0x25,0xf0,0x18,0x38,
++    0x38,0x39,0x4c,0x81,0xf0,0x50,0x42,0x5f,0x48,0x15,0x4a,0x9a,0xf3,0x61,0xf6,0x8b,
++    0x4c,0xdb,0xcc,0x92,0xd9,0x23,0xdb,0x96,0xe0,0x00,0xd2,0x48,0x48,0xfd,0xf4,0xf3,
++    0xe3,0xc4,0xc5,0x9d,0xc5,0x50,0xd2,0x09,0xec,0x4f,0x4a,0x99,0xd3,0x18,0xea,0x03,
++    0x4b,0x21,0x4b,0x04,0xee,0xc8,0xee,0xae,0xee,0x8a,0x47,0x5e,0xec,0x17,0xed,0x3f,
++    0xed,0x05,0xcf,0x53,0xcf,0x61,0xcf,0x38,0xcf,0x46,0x4c,0xaa,0xcf,0xc8,0xcf,0xab,
++    0xcf,0x6e,0x49,0xd6,0xcd,0x25,0xcd,0x76,0x00,0x00,0x49,0x27,0x49,0x70,0xd0,0x33,
++    0x48,0xe5,0xf2,0x62,0xe5,0x76,0xf3,0x46,0xf3,0xe0,0xd9,0x38,0xdb,0x6a,0xe6,0x4c,
++    0xde,0x5d,0xf3,0xb6,0xf7,0xcb,0x43,0x16,0xed,0xc9,0xe4,0xa9,0xe7,0xdf,0xf1,0xc9,
++    0xee,0x74,0xee,0x7f,0x47,0x22,0x46,0xce,0x47,0x05,0x00,0x00,0x49,0x49,0xe8,0x3b,
++    0x47,0x7f,0xdf,0x6d,0xde,0xca,0xf7,0xce,0xe9,0x7b,0xe9,0x6b,0xc5,0xc6,0xd4,0x21,
++    0xd4,0xdc,0xf4,0xdf,0x39,0x3c,0x18,0x3c,0xce,0x16,0x00,0x1d,0x00,0x02,0x1c,0x06,
++    0x02,0x1d,0x07,0x02,0x7f,0x00,0x77,0x18,0xce,0x00,0x64,0xbd,0xec,0x40,0x1e,0x02,
++    0x02,0x03,0x7c,0x00,0x77,0x18,0x09,0x26,0xf2,0xd6,0x77,0xc1,0x32,0x25,0x07,0x1d,
++    0x06,0x02,0xc6,0x02,0x20,0x29,0x1d,0x06,0x02,0x1c,0x07,0x02,0x7f,0x00,0x77,0x18,
++    0xce,0x00,0x64,0xbd,0xec,0x40,0x1f,0x02,0x02,0x03,0x7c,0x00,0x77,0x18,0x09,0x26,
++    0xf2,0xd6,0x77,0xc1,0x32,0x25,0x07,0x1d,0x07,0x02,0xc6,0x01,0x20,0x01,0x5f,0x18,
++    0x38,0x38,0x39,0x3c,0x34,0x30,0xbd,0xc8,0x12,0x8d,0x9a,0xf7,0x07,0x10,0x56,0x56,
++    0x56,0xc4,0xc0,0xe7,0x00,0xf6,0x07,0x21,0xc4,0x3f,0xea,0x00,0xf7,0x07,0x21,0xd6,
++    0xeb,0xf7,0x03,0x71,0xf6,0x06,0xe5,0x4f,0x05,0x05,0x05,0x05,0xfd,0x03,0x74,0xf6,
++    0x06,0xe6,0x4f,0x05,0x05,0x05,0x05,0xfd,0x03,0x72,0xfc,0x03,0x74,0x27,0x16,0xfc,
++    0x03,0x72,0x27,0x11,0x14,0xe3,0x20,0xfc,0x03,0x72,0xdd,0xe9,0xd6,0xea,0xc1,0x80,
++    0x23,0x03,0x7c,0x00,0xe9,0x5f,0xd7,0x79,0x18,0xce,0x03,0x8f,0x18,0x3a,0x18,0x6f,
++    0x00,0x18,0xce,0x03,0x8a,0x18,0x3a,0x18,0x6f,0x00,0x7c,0x00,0x79,0xd6,0x79,0xc1,
++    0x05,0x25,0xe5,0xd6,0xf6,0xc4,0x30,0xd7,0x77,0x27,0x16,0xc0,0x10,0x27,0x25,0xc6,
++    0x06,0xf7,0x02,0x1d,0x5c,0xf7,0x02,0x1e,0xc6,0x09,0xf7,0x02,0x1f,0xc6,0x05,0x20,
++    0x23,0xc6,0x17,0xf7,0x02,0x1d,0xc6,0x19,0xf7,0x02,0x1e,0xc6,0x1c,0xf7,0x02,0x1f,
++    0xc6,0x14,0x20,0x10,0xc6,0x0c,0xf7,0x02,0x1d,0x5c,0xf7,0x02,0x1e,0xc6,0x0f,0xf7,
++    0x02,0x1f,0xc6,0x0a,0xf7,0x02,0x20,0x31,0x38,0x39,0x3c,0x18,0x3c,0xce,0x01,0x7b,
++    0x4f,0xc6,0xa0,0xa7,0x00,0x08,0x5a,0x26,0xfa,0x96,0xd9,0xb7,0x02,0xfa,0x18,0xce,
++    0x0d,0x80,0xce,0x01,0x7b,0xd6,0xda,0xf7,0x02,0xf9,0x18,0x3c,0x4f,0x5f,0x18,0xe3,
++    0x00,0x18,0x08,0x18,0x08,0x7a,0x02,0xf9,0x26,0xf4,0xfd,0x03,0xbd,0x18,0x38,0x3c,
++    0x4f,0xd6,0xda,0x8f,0xfc,0x03,0xbd,0x2a,0x0c,0x40,0x50,0x82,0x00,0x02,0x8f,0x40,
++    0x50,0x82,0x00,0x20,0x02,0x02,0x8f,0xfd,0x03,0xbd,0x38,0x96,0xda,0xb7,0x02,0xf9,
++    0x18,0x3c,0x18,0xec,0x00,0xb3,0x03,0xbd,0x18,0xed,0x00,0x2d,0x04,0x2e,0x0d,0x20,
++    0x18,0x6c,0x01,0x1a,0xa3,0x06,0x2c,0x11,0xed,0x06,0x20,0x0d,0x6c,0x00,0x1a,0xa3,
++    0x04,0x2f,0x02,0xed,0x04,0xe3,0x02,0xed,0x02,0x18,0x08,0x18,0x08,0x7a,0x02,0xf9,
++    0x26,0xd0,0x18,0x38,0xc6,0x0a,0x3a,0x58,0x18,0x3a,0x7a,0x02,0xfa,0x26,0x86,0xce,
++    0x01,0x7b,0x96,0xd9,0xb7,0x02,0xfa,0x4a,0xb7,0x01,0x79,0xb7,0x01,0x7a,0x4f,0xd6,
++    0xe1,0xc0,0x0a,0xa3,0x04,0xe3,0x06,0x2b,0x15,0xd6,0xd9,0xf0,0x02,0xfa,0xb6,0x01,
++    0x79,0xb1,0x01,0x7a,0x27,0x05,0xf7,0x01,0x79,0x20,0x03,0xf7,0x01,0x7a,0xc6,0x0a,
++    0x3a,0x7a,0x02,0xfa,0x26,0xd8,0x8d,0x11,0xf6,0x01,0x79,0xf7,0x01,0x7a,0x8d,0x09,
++    0xbd,0x45,0x39,0x8d,0x30,0x18,0x38,0x38,0x39,0x7f,0x03,0xb8,0xf6,0x01,0x7a,0xf7,
++    0x02,0xfa,0x8d,0x54,0xbd,0x44,0xfc,0x7c,0x02,0xfa,0xf6,0x02,0xfa,0xd1,0xd9,0x26,
++    0xf1,0x7f,0x03,0xb8,0xf6,0x01,0x7a,0xf7,0x02,0xfa,0x8d,0x3c,0xbd,0x44,0xfc,0x7a,
++    0x02,0xfa,0x2a,0xf6,0x39,0x18,0xce,0x01,0x7b,0xce,0x0d,0x80,0x96,0xd9,0xb7,0x02,
++    0xfa,0x18,0x67,0x08,0x18,0x66,0x09,0x96,0xda,0xb7,0x02,0xf9,0x3c,0xec,0x00,0x18,
++    0xe3,0x08,0xed,0x00,0x08,0x08,0x7a,0x02,0xf9,0x26,0xf2,0x38,0xc6,0x0a,0x18,0x3a,
++    0x58,0x3a,0x7a,0x02,0xfa,0x26,0xda,0x39,0xce,0x01,0x7b,0xf6,0x02,0xfa,0x86,0x0a,
++    0x3d,0x3a,0xec,0x00,0x3d,0x5d,0xfd,0x03,0xb4,0x27,0x6e,0x86,0x01,0xf6,0x03,0xb8,
++    0x27,0x10,0x5a,0x27,0x18,0x5a,0x27,0x26,0xf6,0x03,0xb7,0x27,0x05,0x5a,0x27,0x28,
++    0x20,0x08,0xe6,0x00,0xe1,0x01,0x22,0x02,0x20,0x1e,0x4f,0x20,0x1b,0xf6,0x03,0xb7,
++    0xc1,0x02,0x27,0x14,0xe6,0x00,0xd0,0x77,0xc1,0x03,0x2e,0xe6,0x20,0x1a,0x4f,0xf6,
++    0x03,0xb7,0xc1,0x01,0x27,0x02,0x20,0x08,0xb7,0x03,0xb6,0x4f,0xd6,0xda,0x20,0x0e,
++    0xb7,0x03,0xb6,0x4f,0xe6,0x00,0x20,0x06,0xb7,0x03,0xb6,0x4f,0xe6,0x01,0xfd,0x03,
++    0xbd,0xec,0x02,0x3c,0xfe,0x03,0xbd,0x02,0x8f,0x38,0xfd,0x03,0xb4,0x4f,0xf6,0x03,
++    0xb6,0x26,0x06,0xb3,0x03,0xb4,0xfd,0x03,0xb4,0xec,0x04,0xf3,0x03,0xb4,0xfd,0x03,
++    0xbb,0xec,0x06,0xf3,0x03,0xb4,0xfd,0x03,0xb9,0xec,0x08,0xf3,0x03,0xb4,0xed,0x08,
++    0xfc,0x03,0xb9,0x47,0x56,0x47,0x56,0xe3,0x08,0xed,0x08,0xe6,0x00,0xd7,0x77,0x39,
++    0xf6,0x03,0xb8,0xc1,0x03,0x2c,0x03,0xf7,0x03,0xb7,0x7f,0x03,0xb8,0x4f,0xd6,0xe1,
++    0xc0,0x0a,0x1a,0xb3,0x03,0xbb,0x2c,0x03,0x7c,0x03,0xb8,0x40,0x50,0x82,0x00,0x1a,
++    0xb3,0x03,0xb9,0x2f,0x06,0x7c,0x03,0xb8,0x7c,0x03,0xb8,0xf6,0x03,0xb8,0xc1,0x03,
++    0x26,0x0a,0xf6,0x03,0xb7,0x26,0x05,0xc6,0x01,0xf7,0x03,0xb8,0x39,0x3c,0x18,0x3c,
++    0xce,0x01,0x7b,0x18,0xce,0x03,0x94,0xd6,0xd9,0x37,0xec,0x08,0x18,0xe3,0x00,0x47,
++    0x56,0xed,0x08,0x18,0xed,0x00,0xc6,0x0a,0x3a,0x18,0x08,0x18,0x08,0x33,0x5a,0x26,
++    0xe8,0x18,0x38,0x38,0x39,0x3c,0x12,0xe3,0x20,0x02,0x38,0x39,0xce,0x03,0x8f,0x18,
++    0xce,0x00,0xaa,0x68,0x00,0x18,0xe6,0x00,0x27,0x03,0x1c,0x00,0x01,0x08,0x18,0x08,
++    0x8c,0x03,0x94,0x25,0xee,0x5f,0xd7,0x77,0xd7,0x79,0xce,0x03,0x8f,0x3a,0xe6,0x00,
++    0xc4,0x07,0xc1,0x07,0x27,0x03,0x7e,0x46,0x16,0xce,0x02,0x25,0xd6,0x79,0x3a,0x3a,
++    0x3a,0xe6,0x00,0x26,0x75,0xbd,0x46,0x24,0x5d,0x27,0x6f,0x20,0x34,0xce,0x03,0x8f,
++    0xd6,0x77,0x3a,0xa6,0x00,0x85,0x3f,0x26,0x25,0x86,0x01,0xa7,0x00,0x4f,0x37,0x36,
++    0x05,0x18,0x8f,0xd6,0x79,0x4f,0x37,0x36,0x05,0x8f,0xec,0xb9,0x18,0xed,0xb9,0xec,
++    0xaf,0x18,0xed,0xaf,0x38,0x18,0x38,0xe6,0xaa,0x18,0xe7,0xaa,0x20,0x09,0x7c,0x00,
++    0x77,0xd6,0x77,0xc1,0x05,0x25,0xc6,0xd6,0x79,0xce,0x03,0x8f,0x3a,0x1d,0x00,0x01,
++    0xce,0x03,0x8a,0x3a,0x86,0x03,0xa7,0x00,0xce,0x03,0x76,0x58,0x58,0x3a,0x18,0xce,
++    0x02,0x86,0x58,0x37,0x18,0x3a,0x18,0xec,0x00,0xed,0x00,0x33,0x18,0xce,0x02,0xae,
++    0x18,0x3a,0x18,0xec,0x00,0xed,0x02,0xbd,0xf3,0x46,0x7c,0x00,0x79,0xd6,0x79,0xc1,
++    0x05,0x24,0x03,0x7e,0x45,0x86,0x38,0x39,0xbd,0xf8,0xb7,0x07,0x4f,0xa7,0x02,0xd6,
++    0x79,0x58,0x58,0x58,0xc3,0x02,0x86,0xfd,0x02,0x45,0x18,0x8f,0xd6,0x79,0x58,0x58,
++    0x58,0x4f,0xc3,0x02,0xae,0xfd,0x02,0x43,0x18,0xec,0x00,0x37,0x36,0xd6,0x79,0x4f,
++    0x05,0x18,0x8f,0x18,0xec,0xb9,0xbd,0xf5,0x76,0x31,0x31,0xed,0x03,0x18,0xfe,0x02,
++    0x43,0x18,0xec,0x00,0x37,0x36,0xd6,0x79,0x4f,0x05,0x18,0x8f,0x18,0xec,0xaf,0xbd,
++    0xf5,0x76,0x31,0x31,0xed,0x05,0xec,0x03,0xb3,0x03,0x74,0x23,0x03,0x1c,0x02,0x01,
++    0xec,0x05,0xb3,0x03,0x72,0x23,0x03,0x1c,0x02,0x02,0xe6,0x02,0x27,0x3e,0x18,0xfe,
++    0x02,0x45,0x18,0xec,0x00,0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,0x31,0x31,0xed,
++    0x03,0x18,0xfe,0x02,0x43,0x18,0xec,0x00,0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,
++    0xed,0x05,0xfc,0x03,0x74,0x04,0x04,0x04,0xa3,0x03,0x24,0x03,0x1d,0x02,0x01,0xfc,
++    0x03,0x72,0x04,0x04,0x04,0xa3,0x05,0x24,0x03,0x1d,0x02,0x02,0xe6,0x02,0xae,0x00,
++    0x38,0x39,0x3c,0x13,0xe3,0x20,0x30,0x5f,0xd7,0x79,0xce,0x03,0x8a,0x3a,0xa6,0x00,
++    0x27,0x1c,0x4f,0x37,0x36,0x05,0x37,0x36,0x05,0xce,0x03,0x76,0x3a,0xec,0x00,0x18,
++    0x38,0x18,0xed,0xb9,0xec,0x02,0x18,0xed,0xaf,0x38,0xc6,0x01,0xe7,0xaa,0x7c,0x00,
++    0x79,0xd6,0x79,0xc1,0x05,0x25,0xd3,0x38,0x39,0x13,0xe3,0x20,0x18,0x3c,0xce,0x03,
++    0x8a,0x7f,0x00,0x79,0x64,0x00,0x24,0x03,0xbd,0xf3,0x46,0x7c,0x00,0x79,0x08,0x8c,
++    0x03,0x8f,0x25,0xf0,0x38,0x39,0x3c,0x3c,0x13,0xe3,0x20,0x23,0x5f,0xd7,0x79,0x4f,
++    0x8f,0xe6,0xaa,0x27,0x11,0xce,0x03,0x8f,0xd6,0x79,0x3a,0x1e,0x00,0x01,0x07,0x1f,
++    0x00,0x1e,0x03,0xbd,0xf3,0x46,0x7c,0x00,0x79,0xd6,0x79,0xc1,0x05,0x25,0xe0,0xfc,
++    0x03,0x74,0xdd,0xea,0xbd,0xe3,0xcb,0xf6,0x03,0x71,0xd7,0xeb,0xbd,0x45,0x61,0x38,
++    0x38,0x39,0x3c,0xd6,0x79,0x58,0x58,0x58,0x4f,0xc3,0x03,0x49,0x8f,0xd6,0xa9,0xe7,
++    0x01,0xd6,0xa8,0xe7,0x02,0xd6,0xa7,0xe7,0x03,0xd6,0xa6,0xe7,0x04,0xd6,0xa4,0xe7,
++    0x06,0x38,0x39,0x3c,0x3c,0x5f,0xd7,0x79,0x7e,0x48,0x0b,0x4f,0x05,0x05,0xc3,0x00,
++    0x38,0xfd,0x02,0x21,0x8f,0xe6,0x00,0x5a,0x27,0x09,0xe6,0x01,0xd1,0xda,0x26,0x31,
++    0xfe,0x02,0x21,0xe6,0x01,0xe1,0x00,0x26,0x0e,0xe6,0x00,0x5a,0x26,0x04,0x6c,0x01,
++    0x20,0x05,0xfe,0x02,0x21,0x6a,0x00,0xe6,0x03,0xe1,0x02,0x26,0x14,0xd1,0xd8,0x24,
++    0x05,0x6c,0x03,0xfe,0x02,0x21,0xe6,0x02,0xc1,0x01,0x23,0x05,0x6a,0x02,0xfe,0x02,
++    0x21,0xe6,0x02,0x5a,0x27,0x09,0xe6,0x03,0xd1,0xd8,0x26,0x2e,0xfe,0x02,0x21,0xe6,
++    0x03,0xe1,0x02,0x26,0x0e,0xe6,0x02,0x5a,0x26,0x04,0x6c,0x03,0x20,0x05,0xfe,0x02,
++    0x21,0x6a,0x02,0xe6,0x01,0xe1,0x00,0x26,0x11,0xd1,0xda,0x24,0x05,0x6c,0x01,0xfe,
++    0x02,0x21,0xe6,0x00,0xc1,0x01,0x23,0x02,0x6a,0x00,0x7c,0x00,0x79,0xd6,0x79,0xd1,
++    0xe0,0x24,0x03,0x7e,0x47,0x87,0x38,0x38,0x39,0xf6,0x07,0x21,0xc4,0xc0,0xca,0x20,
++    0xf7,0x07,0x21,0xc6,0xf0,0xf7,0x07,0x22,0x8d,0x67,0x5d,0x27,0x43,0x5a,0x27,0x05,
++    0xbd,0x48,0xbe,0x20,0x3e,0x7d,0x07,0x0b,0x27,0x16,0xbd,0xee,0xc8,0x7d,0x00,0x2f,
++    0x27,0x0e,0xbd,0xee,0x8a,0xfc,0x02,0x40,0xb7,0x07,0x0d,0xf7,0x07,0x0c,0x20,0x23,
++    0x8d,0x70,0xbd,0xf5,0xa0,0x8d,0x2b,0xbd,0xf5,0x91,0x8d,0x26,0xbd,0xf5,0xa0,0x8d,
++    0x21,0xbd,0xf5,0x91,0x8d,0x1c,0xbd,0xf5,0xa0,0x8d,0x17,0xbd,0xf5,0x91,0x20,0x03,
++    0xbd,0xf0,0x9c,0x7f,0x07,0x0b,0xf6,0x07,0x21,0xc4,0xc0,0xf7,0x07,0x21,0x7f,0x07,
++    0x22,0x39,0x3c,0xce,0x03,0xe8,0xbd,0xec,0x40,0x09,0x26,0xfa,0x7f,0x13,0x01,0x38,
++    0x39,0x3c,0x4f,0x5f,0xce,0x4f,0x76,0xeb,0x00,0x89,0x00,0x08,0x8c,0x4f,0xef,0x23,
++    0xf6,0x8f,0xc6,0x02,0xbc,0x4f,0x74,0x26,0x15,0xfe,0x4f,0x70,0x8c,0x43,0x46,0x26,
++    0x0d,0xfe,0x4f,0x72,0x8c,0x47,0x52,0x27,0x06,0x8c,0x47,0x58,0x27,0x02,0x5a,0x5a,
++    0x38,0x39,0x3c,0x18,0x3c,0xce,0x4f,0x76,0x18,0xce,0x06,0xa2,0xe6,0x00,0x18,0xe7,
++    0x00,0x08,0x18,0x08,0x8c,0x4f,0xdf,0x25,0xf3,0xbd,0xee,0x8a,0xfc,0x02,0x40,0xb7,
++    0x07,0x0d,0xf7,0x07,0x0c,0x18,0x38,0x38,0x39,0xbd,0xd2,0x98,0x13,0xd1,0x80,0x10,
++    0x15,0xd1,0x80,0xd6,0xd1,0xd1,0xdb,0x25,0x04,0x14,0xd1,0x80,0x39,0x7c,0x00,0xd1,
++    0x39,0xd6,0xf9,0xc4,0xc0,0xc1,0x80,0x26,0x1e,0xfc,0x00,0x7f,0xf3,0x00,0x81,0xfb,
++    0x00,0x83,0x1a,0x83,0x00,0x00,0x26,0x07,0x7d,0x00,0xd1,0x26,0x02,0x20,0x08,0x7c,
++    0x00,0xfb,0x3c,0x3c,0x7e,0xed,0x96,0xbd,0xec,0xc8,0x39,0xbd,0xce,0xae,0xfc,0x00,
++    0x2a,0xb3,0x01,0x0b,0x13,0xfd,0x01,0x0b,0x1a,0x83,0x03,0xe8,0x22,0x0e,0x15,0xfd,
++    0x01,0x20,0x09,0x1a,0x83,0x09,0x60,0x25,0x03,0x14,0xfd,0x01,0x39,0x7d,0x01,0x11,
++    0x27,0x05,0xc6,0x01,0xf7,0x01,0x11,0x13,0xfd,0x02,0x0f,0xfc,0x00,0x2a,0xb3,0x01,
++    0x09,0x1a,0x83,0x00,0x64,0x2f,0x03,0xbd,0xf6,0x7e,0xfc,0x00,0x2a,0xfd,0x01,0x09,
++    0xbd,0xf5,0xcf,0x39,0x3c,0xd6,0xd2,0xc5,0x04,0x26,0x5a,0x7f,0x00,0x79,0xd6,0x79,
++    0x27,0x15,0x5a,0x27,0x0d,0x5a,0x27,0x05,0xf6,0x06,0xe7,0x20,0x0b,0xf6,0x07,0x06,
++    0x20,0x06,0xf6,0x07,0x05,0x20,0x01,0x5f,0xd7,0x77,0x5d,0x27,0x2f,0x4f,0xd6,0x79,
++    0x8f,0xe6,0x54,0x54,0x54,0x54,0x54,0x27,0x23,0x4f,0x83,0x00,0x01,0xf3,0x02,0xdd,
++    0x8f,0x3c,0xe6,0x00,0x96,0xce,0x3d,0x37,0x36,0xd6,0x77,0x4f,0x8f,0x32,0x33,0x02,
++    0x8f,0x1a,0x83,0x00,0xff,0x23,0x02,0xc6,0xff,0x38,0xe7,0x00,0x7c,0x00,0x79,0xd6,
++    0x79,0xc1,0x04,0x25,0xa9,0xbd,0xcf,0xe2,0x38,0x39,0x3c,0x3c,0xbd,0xcd,0x03,0x5f,
++    0xd7,0x79,0x4f,0x8f,0xe6,0xaa,0x27,0x0b,0x8d,0x15,0x5d,0x27,0x06,0xbd,0xcf,0x6e,
++    0x38,0x38,0x39,0x7c,0x00,0x79,0xd6,0x79,0xc1,0x05,0x25,0xe6,0x38,0x38,0x39,0xbd,
++    0xf8,0xb7,0x07,0x4f,0xa7,0x02,0xd6,0x79,0x58,0x58,0x58,0xc3,0x02,0x86,0xfd,0x02,
++    0x45,0x18,0x8f,0xd6,0x79,0x58,0x58,0x58,0x4f,0xc3,0x02,0xae,0xfd,0x02,0x43,0x18,
++    0xec,0x00,0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,0x31,0x31,0xed,0x03,0x18,0xfe,
++    0x02,0x43,0x18,0xec,0x00,0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,0x31,0x31,0xed,
++    0x05,0xec,0x03,0xb3,0x03,0x74,0x23,0x03,0x1c,0x02,0x01,0xec,0x05,0xb3,0x03,0x72,
++    0x23,0x03,0x1c,0x02,0x02,0xe6,0x02,0x27,0x3e,0x18,0xfe,0x02,0x45,0x18,0xec,0x04,
++    0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,0x31,0x31,0xed,0x03,0x18,0xfe,0x02,0x43,
++    0x18,0xec,0x04,0x37,0x36,0x18,0xec,0x02,0xbd,0xf5,0x76,0xed,0x05,0xfc,0x03,0x74,
++    0x04,0x04,0x04,0xa3,0x03,0x24,0x03,0x1d,0x02,0x01,0xfc,0x03,0x72,0x04,0x04,0x04,
++    0xa3,0x05,0x24,0x03,0x1d,0x02,0x02,0xe6,0x02,0xae,0x00,0x38,0x39,0x39,0x3c,0x3c,
++    0xf6,0x07,0x11,0xc1,0xc3,0x26,0x06,0x7f,0x07,0x11,0x7e,0xc0,0x00,0x15,0xf9,0xc0,
++    0xf6,0x06,0x92,0x56,0x56,0x56,0xc4,0xc0,0xda,0xf9,0xd7,0xf9,0xf6,0x06,0x92,0xc5,
++    0x03,0x26,0x05,0xca,0x02,0xf7,0x06,0x92,0xfe,0x05,0xf4,0xad,0x00,0x8d,0x56,0xd6,
++    0xcf,0x27,0x08,0xf6,0x02,0xdf,0xca,0x20,0xf7,0x02,0xdf,0x8d,0x64,0xd6,0xc3,0x5a,
++    0x26,0x18,0xd6,0xc4,0x4f,0xfe,0x06,0x68,0xad,0x00,0xd6,0xc4,0x26,0x0c,0xd6,0xcf,
++    0x26,0x08,0xcc,0x00,0x19,0xfe,0x06,0x68,0xad,0x00,0x8d,0x0c,0xbd,0xe9,0x96,0xbd,
++    0xe9,0xac,0xbd,0xc7,0xdd,0x38,0x38,0x39,0xd6,0xc3,0x5a,0x26,0x17,0x13,0xf6,0x08,
++    0x0a,0xbd,0xf5,0xa0,0xbd,0xec,0x40,0xbd,0xf5,0x91,0x39,0xbd,0xf5,0x91,0xbd,0xec,
++    0x40,0xbd,0xf5,0xa0,0x39,0x5f,0xd7,0xc3,0xd6,0xde,0xc5,0x3f,0x26,0x04,0x13,0xd5,
++    0x3f,0x04,0xc6,0x01,0xd7,0xc3,0xf6,0x07,0x11,0x5a,0x26,0x04,0xc6,0x01,0xd7,0xc3,
++    0x39,0x3c,0x34,0x30,0x6f,0x00,0xd6,0xc3,0x5a,0x27,0x03,0x7e,0x4b,0xfe,0xd6,0xcf,
++    0xf7,0x07,0x22,0x5f,0xd7,0x79,0xc6,0x91,0xd7,0x77,0xbd,0x4c,0x01,0xbd,0x4c,0x01,
++    0xbd,0x4c,0x01,0xd6,0x79,0x58,0x58,0x58,0x4f,0xc3,0x03,0x49,0x18,0x8f,0x18,0xe6,
++    0x02,0xf7,0x07,0x32,0x18,0xe6,0x01,0xf7,0x07,0x39,0x18,0xe6,0x04,0xf7,0x07,0x3a,
++    0x18,0xe6,0x03,0xf7,0x07,0x3b,0x18,0xe6,0x06,0xf7,0x07,0x3c,0xc6,0xab,0xd7,0x77,
++    0x7c,0x00,0x79,0x8d,0x70,0x5f,0xd7,0x77,0xd7,0x79,0x74,0x00,0x77,0x4f,0x18,0x8f,
++    0x18,0xe6,0xaa,0x27,0x03,0x14,0x77,0x10,0x7c,0x00,0x79,0xd6,0x79,0xc1,0x05,0x25,
++    0xe9,0xd6,0xcf,0x27,0x03,0x14,0x77,0x20,0xf6,0x07,0x21,0xc4,0xc0,0xda,0x77,0xf7,
++    0x07,0x21,0xd6,0x77,0xd7,0x79,0xc6,0x07,0xd7,0x77,0x13,0x79,0x02,0x04,0xc6,0x0c,
++    0xd7,0x77,0x13,0x79,0x1c,0x04,0xc6,0x21,0xd7,0x77,0x5f,0xd7,0x79,0x20,0x12,0x4f,
++    0xc3,0x06,0x92,0x18,0x8f,0xe6,0x00,0x18,0xeb,0x8f,0xe7,0x00,0x7c,0x00,0x79,0xd6,
++    0x79,0xd1,0x77,0x25,0xea,0xd6,0x77,0x4f,0xc3,0x06,0x92,0x18,0x8f,0xe6,0x00,0x18,
++    0xe7,0x8f,0x31,0x38,0x39,0x3c,0x3c,0xce,0x06,0x92,0xd6,0x77,0x3a,0x3c,0xd6,0x79,
++    0x58,0x58,0x58,0x4f,0xc3,0x03,0x49,0x8f,0xe6,0x02,0x38,0xe7,0x00,0xd6,0x77,0x4f,
++    0xc3,0x06,0x92,0x37,0x36,0xd6,0x79,0x58,0x58,0x58,0x4f,0xc3,0x03,0x49,0x8f,0xe6,
++    0x01,0x38,0xe7,0x01,0xd6,0x77,0x4f,0xc3,0x06,0x92,0x37,0x36,0xd6,0x79,0x58,0x58,
++    0x58,0x4f,0xc3,0x03,0x49,0x8f,0xe6,0x04,0x38,0xe7,0x02,0xd6,0x77,0x4f,0xc3,0x06,
++    0x92,0x37,0x36,0xd6,0x79,0x58,0x58,0x58,0x4f,0xc3,0x03,0x49,0x8f,0xe6,0x03,0x38,
++    0xe7,0x03,0xd6,0x77,0x4f,0xc3,0x06,0x92,0x37,0x36,0xd6,0x79,0x58,0x58,0x58,0x4f,
++    0xc3,0x03,0x49,0x8f,0xe6,0x06,0x38,0xe7,0x04,0x7c,0x00,0x79,0xd6,0x77,0xcb,0x05,
++    0xd7,0x77,0x38,0x38,0x39,0x3c,0x34,0x30,0xbd,0xc6,0x9c,0xbd,0x42,0x01,0xf7,0x07,
++    0x10,0x56,0x56,0x56,0xc4,0xc0,0xe7,0x00,0xf6,0x07,0x21,0xc4,0x3f,0xea,0x00,0xf7,
++    0x07,0x21,0xc6,0x5d,0x18,0xce,0x14,0x01,0x18,0xe7,0x00,0x31,0x38,0x39,0x3c,0x3c,
++    0xbd,0xcd,0xd6,0x13,0xf6,0x02,0x06,0x7c,0x03,0x12,0x7c,0x03,0x11,0xfe,0x02,0xf7,
++    0xe6,0x00,0xd1,0xe2,0x25,0x16,0xf6,0x03,0x11,0xc1,0x02,0x24,0x07,0xf6,0x03,0x12,
++    0xc1,0x02,0x25,0x08,0xc6,0x03,0xf7,0x03,0x12,0xf7,0x03,0x11,0x38,0x38,0x39,0x4f,
++    0x5f,0xfd,0x03,0x16,0xbd,0xc4,0xd1,0x39,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00,0x00,0x00,
++};
++
++#endif
+diff --git a/drivers/amlogic/input/touchscreen/gt811/gt811_update.c b/drivers/amlogic/input/touchscreen/gt811/gt811_update.c
+new file mode 100755
+index 000000000000..7cef32b1c4bd
+--- /dev/null
++++ b/drivers/amlogic/input/touchscreen/gt811/gt811_update.c
+@@ -0,0 +1,1183 @@
++/* drivers/input/touchscreen/gt818x_update.c
++ *
++ * 2010 - 2012 Goodix Technology.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be a reference
++ * to you, when you are integrating the GOODiX's CTP IC into your system,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * Version:1.2
++ *      V1.0:2012/05/01,create file,by scott
++ *      V1.2:2012/06/05,transplant to GT811 update,by andrew
++ *
++ */
++#include <linux/kthread.h>
++#include "gt811.h"
++
++//-----------------------------------------------
++//Do not change the order                       |
++#define HEADER_UPDATE_DATA NULL         //      |
++#if GUP_USE_HEADER_FILE                 //      |
++#include "gt811_firmware.h"            //      |
++#endif                                  //      |
++//-----------------------------------------------
++
++//#ifdef GTP_AUTO_UPDATE
++
++//**********************************************************************
++
++#define BIT_NVRAM_STROE        0
++#define BIT_NVRAM_RECALL       1
++#define BIT_NVRAM_LOCK         2
++#define REG_NVRCS              0x1201
++
++#define READ_FW_MSG_ADDR       0x715 //0x0F7C
++#define READ_MSK_VER_ADDR      0x4014//0xC009
++
++#define FW_HEAD_LENGTH         30
++#define FILE_HEAD_LENGTH       100
++#define IGNORE_LENGTH          100
++#define FW_MSG_LENGTH          7
++#define UPDATE_DATA_LENGTH     5000
++
++#define fail    0
++#define success 1
++#define false   0
++#define true    1
++
++u16 show_len;
++u16 total_len;
++
++struct i2c_client *guitar_client = NULL;
++
++extern s32  gtp_i2c_read(struct i2c_client *client, uint8_t *buf, s32 len);
++extern s32  gtp_i2c_write(struct i2c_client *client,uint8_t *data,s32 len);
++extern s32  gtp_i2c_end_cmd(struct i2c_client *client);
++extern void gtp_reset_guitar(s32 ms);
++extern s32  gtp_send_cfg(struct i2c_client *client);
++
++#pragma pack(1)
++typedef struct
++{
++    u8  type;          //产品类型//
++    u16 version;       //FW版本号//
++    u8  msk_ver[4];    //MASK版本//
++    u8  st_addr[2];    //烧录的起始地址//
++    u16 lenth;         //FW长度//
++    u8  chk_sum[3];
++    u8  force_update[6];//强制升级标志,为"GOODIX"则强制升级//
++}st_fw_head;
++#pragma pack()
++
++typedef struct
++{
++    u8 force_update;
++    u8 fw_flag;
++    loff_t gt_loc;
++    struct file *file;
++    st_fw_head  ic_fw_msg;
++    mm_segment_t old_fs;
++}st_update_msg;
++
++st_update_msg update_msg;
++
++struct goodix_i2c_rmi_platform_data * goodix_update_pdata;
++//******************************************************************************
++
++static u8 gup_get_ic_msg(struct i2c_client *client, u16 addr, u8* msg, s32 len)
++{
++    s32 i = 0;
++
++    msg[0] = (addr >> 8) & 0xff;
++    msg[1] = addr & 0xff;
++
++    for (i = 0; i < 5; i++)
++    {
++        if (gtp_i2c_read(client, msg, GTP_ADDR_LENGTH + len) > 0)
++        {
++            break;
++        }
++    }
++    gtp_i2c_end_cmd(client);
++
++    if (i >= 5)
++    {
++        GTP_ERROR("Read data from 0x%02x%02x failed!", msg[0], msg[1]);
++        return fail;
++    }
++
++    return success;
++}
++
++static u8 gup_clear_mix_flag(struct i2c_client *client)
++{
++    s32 i = 0;
++    u8 buf[3];
++
++    buf[0] = 0x14;
++    buf[1] = 0x00;
++    buf[2] = 0x8C;
++
++    for (i = 0; i < 5; i++)
++    {
++        if (gtp_i2c_write(client, buf, 3) > 0)
++        {
++            break;
++        }
++    }
++    gtp_i2c_end_cmd(client);
++
++    if (i >= 5)
++    {
++        GTP_DEBUG("Clear mix flag failed!");
++        return fail;
++    }
++
++    return success;
++}
++
++static u8 gup_get_ic_fw_msg(struct i2c_client *client)
++{
++    s32 i = 0;
++    u8 buf[32];
++
++    if (fail == gup_clear_mix_flag(client))
++    {
++        return fail;
++    }
++
++#if 0
++    //Get the mask version in nvram of IC
++    if (fail == gup_get_ic_msg(client, READ_MSK_VER_ADDR, buf, 1))
++    {
++        GTP_ERROR("Read mask version failed!");
++        return fail;
++    }
++
++    update_msg.ic_fw_msg.msk_ver = buf[GTP_ADDR_LENGTH];
++    GTP_DEBUG("IC The mask version in rom is %c.", update_msg.ic_fw_msg.msk_ver);
++#endif
++
++    if (fail == gup_get_ic_msg(client, 0x717, buf, 2))
++    {
++        GTP_DEBUG("Get firmware msg in IC error.");
++        return fail;
++    }
++    update_msg.ic_fw_msg.version = buf[GTP_ADDR_LENGTH + 1] << 8 | buf[GTP_ADDR_LENGTH];
++
++    GTP_DEBUG("IC VID:0x%x", (int)update_msg.ic_fw_msg.version);
++    GTP_DEBUG("IC force update:0x%x", update_msg.force_update);
++
++#if 0
++    //Cuts the frequency
++    buf[0] = 0x15;
++    buf[1] = 0x22;
++    buf[2] = 0x18;
++    ret =  gtp_i2c_write(client, buf, 3);
++    if (ret <= 0)
++    {
++        return fail;
++    }
++    gtp_i2c_end_cmd(client);
++#endif
++    //Get the pid at 0x4011 in nvram
++    if (fail == gup_get_ic_msg(client, 0x4011, buf, 1))
++    {
++        GTP_ERROR("Read pid failed!");
++        return fail;
++    }
++    update_msg.ic_fw_msg.type = buf[GTP_ADDR_LENGTH];
++
++    //Get the mask version at 0x4014 in nvram
++    if (fail == gup_get_ic_msg(client, READ_MSK_VER_ADDR, buf, 1))
++    {
++        GTP_ERROR("Read mask version failed!");
++        return fail;
++    }
++    update_msg.ic_fw_msg.msk_ver[0]= buf[GTP_ADDR_LENGTH];
++
++    GTP_DEBUG("IC PID:%x", update_msg.ic_fw_msg.type);
++    GTP_DEBUG("IC MSK VER:%c", update_msg.ic_fw_msg.msk_ver[0]);
++
++    //Get the firmware msg in IC, include firmware version and checksum flag
++    for (i = 0; i < 2; i++)
++    {
++        if (fail == gup_get_ic_msg(client, 0x694, buf, 1))
++        {
++            GTP_DEBUG("Get firmware msg in IC error.");
++            return fail;
++        }
++        update_msg.force_update = buf[GTP_ADDR_LENGTH];
++        if (i == 0 && update_msg.force_update == 0xAA)
++        {
++            GTP_INFO("The check sum in ic is error.");
++            GTP_INFO("IC will be reset.");
++            GTP_INFO("If the check sum is still error, ");
++            GTP_INFO("The IC will be updated by force.");
++
++            gtp_reset_guitar(10);
++            continue;
++            //msleep(100);
++        }
++        break;
++    }
++
++    return success;
++}
++
++/*
++* Steps of reset guitar
++*1. INT脚输出低，延时5ms
++*2. RESET脚拉低100ms，转输入悬浮态
++*3. I2C寻址GUITAR
++*4. 延时100ms读取0xff(3、4轮询80次，直至成功)
++*5. Oxff等于0x55则返回成功，否则失败
++*/
++s32 gup_enter_update_mode(struct i2c_client *client)
++{
++    int ret = 1;
++    u8 retry;
++    unsigned char inbuf[3] = {0,0xff,0};
++
++    goodix_update_pdata = client->dev.platform_data;
++    // step 1
++    GTP_GPIO_OUTPUT(goodix_update_pdata->gpio_irq, 0);
++    msleep(5);
++
++    //step 2
++    gtp_reset_guitar(100);
++
++    for(retry=0;retry < 20; retry++)
++    {
++        //step 3
++        ret = gtp_i2c_write(client, inbuf, 2);   //Test I2C connection.
++        if (ret > 0)
++        {
++            GTP_DEBUG("<Set update mode>I2C is OK!");
++            //step 4
++            msleep(100);
++            ret = gtp_i2c_read(client, inbuf, 3);
++            if (ret > 0)
++            {
++                GTP_DEBUG("The value of 0x00ff is 0x%02x", inbuf[2]);
++                //step 5
++                if(inbuf[2] == 0x55)
++                {
++                    return success;
++                }
++            }
++        }
++        msleep(40);
++    }
++    GTP_ERROR(KERN_INFO"Detect address %0X", client->addr);
++
++    return fail;
++}
++
++void gup_leave_update_mode(void)
++{
++    if (goodix_update_pdata != NULL)
++        GTP_GPIO_AS_INT(goodix_update_pdata->gpio_irq);
++}
++
++/*******************************************************
++Function:
++	Little endian tranfer to big endian function.
++
++Input:
++  Little_endian:data to tranfer.
++
++Output:
++	Executive outcomes.
++*********************************************************/
++u16 Little2BigEndian(u16 little_endian)
++{
++    u16 temp = 0;
++    temp = little_endian&0xff;
++    return (temp<<8)+((little_endian>>8)&0xff);
++}
++
++u8 gup_load_update_file(struct i2c_client *client, st_fw_head* fw_head, u8* data, u8* path)
++{
++    u8 mask_num = 0;
++    int ret = 0;
++    int i = 0;
++    u8 buf[FW_HEAD_LENGTH];
++
++    if (path)
++    {
++        GTP_DEBUG("File path:%s, %d", path, strlen(path));
++        update_msg.file = filp_open(path, O_RDONLY, 0644);
++
++        if (IS_ERR(update_msg.file))
++        {
++            GTP_ERROR("Open update file(%s) error!", path);
++            return fail;
++        }
++    }
++    else
++    {
++        //Begin to search update file
++        for (i = 0; i < SEARCH_FILE_TIMES; i++)
++        {
++            update_msg.file = filp_open(UPDATE_FILE_PATH_1, O_RDWR, 0666);
++            if (IS_ERR(update_msg.file))
++            {
++                update_msg.file = filp_open(UPDATE_FILE_PATH_2, O_RDWR, 0666);//O_RDWR
++                if (IS_ERR(update_msg.file))
++                {
++                    GTP_DEBUG("%3d:Searching file...", i);
++                    msleep(3000);
++                    continue;
++                }
++                else
++                {
++                    break;
++                }
++            }
++            else
++            {
++                break;
++            }
++        }
++        if (i >= SEARCH_FILE_TIMES)
++        {
++            GTP_ERROR("Can't find update file.");
++            return fail;
++        }
++        GTP_DEBUG("Find the update file.");
++    }
++
++    update_msg.old_fs = get_fs();
++    set_fs(KERNEL_DS);
++
++    //GT811 BIN has no 200 bytes file head
++#if 0
++    update_msg.file->f_pos = IGNORE_LENGTH;
++
++    //Make sure the file is the right file.(By compare the "Guitar" flag)
++    ret = update_msg.file->f_op->read(update_msg.file, (char*)&buf, 6, &update_msg.file->f_pos);
++    if (ret < 0)
++    {
++        GTP_ERROR("Read \"Guitar\" flag error.");
++        goto load_failed;
++    }
++    if (memcmp(buf, "Guitar", 6))
++    {
++        GTP_ERROR("The flag is %s.Not equal!"
++                     "The update file is incorrect!", buf);
++        goto load_failed;
++    }
++    GTP_DEBUG("The file flag is :%s.", buf);
++
++    //Get the total number of masks
++    update_msg.file->f_pos++; //ignore one byte.
++    ret = update_msg.file->f_op->read(update_msg.file, &mask_num, 1, &update_msg.file->f_pos);
++    if (ret < 0)
++    {
++        GTP_ERROR("Didn't get the mask number from the file.");
++        goto load_failed;
++    }
++    GTP_DEBUG("FILE The total number of masks is:%d.", mask_num);
++    update_msg.file->f_pos = FILE_HEAD_LENGTH + IGNORE_LENGTH;
++#endif
++    mask_num = 1;
++    update_msg.file->f_pos = 0;
++
++    //Get the correct nvram data
++    //The correct conditions:
++    //1. the product id is the same
++    //2. the mask id is the same
++    //3. the nvram version in update file is greater than the nvram version in ic
++    //or force update flag is marked or the check sum in ic is wrong
++    update_msg.gt_loc = -1;
++    for ( i = 0; i < mask_num; i++)
++    {
++        ////GT811 BIN file has only 20 bytes head
++        ret = update_msg.file->f_op->read(update_msg.file, (char*)buf, sizeof(st_fw_head)/*FW_HEAD_LENGTH*/, &update_msg.file->f_pos);
++        if (ret < 0)
++        {
++            GTP_ERROR("Read update file head error.");
++            goto load_failed;
++        }
++        memcpy(fw_head, buf, sizeof(st_fw_head));
++        fw_head->version = buf[1] << 8 | buf[2];
++        fw_head->lenth = buf[9] << 8 | buf[10];
++        GTP_DEBUG("No.%d firmware", i);
++        GTP_DEBUG("FILE PID:%x", fw_head->type);
++        fw_head->version = Little2BigEndian(fw_head->version);
++        GTP_DEBUG("FILE VID:0x%04x", fw_head->version);
++        GTP_DEBUG("FILE mask version:%c.", fw_head->msk_ver[0]);
++        GTP_DEBUG("FILE start address:0x%02x%02x.", fw_head->st_addr[0], fw_head->st_addr[1]);
++        GTP_DEBUG("FILE length:%d", (int)fw_head->lenth);
++        GTP_DEBUG("FILE force update flag:%s", fw_head->force_update);
++        GTP_DEBUG("FILE chksum:0x%02x%02x%02x", fw_head->chk_sum[0],
++                                 fw_head->chk_sum[1], fw_head->chk_sum[2]);
++        GTP_DEBUG("IC mask version:%c.", update_msg.ic_fw_msg.msk_ver[0]);
++        GTP_DEBUG("IC PID:%x", update_msg.ic_fw_msg.type);
++        update_msg.ic_fw_msg.version = Little2BigEndian(update_msg.ic_fw_msg.version);
++        GTP_DEBUG("IC VID:0x%04x", update_msg.ic_fw_msg.version);
++
++        //First two conditions
++        if (update_msg.ic_fw_msg.type == fw_head->type
++		    && update_msg.ic_fw_msg.msk_ver[0] == fw_head->msk_ver[0])
++        {
++            GTP_DEBUG("Get the same mask version and same pid.");
++            //The third condition
++            if (fw_head->version > update_msg.ic_fw_msg.version
++                || !memcmp(fw_head->force_update, "GOODIX", 6)
++                || update_msg.force_update == 0xAA)
++            {
++               // GTP_DEBUG("FILE read position:%d", file->f_pos);
++               // file->f_pos = FW_HEAD_LENGTH + FILE_HEAD_LENGTH + IGNORE_LENGTH;
++                if (!memcmp(fw_head->force_update, "GOODIX", 6))
++                {
++                    //GT811 BIN file has only 20 bytes head
++                    update_msg.gt_loc = update_msg.file->f_pos /*- FW_HEAD_LENGTH + sizeof(st_fw_head)*/ - sizeof(fw_head->force_update);
++                }
++
++                ret = update_msg.file->f_op->read(update_msg.file, (char*)data, fw_head->lenth, &update_msg.file->f_pos);
++                if (ret <= 0)
++                {
++                    GTP_ERROR("Read firmware data in file error.");
++                    goto load_failed;
++                }
++               // GTP_DEBUG_ARRAY(data, 512);
++               // set_fs(ts->old_fs);
++              //  filp_close(ts->file, NULL);
++                GTP_DEBUG("Load data from file successfully.");
++                return success;
++            }
++            GTP_ERROR("Don't meet the third condition.");
++            goto load_failed;
++        }
++
++        update_msg.file->f_pos += UPDATE_DATA_LENGTH;
++    }
++
++load_failed:
++    set_fs(update_msg.old_fs);
++    filp_close(update_msg.file, NULL);
++    return fail;
++}
++
++u8 gup_load_update_header(struct i2c_client *client, st_fw_head* fw_head, u8** data)
++{
++    const u8* pos;
++    int i = 0;
++    u8 mask_num = 0;
++
++    //GT811 BIN has no 200 bytes file head
++#if 0
++    pos = HEADER_UPDATE_DATA;
++
++    pos += IGNORE_LENGTH;
++
++    GTP_INFO("The file flag is :%c%c%c%c%c%c.", pos[0], pos[1], pos[2], pos[3], pos[4], pos[5]);
++    if (memcmp((u8 *)pos, "Guitar", 6))
++    {
++        GTP_INFO("The update Header is incorrect!");
++
++        return fail;
++    }
++
++    pos += 7;
++    mask_num = pos[0];
++    GTP_INFO("Header The total number of masks is:%d.", mask_num);
++
++    pos = HEADER_UPDATE_DATA;
++    pos += FILE_HEAD_LENGTH + IGNORE_LENGTH;
++#endif
++    mask_num = 1;
++    pos = HEADER_UPDATE_DATA;
++   // update_msg.gt_loc = -1;
++    for ( i = 0; i < mask_num; i++)
++    {
++        memcpy(fw_head, pos, sizeof(st_fw_head));
++        fw_head->version = pos[1] << 8 | pos[2];
++        fw_head->lenth = pos[9] << 8 | pos[10];
++        GTP_INFO("No.%d firmware", i);
++        GTP_INFO("Header PID:%x", fw_head->type);
++        fw_head->version = Little2BigEndian(fw_head->version);
++        GTP_INFO("Header VID:0x%x", fw_head->version);
++        GTP_INFO("Header mask version:%c.", fw_head->msk_ver[0]);
++        GTP_INFO("Header start address:0x%02x%02x.", fw_head->st_addr[0], fw_head->st_addr[1]);
++        GTP_INFO("Header length:%d", (int)fw_head->lenth);
++        GTP_INFO("Header force update flag:%s", fw_head->force_update);
++        GTP_INFO("Header chksum:0x%02x%02x%02x", fw_head->chk_sum[0],
++                                 fw_head->chk_sum[1], fw_head->chk_sum[2]);
++        update_msg.ic_fw_msg.version = Little2BigEndian(update_msg.ic_fw_msg.version);
++        GTP_INFO("IC PID:%x", update_msg.ic_fw_msg.type);
++        GTP_INFO("IC VID:%x", update_msg.ic_fw_msg.version);
++        GTP_INFO("IC mask version:%c", update_msg.ic_fw_msg.msk_ver[0]);
++
++
++        //pos += FW_HEAD_LENGTH;
++        pos += sizeof(st_fw_head);          //GT811_BIN only 20 bytes firmware head
++
++        //First two conditions
++        if (update_msg.ic_fw_msg.type == fw_head->type
++            && update_msg.ic_fw_msg.msk_ver[0] == fw_head->msk_ver[0])
++        {
++            GTP_INFO("Get the same mask version and same pid.");
++            //The third condition
++            /*if (fw_head->version > update_msg.ic_fw_msg.version
++                || !memcmp(fw_head->force_update, "GOODIX", 6)
++                || update_msg.force_update == 0xAA)    */
++            if (fw_head->version > update_msg.ic_fw_msg.version
++                || update_msg.force_update == 0xAA)
++            {
++
++                *data = (u8 *)pos;
++
++                GTP_INFO("Load data from Header successfully.");
++                return success;
++            }
++            GTP_INFO("Don't meet the third condition.");
++            return fail;
++        }
++
++        pos += UPDATE_DATA_LENGTH;
++    }
++
++    return fail;
++}
++
++static u8 gup_nvram_store(struct i2c_client *client)
++{
++    int ret;
++    int i;
++    u8 inbuf[3] = {REG_NVRCS >> 8, REG_NVRCS & 0xff, 0x18};
++
++    ret = gtp_i2c_read(client, inbuf, 3);
++    if ( ret < 0 )
++    {
++        return fail;
++    }
++
++    if ((inbuf[2] & BIT_NVRAM_LOCK ) == BIT_NVRAM_LOCK)
++    {
++        return fail;
++    }
++
++    inbuf[2] = 0x18;
++    inbuf[2] |= (1<<BIT_NVRAM_STROE);        //store command
++
++    for ( i = 0 ; i < 300 ; i++ )
++    {
++        ret = gtp_i2c_write(client, inbuf, 3);
++        if ( ret > 0 )
++            return success;
++    }
++
++    return fail;
++}
++
++static u8 gup_nvram_recall(struct i2c_client *client)
++{
++    int ret;
++    u8 inbuf[3] = {REG_NVRCS >> 8, REG_NVRCS & 0xff, 0};
++
++    ret = gtp_i2c_read(client, inbuf, 3);
++    if ( ret < 0 )
++    {
++        return fail;
++    }
++
++    if ( ( inbuf[2]&BIT_NVRAM_LOCK) == BIT_NVRAM_LOCK )
++    {
++        return fail;
++    }
++
++    inbuf[2] = ( 1 << BIT_NVRAM_RECALL );        //recall command
++    ret = gtp_i2c_write(client , inbuf, 3);
++
++    if (ret <= 0)
++    {
++        return fail;
++    }
++    return success;
++}
++
++static u8 gup_update_nvram(struct i2c_client *client, st_fw_head* fw_head, u8 *nvram)
++{
++    int length = 0;
++    int ret = 0;
++    int write_bytes = 0;
++    int retry = 0;
++    int i = 0;
++    int comp = 0;
++    u16 st_addr = 0;
++    u8 w_buf[PACK_SIZE + GTP_ADDR_LENGTH];
++    u8 r_buf[PACK_SIZE + GTP_ADDR_LENGTH];
++
++    if (fw_head->lenth > PACK_SIZE)
++    {
++        write_bytes = PACK_SIZE;
++    }
++    else
++    {
++        write_bytes = fw_head->lenth;
++    }
++
++   // gup_clear_mix_flag(ts);
++    st_addr = (fw_head->st_addr[0] << 8) | (fw_head->st_addr[1]&0xff);
++    memcpy(&w_buf[2], &nvram[length], write_bytes);
++    GTP_DEBUG("Total length:%d", (int)fw_head->lenth);
++    GTP_DEBUG("Start addr:%d", st_addr);
++    while(length < fw_head->lenth)
++    {
++        w_buf[0] = st_addr >> 8;
++        w_buf[1] = st_addr & 0xff;
++        GTP_DEBUG("Write address:0x%02x%02x\tlength:%d", w_buf[0], w_buf[1], write_bytes);
++        ret =  gtp_i2c_write(client, w_buf, GTP_ADDR_LENGTH + write_bytes);
++        if (ret <= 0)
++        {
++            if (retry++ > 10)
++            {
++                GTP_DEBUG("Write the same address 10 times.Give up!");
++                return fail;
++            }
++            GTP_DEBUG("Write error![gup_update_nvram]");
++            continue;
++        }
++        else
++        {
++//            GTP_DEBUG("w_buf:");
++//            GTP_DEBUG_ARRAY(w_buf, GTP_ADDR_LENGTH + write_bytes);
++/*            r_buf[0] = 0x14;
++            r_buf[1] = 0x00;
++            r_buf[2] = 0x80;
++            gtp_i2c_write(ts->client, r_buf, 3);
++            r_buf[0] = 0x14;
++            r_buf[1] = 0x00;
++            gtp_i2c_read(ts->client, r_buf, 3);
++            GTP_DEBUG("I2CCS:0x%x", r_buf[2]);//*/
++
++            r_buf[0] = w_buf[0];
++            r_buf[1] = w_buf[1];
++
++            for (i = 0; i < 10; i++)
++            {
++                ret = gtp_i2c_read(client, r_buf, GTP_ADDR_LENGTH + write_bytes);
++                if (ret <= 0)
++                {
++                    continue;
++                }
++                break;
++            }
++            if (i >= 10)
++            {
++                GTP_DEBUG("Read error! Can't check the nvram data.");
++                return fail;
++            }
++//            GTP_DEBUG("r_buf:");
++//            GTP_DEBUG_ARRAY(r_buf, GTP_ADDR_LENGTH + write_bytes);
++#if 0
++            if (fail == gup_nvram_store(ts))
++            {
++                GTP_DEBUG("Store nvram failed.");
++                //continue;
++            }
++            return fail;
++#endif
++            if (memcmp(r_buf, w_buf, GTP_ADDR_LENGTH + write_bytes))
++            {
++                if (comp ++ > 10)
++                {
++                    GTP_DEBUG("Compare error!");
++                    return fail;
++                }
++                GTP_DEBUG("Updating nvram: Not equal!");
++
++                GTP_DEBUG("r_buf:");
++                GTP_DEBUG_ARRAY(r_buf, GTP_ADDR_LENGTH + write_bytes);
++
++
++                GTP_DEBUG("w_buf:");
++//                GTP_DEBUG_ARRAY(w_buf, GTP_ADDR_LENGTH + write_bytes);
++                continue;
++                //return fail;
++            }
++        }
++        comp = 0;
++        retry = 0;
++        length += PACK_SIZE;
++        st_addr += PACK_SIZE;
++        if ((length + PACK_SIZE) > fw_head->lenth)
++        {
++            write_bytes = fw_head->lenth - length;
++        }
++        memcpy(&w_buf[2], &nvram[length], write_bytes);
++    }
++
++    return success;
++}
++
++static u8 gup_update_firmware(struct i2c_client *client, st_fw_head* fw_head, u8 *nvram)
++{
++    s32 retry;
++    s32 i, j;
++    s32 ret;
++    s32 right_count = 0;
++    u32 status = 0;
++    u16 check_sum = 0;
++    u8 buf[150];
++    u8  tmp[150];
++
++    //Cuts the frequency
++    buf[0] = 0x15;
++    buf[1] = 0x22;
++    buf[2] = 0x18;
++    ret =  gtp_i2c_write(client, buf, 3);
++    if (ret <= 0)
++    {
++        return fail;
++    }
++
++    gup_get_ic_msg(client, 0x1522, buf, 1);
++    GTP_DEBUG("IC OSC_CAL:0x%02x.", buf[2]);
++
++    gup_clear_mix_flag(client);
++
++    for (retry = 0; retry < 10; retry++)
++    {
++        if (!(status & 0x01))
++        {
++            tmp[0] = 0x4f;
++            tmp[1] = 0x70;
++            gtp_i2c_read(client, tmp, 130);
++
++            for (i = 0; i < 50; i++)
++            {
++                buf[0] = 0x4f;
++                buf[1] = 0x70;
++                ret = gtp_i2c_read(client, buf, 130);
++                if (ret <= 0)
++                {
++                    continue;
++                }
++                else
++                {
++                    GTP_DEBUG("Read solidified config successfully!");
++                    ret = !memcmp(tmp, buf, 130);
++                    memcpy(tmp, buf, 130);
++                    if (true == ret)
++                    {
++                        if (right_count++ < 3)
++                        {
++                            continue;
++                        }
++                        else
++                        {
++                            for (j = 0; j < 128; j++)
++                            {
++                                check_sum += buf[j + 2];
++                            }
++                            GTP_DEBUG("check sum of solidified config is %04x", check_sum);
++                            status |= 0x01;
++                            break;
++                        }
++                    }
++                    else
++                    {
++                        right_count = 0;
++                    }
++                    if (i >= 40)
++                    {
++                        GTP_DEBUG("Compare solidified config failed!");
++                        return fail;
++                    }
++                }
++            }
++        }
++        //Write the 2nd part (nvram)
++        if (!(status & 0x02))
++        {
++            if (fail == gup_update_nvram(client, fw_head, nvram))
++            {
++                continue;
++            }
++            else
++            {
++                GTP_DEBUG("Update nvram successfully!");
++                status |= 0x02;
++                msleep(1);
++            }
++        }
++        //Write the 3rd part (check sum)
++        if (1)
++        {
++            u32 sum = 0;
++            sum |= fw_head->chk_sum[0] << 16;
++            sum |= fw_head->chk_sum[1] << 8;
++            sum |= fw_head->chk_sum[2];
++            sum += check_sum;
++
++            fw_head->chk_sum[0] = sum >> 16;
++            fw_head->chk_sum[1] = sum >> 8;
++            fw_head->chk_sum[2] = sum;
++
++            GTP_DEBUG("FILE chksum after addition:0x%02x%02x%02x", fw_head->chk_sum[0],
++                                     fw_head->chk_sum[1], fw_head->chk_sum[2]);
++            buf[0] = 0x4f;
++            buf[1] = 0xf3;
++            memcpy(&buf[2], fw_head->chk_sum, sizeof(fw_head->chk_sum));
++            ret = gtp_i2c_write(client, buf, 5);
++            if (ret <= 0)
++            {
++                continue;
++            }
++            else
++            {
++                GTP_DEBUG("Update check sum successfully!");
++                break;
++            }
++        }
++    }
++
++    if (retry >= 10)
++    {
++        return fail;
++    }
++    else
++    {
++        return success;
++    }
++/*
++    else
++    {
++        for (retry = 0; retry < 10; retry++)
++        {
++            buf[0] = 0x00;
++            buf[1] = 0xff;
++            buf[2] = 0x44;
++            ret = gtp_i2c_write(client, buf, 3);
++            if (ret > 0)
++            {
++                break;
++            }
++        }
++
++        if (retry >= 10)
++        {
++            GTP_DEBUG("Write address at 0x00ff error!");
++            return fail;
++        }
++        msleep(10);
++    }
++
++    for (retry = 0; retry < 30; retry++)
++    {
++        msleep(1);
++        if (fail == gup_get_ic_msg(client, 0x00ff, buf, 1))
++        {
++            GTP_DEBUG("Read address at 0x00ff error!\t retry:%d", retry);
++            continue;
++        }
++
++        if (0xcc == buf[GTP_ADDR_LENGTH])
++        {
++            return success;
++        }
++        else
++        {
++            GTP_DEBUG("The value of 0x00ff: 0x%02x!\t retry:%d", buf[GTP_ADDR_LENGTH], retry);
++            continue;
++        }
++    }
++
++    GTP_DEBUG("The value of 0x00ff error.");
++    return fail;
++*/
++}
++
++s32 gup_update_proc(void *dir)
++{
++    s32 ret;
++    u32 retry = 100;
++    u32 i = 0;
++    struct goodix_ts_data* ts = NULL;
++    u8* data = NULL;
++    u8* ic_nvram = NULL;
++    st_fw_head fw_head;
++    u8 buf[32];
++
++    show_len = 20;
++    total_len = 100;
++
++    ts = i2c_get_clientdata(guitar_client);
++
++    if (!(HEADER_UPDATE_DATA != NULL && dir == NULL))
++    {
++        data = kzalloc(UPDATE_DATA_LENGTH, GFP_KERNEL);
++        if (NULL == data)
++        {
++            GTP_ERROR("data failed apply for memory.");
++            return fail;
++        }
++    }
++
++    ic_nvram = kzalloc(UPDATE_DATA_LENGTH, GFP_KERNEL);
++    if (NULL == ic_nvram)
++    {
++        GTP_ERROR("ic_nvram failed apply for memory.");
++        goto app_mem_failed;
++    }
++    GTP_DEBUG("Apply for memory successfully.memory size: %d.", UPDATE_DATA_LENGTH);
++
++    if (dir != NULL)
++    {
++        gup_get_ic_fw_msg(guitar_client);
++        gtp_reset_guitar(10);
++    }
++    else
++    {
++        msleep(1000);
++    }
++    GTP_DEBUG("Updating...");
++
++    if (!(HEADER_UPDATE_DATA != NULL && dir == NULL))
++    {
++        if (fail == gup_load_update_file(guitar_client, &fw_head, data, (u8*)dir))
++        {
++            GTP_ERROR("Load file data failed!");
++            goto load_failed;
++        }
++    }
++    else
++    {
++        if (fail == gup_load_update_header(guitar_client, &fw_head, &data))
++        {
++            GTP_ERROR("Load header file data failed!");
++            goto load_failed;
++        }
++    }
++    GTP_DEBUG("Load file data successfully!");
++
++    show_len = 40;
++    total_len = 100;
++
++    ts->enter_update = 1;
++
++    for (i = 0; i < 5; i++)
++    {
++        if (fail == gup_enter_update_mode(guitar_client))
++        {
++            GTP_ERROR("Next try![Enter update mode]");
++            continue;
++        }
++        else
++        {
++            GTP_ERROR("Set update mode successfully.");
++            break;
++        }
++    }
++    if (i >= 5)
++    {
++        GTP_ERROR("Set update mode failed.");
++        return fail;
++    }
++
++    retry = 0;
++    while(retry++ < 5)
++    {
++        if (fail == gup_update_firmware(guitar_client, &fw_head, data))
++        {
++            GTP_ERROR("Update firmware failed.");
++            continue;
++        }
++        GTP_DEBUG("Update firmware successfully.");
++
++        //while(1)  // simulation store operation failed
++        if (fail == gup_nvram_store(guitar_client))
++        {
++            GTP_ERROR("Store nvram failed.");
++            continue;
++        }
++
++        msleep(100);
++
++        if (fail == gup_get_ic_msg(guitar_client, 0x1201, buf, 1))
++        {
++            GTP_ERROR("Read NVRCS failed.(Store)");
++            continue;
++        }
++        if (buf[GTP_ADDR_LENGTH] & 0x01)
++        {
++            GTP_ERROR("Check NVRCS(0x%02x) failed.(Store)", buf[GTP_ADDR_LENGTH]);
++            continue;
++        }
++
++        GTP_DEBUG("Store nvram successfully.");
++
++        if (fail == gup_nvram_recall(guitar_client))
++        {
++            GTP_ERROR("Recall nvram failed.");
++            continue;
++        }
++        msleep(5);
++
++        if (fail == gup_get_ic_msg(guitar_client, 0x1201, buf, 1))
++        {
++            GTP_ERROR("Read NVRCS failed.(Recall)");
++            continue;
++        }
++        if (buf[GTP_ADDR_LENGTH] & 0x02)
++        {
++            GTP_ERROR("Check NVRCS(0x%02x) failed.(Recall)", buf[GTP_ADDR_LENGTH]);
++            continue;
++        }
++        GTP_DEBUG("Recall nvram successfully.");
++
++        ic_nvram[0] = fw_head.st_addr[0];
++        ic_nvram[1] = fw_head.st_addr[1];
++
++        for ( i = 0; i < 10; i++)
++        {
++            ret = gtp_i2c_read(guitar_client, ic_nvram, GTP_ADDR_LENGTH + fw_head.lenth);
++            if (ret <= 0)
++            {
++                continue;
++            }
++            break;
++        }
++
++        if (i >= 10)
++        {
++            GTP_ERROR("Read nvram failed!");
++            continue;
++        }
++        GTP_DEBUG("Read nvram successfully!");
++
++        if (memcmp(data, &ic_nvram[2], fw_head.lenth))
++        {
++            GTP_ERROR("Nvram not equal!");
++            continue;
++        }
++        GTP_DEBUG("Check nvram by byte successfully!");
++
++  //      if (HEADER_UPDATE_DATA == NULL || dir != NULL)
++        if (HEADER_UPDATE_DATA == NULL && dir == NULL)
++        {
++            if (update_msg.gt_loc > 0)
++            {
++                GTP_DEBUG("Location:%d, Ret:%d.", (s32)update_msg.gt_loc, (s32)ret);
++                memset(buf, 0, sizeof(buf));
++                ret = update_msg.file->f_op->write(update_msg.file, buf, 6, &update_msg.gt_loc);
++                if (ret < 0)
++                {
++                    GTP_ERROR("Didn't clear the focre update flag in file.");
++                }
++                else
++                {
++                    GTP_DEBUG("Clear the focre update flag in file.Location:%d, Ret:%d.", (s32)update_msg.gt_loc, (s32)ret);
++                }
++            }
++        }
++
++        GTP_DEBUG("Update successfully!");
++        break;
++    }
++    if (!(HEADER_UPDATE_DATA != NULL && dir == NULL))
++    {
++        set_fs(update_msg.old_fs);
++        filp_close(update_msg.file, NULL);
++    }
++    gup_leave_update_mode();
++    GTP_DEBUG("Leave update mode!");
++
++    //Reset guitar
++    GTP_DEBUG("Reset IC and send config!");
++    gtp_reset_guitar(10);
++
++    ret = gtp_send_cfg(guitar_client);
++    if (ret < 0)
++    {
++        GTP_ERROR("Send config data failed.");
++    }
++
++    msleep(10);
++    ts->enter_update = 0;
++
++load_failed:
++    kfree(ic_nvram);
++app_mem_failed:
++    if (!(HEADER_UPDATE_DATA != NULL && dir == NULL))
++    {
++        kfree(data);
++    }
++
++    if (retry < 5)
++    {
++        show_len = 100;
++        return success;
++    }
++
++    show_len = 200;
++    GTP_DEBUG("Update failed!");
++    return fail;
++}
++
++u8 gup_init_update_proc(struct goodix_ts_data *ts)
++{
++    u8 flag = 0;
++    struct task_struct *thread = NULL;
++    s32 retry = 0;
++
++    GTP_INFO("Ready to run update thread.");
++
++    guitar_client = ts->client;
++
++    update_msg.fw_flag = gup_get_ic_fw_msg(ts->client);
++    if (fail == update_msg.fw_flag)
++    {
++        GTP_DEBUG("Try get ic msg in update mode.");
++        for (retry = 0; retry < 5; retry++)
++        {
++            if (success == gup_enter_update_mode(ts->client))
++            {
++                break;
++            }
++        }
++        if (retry >= 5)
++        {
++            update_msg.fw_flag = fail;
++        }
++        else
++        {
++            GTP_DEBUG("Get ic msg in update mode.");
++            update_msg.fw_flag = gup_get_ic_fw_msg(ts->client);
++            update_msg.ic_fw_msg.version = 0xfff0;
++            if (update_msg.force_update == 0xAA)
++            {
++                flag = 0xff;
++            }
++        }
++        gup_leave_update_mode();
++    }
++
++    gtp_reset_guitar(10);
++
++    if (success == update_msg.fw_flag)
++    {
++        update_msg.gt_loc = -1;
++        thread = kthread_run(gup_update_proc, (void*)NULL, "guitar_update");
++        if (IS_ERR(thread))
++        {
++            GTP_ERROR("Failed to create update thread.");
++            return -1;
++        }
++    }
++
++    return 0;
++}
++//#endif   //endif GTP_AUTO_UPDATE
++//******************************End of firmware update surpport*******************************
+-- 
+2.19.0
+

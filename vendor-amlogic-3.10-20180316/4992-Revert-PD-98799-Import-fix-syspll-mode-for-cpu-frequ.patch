@@ -1,0 +1,259 @@
+From 64aebcc088ed683375ce71540b691573854b5b5b Mon Sep 17 00:00:00 2001
+From: Victor Wan <victor.wan@amlogic.com>
+Date: Mon, 27 Oct 2014 22:08:30 +0800
+Subject: [PATCH 4992/5965] Revert "PD#98799:Import fix syspll mode for cpu
+ frequent scaling:"
+
+This reverts commit 5308b7db3ab0860d79403e7d95a60477c6eed768.
+
+1) Break non-m8baby machine compile
+2) Define array in the head file.
+---
+ arch/arm/mach-meson8b/clock.c                 | 67 +++----------------
+ .../mach-meson8b/include/mach/cpufreq_table.h | 16 -----
+ drivers/amlogic/cpufreq/meson-cpufreq.c       | 34 +---------
+ 3 files changed, 10 insertions(+), 107 deletions(-)
+
+diff --git a/arch/arm/mach-meson8b/clock.c b/arch/arm/mach-meson8b/clock.c
+index 86d04ff6cdf4..2a0eea703265 100755
+--- a/arch/arm/mach-meson8b/clock.c
++++ b/arch/arm/mach-meson8b/clock.c
+@@ -55,13 +55,12 @@ extern struct arm_delay_ops arm_delay_ops;
+ 
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
+-static int measure_cpu_clock = 0;
+ 
+ /**************** SYS PLL**************************/
+ #define SYS_PLL_TABLE_MIN	 24000000
+ #define SYS_PLL_TABLE_MAX	2112000000
+ 
+-#define CPU_FREQ_LIMIT 1536000000
++#define CPU_FREQ_LIMIT 1488000000
+ 
+ struct sys_pll_s {
+     unsigned int freq;
+@@ -340,11 +339,10 @@ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ 		dst = setup_a9_clk_min;
+ 	else if(dst > setup_a9_clk_max)
+ 		dst = setup_a9_clk_max;
+- 	if ((rate != 1250000000)) {
+-	    idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
+-        //printk("sys round rate: %ld -- %d\n",rate,sys_pll_settings[idx][0]);
+-        rate = sys_pll_settings[idx][0] * 1000000;
+-    } 
++ 	 
++	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++	//printk("sys round rate: %d -- %d\n",rate,sys_pll_settings[idx][0]);
++	rate = sys_pll_settings[idx][0] * 1000000;
+ 	
+ 	return rate;
+ }
+@@ -746,11 +744,8 @@ static unsigned long clk_get_rate_a9(struct clk * clkdev)
+ 			parent_clk = clk_get_rate_xtal(NULL);
+ 		else if(pll_sel == 1)
+ 			parent_clk = clk_get_rate_sys(clkdev->parent);
+-	    else if (pll_sel == 2) {
+-            clk = 1250000000;   // from MPLL / 2 
+-        } else { 
++		else
+ 			printk(KERN_INFO "Error : A9 parent pll selection incorrect!\n");
+-        }
+ 		if(parent_clk > 0){
+ 			unsigned int N = (aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL1) >> 20) & 0x3FF;
+ 			unsigned int div = 1;
+@@ -797,14 +792,11 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 	unsigned long parent = 0;
+ 	unsigned long oldcpu = clk_get_rate_a9(clk);
+ 	unsigned int cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
+-	int test_n = 0;
+ 	
+ //	if ((cpu_clk_cntl & 3) == 1) {
+ 	{
+-		unsigned long real_cpu;
+ 		parent = clk_get_rate_sys(clk->parent);
+ 		// CPU switch to xtal 
+-
+ 		aml_write_reg32(P_HHI_SYS_CPU_CLK_CNTL, cpu_clk_cntl & ~(1 << 7));
+ 		if (oldcpu <= cpu) {
+ 			// when increasing frequency, lpj has already been adjusted
+@@ -813,19 +805,7 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 			// when decreasing frequency, lpj has not yet been adjusted
+ 			udelay_scaled(10, oldcpu / 1000000, 24 /*clk_get_rate_xtal*/);
+ 		}
+-
+-	    aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 1, 0, 2);    // path select to syspll
+-        if (cpu == 1250000000) {
+-	    	aml_set_reg32_bits(P_HHI_MPLL_CNTL6, 1, 27, 1);
+-	    	aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 2, 0, 2);    // select to mpll
+-			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 2, 2);    // cancel external od
+-		    udelay_scaled(500, oldcpu / 1000000, 24 /*clk_get_rate_xtal*/);
+-	        printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n",
+-									clk->rate / 1000000, cpu / 1000000);
+-            clk->parent->rate = cpu;
+-        } else {
+-    		set_sys_pll(clk->parent, cpu);
+-        }
++		set_sys_pll(clk->parent, cpu);
+ 
+ 		// Read CBUS for short delay, then CPU switch to sys pll
+ 		cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
+@@ -838,16 +818,6 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 			udelay_scaled(100, oldcpu / 1000000, cpu / 1000000);
+ 		}
+ 
+-        if (measure_cpu_clock) {
+-            while (test_n < 5) {
+-	            real_cpu = clk_util_clk_msr(18) << 4;
+-	            if ((real_cpu < cpu && (cpu - real_cpu) > 48000000) ||
+-	            	(real_cpu > cpu && (real_cpu - cpu) > 48000000)) {
+-	            	pr_info("hope to set cpu clk as %ld, real value is %ld, time %d\n", cpu, real_cpu, test_n);
+-	            }
+-                test_n++;
+-            }
+-        }
+ 		// CPU switch to sys pll
+ 		//cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
+ 		//aml_set_reg32_mask(P_HHI_SYS_CPU_CLK_CNTL, (1 << 7));
+@@ -1210,12 +1180,7 @@ SETPLL:
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 3, 2, 2);
+ 		else
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 2, 2);
+-      //aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
+-        if((cpu_clk_cntl & 0x3fff) != (curr_cntl & 0x3fff)) {
+-            //dest M,N is equal to curr_cntl, So, we neednot reset the pll, just change the OD.
+-            aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
+-        }
+-
++		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
+ 		if(only_once == 99){
+ 			only_once = 1;
+ 			aml_write_reg32(P_HHI_SYS_PLL_CNTL2, M8_SYS_PLL_CNTL_2);
+@@ -1726,25 +1691,9 @@ static ssize_t freq_limit_show(struct class *cla, struct class_attribute *attr,
+ 	return sprintf(buf, "%d\n", freq_limit);
+ }
+ 
+-static ssize_t check_clock_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
+-{
+-	unsigned int input;
+-	int ret;
+-	ret = sscanf(buf, "%u", &input);
+-	if (ret != 1)
+-		return -EINVAL;
+-	measure_cpu_clock = input;
+-	return count;
+-}
+-static ssize_t check_clock_show(struct class *cla, struct class_attribute *attr, char *buf)
+-{
+-	printk("%u\n", measure_cpu_clock);
+-	return sprintf(buf, "%d\n", measure_cpu_clock);
+-}
+ 
+ static struct class_attribute freq_limit_class_attrs[] = {
+ 	__ATTR(limit, S_IRUGO|S_IWUSR|S_IWGRP, freq_limit_show, freq_limit_store),
+-	__ATTR(check_clock, S_IRUGO|S_IWUSR|S_IWGRP, check_clock_show, check_clock_store),
+ 	__ATTR_NULL,
+ };
+ 
+diff --git a/arch/arm/mach-meson8b/include/mach/cpufreq_table.h b/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
+index 7c8ad34c5c22..4a9bf923ebee 100755
+--- a/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
++++ b/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
+@@ -21,19 +21,3 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+     {14	, 1488000  },
+     {15	, CPUFREQ_TABLE_END},
+ };
+-
+-static struct cpufreq_frequency_table meson_freq_table_fix_syspll[]=
+-{
+-    {0	,   96000   },
+-    {1	,  192000   },
+-    {2  ,  384000   },
+-    {3  ,  768000   },
+-#if 1
+-    {4  , 1250000   },
+-    {5  , 1536000   },
+-    {6	, CPUFREQ_TABLE_END},
+-#else
+-    {4  , 1536000   },
+-    {5	, CPUFREQ_TABLE_END},
+-#endif
+-};
+diff --git a/drivers/amlogic/cpufreq/meson-cpufreq.c b/drivers/amlogic/cpufreq/meson-cpufreq.c
+index b523659256f1..7850dab2f131 100755
+--- a/drivers/amlogic/cpufreq/meson-cpufreq.c
++++ b/drivers/amlogic/cpufreq/meson-cpufreq.c
+@@ -42,7 +42,6 @@ struct meson_cpufreq {
+ };
+ 
+ static struct meson_cpufreq cpufreq;
+-static int fix_syspll = 0;
+ 
+ static DEFINE_MUTEX(meson_cpufreq_mutex);
+ 
+@@ -101,9 +100,6 @@ static int meson_cpufreq_target_locked(struct cpufreq_policy *policy,
+     uint cpu = policy ? policy->cpu : 0;
+     int ret = -EINVAL;
+     unsigned int freqInt = 0;
+-	struct cpufreq_frequency_table *freq_table = NULL;
+-    unsigned int freq_new, index;
+-
+ 	if (cpu > (NR_CPUS - 1)) {
+         printk(KERN_ERR"cpu %d set target freq error\n",cpu);
+         return ret;
+@@ -127,21 +123,7 @@ static int meson_cpufreq_target_locked(struct cpufreq_policy *policy,
+         }
+     }
+ 
+-    /*
+-     * CPU frequent should only select from aviliable frequent table 
+-     * if under fix syspll mode
+-     */
+-    if (fix_syspll) {
+-        freq_table = cpufreq_frequency_get_table(policy->cpu);
+-        ret        = cpufreq_frequency_table_target(policy, freq_table, target_freq,
+-        		                                    CPUFREQ_RELATION_H, &index);
+-        if(ret >= 0) {
+-        	freq_new = freq_table[index].frequency;
+-            target_freq = freq_new;
+-        } else {
+-            printk(KERN_ERR"input frequent :%d cannot found in frequent table, ret:%d\n", target_freq, ret);
+-        }
+-    }
++
+ 
+     freqs.old = clk_get_rate(cpufreq.armclk) / 1000;
+     freqs.new = clk_round_rate(cpufreq.armclk, target_freq * 1000) / 1000;
+@@ -245,13 +227,8 @@ static int meson_cpufreq_init(struct cpufreq_policy *policy)
+                                          policy->cpu);
+     } else {
+ #endif
+-    if (fix_syspll) {           // select fix pll table if syspll_fixed is enabled in dts
+-	    cpufreq_frequency_table_get_attr(meson_freq_table_fix_syspll,
+-                                         policy->cpu);
+-    } else {
+ 	    cpufreq_frequency_table_get_attr(meson_freq_table,
+                                          policy->cpu);
+-    }
+ #if 0
+     }
+ #endif
+@@ -371,14 +348,7 @@ static int __init meson_cpufreq_probe(struct platform_device *pdev)
+ 
+ #ifdef CONFIG_USE_OF
+ 		const void *prop;
+-    int err = 0;
+-    if (pdev->dev.of_node) {
+-        err = of_property_read_bool(pdev->dev.of_node, "syspll_fixed");
+-        if (err) {
+-            printk("%s:SYSPLL request to be fixed\n", __func__);
+-            fix_syspll = 1;
+-        }
+-    }
++
+ 		if (pdev->dev.of_node) {
+ 			prop = of_get_property(pdev->dev.of_node, "voltage_control", NULL);
+ 			if(prop)
+-- 
+2.19.0
+

@@ -1,0 +1,120 @@
+From 8b8bd9321634a64e61fd77eec6ee622f086467a3 Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Thu, 24 Apr 2014 15:19:08 +0800
+Subject: [PATCH 3964/5965] PD  #90113: dirvers: fix kernel detect task hungup
+ issue.
+
+In the Kernel thread, msleep is uninterruptible wait. The status of the task is "D".
+And the Kernel thread is uninterruptible sleep after it's created but not run.
+The Kernel hung_task detect checks all "D" status task for several seconds. If no any
+context switch changed, the task will be reported as the "hung task".
+
+This patch changs msleep() to msleep_interruptible(), and wakes up kernel thread after
+it's created.
+---
+ drivers/amlogic/display/ge2d/ge2d_wq.c      |  2 +-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c      |  2 +-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c  |  2 +-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c |  2 +-
+ sound/soc/aml/m8/aml_m8.c                   | 10 +++++-----
+ 5 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/display/ge2d/ge2d_wq.c b/drivers/amlogic/display/ge2d/ge2d_wq.c
+index f5f6a602c67e..af9050d93c16 100755
+--- a/drivers/amlogic/display/ge2d/ge2d_wq.c
++++ b/drivers/amlogic/display/ge2d/ge2d_wq.c
+@@ -281,7 +281,7 @@ static int ge2d_monitor_thread(void *data)
+ 	//setup current_wq here.
+ 	while(ge2d_manager.process_queue_state!=GE2D_PROCESS_QUEUE_STOP)
+ 	{
+-		ret=down_timeout(&manager->event.cmd_in_sem,6000);
++		ret = down_interruptible(&manager->event.cmd_in_sem);
+ 		//got new cmd arrived in signal,
+ 		//CLK_GATE_ON(GE2D);
+ 		while((manager->current_wq=get_next_work_queue(manager))!=NULL)
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index 5812c5968999..9a4fe287f81c 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -1204,7 +1204,7 @@ edid_op:
+             hdmitx_device->vic_count = 0;
+         }
+ next:
+-        msleep(100);
++        msleep_interruptible(100);
+     }
+     return 0;
+ }
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index 460a3b49dc8b..96dee6a3966f 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -346,7 +346,7 @@ static int cec_task(void *data)
+ 
+     hdmi_print(INF, CEC "CEC task process\n");
+     if(hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)){
+-        msleep(10000);
++        msleep_interruptible(10000);
+ #ifdef CONFIG_ARCH_MESON6
+         cec_gpi_init();
+ #endif
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
+index 09b49b27931a..962342382d48 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
+@@ -125,7 +125,7 @@ static int hdmitx_hdcp_task(void *data)
+             hdmitx_device->audio_step = 1;
+ #endif
+         }
+-        msleep(100);
++        msleep_interruptible(100);
+     }
+ 
+     return 0;
+diff --git a/sound/soc/aml/m8/aml_m8.c b/sound/soc/aml/m8/aml_m8.c
+index 410c8fafe4c4..029581ddec02 100755
+--- a/sound/soc/aml/m8/aml_m8.c
++++ b/sound/soc/aml/m8/aml_m8.c
+@@ -99,7 +99,7 @@ static int hp_det_adc_value(struct aml_audio_private_data *p_aml_audio)
+         }
+         hp_val_sum += hp_value;
+         loop_num ++;
+-        msleep(15);
++        msleep_interruptible(15);
+     }
+     hp_val_sum = hp_val_sum >> 3;
+ 	//printk("00000000000hp_val_sum = %hx\n",hp_val_sum);
+@@ -138,14 +138,14 @@ static int aml_audio_hp_detect(struct aml_audio_private_data *p_aml_audio)
+         ret = hp_det_adc_value(p_aml_audio);
+         if(p_aml_audio->hp_last_state != ret){
+             loop_num = 0;
+-            msleep(50);
++            msleep_interruptible(50);
+             if(ret < 0){
+                 ret = p_aml_audio->hp_last_state;
+             }else {
+                 p_aml_audio->hp_last_state = ret;
+             }
+         }else{
+-            msleep(50);
++            msleep_interruptible(50);
+             loop_num = loop_num + 1;
+         }
+     }
+@@ -293,11 +293,11 @@ static int aml_m8_set_spk(struct snd_kcontrol *kcontrol,
+     aml_m8_spk_enabled = ucontrol->value.integer.value[0];
+     printk(KERN_INFO "aml_m8_set_spk: aml_m8_spk_enabled=%d\n",aml_m8_spk_enabled);
+ 
+-    msleep(10);
++    msleep_interruptible(10);
+     amlogic_set_value(p_audio->gpio_mute, aml_m8_spk_enabled, "mute_spk");
+ 
+     if(aml_m8_spk_enabled ==1)
+-        msleep(100);
++        msleep_interruptible(100);
+ 
+     return 0;
+ }
+-- 
+2.19.0
+

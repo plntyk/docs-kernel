@@ -1,0 +1,103 @@
+From 831163fd9f9a21b29804c4477c558d704884ebc1 Mon Sep 17 00:00:00 2001
+From: "wengang.lei" <wengang.lei@amlogic.com>
+Date: Tue, 23 Sep 2014 12:24:42 +0800
+Subject: [PATCH 4965/5965] PD#97077: Fix eMMC timeout error when enable data1
+ interrupt in MMC driver
+
+Change-Id: I06c72d30a834ce61d173d1218479cead8a67d0c6
+---
+ drivers/amlogic/mmc/aml_sdhc_m8.c |  3 +++
+ drivers/amlogic/mmc/aml_sdio.c    | 11 ++++++++++-
+ drivers/amlogic/mmc/amlsd.h       |  2 +-
+ drivers/mmc/card/block.c          |  2 +-
+ 4 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdhc_m8.c b/drivers/amlogic/mmc/aml_sdhc_m8.c
+index 58781c18a8c5..cfe5b85e07cd 100755
+--- a/drivers/amlogic/mmc/aml_sdhc_m8.c
++++ b/drivers/amlogic/mmc/aml_sdhc_m8.c
+@@ -1358,6 +1358,9 @@ void aml_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq)
+     else
+         timeout = 500;//mod_timer(&host->timeout_tlist,
+                 //jiffies + 500/*10*nsecs_to_jiffies(mrq->data->timeout_ns)*/); // 5s
++    
++    if(mrq->cmd->opcode == MMC_ERASE) //about 30S for erase cmd.
++        timeout = 3000;
+              
+     schedule_delayed_work(&host->timeout, timeout);
+ 
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 5b1c4ac210a7..5033b1114ea0 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -46,6 +46,8 @@ void aml_sdio_send_stop(struct amlsd_host* host);
+ static unsigned int sdio_error_flag = 0;
+ static unsigned int sdio_debug_flag = 0;
+ static unsigned int sdio_err_bak;
++static unsigned int timeout_cmd_cnt = 0;
++
+ 
+ void sdio_debug_irqstatus(struct sdio_status_irq* irqs, struct cmd_send* send)
+ {    
+@@ -282,9 +284,13 @@ void aml_sdio_start_cmd(struct mmc_host* mmc, struct mmc_request* mrq)
+ 
+     if(!(mrq->cmd->flags & MMC_RSP_CRC))
+         send.response_do_not_have_crc7 = 1;
++        
+     if(mrq->cmd->flags & MMC_RSP_BUSY)
+         send.check_busy_on_dat0 = 1;
+ 
++    //clear here
++    timeout_cmd_cnt = 0;
++     
+     if(mrq->data){
+         /*total package num*/
+         send.repeat_package_times = mrq->data->blocks - 1;
+@@ -443,7 +449,6 @@ static void aml_sdio_timeout(struct work_struct *work)
+ //#ifdef      CONFIG_MMC_AML_DEBUG
+     struct amlsd_platform * pdata = mmc_priv(host->mmc);
+ //#endif
+-	static int timeout_cmd_cnt = 0;
+ 	int is_mmc_stop = 0;
+ 
+ //	struct timeval ts_current;
+@@ -771,6 +776,10 @@ void aml_sdio_request(struct mmc_host *mmc, struct mmc_request *mrq)
+         timeout = 500;//mod_timer(&host->timeout_tlist,
+                 //jiffies + 500/*10*nsecs_to_jiffies(mrq->data->timeout_ns)*/); // 5s
+ //	if(mmc->caps & MMC_CAP_SDIO_IRQ){
++
++    if(mrq->cmd->opcode == MMC_ERASE) //maybe over 30S for erase cmd.
++        timeout = 3000;
++            
+ 	if(SDIO_IRQ_SUPPORT){
+ 		schedule_delayed_work(&host->timeout, timeout/20); 
+ 	}else{
+diff --git a/drivers/amlogic/mmc/amlsd.h b/drivers/amlogic/mmc/amlsd.h
+index 27f1fa99edbe..c41075e79c20 100755
+--- a/drivers/amlogic/mmc/amlsd.h
++++ b/drivers/amlogic/mmc/amlsd.h
+@@ -7,7 +7,7 @@
+ #define AML_MMC_MAJOR_VERSION   1
+ #define AML_MMC_MINOR_VERSION   07
+ #define AML_MMC_VERSION         ((AML_MMC_MAJOR_VERSION << 8) | AML_MMC_MINOR_VERSION)
+-#define AML_MMC_VER_MESSAGE     "2014-06-30: eMMC add hw reset function"
++#define AML_MMC_VER_MESSAGE     "2014-09-23: eMMC fix the SDIO data1 interrupt caused timeout error problem"
+ 
+ extern unsigned sdhc_debug;
+ extern unsigned sdio_debug;
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index abfeb000ee9f..f5882be519d5 100755
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -2104,7 +2104,7 @@ static int mmc_wipe_part_ioctl(struct block_device *bdev)
+     if (!mmc_can_erase(card)) {
+         pr_err("device do not support erase, do nothing\n");
+ 		err = 0;
+-		goto cmd_rel_host;
++		goto dev_card_err;
+ 	}
+     
+ 	mmc_claim_host(card->host);
+-- 
+2.19.0
+

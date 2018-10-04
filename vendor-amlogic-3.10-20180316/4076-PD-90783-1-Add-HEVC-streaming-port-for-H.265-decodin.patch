@@ -1,0 +1,1661 @@
+From 0ef7449d75844997777e91900db0d68a4cd8671d Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Mon, 28 Apr 2014 16:27:38 -0700
+Subject: [PATCH 4076/5965] PD #90783-1 Add HEVC streaming port for H.265
+ decoding.
+
+---
+ drivers/amlogic/amports/amstream.c       | 214 ++++++++++++++++++-----
+ drivers/amlogic/amports/amvdec.c         | 211 ++++++++++++++++++++--
+ drivers/amlogic/amports/amvdec.h         |   8 +
+ drivers/amlogic/amports/esparser.c       | 111 +++++++++---
+ drivers/amlogic/amports/ptsserv.c        |  26 ++-
+ drivers/amlogic/amports/streambuf.c      |  48 ++++-
+ drivers/amlogic/amports/streambuf.h      |   5 +
+ drivers/amlogic/amports/streambuf_reg.h  |   4 +
+ drivers/amlogic/amports/tsdemux.c        |  52 ++++--
+ drivers/amlogic/amports/tsdemux.h        |   8 +-
+ drivers/amlogic/amports/vdec.c           | 137 ++++++++++++++-
+ drivers/amlogic/amports/vdec.h           |   3 +-
+ include/linux/amlogic/amports/amstream.h |   1 +
+ include/linux/amlogic/amports/ptsserv.h  |   7 +
+ include/linux/amlogic/amports/vformat.h  |   1 +
+ mk_m8b.sh                                |   3 +-
+ 16 files changed, 726 insertions(+), 113 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 88bd9a312b24..35b96dcbb432 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -218,6 +218,7 @@ const static struct file_operations userdata_fops = {
+     .poll     = amstream_userdata_poll,
+     .unlocked_ioctl    = amstream_ioctl,
+ };
++
+ const static struct file_operations amstream_fops = {
+     .owner    = THIS_MODULE,
+     .open     = amstream_open,
+@@ -279,7 +280,15 @@ static stream_port_t ports[] = {
+         .name  = "amstream_userdata",
+         .type  = PORT_TYPE_USERDATA,
+         .fops  = &userdata_fops,
+-    }
++    },
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    {
++        .name  = "amstream_hevc",
++        .type  = PORT_TYPE_ES | PORT_TYPE_VIDEO | PORT_TYPE_HEVC,
++        .fops  = &vbuf_fops,
++        .vformat = VFORMAT_HEVC,
++    },
++#endif
+ };
+ 
+ static stream_buf_t bufs[BUF_MAX_NUM] = {
+@@ -303,7 +312,6 @@ static stream_buf_t bufs[BUF_MAX_NUM] = {
+         .buf_start = 0,
+         .buf_size = 0,
+         .first_tstamp = INVALID_PTS
+-
+     },
+     {
+         .reg_base = 0,
+@@ -311,8 +319,18 @@ static stream_buf_t bufs[BUF_MAX_NUM] = {
+         .buf_start = 0,
+         .buf_size = 0,
+         .first_tstamp = INVALID_PTS
+-    }
++    },
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    {
++        .reg_base = HEVC_STREAM_REG_BASE,
++        .type = BUF_TYPE_HEVC,
++        .buf_start = 0,
++        .buf_size = 0,
++        .first_tstamp = INVALID_PTS
++    },        
++#endif
+ };
++
+ stream_buf_t *get_buf_by_type(u32  type)
+ {
+    if(type<BUF_MAX_NUM)
+@@ -338,7 +356,11 @@ EXPORT_SYMBOL(get_audio_info);
+ 
+ static void amstream_change_vbufsize(stream_port_t *port,struct stream_buf_s *pvbuf)
+ {
+-    if (pvbuf->type == BUF_TYPE_VIDEO){ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if ((pvbuf->type == BUF_TYPE_VIDEO) || (pvbuf->type == BUF_TYPE_HEVC)) {
++#else
++    if (pvbuf->type == BUF_TYPE_VIDEO) {
++#endif
+         if (port->vformat == VFORMAT_H264_4K2K){				
+             pvbuf->buf_size = pvbuf->default_buf_size;
+ 
+@@ -384,6 +406,16 @@ static  int video_port_init(stream_port_t *port, struct stream_buf_s * pbuf)
+ 	
+     amstream_change_vbufsize(port,pbuf);
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (port->type & PORT_TYPE_MPTS) {
++        if (pbuf->type == BUF_TYPE_HEVC) {
++            vdec_poweroff(VDEC_1);
++        } else {
++            vdec_poweroff(VDEC_HEVC);
++        }
++    }
++#endif
++
+     r = stbuf_init(pbuf);
+     if (r < 0) {
+         printk("video_port_init %d, stbuf_init failed\n", __LINE__);
+@@ -407,6 +439,7 @@ static  int video_port_init(stream_port_t *port, struct stream_buf_s * pbuf)
+     }
+ 
+     pbuf->flag |= BUF_FLAG_IN_USE;
++
+     return 0;
+ }
+ 
+@@ -594,6 +627,12 @@ static  int amstream_port_init(stream_port_t *port)
+         pubuf->buf_wp = 0;
+         pubuf->buf_rp = 0;
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        if (port->vformat == VFORMAT_HEVC) {
++            pvbuf = &bufs[BUF_TYPE_HEVC];
++        }
++#endif
++
+         r = video_port_init(port, pvbuf);
+         if (r < 0) {
+             printk("video_port_init  failed\n");
+@@ -610,9 +649,16 @@ static  int amstream_port_init(stream_port_t *port)
+     }
+ 
+     if (port->type & PORT_TYPE_MPTS) {
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        r = tsdemux_init((port->flag & PORT_FLAG_VID) ? port->vid : 0xffff,
++                         (port->flag & PORT_FLAG_AID) ? port->aid : 0xffff,
++                         (port->flag & PORT_FLAG_SID) ? port->sid : 0xffff,
++                         (port->vformat == VFORMAT_HEVC));
++#else
+         r = tsdemux_init((port->flag & PORT_FLAG_VID) ? port->vid : 0xffff,
+                          (port->flag & PORT_FLAG_AID) ? port->aid : 0xffff,
+                          (port->flag & PORT_FLAG_SID) ? port->sid : 0xffff);
++#endif
+         if (r < 0) {
+             printk("tsdemux_init  failed\n");
+             goto error4;
+@@ -661,6 +707,12 @@ static  int amstream_port_release(stream_port_t *port)
+     stream_buf_t *pabuf = &bufs[BUF_TYPE_AUDIO];
+     stream_buf_t *psbuf = &bufs[BUF_TYPE_SUBTITLE];
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (port->vformat == VFORMAT_HEVC) {
++        pvbuf = &bufs[BUF_TYPE_HEVC];
++    }
++#endif
++
+     if (port->type & PORT_TYPE_MPTS) {
+         tsdemux_release();
+     }
+@@ -724,7 +776,11 @@ static ssize_t amstream_vbuf_write(struct file *file, const char *buf,
+                                    size_t count, loff_t * ppos)
+ {
+     stream_port_t *port = (stream_port_t *)file->private_data;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    stream_buf_t *pbuf = (port->type & PORT_TYPE_HEVC) ? &bufs[BUF_TYPE_HEVC] : &bufs[BUF_TYPE_VIDEO];
++#else
+     stream_buf_t *pbuf = &bufs[BUF_TYPE_VIDEO];
++#endif
+     int r;
+     if (!(port->flag & PORT_FLAG_INITED)) {
+         r = amstream_port_init(port);
+@@ -733,11 +789,11 @@ static ssize_t amstream_vbuf_write(struct file *file, const char *buf,
+         }
+     }
+ 
+-	if (port->flag & PORT_FLAG_DRM){
+-		r = drm_write(file, pbuf, buf, count);
+-	}else{
+-    	r = esparser_write(file, pbuf, buf, count);
+-	}
++    if (port->flag & PORT_FLAG_DRM) {
++        r = drm_write(file, pbuf, buf, count);
++    } else {
++        r = esparser_write(file, pbuf, buf, count);
++    }
+ #ifdef DATA_DEBUG
+     debug_file_write(buf, r);
+ #endif
+@@ -759,11 +815,11 @@ static ssize_t amstream_abuf_write(struct file *file, const char *buf,
+         }
+     }
+ 
+-	if (port->flag & PORT_FLAG_DRM){
+-		r = drm_write(file, pbuf, buf, count);
+-	}else{
+-    	r = esparser_write(file, pbuf, buf, count);
+-	}
++    if (port->flag & PORT_FLAG_DRM) {
++        r = drm_write(file, pbuf, buf, count);
++    } else {
++        r = esparser_write(file, pbuf, buf, count);
++    }
+ 
+     return r;
+ }
+@@ -772,7 +828,11 @@ static ssize_t amstream_mpts_write(struct file *file, const char *buf,
+                                    size_t count, loff_t * ppos)
+ {
+     stream_port_t *port = (stream_port_t *)file->private_data;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    stream_buf_t *pvbuf = (port->vformat == VFORMAT_HEVC) ? &bufs[BUF_TYPE_HEVC] : &bufs[BUF_TYPE_VIDEO];
++#else
+     stream_buf_t *pvbuf = &bufs[BUF_TYPE_VIDEO];
++#endif
+     stream_buf_t *pabuf = &bufs[BUF_TYPE_AUDIO];
+     int r;
+     if (!(port->flag & PORT_FLAG_INITED)) {
+@@ -857,6 +917,7 @@ static ssize_t amstream_sub_read(struct file *file, char __user *buf, size_t cou
+             if (res >= 0) {
+                 stbuf_sub_rp_set(sub_rp + data_size - res);
+             }
++
+             return data_size - res;
+         } else {
+             if (first_num > 0) {
+@@ -864,23 +925,25 @@ static ssize_t amstream_sub_read(struct file *file, char __user *buf, size_t cou
+                 if (res >= 0) {
+                     stbuf_sub_rp_set(sub_rp + first_num - res);
+                 }
++
+                 return first_num - res;
+             }
+ 
+-
+-
+-
+             res = copy_to_user((void *)buf, (void *)(phys_to_virt(sub_start)), data_size - first_num);
++
+             if (res >= 0) {
+                 stbuf_sub_rp_set(sub_start + data_size - first_num - res);
+             }
++
+             return data_size - first_num - res;
+         }
+     } else {
+         res = copy_to_user((void *)buf, (void *)(phys_to_virt(sub_rp)), data_size);
++
+         if (res >= 0) {
+             stbuf_sub_rp_set(sub_rp + data_size - res);
+         }
++
+         return data_size - res;
+     }
+ }
+@@ -909,7 +972,6 @@ static ssize_t amstream_sub_write(struct file *file, const char *buf,
+     return r;
+ }
+ 
+-
+ static unsigned int amstream_sub_poll(struct file *file, poll_table *wait_table)
+ {
+     poll_wait(file, &amstream_sub_wait, wait_table);
+@@ -932,6 +994,7 @@ int wakeup_userdata_poll(int wp, int start_phyaddr, int buf_size)
+     wake_up_interruptible(&amstream_userdata_wait);
+     return userdata_buf->buf_rp;
+ }
++
+ static unsigned int amstream_userdata_poll(struct file *file, poll_table *wait_table)
+ {
+     poll_wait(file, &amstream_userdata_wait, wait_table);
+@@ -984,6 +1047,7 @@ static ssize_t amstream_userdata_read(struct file *file, char __user *buf, size_
+     }
+ 	return retVal;
+ }
++
+ static int amstream_open(struct inode *inode, struct file *file)
+ {
+     s32 i;
+@@ -1019,9 +1083,18 @@ static int amstream_open(struct inode *inode, struct file *file)
+ 
+     if (this->type & PORT_TYPE_VIDEO) {
+         switch_mod_gate_by_name("vdec", 1);
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        if (this->type & (PORT_TYPE_MPTS | PORT_TYPE_HEVC)) {
++            vdec_poweron(VDEC_HEVC);
++        }
++        else if ((this->type & PORT_TYPE_HEVC) == 0) {
++            vdec_poweron(VDEC_1);
++        }
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+         vdec_poweron(VDEC_1);
+ #endif
++
+         memset(&amstream_dec_info, 0, sizeof(amstream_dec_info));
+     }
+ 
+@@ -1073,8 +1146,12 @@ static int amstream_release(struct inode *inode, struct file *file)
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     if (this->type & PORT_TYPE_VIDEO) {
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        vdec_poweroff(VDEC_HEVC);
++#endif
+         vdec_poweroff(VDEC_1);
+ #endif
++
+         switch_mod_gate_by_name("vdec", 0);
+     }
+ 
+@@ -1108,6 +1185,9 @@ static long amstream_ioctl(struct file *file,
+     case AMSTREAM_IOC_VB_START:
+         if ((this->type & PORT_TYPE_VIDEO) &&
+             ((bufs[BUF_TYPE_VIDEO].flag & BUF_FLAG_IN_USE) == 0)) {
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++            bufs[BUF_TYPE_HEVC].buf_start = arg;
++#endif
+             bufs[BUF_TYPE_VIDEO].buf_start = arg;
+         } else {
+             r = -EINVAL;
+@@ -1118,6 +1198,9 @@ static long amstream_ioctl(struct file *file,
+         if ((this->type & PORT_TYPE_VIDEO) &&
+             ((bufs[BUF_TYPE_VIDEO].flag & BUF_FLAG_IN_USE) == 0)) {
+             if (bufs[BUF_TYPE_VIDEO].flag & BUF_FLAG_ALLOC) {
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++                r = stbuf_change_size(&bufs[BUF_TYPE_HEVC], arg);
++#endif
+                 r = stbuf_change_size(&bufs[BUF_TYPE_VIDEO], arg);
+             }
+         } else {
+@@ -1206,8 +1289,11 @@ static long amstream_ioctl(struct file *file,
+     case AMSTREAM_IOC_VB_STATUS:
+         if (this->type & PORT_TYPE_VIDEO) {
+             struct am_io_param *p = (void*)arg;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++            stream_buf_t *buf = (this->vformat == VFORMAT_HEVC) ? &bufs[BUF_TYPE_HEVC] : &bufs[BUF_TYPE_VIDEO];
++#else
+             stream_buf_t *buf = &bufs[BUF_TYPE_VIDEO];
+-
++#endif
+             if (p == NULL) {
+                 r = -EINVAL;
+             }
+@@ -1279,19 +1365,32 @@ static long amstream_ioctl(struct file *file,
+         if ((this->type & (PORT_TYPE_AUDIO | PORT_TYPE_VIDEO)) ==
+             ((PORT_TYPE_AUDIO | PORT_TYPE_VIDEO))) {
+             r = -EINVAL;
+-        } else if (this->type & PORT_TYPE_VIDEO) {
++        } 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        else if (this->type & PORT_TYPE_HEVC) {
++            r = es_vpts_checkin(&bufs[BUF_TYPE_HEVC], arg);
++        }
++#endif
++        else if (this->type & PORT_TYPE_VIDEO) {
+             r = es_vpts_checkin(&bufs[BUF_TYPE_VIDEO], arg);
+-        } else if (this->type & PORT_TYPE_AUDIO) {
++        }
++        else if (this->type & PORT_TYPE_AUDIO) {
+             r = es_apts_checkin(&bufs[BUF_TYPE_AUDIO], arg);
+         }
+         break;
+-	case AMSTREAM_IOC_TSTAMP_uS64:
++
++    case AMSTREAM_IOC_TSTAMP_uS64:
+         if ((this->type & (PORT_TYPE_AUDIO | PORT_TYPE_VIDEO)) ==
+         	((PORT_TYPE_AUDIO | PORT_TYPE_VIDEO))) {	
+         	r = -EINVAL;
+         } else{
+             u64 pts;
+             memcpy(&pts,(void *)arg,sizeof(u64));
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++            if (this->type & PORT_TYPE_HEVC) {
++                r = es_vpts_checkin_us64(&bufs[BUF_TYPE_HEVC], pts);
++            } else
++#endif
+             if (this->type & PORT_TYPE_VIDEO) {
+                 r = es_vpts_checkin_us64(&bufs[BUF_TYPE_VIDEO],pts);
+             } else if (this->type & PORT_TYPE_AUDIO) {
+@@ -1362,7 +1461,6 @@ static long amstream_ioctl(struct file *file,
+         break;
+ 
+     case AMSTREAM_IOC_AUDIO_INFO:
+-
+         if ((this->type & PORT_TYPE_VIDEO) || (this->type & PORT_TYPE_AUDIO)) {
+             if (copy_from_user(&audio_dec_info, (void __user *)arg, sizeof(audio_dec_info))) {
+                 r = -EFAULT;
+@@ -1499,38 +1597,44 @@ static long amstream_ioctl(struct file *file,
+     case AMSTREAM_IOC_SET_DEMUX:
+         tsdemux_set_demux((int)arg);
+         break;
+-	case AMSTREAM_IOC_SET_VIDEO_DELAY_LIMIT_MS:
++    case AMSTREAM_IOC_SET_VIDEO_DELAY_LIMIT_MS:
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        bufs[BUF_TYPE_HEVC].max_buffer_delay_ms = (int)arg;
++#endif
+         bufs[BUF_TYPE_VIDEO].max_buffer_delay_ms = (int)arg;
+         break;
+-	case AMSTREAM_IOC_SET_AUDIO_DELAY_LIMIT_MS:
++    case AMSTREAM_IOC_SET_AUDIO_DELAY_LIMIT_MS:
+         bufs[BUF_TYPE_AUDIO].max_buffer_delay_ms = (int)arg;
+         break;
+-	case AMSTREAM_IOC_GET_VIDEO_DELAY_LIMIT_MS:
++    case AMSTREAM_IOC_GET_VIDEO_DELAY_LIMIT_MS:
+         put_user(bufs[BUF_TYPE_VIDEO].max_buffer_delay_ms,(int *)arg);
+         break;
+-	case AMSTREAM_IOC_GET_AUDIO_DELAY_LIMIT_MS:
++    case AMSTREAM_IOC_GET_AUDIO_DELAY_LIMIT_MS:
+         put_user(bufs[BUF_TYPE_AUDIO].max_buffer_delay_ms,(int *)arg);
+         break;		
+-	case AMSTREAM_IOC_GET_VIDEO_CUR_DELAY_MS:
+-		{
+-		int delay;
+-		delay=calculation_stream_delayed_ms(PTS_TYPE_VIDEO,NULL,NULL);
+-		if(delay>=0)
+-			put_user(delay,(int *)arg);
+-		else 
+-			put_user(0,(int *)arg);
++    case AMSTREAM_IOC_GET_VIDEO_CUR_DELAY_MS:
++        {
++            int delay;
++            delay = calculation_stream_delayed_ms(PTS_TYPE_VIDEO,NULL,NULL);
++            if (delay >= 0) {
++                put_user(delay,(int *)arg);
++            } else {
++                put_user(0,(int *)arg);
++            }
++        }
+         break;
+-		}
+-	case AMSTREAM_IOC_GET_AUDIO_CUR_DELAY_MS:
+-		{
+-		int delay;
+-		delay=calculation_stream_delayed_ms(PTS_TYPE_AUDIO,NULL,NULL);
+-		if(delay>=0)
+-			put_user(delay,(int *)arg);
+-		else 
+-			put_user(0,(int *)arg);
++
++    case AMSTREAM_IOC_GET_AUDIO_CUR_DELAY_MS:
++        {
++            int delay;
++            delay = calculation_stream_delayed_ms(PTS_TYPE_AUDIO,NULL,NULL);
++            if (delay >= 0) {
++                put_user(delay,(int *)arg);
++            } else {
++                put_user(0,(int *)arg);
++            }
++        }
+         break;
+-		}
+ 	case AMSTREAM_IOC_GET_AUDIO_AVG_BITRATE_BPS:
+ 		{
+ 		int delay;
+@@ -1643,7 +1747,12 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+     int i;
+     char *pbuf = buf;
+     stream_buf_t *p = NULL;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    char buf_type[][12] = {"Video", "Audio", "Subtitle", "UserData", "HEVC"};
++#else
+     char buf_type[][12] = {"Video", "Audio", "Subtitle", "UserData"};
++#endif
++
+     for (i = 0; i < sizeof(bufs) / sizeof(stream_buf_t); i++) {
+         p = &bufs[i];
+         /*type*/
+@@ -1702,7 +1811,7 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+                 data_size = p->buf_size - sub_rp + sub_wp;
+             }
+             pbuf += sprintf(pbuf, "\tbuf size:%#x\n", p->buf_size);
+-	     pbuf += sprintf(pbuf, "\tbuf canusesize:%#x\n", p->canusebuf_size);
++	    pbuf += sprintf(pbuf, "\tbuf canusesize:%#x\n", p->canusebuf_size);
+             pbuf += sprintf(pbuf, "\tbuf start:%#x\n", stbuf_sub_start_get());
+             pbuf += sprintf(pbuf, "\tbuf write pointer:%#x\n", sub_wp);
+             pbuf += sprintf(pbuf, "\tbuf read pointer:%#x\n", sub_rp);
+@@ -1952,6 +2061,17 @@ static int  amstream_probe(struct platform_device *pdev)
+         bufs[BUF_TYPE_SUBTITLE].flag = BUF_FLAG_IOMEM;
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    bufs[BUF_TYPE_HEVC].buf_start = bufs[BUF_TYPE_VIDEO].buf_start;
++    bufs[BUF_TYPE_HEVC].buf_size  = bufs[BUF_TYPE_VIDEO].buf_size;
++
++    if (bufs[BUF_TYPE_VIDEO].flag & BUF_FLAG_IOMEM) {
++        bufs[BUF_TYPE_HEVC].flag |= BUF_FLAG_IOMEM;
++    }
++
++    bufs[BUF_TYPE_HEVC].default_buf_size = bufs[BUF_TYPE_VIDEO].default_buf_size;
++#endif
++
+     if (stbuf_fetch_init() != 0) {
+         r = (-ENOMEM);
+         goto error7;
+diff --git a/drivers/amlogic/amports/amvdec.c b/drivers/amlogic/amports/amvdec.c
+index 0a4a289824b9..bc9282bf3717 100755
+--- a/drivers/amlogic/amports/amvdec.c
++++ b/drivers/amlogic/amports/amvdec.c
+@@ -173,7 +173,53 @@ static void amvdec2_pg_enable(bool enable)
+ 
+         timeout = jiffies + HZ / 10;
+ 
+-        while (READ_VREG(DCAC_DMA_CTRL) & 0x8000) {
++        while (READ_VREG(VDEC2_DCAC_DMA_CTRL) & 0x8000) {
++            if (time_after(jiffies, timeout)) {
++                break;
++            }
++        }
++    }
++}
++#endif
++
++#if HAS_HEVC_VDEC
++static void amhevc_pg_enable(bool enable)
++{
++    ulong timeout;
++    if(!vdec_on(VDEC_HEVC))
++        return;
++    if (enable) {
++//        WRITE_VREG(VDEC2_GCLK_EN, 0x3ff);
++    } else {
++        timeout = jiffies + HZ / 10;
++
++        while (READ_VREG(HEVC_MDEC_PIC_DC_STATUS) != 0) {
++            if (time_after(jiffies, timeout)) {
++                WRITE_VREG_BITS(HEVC_MDEC_PIC_DC_CTRL, 1, 0, 1);
++                WRITE_VREG_BITS(HEVC_MDEC_PIC_DC_CTRL, 0, 0, 1);
++                READ_VREG(HEVC_MDEC_PIC_DC_STATUS);
++                READ_VREG(HEVC_MDEC_PIC_DC_STATUS);
++                READ_VREG(HEVC_MDEC_PIC_DC_STATUS);
++                break;
++            }
++        }
++
++        timeout = jiffies + HZ / 10;
++
++        while (READ_VREG(HEVC_DBLK_STATUS) & 1) {
++            if (time_after(jiffies, timeout)) {
++                WRITE_VREG(HEVC_DBLK_CTRL, 3);
++                WRITE_VREG(HEVC_DBLK_CTRL, 0);
++                READ_VREG(HEVC_DBLK_STATUS);
++                READ_VREG(HEVC_DBLK_STATUS);
++                READ_VREG(HEVC_DBLK_STATUS);
++                break;
++            }
++        }
++
++        timeout = jiffies + HZ / 10;
++
++        while (READ_VREG(HEVC_DCAC_DMA_CTRL) & 0x8000) {
+             if (time_after(jiffies, timeout)) {
+                 break;
+             }
+@@ -277,6 +323,7 @@ s32 amvdec_loadmc(const u32 *p)
+ 
+     return ret;
+ }
++
+ s32 amvdec_loadmc_ex(const char*name,char *def)
+ {
+ 	return am_loadmc_ex(name,def,&amvdec_loadmc);
+@@ -335,9 +382,10 @@ s32 amvdec2_loadmc(const u32 *p)
+ 
+     return ret;
+ }
++
+ s32 amvdec2_loadmc_ex(const char*name,char *def)
+ {
+-       return am_loadmc_ex(name,def,&amvdec2_loadmc);
++    return am_loadmc_ex(name,def,&amvdec2_loadmc);
+ }
+ 
+ #endif
+@@ -353,7 +401,7 @@ s32 amhcodec_loadmc(const u32 *p)
+     }
+ 
+     if (!mc_addr) {
+-        return;
++        return -ENOMEM;
+     }
+ 
+     memcpy(mc_addr, p, MC_SIZE);
+@@ -373,14 +421,77 @@ s32 amhcodec_loadmc(const u32 *p)
+ #ifndef AMVDEC_USE_STATIC_MEMORY
+     kfree(mc_addr);
+ #endif
++
++    return 0;
+ }
++
+ s32 amhcodec_loadmc_ex(const char*name,char *def)
+ {
+-	return am_loadmc_ex(name,def,&amhcodec_loadmc);
++    return am_loadmc_ex(name,def,&amhcodec_loadmc);
+ }
+ 
+ #endif
+ 
++#if HAS_HEVC_VDEC
++s32 amhevc_loadmc(const u32 *p)
++{
++    ulong timeout;
++    s32 ret = 0;
++
++#ifdef AMVDEC_USE_STATIC_MEMORY
++    if (mc_addr == NULL)
++#endif
++    {
++        mc_addr = kmalloc(MC_SIZE, GFP_KERNEL);
++    }
++
++    if (!mc_addr) {
++        return -ENOMEM;
++    }
++
++    memcpy(mc_addr, p, MC_SIZE);
++
++    mc_addr_map = dma_map_single(NULL, mc_addr, MC_SIZE, DMA_TO_DEVICE);
++
++    WRITE_VREG(HEVC_MPSR, 0);
++    WRITE_VREG(HEVC_CPSR, 0);
++
++    /* Read CBUS register for timing */
++    timeout = READ_VREG(HEVC_MPSR);
++    timeout = READ_VREG(HEVC_MPSR);
++
++    timeout = jiffies + HZ;
++
++    WRITE_VREG(HEVC_IMEM_DMA_ADR, mc_addr_map);
++    WRITE_VREG(HEVC_IMEM_DMA_COUNT, 0x1000);
++    WRITE_VREG(HEVC_IMEM_DMA_CTRL, (0x8000 | (7 << 16)));
++
++    while (READ_VREG(HEVC_IMEM_DMA_CTRL) & 0x8000) {
++        if (time_before(jiffies, timeout)) {
++            schedule();
++        } else {
++            printk("vdec2 load mc error\n");
++            ret = -EBUSY;
++            break;
++        }
++    }
++
++    dma_unmap_single(NULL, mc_addr_map, MC_SIZE, DMA_TO_DEVICE);
++
++#ifndef AMVDEC_USE_STATIC_MEMORY
++    kfree(mc_addr);
++    mc_addr = NULL;
++#endif
++
++    return ret;
++}
++
++s32 amhevc_loadmc_ex(const char*name, char *def)
++{
++    return am_loadmc_ex(name, def, &amhevc_loadmc);
++}
++#endif
++
+ void amvdec_start(void)
+ {
+ #ifdef CONFIG_WAKELOCK
+@@ -444,6 +555,28 @@ void amhcodec_start(void)
+ }
+ #endif
+ 
++#if HAS_HEVC_VDEC
++void amhevc_start(void)
++{
++#ifdef CONFIG_WAKELOCK
++    amvdec_wake_lock();
++#endif
++
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++
++    WRITE_VREG(DOS_SW_RESET3, (1<<12)|(1<<11));
++    WRITE_VREG(DOS_SW_RESET3, 0);
++
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++
++    WRITE_VREG(HEVC_MPSR, 0x0001);
++}
++#endif
++
+ void amvdec_stop(void)
+ {
+     ulong timeout = jiffies + HZ;
+@@ -514,6 +647,30 @@ void amhcodec_stop(void)
+ }
+ #endif
+ 
++#if HAS_HEVC_VDEC
++void amhevc_stop(void)
++{
++    ulong timeout = jiffies + HZ;
++
++    WRITE_VREG(HEVC_MPSR, 0);
++    WRITE_VREG(HEVC_CPSR, 0);
++
++    while (READ_VREG(HEVC_IMEM_DMA_CTRL) & 0x8000) {
++        if (time_after(jiffies, timeout)) {
++            break;
++        }
++    }
++
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++    READ_VREG(DOS_SW_RESET3);
++
++#ifdef CONFIG_WAKELOCK
++    amvdec_wake_unlock();
++#endif
++}
++#endif
++
+ void amvdec_enable(void)
+ {
+     amvdec_pg_enable(true);
+@@ -536,6 +693,18 @@ void amvdec2_disable(void)
+ }
+ #endif
+ 
++#if HAS_HEVC_VDEC
++void amhevc_enable(void)
++{
++    amhevc_pg_enable(true);
++}
++
++void amhevc_disable(void)
++{
++    amhevc_pg_enable(false);
++}
++#endif
++
+ #ifdef CONFIG_PM
+ int amvdec_suspend(struct platform_device *dev, pm_message_t event)
+ {
+@@ -545,6 +714,9 @@ int amvdec_suspend(struct platform_device *dev, pm_message_t event)
+     amvdec2_pg_enable(false);
+ #endif
+ 
++#if HAS_HEVC_VDEC
++    amhevc_pg_enable(false);
++#endif
+     return 0;
+ }
+ 
+@@ -556,6 +728,9 @@ int amvdec_resume(struct platform_device *dev)
+     amvdec2_pg_enable(true);
+ #endif
+ 
++#if HAS_HEVC_VDEC
++    amhevc_pg_enable(true);
++#endif
+     return 0;
+ }
+ #endif
+@@ -568,10 +743,22 @@ static int vdec_is_paused(void)
+     unsigned long wp, rp, level;
+     static int  paused_time = 0;
+ 
++#if HAS_HEVC_VDEC
++    if ((vdec_on(VDEC_HEVC)) && (READ_VREG(HEVC_STREAM_CONTROL) & 1)) {
++        wp = READ_VREG(HEVC_STREAM_WR_PTR);
++        rp = READ_VREG(HEVC_STREAM_RD_PTR);
++        level = READ_VREG(HEVC_STREAM_LEVEL);
++    } else {
++        wp = READ_VREG(VLD_MEM_VIFIFO_WP);
++        rp = READ_VREG(VLD_MEM_VIFIFO_RP);
++        level = READ_VREG(VLD_MEM_VIFIFO_LEVEL);
++    }
++#else    
+     wp = READ_VREG(VLD_MEM_VIFIFO_WP);
+     rp = READ_VREG(VLD_MEM_VIFIFO_RP);
+     level = READ_VREG(VLD_MEM_VIFIFO_LEVEL);
+-    if ((rp == old_rp && level > 1024) || /*have data,but output buffer is fulle*/
++#endif
++    if ((rp == old_rp && level > 1024) || /*have data,but output buffer is full */
+         (rp == old_rp && wp == old_wp && level == level)) { /*no write && not read*/
+         paused_time++;
+     } else {
+@@ -602,17 +789,17 @@ int amvdev_resume(void)
+ 
+ static void vdec_paused_check_timer(unsigned long arg)
+ {
+-    if(video_stated_changed){
+-	if(!video_running){
+-    		if (vdec_is_paused()) {
++    if (video_stated_changed) {
++        if (!video_running) {
++            if (vdec_is_paused()) {
+         		printk("vdec paused and release wakelock now\n");
+         		amvdec_wake_unlock();
+-			video_stated_changed=0;
++                video_stated_changed=0;
+ 	    	}
+-         }else{
++         } else {
+ 	    	amvdec_wake_lock();
+-            	video_stated_changed=0; 
+-	}
++            video_stated_changed=0; 
++        }
+     }
+     mod_timer(&amvdevtimer, jiffies + WAKE_CHECK_INTERVAL);
+ }
+diff --git a/drivers/amlogic/amports/amvdec.h b/drivers/amlogic/amports/amvdec.h
+index 0f66d0958a1e..f72af123eead 100755
+--- a/drivers/amlogic/amports/amvdec.h
++++ b/drivers/amlogic/amports/amvdec.h
+@@ -43,6 +43,14 @@ extern void amvdec2_enable(void);
+ extern void amvdec2_disable(void);
+ #endif
+ 
++#if HAS_HEVC_VDEC
++extern  s32 amhevc_loadmc(const u32 *p);
++extern void amhevc_start(void);
++extern void amhevc_stop(void);
++extern void amhevc_enable(void);
++extern void amvdec_disable(void);
++#endif
++
+ #if HAS_HDEC
+ extern s32 amhcodec_loadmc(const u32 *p);
+ extern void amhcodec_start(void);
+diff --git a/drivers/amlogic/amports/esparser.c b/drivers/amlogic/amports/esparser.c
+index e81e1041ff7c..0e253f67aef6 100755
+--- a/drivers/amlogic/amports/esparser.c
++++ b/drivers/amlogic/amports/esparser.c
+@@ -93,11 +93,17 @@ static irqreturn_t parser_isr(int irq, void *dev_id)
+     return IRQ_HANDLED;
+ }
+ 
+-static inline u32 buf_rp(u32 type)
++static inline u32 buf_wp(u32 type)
+ {
+-    return (type == BUF_TYPE_VIDEO) ? READ_VREG(VLD_MEM_VIFIFO_WP) :
+-           (type == BUF_TYPE_AUDIO) ? READ_MPEG_REG(AIU_MEM_AIFIFO_MAN_WP) :
+-                                      READ_MPEG_REG(PARSER_SUB_START_PTR);
++    u32 wp = 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B    
++    (type == BUF_TYPE_HEVC) ? READ_VREG(HEVC_STREAM_WR_PTR) :
++#endif
++    (type == BUF_TYPE_VIDEO) ? READ_VREG(VLD_MEM_VIFIFO_WP) :
++    (type == BUF_TYPE_AUDIO) ? READ_MPEG_REG(AIU_MEM_AIFIFO_MAN_WP) :
++                               READ_MPEG_REG(PARSER_SUB_START_PTR);
++
++    return wp;
+ }
+ 
+ static ssize_t _esparser_write(const char __user *buf, 
+@@ -105,7 +111,7 @@ static ssize_t _esparser_write(const char __user *buf,
+ 							u32 type,
+ 							int isphybuf)
+ {
+-	size_t r = count;
++    size_t r = count;
+     const char __user *p = buf;
+ 
+     u32 len = 0;
+@@ -113,6 +119,11 @@ static ssize_t _esparser_write(const char __user *buf,
+     int ret;
+     u32 wp;
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == BUF_TYPE_HEVC) {
++        parser_type = PARSER_VIDEO;
++    } else
++#endif
+     if (type == BUF_TYPE_VIDEO) {
+         parser_type = PARSER_VIDEO;
+     } else if (type == BUF_TYPE_AUDIO) {
+@@ -120,8 +131,8 @@ static ssize_t _esparser_write(const char __user *buf,
+     } else {
+         parser_type = PARSER_SUBPIC;
+     }
+-	
+-    wp = buf_rp(type);
++
++    wp = buf_wp(type);
+ 
+     if (r > 0) {
+         if (isphybuf) {
+@@ -143,11 +154,11 @@ static ssize_t _esparser_write(const char __user *buf,
+                             parser_type | PARSER_WRITE | PARSER_AUTOSEARCH,
+                             ES_CTRL_BIT, ES_CTRL_WID);
+ 
+-	if (isphybuf) {
++        if (isphybuf) {
+             WRITE_MPEG_REG(PARSER_FETCH_ADDR, (u32)buf);
+-	} else {
++        } else {
+             WRITE_MPEG_REG(PARSER_FETCH_ADDR, virt_to_phys((u8 *)fetchbuf));
+-	}
++        }
+ 
+         WRITE_MPEG_REG(PARSER_FETCH_CMD,
+                        (7 << FETCH_ENDIAN) | len);
+@@ -163,18 +174,22 @@ static ssize_t _esparser_write(const char __user *buf,
+         if (ret == 0) {
+             WRITE_MPEG_REG(PARSER_FETCH_CMD, 0);
+ 
+-            if (wp == buf_rp(type)) {
++            if (wp == buf_wp(type)) {
+                 /*no data fetched*/
+             	return -EAGAIN;
+             } else {
+-                printk("write timeout, but fetched ok,len=%d,wpdiff=%d\n", len, wp - buf_rp(type));
++                printk("write timeout, but fetched ok,len=%d,wpdiff=%d\n", len, wp - buf_wp(type));
+             }
+         } else if (ret < 0) {
+             return -ERESTARTSYS;
+         }
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if ((type == BUF_TYPE_VIDEO) || (type == BUF_TYPE_HEVC)) {
++#else
+     if (type == BUF_TYPE_VIDEO) {
++#endif
+         video_data_parsed += len;
+     } else if (type == BUF_TYPE_AUDIO ) {
+         audio_data_parsed += len;
+@@ -235,6 +250,11 @@ s32 esparser_init(struct stream_buf_s *buf)
+     u32 parser_sub_rp;
+     bool first_use = false;
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (buf->type == BUF_TYPE_HEVC) {
++        pts_type = PTS_TYPE_HEVC;
++    } else
++#endif
+     if (buf->type == BUF_TYPE_VIDEO) {
+         pts_type = PTS_TYPE_VIDEO;
+     } else if (buf->type & BUF_TYPE_AUDIO) {
+@@ -318,6 +338,25 @@ s32 esparser_init(struct stream_buf_s *buf)
+     }
+ 
+     /* hook stream buffer with PARSER */
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (pts_type == PTS_TYPE_HEVC) {
++        CLEAR_VREG_MASK(HEVC_STREAM_CONTROL, 1);
++
++        WRITE_MPEG_REG(PARSER_VIDEO_START_PTR,
++                       READ_VREG(HEVC_STREAM_START_ADDR));
++        WRITE_MPEG_REG(PARSER_VIDEO_END_PTR,
++                       READ_VREG(HEVC_STREAM_END_ADDR));
++
++        CLEAR_MPEG_REG_MASK(PARSER_ES_CONTROL, ES_VID_MAN_RD_PTR);
++
++        WRITE_VREG(DOS_GEN_CTRL0, 3<<1);    // set vififo_vbuf_rp_sel=>hevc
++
++        SET_VREG_MASK(HEVC_STREAM_CONTROL, (1<<3)|(0<<4)); // set use_parser_vbuf_wp
++        SET_VREG_MASK(HEVC_STREAM_CONTROL, 1); // set stream_fetch_enable
++
++        video_data_parsed = 0;
++    } else
++#endif
+     if (pts_type == PTS_TYPE_VIDEO) {
+         WRITE_MPEG_REG(PARSER_VIDEO_START_PTR,
+                        READ_VREG(VLD_MEM_VIFIFO_START_PTR));
+@@ -328,6 +367,10 @@ s32 esparser_init(struct stream_buf_s *buf)
+         WRITE_VREG(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+         CLEAR_VREG_MASK(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        WRITE_VREG(DOS_GEN_CTRL0, 0);    // set vififo_vbuf_rp_sel=>vdec
++#endif
++
+         video_data_parsed = 0;
+     } else if (pts_type == PTS_TYPE_AUDIO) {
+         WRITE_MPEG_REG(PARSER_AUDIO_START_PTR,
+@@ -349,6 +392,7 @@ s32 esparser_init(struct stream_buf_s *buf)
+ 
+     if (pts_type < PTS_TYPE_MAX) {
+         r = pts_start(pts_type);
++
+         if (r < 0) {
+             printk("esparser_init: pts_start failed\n");
+             goto Err_1;
+@@ -445,6 +489,11 @@ void esparser_release(struct stream_buf_s *buf)
+         }
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (buf->type == BUF_TYPE_HEVC) {
++        pts_type = PTS_TYPE_VIDEO;
++    } else
++#endif
+     if (buf->type == BUF_TYPE_VIDEO) {
+         pts_type = PTS_TYPE_VIDEO;
+     } else if (buf->type == BUF_TYPE_AUDIO) {
+@@ -563,27 +612,35 @@ ssize_t esparser_write(struct file *file,
+     }
+ 
+     if (stbuf->type!=BUF_TYPE_SUBTITLE && /*subtitle have no level to check,*/
+-		stbuf_space(stbuf) < count) {
+-        if (file->f_flags & O_NONBLOCK) {
+-			len = stbuf_space(stbuf) ;	
+-			if(len<256)//<1k.do eagain,
+-				return -EAGAIN;
+-        }else{
+-	        len = min(stbuf_canusesize(stbuf) / 8, len);
++        stbuf_space(stbuf) < count) {
++        if ((file != NULL) && (file->f_flags & O_NONBLOCK)) {
++            len = stbuf_space(stbuf) ;	
+ 
+-	        if (stbuf_space(stbuf) < len) {
+-	            r = stbuf_wait_space(stbuf, len);
+-	            if (r < 0) {
+-	                return r;
+-	            }
+-	        }
++            if(len<256) {//<1k.do eagain,
++                return -EAGAIN;
++            }
++        } else {
++	    len = min(stbuf_canusesize(stbuf) / 8, len);
++
++            if (stbuf_space(stbuf) < len) {
++	        r = stbuf_wait_space(stbuf, len);
++	        if (r < 0) {
++	            return r;
++                }
++	    }
+ 	}
+     }
+-	stbuf->last_write_jiffies64=jiffies_64;
++
++    stbuf->last_write_jiffies64=jiffies_64;
++
+     len = min(len, count);
++
+     mutex_lock(&esparser_mutex);
+-	r = _esparser_write(buf, len, stbuf->type,0);
++
++    r = _esparser_write(buf, len, stbuf->type,0);
++
+     mutex_unlock(&esparser_mutex);
++
+     return r;
+ }
+ 
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 950ec7d250fd..e8c58f6e46a3 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -816,6 +816,11 @@ int pts_start(u8 type)
+         return -EINVAL;
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == PTS_TYPE_HEVC) {
++        pTable = &pts_table[PTS_TYPE_VIDEO];
++    } else
++#endif
+     pTable = &pts_table[type];
+ 
+     spin_lock_irqsave(&lock, flags);
+@@ -826,9 +831,21 @@ int pts_start(u8 type)
+         spin_unlock_irqrestore(&lock, flags);
+ 
+         if(alloc_pts_list(pTable)!=0){
+-			return -ENOMEM;
++            return -ENOMEM;
+         }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        if (type == PTS_TYPE_HEVC) {
++            pTable->buf_start = READ_VREG(HEVC_STREAM_START_ADDR);
++            pTable->buf_size = READ_VREG(HEVC_STREAM_END_ADDR)
++                               - pTable->buf_start + 8;
++            WRITE_MPEG_REG(VIDEO_PTS, 0);
++            timestamp_pcrscr_set(0);//video always need the pcrscr,Clear it to use later
++            pTable->first_checkin_pts = -1;
++            pTable->first_lookup_ok = 0;
++            pTable->first_lookup_is_fail = 0;
++        } else
++#endif
+         if (type == PTS_TYPE_VIDEO) {
+             pTable->buf_start = READ_VREG(VLD_MEM_VIFIFO_START_PTR);
+             pTable->buf_size = READ_VREG(VLD_MEM_VIFIFO_END_PTR)
+@@ -845,7 +862,7 @@ int pts_start(u8 type)
+             timestamp_pcrscr_set(0);//video always need the pcrscr,Clear it to use later
+             pTable->first_checkin_pts = -1;
+             pTable->first_lookup_ok = 0;
+-	     pTable->first_lookup_is_fail = 0;
++            pTable->first_lookup_is_fail = 0;
+         } else if (type == PTS_TYPE_AUDIO) {
+             pTable->buf_start = READ_MPEG_REG(AIU_MEM_AIFIFO_START_PTR);
+             pTable->buf_size = READ_MPEG_REG(AIU_MEM_AIFIFO_END_PTR)
+@@ -892,6 +909,11 @@ int pts_stop(u8 type)
+         return -EINVAL;
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == PTS_TYPE_HEVC) {
++        pTable = &pts_table[PTS_TYPE_VIDEO];
++    } else
++#endif
+     pTable = &pts_table[type];
+ 
+     spin_lock_irqsave(&lock, flags);
+diff --git a/drivers/amlogic/amports/streambuf.c b/drivers/amlogic/amports/streambuf.c
+index e8951a027065..f6fc869fce09 100755
+--- a/drivers/amlogic/amports/streambuf.c
++++ b/drivers/amlogic/amports/streambuf.c
+@@ -56,7 +56,12 @@ static s32 _stbuf_alloc(stream_buf_t *buf)
+         }
+ 
+         printk("%s stbuf alloced at 0x%x, size = %d\n",
+-               (buf->type == BUF_TYPE_VIDEO) ? "Video" : (buf->type == BUF_TYPE_AUDIO) ? "Audio" : "Subtitle",
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++               (buf->type == BUF_TYPE_HEVC) ? "HEVC" :
++#endif
++               (buf->type == BUF_TYPE_VIDEO) ? "Video" :
++               (buf->type == BUF_TYPE_AUDIO) ? "Audio" :
++                "Subtitle",
+                buf->buf_start, buf->buf_size);
+     }
+ 
+@@ -165,25 +170,40 @@ static void _stbuf_timer_func(unsigned long arg)
+ 
+ u32 stbuf_level(struct stream_buf_s *buf)
+ {
+-    return _READ_ST_REG(LEVEL);
++    return 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++    (buf->type == BUF_TYPE_HEVC) ? READ_VREG(HEVC_STREAM_LEVEL) :
++#endif
++    _READ_ST_REG(LEVEL);
+ }
+ 
+ u32 stbuf_rp(struct stream_buf_s *buf)
+ {
+-    return _READ_ST_REG(RP);
++    return
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++    (buf->type == BUF_TYPE_HEVC) ? READ_VREG(HEVC_STREAM_RD_PTR) :
++#endif
++    _READ_ST_REG(RP);
+ }
+ 
+ u32 stbuf_space(struct stream_buf_s *buf)
+ {
+     /* reserved space for safe write, the parser fifo size is 1024byts, so reserve it */
+-    int size = (buf->canusebuf_size- _READ_ST_REG(LEVEL)) ;
++    int size;
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (buf->type == BUF_TYPE_HEVC) {
++        size = buf->canusebuf_size - READ_VREG(HEVC_STREAM_LEVEL);
++    } else
++#endif
++    size = (buf->canusebuf_size - _READ_ST_REG(LEVEL)) ;
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
+     if ((buf->type == BUF_TYPE_VIDEO) && (vdec_on(VDEC_2))) {
+         if ((_READ_VDEC2_ST_REG(START_PTR) == _READ_ST_REG(START_PTR)) &&
+             (_READ_VDEC2_ST_REG(END_PTR)   == _READ_ST_REG(END_PTR))   &&
+             (_READ_VDEC2_ST_REG(CONTROL) & MEM_CTRL_FILL_EN)) {
+-            size = min(size, (buf->canusebuf_size- _READ_VDEC2_ST_REG(LEVEL)));
++            size = min(size, (int)(buf->canusebuf_size - _READ_VDEC2_ST_REG(LEVEL)));
+         }
+     }
+ #endif
+@@ -191,7 +211,11 @@ u32 stbuf_space(struct stream_buf_s *buf)
+     if(buf->canusebuf_size>=buf->buf_size/2)
+         size=size-6*1024;//old reversed value,tobe full, reversed only...
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if ((buf->type == BUF_TYPE_VIDEO) || (buf->type == BUF_TYPE_HEVC)) {
++#else
+     if (buf->type == BUF_TYPE_VIDEO) {
++#endif
+         size -= READ_MPEG_REG(PARSER_VIDEO_HOLE);
+     }
+ 
+@@ -202,10 +226,12 @@ u32 stbuf_size(struct stream_buf_s *buf)
+ {
+     return buf->buf_size;
+ }
++
+ u32 stbuf_canusesize(struct stream_buf_s *buf)
+ {
+     return buf->canusebuf_size;
+ }
++
+ s32 stbuf_init(struct stream_buf_s *buf)
+ {
+     s32 r;
+@@ -224,6 +250,18 @@ s32 stbuf_init(struct stream_buf_s *buf)
+ 
+     init_waitqueue_head(&buf->wq);
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (buf->type == BUF_TYPE_HEVC) {
++        CLEAR_VREG_MASK(HEVC_STREAM_CONTROL, 1);
++        WRITE_VREG(HEVC_STREAM_START_ADDR, phy_addr);
++        WRITE_VREG(HEVC_STREAM_END_ADDR, phy_addr + buf->buf_size - 8);
++        WRITE_VREG(HEVC_STREAM_RD_PTR, phy_addr);
++        WRITE_VREG(HEVC_STREAM_WR_PTR, phy_addr);
++
++        return 0;
++    }
++#endif
++
+     if (buf->type == BUF_TYPE_VIDEO) {
+         _WRITE_ST_REG(CONTROL, 0);
+         /* reset VLD before setting all pointers */
+diff --git a/drivers/amlogic/amports/streambuf.h b/drivers/amlogic/amports/streambuf.h
+index 48494fba7dee..9fec38fed6f5 100755
+--- a/drivers/amlogic/amports/streambuf.h
++++ b/drivers/amlogic/amports/streambuf.h
+@@ -32,7 +32,12 @@
+ #define BUF_TYPE_AUDIO      1
+ #define BUF_TYPE_SUBTITLE   2
+ #define BUF_TYPE_USERDATA   3
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++#define BUF_TYPE_HEVC       4
++#define BUF_MAX_NUM         5
++#else
+ #define BUF_MAX_NUM         4
++#endif
+ 
+ #define INVALID_PTS 0xffffffff
+ 
+diff --git a/drivers/amlogic/amports/streambuf_reg.h b/drivers/amlogic/amports/streambuf_reg.h
+index 738e2b5e8f85..d6f789639c80 100755
+--- a/drivers/amlogic/amports/streambuf_reg.h
++++ b/drivers/amlogic/amports/streambuf_reg.h
+@@ -22,6 +22,10 @@
+ #ifndef STREAMBUF_REG_H
+ #define STREAMBUF_REG_H
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++#define HEVC_STREAM_REG_BASE        HEVC_STREAM_START_ADDR
++#endif
++
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ #define VLD_MEM_VIFIFO_REG_BASE     P_VLD_MEM_VIFIFO_START_PTR
+ #define AIU_MEM_AIFIFO_REG_BASE     P_AIU_MEM_AIFIFO_START_PTR
+diff --git a/drivers/amlogic/amports/tsdemux.c b/drivers/amlogic/amports/tsdemux.c
+index dda6062737c3..229d5545f13d 100755
+--- a/drivers/amlogic/amports/tsdemux.c
++++ b/drivers/amlogic/amports/tsdemux.c
+@@ -402,7 +402,7 @@ static ssize_t _tsdemux_write(const char __user *buf, size_t count)
+         ret = wait_event_interruptible_timeout(wq, fetch_done != 0, HZ/2);
+         if (ret == 0) {
+             WRITE_MPEG_REG(PARSER_FETCH_CMD, 0);
+-			printk("write timeout, retry\n");
++            printk("write timeout, retry\n");
+             return -EAGAIN;
+         } else if (ret < 0) {
+             return -ERESTARTSYS;
+@@ -415,7 +415,11 @@ static ssize_t _tsdemux_write(const char __user *buf, size_t count)
+     return count - r;
+ }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++s32 tsdemux_init(u32 vid, u32 aid, u32 sid, bool is_hevc)
++#else
+ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
++#endif
+ {
+     s32 r;
+     u32 parser_sub_start_ptr;
+@@ -494,11 +498,34 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
+     }
+ 
+     /* hook stream buffer with PARSER */
+-    WRITE_MPEG_REG(PARSER_VIDEO_START_PTR,
+-                   READ_VREG(VLD_MEM_VIFIFO_START_PTR));
+-    WRITE_MPEG_REG(PARSER_VIDEO_END_PTR,
+-                   READ_VREG(VLD_MEM_VIFIFO_END_PTR));
+-    CLEAR_MPEG_REG_MASK(PARSER_ES_CONTROL, ES_VID_MAN_RD_PTR);
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (is_hevc) {
++        WRITE_MPEG_REG(PARSER_VIDEO_START_PTR,
++                       READ_VREG(HEVC_STREAM_START_ADDR));
++        WRITE_MPEG_REG(PARSER_VIDEO_END_PTR,
++                       READ_VREG(HEVC_STREAM_END_ADDR));
++
++        CLEAR_MPEG_REG_MASK(PARSER_ES_CONTROL, ES_VID_MAN_RD_PTR);
++
++        WRITE_VREG(DOS_GEN_CTRL0, 3<<1);    // set vififo_vbuf_rp_sel=>hevc
++
++        SET_VREG_MASK(HEVC_STREAM_CONTROL, (1<<3)|(0<<4)); // set use_parser_vbuf_wp
++        SET_VREG_MASK(HEVC_STREAM_CONTROL, 1); // set stream_fetch_enable
++    } else {
++#endif
++        WRITE_MPEG_REG(PARSER_VIDEO_START_PTR,
++                       READ_VREG(VLD_MEM_VIFIFO_START_PTR));
++        WRITE_MPEG_REG(PARSER_VIDEO_END_PTR,
++                       READ_VREG(VLD_MEM_VIFIFO_END_PTR));
++        CLEAR_MPEG_REG_MASK(PARSER_ES_CONTROL, ES_VID_MAN_RD_PTR);
++
++        WRITE_VREG(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
++        CLEAR_VREG_MASK(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        WRITE_VREG(DOS_GEN_CTRL0, 0);    // set vififo_vbuf_rp_sel=>vdec
++    }
++#endif
+ 
+     WRITE_MPEG_REG(PARSER_AUDIO_START_PTR,
+                    READ_MPEG_REG(AIU_MEM_AIFIFO_START_PTR));
+@@ -511,9 +538,6 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
+                    (1  << PS_CFG_MAX_ES_WR_CYCLE_BIT) |
+                    (16 << PS_CFG_MAX_FETCH_CYCLE_BIT));
+ 
+-    WRITE_VREG(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+-    CLEAR_VREG_MASK(VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+-
+     WRITE_MPEG_REG(AIU_MEM_AIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+     CLEAR_MPEG_REG_MASK(AIU_MEM_AIFIFO_BUF_CNTL, MEM_BUFCTRL_INIT);
+ 
+@@ -522,8 +546,12 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
+     WRITE_MPEG_REG(PARSER_SUB_RP, parser_sub_rp);
+     SET_MPEG_REG_MASK(PARSER_ES_CONTROL, (7 << ES_SUB_WR_ENDIAN_BIT) | ES_SUB_MAN_RD_PTR);
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if ((r = pts_start((is_hevc) ? PTS_TYPE_HEVC : PTS_TYPE_VIDEO)) < 0) {
++#else
+     if ((r = pts_start(PTS_TYPE_VIDEO)) < 0) {
+-        printk("Video pts start  failed.(%d)\n", r);
++#endif
++        printk("Video pts start failed.(%d)\n", r);
+         goto err1;
+     }
+ 
+@@ -581,7 +609,11 @@ err4:
+ err3:
+     pts_stop(PTS_TYPE_AUDIO);
+ err2:
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    pts_stop((is_hevc) ? PTS_TYPE_HEVC : PTS_TYPE_VIDEO);
++#else
+     pts_stop(PTS_TYPE_VIDEO);
++#endif
+ err1:
+     printk("TS Demux init failed.\n");
+     return -ENOENT;
+diff --git a/drivers/amlogic/amports/tsdemux.h b/drivers/amlogic/amports/tsdemux.h
+index ed74aef47acb..0a7cb7b5b80f 100755
+--- a/drivers/amlogic/amports/tsdemux.h
++++ b/drivers/amlogic/amports/tsdemux.h
+@@ -69,7 +69,11 @@
+ #endif
+ 
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid, bool is_hevc);
++#else
+ extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid);
++#endif
+ 
+ extern void tsdemux_release(void);
+ 
+@@ -78,8 +82,8 @@ extern ssize_t tsdemux_write(struct file *file,
+                              struct stream_buf_s *abuf,
+                              const char __user *buf, size_t count);
+ 
+-int     tsdemux_class_register(void);
+-void  tsdemux_class_unregister(void);
++int  tsdemux_class_register(void);
++void tsdemux_class_unregister(void);
+ void tsdemux_change_avid(unsigned int vid, unsigned int aid);
+ void tsdemux_change_sid(unsigned int sid);
+ void tsdemux_audio_reset(void);
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index 437e3394df57..857bb3f7c373 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -43,7 +43,90 @@
+ 
+ static DEFINE_SPINLOCK(lock);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++/*
++HHI_VDEC_CLK_CNTL
++0x1078[11:9] (fclk = 2550MHz)
++    0: fclk_div4
++    1: fclk_div3
++    2: fclk_div5
++    3: fclk_div7
++    4: mpll_clk_out1
++    5: mpll_clk_out2
++0x1078[6:0]
++    devider
++0x1078[8]
++    enable
++*/
++//182.14M <-- (2550/7)/2
++#define VDEC1_182M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (3 << 9) | (1), 0, 16);
++#define VDEC2_182M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (3 << 9) | (1));
++//212.50M <-- (2550/3)/4
++#define VDEC1_212M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (1 << 9) | (3), 0, 16);
++#define VDEC2_212M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (1 << 9) | (3));
++//255.00M <-- (2550/5)/2
++#define VDEC1_255M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (2 << 9) | (1), 0, 16);
++#define VDEC2_255M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (2 << 9) | (1));
++#define HCODEC_255M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, (2 << 9) | (1), 16, 16);
++#define HEVC_255M()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, (2 << 9) | (1), 16, 16);
++//283.33M <-- (2550/3)/3
++#define VDEC1_283M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (1 << 9) | (2), 0, 16);
++#define VDEC2_283M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (1 << 9) | (2));
++//318.75M <-- (2550/4)/2
++#define VDEC1_319M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (0 << 9) | (1), 0, 16);
++#define VDEC2_319M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (0 << 9) | (1));
++//364.29M <-- (2550/7)/1 -- over limit, do not use
++#define VDEC1_364M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (3 << 9) | (0), 0, 16);
++#define VDEC2_364M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (3 << 9) | (0));
++
++#define VDEC1_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 8, 1); \
++                           WRITE_VREG_BITS(DOS_GCLK_EN0, 0x3ff,0,10)
++#define VDEC2_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 8, 1); \
++                           WRITE_VREG(DOS_GCLK_EN1, 0x3ff)
++#define HCODEC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 24, 1); \
++                           WRITE_VREG_BITS(DOS_GCLK_EN0, 0x7fff, 12, 15)
++#define HEVC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 24, 1); \
++                           WRITE_VREG(DOS_GCLK_EN3, 0xffffffff)
++#define VDEC1_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 8, 1)
++#define VDEC2_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 0, 8, 1)
++#define HCODEC_CLOCK_OFF() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 0, 24, 1)
++#define HEVC_CLOCK_OFF()   WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 0, 24, 1)
++
++#define vdec_clock_enable() \
++    VDEC1_CLOCK_OFF(); \
++    VDEC1_255M(); \
++    VDEC1_CLOCK_ON(); \
++    clock_level = 0; 
++
++#define vdec_clock_hi_enable() \
++    VDEC1_CLOCK_OFF(); \
++    VDEC1_319M(); \
++    VDEC1_CLOCK_ON(); \
++    clock_level = 1;
++
++#define vdec2_clock_enable() \
++    VDEC2_CLOCK_OFF(); \
++    VDEC2_255M(); \
++    VDEC2_CLOCK_ON(); \
++    clock_level2 = 0; 
++
++#define vdec2_clock_hi_enable() \
++    VDEC2_CLOCK_OFF(); \
++    VDEC2_319M(); \
++    VDEC2_CLOCK_ON(); \
++    clock_level2 = 1;
++
++#define hcodec_clock_enable() \
++    HCODEC_CLOCK_OFF(); \
++    HCODEC_255M(); \
++    HCODEC_CLOCK_ON();
++
++#define hevc_clock_enable() \
++    HEVC_CLOCK_OFF(); \
++    HEVC_255M(); \
++    HEVC_CLOCK_ON(); 
++
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ /*
+ HHI_VDEC_CLK_CNTL
+ 0x1078[11:9] (fclk = 2550MHz)
+@@ -301,7 +384,8 @@ static const char *vdec_device_name[] = {
+     "amvdec_avs",
+     "amvdec_yuv",
+     "amvdec_h264mvc",
+-    "amvdec_h264_4k2k"
++    "amvdec_h264_4k2k",
++    "amvdec_h265"
+ };
+ 
+ void vdec_set_decinfo(void *p)
+@@ -438,7 +522,7 @@ void vdec_poweron(vdec_type_t core)
+ #endif
+     } else if (core == VDEC_HCODEC) {
+ #if HAS_HDEC
+-        // hcodec poer on
++        // hcodec power on
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & ~0x3);
+         // wait 10uS
+         udelay(10);
+@@ -451,8 +535,25 @@ void vdec_poweron(vdec_type_t core)
+         WRITE_VREG(DOS_MEM_PD_HCODEC, 0);
+         // remove hcodec isolation
+         WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) & ~0x30);
+-#endif  
+-  }
++#endif		
++    }
++    else if (core == VDEC_HEVC) {
++#if  HAS_HEVC_VDEC
++        // hevc power on
++        WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & ~0xc0);
++        // wait 10uS
++        udelay(10);
++        // hevc soft reset
++        WRITE_VREG(DOS_SW_RESET3, 0xffffffff);
++        WRITE_VREG(DOS_SW_RESET3, 0);
++        // enable hevc clock
++        hevc_clock_enable();
++        // power up hevc memories
++        WRITE_VREG(DOS_MEM_PD_HEVC, 0);
++        // remove hevc isolation
++        WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) & ~0xc00);
++#endif
++    }
+ 
+     spin_unlock_irqrestore(&lock, flags);
+ }
+@@ -473,6 +574,7 @@ void vdec_poweroff(vdec_type_t core)
+         // vdec1 power off
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0xc);
+     } else if (core == VDEC_2) {
++#if  HAS_VDEC2   
+         // enable vdec2 isolation
+         WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0x300);
+         // power off vdec2 memories
+@@ -481,7 +583,9 @@ void vdec_poweroff(vdec_type_t core)
+         VDEC2_CLOCK_OFF();
+         // vdec2 power off
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0x30);
++#endif
+     } else if (core == VDEC_HCODEC) {
++#if  HAS_HDEC    
+         // enable hcodec isolation
+         WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0x30);
+         // power off hcodec memories
+@@ -490,6 +594,18 @@ void vdec_poweroff(vdec_type_t core)
+         HCODEC_CLOCK_OFF();
+         // hcodec power off
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 3);
++#endif
++    } else if (core == VDEC_HEVC) {
++#if  HAS_HEVC_VDEC
++        // enable hevc isolation
++        WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0xc00);
++        // power off hevc memories
++        WRITE_VREG(DOS_MEM_PD_HEVC, 0xffffffffUL);
++        // disable hevc clock
++        HEVC_CLOCK_OFF();
++        // hevc power off
++        WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0xc0);
++#endif        
+     }
+ 
+     spin_unlock_irqrestore(&lock, flags);
+@@ -505,15 +621,26 @@ bool vdec_on(vdec_type_t core)
+             ret = true;
+         }
+     } else if (core == VDEC_2) {
++#if HAS_VDEC2
+         if (((READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & 0x30) == 0) &&
+             (READ_MPEG_REG(HHI_VDEC2_CLK_CNTL) & 0x100)) {
+             ret = true;
+         }
++#endif
+     } else if (core == VDEC_HCODEC) {
++#if  HAS_HDEC 
+         if (((READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & 0x3) == 0) &&
+             (READ_MPEG_REG(HHI_VDEC_CLK_CNTL) & 0x1000000)) {
+             ret = true;
+         }
++#endif
++    } else if (core == VDEC_HEVC) {
++#if  HAS_HEVC_VDEC 
++        if (((READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & 0xc0) == 0) &&
++            (READ_MPEG_REG(HHI_VDEC2_CLK_CNTL) & 0x1000000)) {
++            ret = true;
++        }
++#endif
+     }
+ 
+     return ret;
+diff --git a/drivers/amlogic/amports/vdec.h b/drivers/amlogic/amports/vdec.h
+index e0a802e89be8..9cce8036d925 100755
+--- a/drivers/amlogic/amports/vdec.h
++++ b/drivers/amlogic/amports/vdec.h
+@@ -42,7 +42,8 @@ void vdec_power_mode(int level);
+ typedef enum {
+     VDEC_1,
+     VDEC_HCODEC,
+-    VDEC_2
++    VDEC_2,
++    VDEC_HEVC
+ } vdec_type_t;
+ 
+ extern void vdec2_power_mode(int level);
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 293199c10cd5..3f327b38a268 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -46,6 +46,7 @@
+ #define PORT_TYPE_RM        0x20
+ #define PORT_TYPE_SUB       0x40
+ #define PORT_TYPE_SUB_RD    0x80
++#define PORT_TYPE_HEVC      0x100
+ #define PORT_TYPE_USERDATA	0x200
+ #endif
+ 
+diff --git a/include/linux/amlogic/amports/ptsserv.h b/include/linux/amlogic/amports/ptsserv.h
+index fadcdae7df90..7dca98fee800 100755
+--- a/include/linux/amlogic/amports/ptsserv.h
++++ b/include/linux/amlogic/amports/ptsserv.h
+@@ -22,10 +22,17 @@
+ #ifndef PTSSERV_H
+ #define PTSSERV_H
+ 
++#include <mach/cpu.h>
++
+ enum {
+     PTS_TYPE_VIDEO = 0,
+     PTS_TYPE_AUDIO = 1,
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    PTS_TYPE_HEVC  = 2,
++    PTS_TYPE_MAX   = 3
++#else
+     PTS_TYPE_MAX   = 2
++#endif
+ };
+ 
+ #define apts_checkin(x) pts_checkin(PTS_TYPE_AUDIO, (x))
+diff --git a/include/linux/amlogic/amports/vformat.h b/include/linux/amlogic/amports/vformat.h
+index 8db99536bdfb..4e1b035d21a7 100755
+--- a/include/linux/amlogic/amports/vformat.h
++++ b/include/linux/amlogic/amports/vformat.h
+@@ -34,6 +34,7 @@ typedef enum {
+     VFORMAT_YUV,    // Use SW decoder
+     VFORMAT_H264MVC,
+     VFORMAT_H264_4K2K,
++    VFORMAT_HEVC,
+     VFORMAT_MAX
+ } vformat_t;
+ 
+diff --git a/mk_m8b.sh b/mk_m8b.sh
+index 63efa91b0691..eb657b822d99 100755
+--- a/mk_m8b.sh
++++ b/mk_m8b.sh
+@@ -1,7 +1,6 @@
+ #! /bin/bash
+ 
+-#make UIMAGE_COMPRESSION=none uImage -j
+-make uImage -j
++make UIMAGE_COMPRESSION=none uImage -j
+ #make modules
+ 
+ make meson8b_skt.dtd
+-- 
+2.19.0
+

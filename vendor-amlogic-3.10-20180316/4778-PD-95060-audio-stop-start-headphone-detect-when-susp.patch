@@ -1,0 +1,456 @@
+From cf5adc9b198c87d2c215e97b3a5bdd247dc727e9 Mon Sep 17 00:00:00 2001
+From: "sunny.luo" <sunny.luo@amlogic.com>
+Date: Mon, 25 Aug 2014 14:21:33 +0800
+Subject: [PATCH 4778/5965] PD#95060 audio: stop/start headphone detect when
+ suspend/resume
+
+Change-Id: I78569e21bcf7d02dd643d228e8bfed221dbc3a40
+
+Conflicts:
+
+	sound/soc/aml/m8/aml_m8.c
+---
+ drivers/amlogic/input/keyboard/adc_keypad.c |  32 +++++
+ drivers/amlogic/input/saradc/saradc.c       | 134 +++++++++++---------
+ sound/soc/aml/m8/aml_m8.c                   |  43 +++++--
+ sound/soc/aml/m8/aml_m8.h                   |   1 +
+ 4 files changed, 140 insertions(+), 70 deletions(-)
+
+diff --git a/drivers/amlogic/input/keyboard/adc_keypad.c b/drivers/amlogic/input/keyboard/adc_keypad.c
+index 0d8c9b66612d..abf43cf2353d 100755
+--- a/drivers/amlogic/input/keyboard/adc_keypad.c
++++ b/drivers/amlogic/input/keyboard/adc_keypad.c
+@@ -43,6 +43,9 @@
+ #include <linux/amlogic/saradc.h>
+ #include <linux/amlogic/input/adc_keypad.h>
+ #include <linux/of.h>
++#ifdef CONFIG_HAS_EARLYSUSPEND
++#include <linux/earlysuspend.h>
++#endif
+ 
+ #define POLL_PERIOD_WHEN_KEY_DOWN 10 /* unit msec */
+ #define POLL_PERIOD_WHEN_KEY_UP   50
+@@ -64,6 +67,9 @@ struct kp {
+ 	struct adc_key *key;
+ 	int key_num;
+ 	struct work_struct work_update;
++#ifdef CONFIG_HAS_EARLYSUSPEND
++	struct early_suspend early_suspend;
++#endif
+ };
+ 
+ #ifndef CONFIG_OF
+@@ -191,6 +197,21 @@ static int register_keypad_dev(struct kp  *kp)
+     return ret;
+ }
+ 
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static void kp_early_suspend(struct early_suspend *h)
++{
++    struct kp *kp = container_of(h, struct kp, early_suspend);
++    del_timer_sync(&kp->timer);
++    cancel_work_sync(&kp->work_update);
++}
++
++static void kp_late_resume(struct early_suspend *h)
++{
++    struct kp *kp = container_of(h, struct kp, early_suspend);
++    mod_timer(&kp->timer,jiffies+msecs_to_jiffies(kp->poll_period));
++}
++#endif
++
+ static int kp_probe(struct platform_device *pdev)
+ {
+     struct kp *kp;
+@@ -355,6 +376,12 @@ static int kp_probe(struct platform_device *pdev)
+     printk("adc keypad register input device completed.\r\n");
+     register_keypad_dev(gp_kp);
+     kfree(key_param);
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    kp->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN;
++    kp->early_suspend.suspend = kp_early_suspend;
++    kp->early_suspend.resume = kp_late_resume;
++    register_early_suspend(&kp->early_suspend);
++#endif
+     return 0;
+ 
+     get_key_param_failed:
+@@ -372,6 +399,11 @@ static int kp_remove(struct platform_device *pdev)
+     struct adc_kp_platform_data *pdata = platform_get_drvdata(pdev);
+     struct kp *kp = gp_kp;
+ 
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    unregister_early_suspend(&kp->early_suspend);
++#endif
++    del_timer_sync(&kp->timer);
++    cancel_work_sync(&kp->work_update);
+     input_unregister_device(kp->input);
+     input_free_device(kp->input);
+     unregister_chrdev(kp->config_major,kp->config_name);
+diff --git a/drivers/amlogic/input/saradc/saradc.c b/drivers/amlogic/input/saradc/saradc.c
+index e0d6393639c0..e81f38e525d7 100755
+--- a/drivers/amlogic/input/saradc/saradc.c
++++ b/drivers/amlogic/input/saradc/saradc.c
+@@ -11,6 +11,12 @@
+ #endif
+ 
+ #define ENABLE_CALIBRATION
++//#define ENABLE_DYNAMIC_POWER
++
++#define SARADC_STATE_IDLE 0
++#define SARADC_STATE_BUSY 1
++#define SARADC_STATE_SUSPEND 2
++
+ #ifndef CONFIG_OF
+ #define CONFIG_OF
+ #endif
+@@ -21,7 +27,7 @@ struct saradc {
+ 	int ref_nominal;
+ 	int coef;
+ #endif
+-
++	int state;
+ };
+ 
+ static struct saradc *gp_saradc;
+@@ -35,6 +41,27 @@ static struct saradc *gp_saradc;
+ 
+ static u8 chan_mux[SARADC_CHAN_NUM] = {0,1,2,3,4,5,6,7};
+ 
++static inline void saradc_power_control(int on)
++{
++	if (on) {
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++		enable_bandgap();
++		udelay(10);
++#endif
++		enable_adc();
++		udelay(5);
++		enable_clock();
++		enable_sample_engine();
++	}
++	else {
++		disable_sample_engine();
++		disable_clock();
++		disable_adc();
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++		disable_bandgap();
++#endif 			
++	}
++}
+ 
+ static void saradc_reset(void)
+ {
+@@ -42,11 +69,7 @@ static void saradc_reset(void)
+ 
+ 	//set adc clock as 1.28Mhz
+ 	set_clock_divider(20);
+-	enable_clock();
+-	enable_adc();
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	enable_bandgap();
+-#endif
++	saradc_power_control(1);
+ 	set_sample_mode(DIFF_MODE);
+ 	set_tempsen(0);
+ 	disable_fifo_irq();
+@@ -136,7 +159,6 @@ static int saradc_get_cal_value(struct saradc *saradc, int val)
+ }
+ #endif
+ 
+-static u8 print_flag = 0; //(1<<CHAN_4)
+ #ifdef CONFIG_AMLOGIC_THERMAL
+ void temp_sensor_adc_init(int triming)
+ {
+@@ -148,62 +170,63 @@ void temp_sensor_adc_init(int triming)
+ 	enable_temp__();
+ }
+ #endif
++
+ int get_adc_sample(int chan)
+ {
+-	int count;
+-	int value=-1;
+-	int sum;
++	int value, count;
+ 	unsigned long flags;
++	
+ 	if (!gp_saradc)
+ 		return -1;
+-	
+ 	spin_lock_irqsave(&gp_saradc->lock,flags);
+-
++	if (gp_saradc->state == SARADC_STATE_SUSPEND) {
++		spin_unlock_irqrestore(&gp_saradc->lock,flags);
++		return -1;
++	}
++	gp_saradc->state = SARADC_STATE_BUSY;
++#ifdef ENABLE_DYNAMIC_POWER
++	saradc_power_control(1);
++#endif
+ 	set_chan_list(chan, 1);
+ 	set_avg_mode(chan, NO_AVG_MODE, SAMPLE_NUM_8);
+ 	set_sample_mux(chan, chan_mux[chan]);
+ 	set_detect_mux(chan_mux[chan]);
+ 	set_idle_mux(chan_mux[chan]); // for revb
+-	enable_sample_engine();
+ 	start_sample();
+ 
+ 	// Read any CBUS register to delay one clock cycle after starting the sampling engine
+ 	// The bus is really fast and we may miss that it started
+-	{ count = get_reg(ISA_TIMERE); }
+-
++	value = get_reg(ISA_TIMERE);
+ 	count = 0;
+ 	while (delta_busy() || sample_busy() || avg_busy()) {
+ 		if (++count > 10000) {
+ 			printk(KERN_ERR "ADC busy error=%x.\n", READ_CBUS_REG(SAR_ADC_REG0));
++			value = -1;
+ 			goto end;
+ 		}
+ 	}
+-    stop_sample();
+-    
+-    sum = 0;
+-    count = 0;
+-    value = get_fifo_sample();
+-	while (get_fifo_cnt()) {
+-        value = get_fifo_sample() & 0x3ff;
+-        //if ((value != 0x1fe) && (value != 0x1ff)) {
+-			sum += value & 0x3ff;
+-            count++;
+-        //}
++	
++	stop_sample();	
++	value = get_fifo_sample();
++	value = count = 0;
++	while (get_fifo_cnt() && (count < 64)) {
++		value += get_fifo_sample() & 0x3ff;
++		count++;
++	}
++	if (!count) {
++		value = -1;
++		goto end;
+ 	}
+-	value = (count) ? (sum / count) : (-1);
++	value /= count;
++#ifdef ENABLE_CALIBRATION
++	value = saradc_get_cal_value(gp_saradc, value);
++#endif
+ 
+ end:
+-	if ((print_flag>>chan)&1) {
+-		printk("before cal: ch%d = %d\n", chan, value);
+-	}
+-#ifdef ENABLE_CALIBRATION
+-  value = saradc_get_cal_value(gp_saradc, value);
+-  if ((print_flag>>chan)&1) {
+-			printk("after cal: ch%d = %d\n\n", chan, value);
+-	}
++#ifdef ENABLE_DYNAMIC_POWER
++	saradc_power_control(0);
+ #endif
+-	disable_sample_engine();
+-//	set_sc_phase();
++	gp_saradc->state = SARADC_STATE_IDLE;
+ 	spin_unlock_irqrestore(&gp_saradc->lock,flags);
+ 	return value;
+ }
+@@ -297,12 +320,7 @@ static ssize_t saradc_ch7_show(struct class *cla, struct class_attribute *attr,
+ {
+     return sprintf(buf, "%d\n", get_adc_sample(7));
+ }
+-static ssize_t saradc_print_flag_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
+-{
+-		sscanf(buf, "%x", (int*)&print_flag);
+-    printk("print_flag=%d\n", print_flag);
+-    return count;
+-}
++
+ #ifndef CONFIG_MESON_CPU_TEMP_SENSOR
+ static ssize_t saradc_temperature_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
+ {
+@@ -414,7 +432,6 @@ static struct class_attribute saradc_class_attrs[] = {
+     __ATTR(temperature_mode, S_IRUGO | S_IWUSR, temperature_mode_show, temperature_mode_store),
+ #endif
+     __ATTR_RO(saradc_ch7),    
+-    __ATTR(saradc_print_flag, S_IRUGO | S_IWUSR,NULL, saradc_print_flag_store),
+     __ATTR_NULL
+ };
+ static struct class saradc_class = {
+@@ -435,6 +452,7 @@ static int saradc_probe(struct platform_device *pdev)
+ 	}
+ 	saradc_reset();
+ 	gp_saradc = saradc;
++	saradc->state = SARADC_STATE_IDLE;
+ #ifdef ENABLE_CALIBRATION
+ 	saradc->coef = 0;
+   saradc_internal_cal(saradc);
+@@ -453,35 +471,33 @@ err_free_mem:
+ 	return err;
+ }
+ 
+-static int saradc_suspend(struct platform_device *pdev,pm_message_t state)
++static int saradc_suspend(struct platform_device *pdev, pm_message_t state)
+ {
++	unsigned long flags;
+ 	printk("%s: disable SARADC\n", __func__);
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	disable_bandgap();
+-#endif
+-	disable_adc();
+-	disable_clock();
++	spin_lock_irqsave(&gp_saradc->lock,flags);
++	saradc_power_control(0);
++	gp_saradc->state = SARADC_STATE_SUSPEND;
++	spin_unlock_irqrestore(&gp_saradc->lock,flags);
+ 	return 0;
+ }
+ 
+ static int saradc_resume(struct platform_device *pdev)
+ {
++	unsigned long flags;
+ 	printk("%s: enable SARADC\n", __func__);
+-	enable_clock();
+-	enable_adc();
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	enable_bandgap();
+-#endif
++	spin_lock_irqsave(&gp_saradc->lock,flags);
++	saradc_power_control(1);
++	gp_saradc->state = SARADC_STATE_IDLE;
++	spin_unlock_irqrestore(&gp_saradc->lock,flags);
+ 	return 0;
+ }
+ 
+ static int __exit saradc_remove(struct platform_device *pdev)
+ {
+-	struct saradc *saradc = platform_get_drvdata(pdev);
+-	disable_adc();
+-	disable_sample_engine();
++	saradc_power_control(0);
++	kfree(gp_saradc);
+ 	gp_saradc = 0;
+-	kfree(saradc);
+ 	return 0;
+ }
+ #ifdef CONFIG_OF
+diff --git a/sound/soc/aml/m8/aml_m8.c b/sound/soc/aml/m8/aml_m8.c
+index f7f87890514b..f12493fde7a0 100755
+--- a/sound/soc/aml/m8/aml_m8.c
++++ b/sound/soc/aml/m8/aml_m8.c
+@@ -88,16 +88,16 @@ static void aml_audio_stop_timer(struct aml_audio_private_data *p_aml_audio)
+ 
+ static int hp_det_adc_value(struct aml_audio_private_data *p_aml_audio)
+ {
+-    int ret,hp_value,hp_val_sum,loop_num;
++    int ret,hp_value;
++    int hp_val_sum = 0;
++    int loop_num = 0;
+     unsigned int mic_ret = 0;
+-    hp_val_sum = 0;
+-    loop_num = 0;
+     
+     while(loop_num < 8){
+         hp_value = get_adc_sample(p_aml_audio->hp_adc_ch);
+         if(hp_value <0){
+             printk("hp detect get error adc value!\n");
+-            continue;
++            return -1; //continue;
+         }
+         hp_val_sum += hp_value;
+         loop_num ++;
+@@ -139,7 +139,6 @@ static int aml_audio_hp_detect(struct aml_audio_private_data *p_aml_audio)
+     while(loop_num < 3){
+         ret = hp_det_adc_value(p_aml_audio);
+         if(p_aml_audio->hp_last_state != ret){
+-            loop_num = 0;
+             msleep_interruptible(50);
+             if(ret < 0){
+                 ret = p_aml_audio->hp_last_state;
+@@ -148,8 +147,8 @@ static int aml_audio_hp_detect(struct aml_audio_private_data *p_aml_audio)
+             }
+         }else{
+             msleep_interruptible(50);
+-            loop_num = loop_num + 1;
+         }
++        loop_num = loop_num + 1;
+     }
+  
+    // mutex_unlock(&p_aml_audio->lock);
+@@ -225,7 +224,7 @@ static void aml_asoc_timer_func(unsigned long data)
+     struct aml_audio_private_data *p_aml_audio = (struct aml_audio_private_data *)data;
+     unsigned long delay = msecs_to_jiffies(150);
+ 
+-    if(p_aml_audio->hp_det_status){
++    if(p_aml_audio->hp_det_status && !p_aml_audio->suspended){
+         schedule_work(&p_aml_audio->work);
+     }
+     mod_timer(&p_aml_audio->timer, jiffies + delay);
+@@ -410,10 +409,19 @@ static int aml_set_bias_level(struct snd_soc_card *card,
+ #ifdef CONFIG_PM_SLEEP
+ static int aml_suspend_pre(struct snd_soc_card *card)
+ {
+-    printk(KERN_DEBUG "enter %s\n", __func__);
+-#if HP_DET
++    struct aml_audio_private_data * p_aml_audio;
+ 
+-#endif
++    printk(KERN_INFO "enter %s\n", __func__);
++    p_aml_audio = snd_soc_card_get_drvdata(card);
++    if(!p_aml_audio->hp_disable){
++        /* stop timer */
++        mutex_lock(&p_aml_audio->lock);
++        p_aml_audio->suspended = true;
++        if (p_aml_audio->timer_en) {
++            aml_audio_stop_timer(p_aml_audio);
++        }
++        mutex_unlock(&p_aml_audio->lock);
++    }
+     return 0;
+ }
+ 
+@@ -499,7 +507,19 @@ static int aml_resume_pre(struct snd_soc_card *card)
+ 
+ static int aml_resume_post(struct snd_soc_card *card)
+ {
+-    printk(KERN_DEBUG "enter %s\n", __func__);
++    struct aml_audio_private_data * p_aml_audio;
++
++    printk(KERN_INFO "enter %s\n", __func__);
++    p_aml_audio = snd_soc_card_get_drvdata(card);
++    if(!p_aml_audio->hp_disable){
++        mutex_lock(&p_aml_audio->lock);
++        p_aml_audio->suspended = false;
++        if (!p_aml_audio->timer_en) {
++            aml_audio_start_timer(p_aml_audio, msecs_to_jiffies(100));
++        }
++        mutex_unlock(&p_aml_audio->lock);
++    }
++
+     return 0;
+ }
+ #else
+@@ -638,6 +658,7 @@ static int aml_asoc_init(struct snd_soc_pcm_runtime *rtd)
+         p_aml_audio->timer.function = aml_asoc_timer_func;
+         p_aml_audio->timer.data = (unsigned long)p_aml_audio;
+         p_aml_audio->data= (void*)card;
++        p_aml_audio->suspended = false;
+ 
+         INIT_WORK(&p_aml_audio->work, aml_asoc_work_func);
+         mutex_init(&p_aml_audio->lock);
+diff --git a/sound/soc/aml/m8/aml_m8.h b/sound/soc/aml/m8/aml_m8.h
+index 7bfc1a3d19ea..02ac9e4cf407 100755
+--- a/sound/soc/aml/m8/aml_m8.h
++++ b/sound/soc/aml/m8/aml_m8.h
+@@ -21,6 +21,7 @@ struct aml_audio_private_data {
+     unsigned int mic_val;
+     unsigned int hp_detal;
+     unsigned int hp_adc_ch;
++    bool suspended;
+ 
+     bool mic_det;
+     bool hp_disable;
+-- 
+2.19.0
+

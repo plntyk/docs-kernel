@@ -1,0 +1,53 @@
+From 61ffac73366844578d7e773cdc33a4f6adca09d3 Mon Sep 17 00:00:00 2001
+From: Amit Shah <amit.shah@redhat.com>
+Date: Mon, 29 Jul 2013 14:23:21 +0930
+Subject: [PATCH 0903/5965] virtio: console: return -ENODEV on all read
+ operations after unplug
+
+commit 96f97a83910cdb9d89d127c5ee523f8fc040a804 upstream.
+
+If a port gets unplugged while a user is blocked on read(), -ENODEV is
+returned.  However, subsequent read()s returned 0, indicating there's no
+host-side connection (but not indicating the device went away).
+
+This also happened when a port was unplugged and the user didn't have
+any blocking operation pending.  If the user didn't monitor the SIGIO
+signal, they won't have a chance to find out if the port went away.
+
+Fix by returning -ENODEV on all read()s after the port gets unplugged.
+write() already behaves this way.
+
+Signed-off-by: Amit Shah <amit.shah@redhat.com>
+Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/char/virtio_console.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/char/virtio_console.c b/drivers/char/virtio_console.c
+index e4845f1c9a0b..fc45567ad3ac 100644
+--- a/drivers/char/virtio_console.c
++++ b/drivers/char/virtio_console.c
+@@ -749,6 +749,10 @@ static ssize_t port_fops_read(struct file *filp, char __user *ubuf,
+ 
+ 	port = filp->private_data;
+ 
++	/* Port is hot-unplugged. */
++	if (!port->guest_connected)
++		return -ENODEV;
++
+ 	if (!port_has_data(port)) {
+ 		/*
+ 		 * If nothing's connected on the host just return 0 in
+@@ -765,7 +769,7 @@ static ssize_t port_fops_read(struct file *filp, char __user *ubuf,
+ 		if (ret < 0)
+ 			return ret;
+ 	}
+-	/* Port got hot-unplugged. */
++	/* Port got hot-unplugged while we were waiting above. */
+ 	if (!port->guest_connected)
+ 		return -ENODEV;
+ 	/*
+-- 
+2.19.0
+

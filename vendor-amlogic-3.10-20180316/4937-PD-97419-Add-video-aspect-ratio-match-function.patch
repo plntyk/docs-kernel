@@ -1,0 +1,278 @@
+From 2df2977f12f3a987286b9bae77dc16d822691c0c Mon Sep 17 00:00:00 2001
+From: "ke.gong" <ke.gong@amlogic.com>
+Date: Sat, 11 Oct 2014 15:40:18 +0800
+Subject: [PATCH 4937/5965] PD #97419: Add video aspect ratio match function.
+
+Squashed commit of the following:
+
+commit f875db38ab7b0e9f8283130896db3bc3a4c5a0de
+Author: ke.gong <ke.gong@amlogic.com>
+Date:   Tue Sep 16 15:12:34 2014 +0800
+
+    PD #97419: Remove match_method interface and add match modes to screen_mode.
+
+commit 3206b3fed3ed9c5797f07376ba6633722aeacc5f
+Author: ke.gong <ke.gong@amlogic.com>
+Date:   Tue Sep 16 11:34:23 2014 +0800
+
+    PD #97419: Add video aspect ratio match function.
+
+    Add /sys/class/video/match_method interface.
+    0:VIDEO_MATCH_NONE
+    1:VIDEO_MATCH_IGNORE
+    2:VIDEO_MATCH_LETTER_BOX
+    3:VIDEO_MATCH_PAN_SCAN
+    4:VIDEO_MATCH_COMBINED
+
+Change-Id: I1a43b4c9b09a34be12f68f06a7a8a3760de37dd4
+---
+ drivers/amlogic/amports/video.c |   4 +-
+ drivers/amlogic/amports/video.h |  10 ++-
+ drivers/amlogic/amports/vpp.c   | 147 ++++++++++++++++++++++++++------
+ drivers/amlogic/amports/vpp.h   |   2 +-
+ 4 files changed, 133 insertions(+), 30 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 87b37b581203..c91372744eb9 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -4190,7 +4190,9 @@ static ssize_t video_zoom_store(struct class *cla, struct class_attribute *attr,
+ 
+ static ssize_t video_screen_mode_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+-    const char *wide_str[] = {"normal", "full stretch", "4-3", "16-9", "non-linear", "normal-noscaleup"};
++    const char *wide_str[] = {"normal", "full stretch", "4-3", "16-9", "non-linear", "normal-noscaleup",
++			"4-3 ignore", "4-3 letter box", "4-3 pan scan", "4-3 combined",
++			"16-9 ignore", "16-9 letter box", "16-9 pan scan", "16-9 combined"};
+ 
+     if (wide_setting < ARRAY_SIZE(wide_str)) {
+         return sprintf(buf, "%d:%s\n", wide_setting, wide_str[wide_setting]);
+diff --git a/drivers/amlogic/amports/video.h b/drivers/amlogic/amports/video.h
+index 154a0696f58b..00a7d920411b 100755
+--- a/drivers/amlogic/amports/video.h
++++ b/drivers/amlogic/amports/video.h
+@@ -29,7 +29,15 @@ enum {
+     VIDEO_WIDEOPTION_16_9             = 3,
+ 	VIDEO_WIDEOPTION_NONLINEAR        = 4,
+     VIDEO_WIDEOPTION_NORMAL_NOSCALEUP = 5,
+-    VIDEO_WIDEOPTION_MAX              = 6
++	VIDEO_WIDEOPTION_4_3_IGNORE       = 6,
++	VIDEO_WIDEOPTION_4_3_LETTER_BOX   = 7,
++	VIDEO_WIDEOPTION_4_3_PAN_SCAN     = 8,
++	VIDEO_WIDEOPTION_4_3_COMBINED     = 9,
++	VIDEO_WIDEOPTION_16_9_IGNORE      = 10,
++	VIDEO_WIDEOPTION_16_9_LETTER_BOX  = 11,
++	VIDEO_WIDEOPTION_16_9_PAN_SCAN    = 12,
++	VIDEO_WIDEOPTION_16_9_COMBINED    = 13,
++    VIDEO_WIDEOPTION_MAX              = 14
+ };
+ 
+ typedef  struct {
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+index 7276840fb3f5..7b3468b2bb8c 100755
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -180,6 +180,21 @@ module_param(force_filter_mode, int, 0664);
+ 
+ #endif
+ 
++#if 0
++#define DECL_PARM(name)\
++static int name;\
++MODULE_PARM_DESC(name, "\n "#name"  \n");\
++module_param(name, int, 0664);
++
++DECL_PARM(debug_wide_mode)
++DECL_PARM(debug_video_left)
++DECL_PARM(debug_video_top)
++DECL_PARM(debug_video_width)
++DECL_PARM(debug_video_height)
++DECL_PARM(debug_ratio_x)
++DECL_PARM(debug_ratio_y)
++#endif
++
+ #define ZOOM_BITS       18
+ #define PHASE_BITS      8
+ 
+@@ -352,6 +367,9 @@ vpp_set_filters2(u32 width_in,
+     u32 width_out = vinfo->width;
+     u32 height_out = vinfo->height;
+     u32 aspect_ratio_out = (vinfo->aspect_ratio_den << 8) / vinfo->aspect_ratio_num;
++	bool fill_match = true;
++	u32 orig_aspect = 0;
++	u32 screen_aspect = 0;
+ 
+     if (likely(w_in > (video_source_crop_left + video_source_crop_right))) {
+         w_in -= video_source_crop_left + video_source_crop_right;
+@@ -383,7 +401,7 @@ RESTART:
+     wide_mode = vpp_flags & VPP_FLAG_WIDEMODE_MASK;
+ 
+     /* keep 8 bits resolution for aspect conversion */
+-    if (wide_mode == VIDEO_WIDEOPTION_4_3) {
++    if (wide_mode == VIDEO_WIDEOPTION_4_3) {	
+         if (vpp_flags & VPP_FLAG_PORTRAIT_MODE)
+             aspect_factor = 0x155;
+         else
+@@ -397,6 +415,20 @@ RESTART:
+             aspect_factor = 0x90;
+         wide_mode = VIDEO_WIDEOPTION_NORMAL;
+     }
++	else if ((wide_mode >= VIDEO_WIDEOPTION_4_3_IGNORE) && (wide_mode <= VIDEO_WIDEOPTION_4_3_COMBINED)) {
++		if (aspect_factor != 0xc0)
++			fill_match = false;
++
++		orig_aspect = aspect_factor;
++		screen_aspect = 0xc0;
++	}
++	else if ((wide_mode >= VIDEO_WIDEOPTION_16_9_IGNORE) && (wide_mode <= VIDEO_WIDEOPTION_16_9_COMBINED)) {
++		if (aspect_factor != 0x90)
++			fill_match = false;
++
++		orig_aspect = aspect_factor;
++		screen_aspect = 0x90;
++	}
+ 
+     if ((aspect_factor == 0) || (wide_mode == VIDEO_WIDEOPTION_FULL_STRETCH) || (wide_mode == VIDEO_WIDEOPTION_NONLINEAR)) {
+         aspect_factor = 0x100;
+@@ -449,38 +481,99 @@ RESTART:
+         }
+     }
+ 
+-    screen_width = video_width * vpp_zoom_ratio / 100;
+-    screen_height = video_height * vpp_zoom_ratio / 100;
++	/*aspect ratio match*/
++	if ((wide_mode >= VIDEO_WIDEOPTION_4_3_IGNORE) && (wide_mode <= VIDEO_WIDEOPTION_16_9_COMBINED) && orig_aspect) {
++		if ((video_height << 8) > (video_width * aspect_ratio_out)) {
++			u32 real_video_height = (video_width * aspect_ratio_out) >> 8;
+ 
+-    ratio_x = (w_in << 18) / screen_width;
+-    if (ratio_x * screen_width < (w_in << 18)) {
+-        ratio_x++;
+-    }
++			video_top   += (video_height - real_video_height) >> 1;
++			video_height = real_video_height;
++		}
++		else {
++			u32 real_video_width = (video_height << 8) / aspect_ratio_out;
++
++			video_left  += (video_width - real_video_width) >> 1;
++			video_width  = real_video_width;
++		}
+ 
+-    ratio_y = (height_after_ratio << 18) / screen_height;
++		if (!fill_match) {
++			u32 screen_ratio_x, screen_ratio_y;
++
++			screen_ratio_x = 1 << 18;
++			screen_ratio_y = (orig_aspect << 18) / screen_aspect;
++
++			switch (wide_mode) {
++				case VIDEO_WIDEOPTION_4_3_LETTER_BOX:
++				case VIDEO_WIDEOPTION_16_9_LETTER_BOX:
++					screen_ratio_x = screen_ratio_y = max(screen_ratio_x, screen_ratio_y);
++					break;
++				case VIDEO_WIDEOPTION_4_3_PAN_SCAN:
++				case VIDEO_WIDEOPTION_16_9_PAN_SCAN:
++					screen_ratio_x = screen_ratio_y = min(screen_ratio_x, screen_ratio_y);
++					break;
++				case VIDEO_WIDEOPTION_4_3_COMBINED:
++				case VIDEO_WIDEOPTION_16_9_COMBINED:
++					screen_ratio_x = screen_ratio_y = ((screen_ratio_x + screen_ratio_y) >> 1);
++					break;
++				default:
++					break;
++			}
+ 
+-    if (wide_mode == VIDEO_WIDEOPTION_NORMAL) {
+-        ratio_x = ratio_y = max(ratio_x, ratio_y);
+-        ratio_y = (ratio_y << 8) / aspect_factor;
+-    }
+-    else if (wide_mode == VIDEO_WIDEOPTION_NORMAL_NOSCALEUP) {
+-        u32 r1, r2;
+-        r1 = max(ratio_x, ratio_y);
+-        r2 = (r1 << 8) / aspect_factor;
+-
+-		if ((r1 < (1<<18)) || (r2 < (1<<18))) {
+-			if (r1 < r2) {
+-				ratio_x = 1 << 18;
+-				ratio_y = (ratio_x << 8) / aspect_factor;
++			ratio_x = screen_ratio_x * w_in / video_width;
++			ratio_y = screen_ratio_y * h_in / orig_aspect * screen_aspect / video_height;
++		}
++		else {
++			screen_width  = video_width * vpp_zoom_ratio / 100;
++			screen_height = video_height * vpp_zoom_ratio / 100;
++			
++			ratio_x = (w_in << 18) / screen_width;
++			ratio_y = (h_in << 18) / screen_height;
++		}
++	}
++	else {
++		screen_width = video_width * vpp_zoom_ratio / 100;
++		screen_height = video_height * vpp_zoom_ratio / 100;
++
++		ratio_x = (w_in << 18) / screen_width;
++		if (ratio_x * screen_width < (w_in << 18)) {
++			ratio_x++;
++		}
++
++		ratio_y = (height_after_ratio << 18) / screen_height;
++
++		if (wide_mode == VIDEO_WIDEOPTION_NORMAL) {
++			ratio_x = ratio_y = max(ratio_x, ratio_y);
++			ratio_y = (ratio_y << 8) / aspect_factor;
++		}
++		else if (wide_mode == VIDEO_WIDEOPTION_NORMAL_NOSCALEUP) {
++			u32 r1, r2;
++			r1 = max(ratio_x, ratio_y);
++			r2 = (r1 << 8) / aspect_factor;
++
++			if ((r1 < (1<<18)) || (r2 < (1<<18))) {
++				if (r1 < r2) {
++					ratio_x = 1 << 18;
++					ratio_y = (ratio_x << 8) / aspect_factor;
++				} else {
++					ratio_y = 1 << 18;
++					ratio_x = aspect_factor << 10;
++				}
+ 			} else {
+-				ratio_y = 1 << 18;
+-				ratio_x = aspect_factor << 10;
++				ratio_x = r1;
++				ratio_y = r2;
+ 			}
+-		} else {
+-			ratio_x = r1;
+-			ratio_y = r2;
+ 		}
+-    }
++	}
++
++#if 0
++	debug_video_left   = video_left;
++	debug_video_top    = video_top;
++	debug_video_width  = video_width;
++	debug_video_height = video_height;
++	debug_ratio_x = ratio_x;
++	debug_ratio_y = ratio_y;
++	debug_wide_mode = wide_mode;
++#endif
+ 
+     /* vertical */
+     ini_vphase = vpp_zoom_center_y & 0xff;
+diff --git a/drivers/amlogic/amports/vpp.h b/drivers/amlogic/amports/vpp.h
+index 5f8e823b5796..e2bd7a371b95 100755
+--- a/drivers/amlogic/amports/vpp.h
++++ b/drivers/amlogic/amports/vpp.h
+@@ -22,7 +22,7 @@
+ #ifndef VPP_H
+ #define VPP_H
+ 
+-#define VPP_FLAG_WIDEMODE_MASK      0x00000007
++#define VPP_FLAG_WIDEMODE_MASK      0x0000000F
+ #define VPP_FLAG_INTERLACE_OUT      0x00000010
+ #define VPP_FLAG_INTERLACE_IN       0x00000020
+ #define VPP_FLAG_CBCR_SEPARATE      0x00000040
+-- 
+2.19.0
+

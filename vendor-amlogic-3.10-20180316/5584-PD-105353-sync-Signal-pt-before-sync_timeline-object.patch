@@ -1,0 +1,80 @@
+From 0ea89221b2598b27163ea0fe516dde0715df649b Mon Sep 17 00:00:00 2001
+From: Prakash Kamliya <pkamliya@codeaurora.org>
+Date: Tue, 4 Feb 2014 16:08:35 -0800
+Subject: [PATCH 5584/5965] PD#105353: sync: Signal pt before sync_timeline
+ object gets destroyed
+
+mali r5p1 rel, merge this from mainline
+
+staging: android: sync: Signal pt before sync_timeline object gets destroyed
+
+There is a race condition
+
+Assume we have *one* sync_fence object, with *one* sync_pt
+which belongs to *one* sync_timeline, given this condition,
+sync_timeline->kref will have two counts, one for sync_timeline
+(implicit) and another for sync_pt.
+
+Assume following is the situation on CPU
+
+Theead-1 : (Thread which calls sync_timeline_destroy())
+  -> (some function calls)
+   -> sync_timeline_destory()
+    -> sync_timeline_signal() (CPU is inside this
+function after putting reference to sync_timeline)
+
+At this time Thread-2 comes and does following
+
+Thread-2 : (fclose on fence fd)
+> sync_fence_release() -> because of fclose() on fence object
+ -> sync_fence_free()
+  -> sync_pt_free()
+   -> kref_put(&pt->parent->kref, sync_timeline_free);
+    -> sync_timeline_free() (CPU is inside this because
+this time kref will be zero after _put)
+
+Thread-2 will free sync_timeline object before Thread-1
+has finished its work inside sync_timeline_signal.
+
+With this change we signals all sync_pt before putting
+reference to sync_timeline object.
+
+Cc: Colin Cross <ccross@android.com>
+Cc: Android Kernel Team <kernel-team@android.com>
+Signed-off-by: Prakash Kamliya <pkamliya@codeaurora.org>
+[jstultz: minor commit subject tweak]
+Signed-off-by: John Stultz <john.stultz@linaro.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+Change-Id: Ie0920cf2e6912a233f40f0c84f850c5b07d65777
+Signed-off-by: Jiyu Yang <jiyu.yang@amlogic.com>
+---
+ drivers/staging/android/sync.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/staging/android/sync.c b/drivers/staging/android/sync.c
+index 2e1c13acc527..8c54e2bbeac3 100755
+--- a/drivers/staging/android/sync.c
++++ b/drivers/staging/android/sync.c
+@@ -92,14 +92,14 @@ static void sync_timeline_free(struct kref *kref)
+ void sync_timeline_destroy(struct sync_timeline *obj)
+ {
+ 	obj->destroyed = true;
++	smp_wmb();
+ 
+ 	/*
+-	 * If this is not the last reference, signal any children
+-	 * that their parent is going away.
++	 * signal any children that their parent is going away.
+ 	 */
++	sync_timeline_signal(obj);
+ 
+-	if (!kref_put(&obj->kref, sync_timeline_free))
+-		sync_timeline_signal(obj);
++	kref_put(&obj->kref, sync_timeline_free);
+ }
+ EXPORT_SYMBOL(sync_timeline_destroy);
+ 
+-- 
+2.19.0
+

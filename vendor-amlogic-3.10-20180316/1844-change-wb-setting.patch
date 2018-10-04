@@ -1,0 +1,246 @@
+From 9a630bada6d2759be0d479977f004c8a0ef41f2c Mon Sep 17 00:00:00 2001
+From: "xiaoyu.yuan" <xiaoyu.yuan@droid05.amlogic.com>
+Date: Tue, 12 Nov 2013 22:12:42 +0800
+Subject: [PATCH 1844/5965] change wb setting
+
+---
+ drivers/amlogic/camera/common/config_parser.c | 57 +++++++++++++++----
+ drivers/amlogic/camera/common/config_parser.h | 11 +++-
+ drivers/amlogic/camera/ov5647.c               | 49 ++++++----------
+ 3 files changed, 72 insertions(+), 45 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/config_parser.c b/drivers/amlogic/camera/common/config_parser.c
+index a81736ba2947..fc0c0e533cc9 100755
+--- a/drivers/amlogic/camera/common/config_parser.c
++++ b/drivers/amlogic/camera/common/config_parser.c
+@@ -20,6 +20,7 @@ char *wb_key = "wb_start";
+ char *wave_key = "wave_start";
+ char *lenc_key = "lenc_start";
+ char *gamma_key = "gamma_start";
++char *wb_sensor_key = "sensor_start";
+ 
+ typedef struct{
+ 	char *buffer;
+@@ -859,6 +860,29 @@ int parse_gamma(buffer_para_t *buf_para,int *remained,int *offset){
+     return 0;
+ }
+ 
++
++int parse_wb_sensor(buffer_para_t *buf_para,int *remained,int *offset){
++    int i;
++    char *iter;
++
++    iter = search_string(buf_para,offset,remained,"sensor_start","sensor_end");
++    if(iter == NULL){
++        return -WRONG_FORMAT;
++    }
++    /***parser head***/
++    iter = strstr(iter,"export");
++    iter += 7;
++    for(i=0;i<WB_SENSOR_MAX;i++){
++        sscanf(iter,"%x",&(cf->wb_sensor_data.export[i]));
++        //printk("wb sensor:%x\n",cf->wb_sensor_data.export[i]);
++        iter = strstr(iter,",");
++        if(iter == NULL)
++            break;
++        iter += 1;
++    }
++    return 0;
++}
++
+ int parse_config(char *path){
+     char *buffer,*iter;
+     int file_size;
+@@ -951,7 +975,7 @@ int parse_config(char *path){
+                     }else{
+                         buf_para.data_start += strlen(wb_key);
+                     }
+-                }if(*(iter + 1) == 'a'){
++                }else if(*(iter + 1) == 'a'){
+                     if(memcmp(iter,wave_key,strlen(wave_key)) == 0){
+                         cf->wave_valid = 1;
+                         if((ret = parse_wave(&buf_para,&remained_size,&read_offset)) != 0){
+@@ -961,20 +985,33 @@ int parse_config(char *path){
+                     }else{
+                         buf_para.data_start += strlen(wave_key);
+                     }					
+-                }else
++                }else 
+                     buf_para.data_start += 1;
+ 
+                 break;
+             case 's':
+-                if(memcmp(iter,scenes_key,strlen(scenes_key)) == 0){
+-                    cf->scene_valid = 1;
+-                    if((ret = parse_scene(&buf_para,&remained_size,&read_offset)) != 0){
+-                        cf->scene_valid = 0;
+-                        printk("scene invalid :%d\n",ret);										
++                if(*(iter + 3) == 'n'){
++                    if(memcmp(iter,scenes_key,strlen(scenes_key)) == 0){
++                        cf->scene_valid = 1;
++                        if((ret = parse_scene(&buf_para,&remained_size,&read_offset)) != 0){
++                            cf->scene_valid = 0;
++                            printk("scene invalid :%d\n",ret);										
++                        }
++                    }else{
++                        buf_para.data_start += strlen(scenes_key);
+                     }
+-                }else{
+-                    buf_para.data_start += strlen(scenes_key);
+-                }
++                }else if(*(iter + 3) == 's'){
++                    if(memcmp(iter,wb_sensor_key,strlen(wb_sensor_key)) == 0){
++                        cf->wb_sensor_data_valid = 1;
++                        if((ret = parse_wb_sensor(&buf_para,&remained_size,&read_offset)) != 0){
++                            cf->wb_sensor_data_valid = 0;
++                            printk("wb sensor data invalid :%d\n",ret);									
++                        }
++                    }else{
++                        buf_para.data_start += strlen(wb_sensor_key);
++                    }
++                }else
++                    buf_para.data_start += 3;
+                 break;
+             case 'c':
+                 if(memcmp(iter,capture_key,strlen(capture_key)) == 0){
+diff --git a/drivers/amlogic/camera/common/config_parser.h b/drivers/amlogic/camera/common/config_parser.h
+index 4a57df1808dd..85efc809e5ba 100755
+--- a/drivers/amlogic/camera/common/config_parser.h
++++ b/drivers/amlogic/camera/common/config_parser.h
+@@ -15,6 +15,7 @@
+ #define CAPTURE_MAX 5
+ #define GAMMA_MAX 257
+ #define SCENE_MAX 202
++#define WB_SENSOR_MAX 6
+ #define BUFFER_SIZE 1024
+ 
+ enum error_code {
+@@ -88,8 +89,6 @@ typedef struct{
+ 	capture_type capture[CAPTURE_MAX];
+ }capture_struct;
+ 
+-
+-
+ typedef struct sensor_aet_s {
+     unsigned int exp;
+     unsigned int ag;
+@@ -139,6 +138,10 @@ typedef struct{
+ 	unsigned short gamma_b[GAMMA_MAX];
+ }gamma_struct;
+ 
++typedef struct{
++    int export[WB_SENSOR_MAX];
++}wb_sensor_struct;
++
+ typedef struct{
+     effect_struct eff;
+     int effect_valid;
+@@ -157,7 +160,9 @@ typedef struct{
+     lenc_struct lenc;
+     int lenc_valid;
+     gamma_struct gamma;
+-    int gamma_valid;  
++    int gamma_valid;
++    wb_sensor_struct wb_sensor_data;
++    int wb_sensor_data_valid;
+ }configure;
+ 
+ typedef struct{
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 7284530e5d66..b34ed3abbb1f 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -788,13 +788,7 @@ struct aml_camera_i2c_fig_s OV5647_preview_VGA_script[] = {
+ 	{0x5000,0x86},
+ 	{0x5001,0x00},
+ 	{0x5002,0x41},			
+-	{0x5180,0x08},			
+-	{0x5186,0x06},			
+-	{0x5187,0x68},	//0x58		
+-	{0x5188,0x04},
+-	{0x5189,0x00},
+-	{0x518a,0x08},  //0x05
+-	{0x518b,0x78},	//0x07
++	{0x5180,0x08},
+ 	{0x5003,0x08},
+ 	{0x5a00,0x08},
+ 	{0x3000,0xff},
+@@ -1051,12 +1045,6 @@ struct aml_camera_i2c_fig_s OV5647_preview_720P_script[] = {
+ 	{0x5001,0x00},
+ 	{0x5002,0x41},
+ 	{0x5180,0x08},
+-	{0x5186,0x06},			
+-	{0x5187,0x68},	//0x58		
+-	{0x5188,0x04},
+-	{0x5189,0x00},
+-	{0x518a,0x08},	//0x05
+-	{0x518b,0x78},	//0x07
+ 	{0x5003,0x08},
+ 	{0x5a00,0x08},
+ 	{0x3000,0xff},
+@@ -1216,13 +1204,7 @@ struct aml_camera_i2c_fig_s OV5647_preview_960P_script[] = {
+ 	{0x5000,0x86},  
+ 	{0x5001,0x00},  
+ 	{0x5002,0x41},	
+-	{0x5180,0x08},	
+-	{0x5186,0x06},			
+-	{0x5187,0x68},	//0x58		
+-	{0x5188,0x04},
+-	{0x5189,0x00},
+-	{0x518a,0x08},	//0x05
+-	{0x518b,0x78},	//0x07
++	{0x5180,0x08},
+ 	{0x5003,0x08},  
+ 	{0x5a00,0x08},  
+ 	{0x3000,0xff},  
+@@ -1471,12 +1453,6 @@ struct aml_camera_i2c_fig_s OV5647_preview_1080P_script[] = {
+ 	{0x5001,0x00},
+ 	{0x5002,0x41},
+ 	{0x5180,0x08},
+-	{0x5186,0x06},			
+-	{0x5187,0x68},	//0x58		
+-	{0x5188,0x04},
+-	{0x5189,0x00},
+-	{0x518a,0x08},	//0x05
+-	{0x518b,0x78},	//0x07
+ 	{0x5003,0x08},
+ 	{0x5a00,0x08},
+ 	{0x3000,0xff},
+@@ -1731,12 +1707,6 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ 	{0x5001,0x00},
+ 	{0x5002,0x41},
+ 	{0x5180,0x08},
+-	{0x5186,0x06},			
+-	{0x5187,0x68},	//0x58		
+-	{0x5188,0x04},
+-	{0x5189,0x00},
+-	{0x518a,0x08},	//0x05
+-	{0x518b,0x78},	//0x07
+ 	{0x5003,0x08},
+ 	{0x5a00,0x08},
+ 	{0x3000,0xff},
+@@ -2676,6 +2646,21 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+         }
+         i++;
+     }
++
++    int default_sensor_data[6] = {0x06,0x68,0x04,0x00,0x08,0x78};
++    int *sensor_data;
++    int addr_start = 0x5186;
++    if(cf->wb_sensor_data_valid == 1){
++        sensor_data = cf->wb_sensor_data.export;
++    }else
++        sensor_data = default_sensor_data;
++    for(i = 0;i < WB_SENSOR_MAX; i++){
++        if((i2c_put_byte(client, addr_start + i, sensor_data[i]) < 0)) {
++            printk("fail in setting resolution param. i=%d\n",i);
++            break;
++        }
++        i++;
++    }
+     ov5647_frmintervals_active.numerator = 1;
+     ov5647_frmintervals_active.denominator = res_param->active_fps;
+     ov5647_h_active = res_param->frmsize.width;
+-- 
+2.19.0
+

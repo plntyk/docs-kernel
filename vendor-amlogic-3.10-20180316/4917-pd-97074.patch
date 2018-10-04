@@ -1,0 +1,289 @@
+From 1486a3aca6bdffb98b24ae8f39286a8697fcd6b1 Mon Sep 17 00:00:00 2001
+From: "jiwei.sun" <jiwei.sun@amlogic.com>
+Date: Tue, 30 Sep 2014 15:35:03 +0800
+Subject: [PATCH 4917/5965] pd#97074:     [vudu] add drm_write code for ts
+
+Squashed commit of the following:
+
+commit e6a0b77a4e7cd7bd0419d1accd2ded8462e179e4
+Author: jiwei.sun <jiwei.sun@amlogic.com>
+Date:   Fri Sep 5 16:33:06 2014 +0800
+
+    PD #97074: pass compile
+
+commit f444c3746cfc1123a5ba11dd5c1382baa666191d
+Author: FFT <zh.cao@amlogic.com>
+Date:   Fri Nov 1 17:04:18 2013 +0800
+
+    [vudu] add drm_write code for ts
+
+Change-Id: Ia3475113420afac3a00b378c0cc16f4117dfcd0d
+---
+ drivers/amlogic/amports/amstream.c  |   9 ++-
+ drivers/amlogic/amports/esparser.h  |  23 ------
+ drivers/amlogic/amports/streambuf.h |  25 ++++++
+ drivers/amlogic/amports/tsdemux.c   | 115 ++++++++++++++++++++++++++--
+ drivers/amlogic/amports/tsdemux.h   |   4 +
+ 5 files changed, 144 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 9b073ac378cc..2076f9e6bf12 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -875,7 +875,14 @@ static ssize_t amstream_mpts_write(struct file *file, const char *buf,
+ #ifdef DATA_DEBUG
+     debug_file_write(buf, count);
+ #endif
+-    return tsdemux_write(file, pvbuf, pabuf, buf, count);
++	if (port->flag & PORT_FLAG_DRM){
++		r = drm_tswrite(file, pvbuf, pabuf, buf, count);
++	}
++	else{
++		r = tsdemux_write(file, pvbuf, pabuf, buf, count);
++	}
++
++    return r;
+ }
+ 
+ static ssize_t amstream_mpps_write(struct file *file, const char *buf,
+diff --git a/drivers/amlogic/amports/esparser.h b/drivers/amlogic/amports/esparser.h
+index 2b88c96033ba..a33bf99dbfb6 100755
+--- a/drivers/amlogic/amports/esparser.h
++++ b/drivers/amlogic/amports/esparser.h
+@@ -151,29 +151,6 @@ extern void esparser_sub_reset(void);
+ #define  TRACE()	printk("drm--[%s::%d]\n",__FUNCTION__,__LINE__)
+ 
+ 
+-typedef enum {
+-    DRM_LEVEL1     = 1,
+-    DRM_LEVEL2     = 2,
+-    DRM_LEVEL3     = 3,
+-    DRM_NONE       = 4, 
+-} drm_level_t;
+-
+-
+-#define TYPE_DRMINFO   0x80
+-
+-typedef struct drm_info {
+-    drm_level_t drm_level;
+-	int drm_flag;
+-	int drm_hasesdata;
+-	int drm_priv;
+-    unsigned int drm_pktsize;
+-	unsigned int drm_pktpts;
+-	unsigned int drm_phy;
+-	unsigned int drm_vir;
+-	unsigned int drm_remap;
+-	int data_offset;
+-	int extpad[8];
+-} drminfo_t;
+ 
+ 
+ 
+diff --git a/drivers/amlogic/amports/streambuf.h b/drivers/amlogic/amports/streambuf.h
+index 663f2f4ce3ef..b0aedf7b03be 100755
+--- a/drivers/amlogic/amports/streambuf.h
++++ b/drivers/amlogic/amports/streambuf.h
+@@ -81,6 +81,31 @@ typedef struct stream_port_s {
+     u32 sid;
+     u32 pcrid;
+ } stream_port_t;
++typedef enum {
++    DRM_LEVEL1     = 1,
++    DRM_LEVEL2     = 2,
++    DRM_LEVEL3     = 3,
++    DRM_NONE       = 4, 
++} drm_level_t;
++
++
++typedef struct drm_info {
++    drm_level_t drm_level;
++	int drm_flag;
++	int drm_hasesdata;
++	int drm_priv;
++    unsigned int drm_pktsize;
++	unsigned int drm_pktpts;
++	unsigned int drm_phy;
++	unsigned int drm_vir;
++	unsigned int drm_remap;
++	int data_offset;
++	int extpad[8];
++} drminfo_t;
++
++
++
++#define TYPE_DRMINFO   0x80
+ 
+ extern ulong fetchbuf, *fetchbuf_remap;
+ 
+diff --git a/drivers/amlogic/amports/tsdemux.c b/drivers/amlogic/amports/tsdemux.c
+index 713c7deae06d..c5769afb10da 100755
+--- a/drivers/amlogic/amports/tsdemux.c
++++ b/drivers/amlogic/amports/tsdemux.c
+@@ -393,7 +393,7 @@ static irqreturn_t parser_isr(int irq, void *dev_id)
+     return IRQ_HANDLED;
+ }
+ 
+-static ssize_t _tsdemux_write(const char __user *buf, size_t count)
++static ssize_t _tsdemux_write(const char __user *buf, size_t count, int isphybuf)
+ {
+     size_t r = count;
+     const char __user *p = buf;
+@@ -401,18 +401,27 @@ static ssize_t _tsdemux_write(const char __user *buf, size_t count)
+     int ret;
+ 
+     if (r > 0) {
+-        len = min(r, (size_t)FETCHBUF_SIZE);
+-
+-        if (copy_from_user(fetchbuf_remap, p, len)) {
++		if (isphybuf){
++			len=count;
++		}
++		else {
++        	len = min(r, (size_t)FETCHBUF_SIZE);
++		
++		
++        	if (copy_from_user(fetchbuf_remap, p, len)) 
+             return -EFAULT;
+         }
+ 
+         fetch_done = 0;
+ 
+         wmb();
+-
+-        WRITE_MPEG_REG(PARSER_FETCH_ADDR, virt_to_phys((u8 *)fetchbuf));
+-        
++		
++		if (isphybuf){
++			WRITE_MPEG_REG(PARSER_FETCH_ADDR, (u32)buf);
++		}else{
++	        WRITE_MPEG_REG(PARSER_FETCH_ADDR, virt_to_phys((u8 *)fetchbuf));
++		}
++		
+         WRITE_MPEG_REG(PARSER_FETCH_CMD, (7 << FETCH_ENDIAN) | len);
+ 
+         ret = wait_event_interruptible_timeout(wq, fetch_done != 0, HZ/2);
+@@ -725,6 +734,96 @@ static int limited_delay_check(struct file *file,
+ 	return write_size;
+ }
+ 
++ssize_t drm_tswrite(struct file *file,
++                      struct stream_buf_s *vbuf,
++                      struct stream_buf_s *abuf,
++                      const char __user *buf, size_t count)
++
++{
++    s32 r;
++	u32 realcount;
++	u32 re_count = count;
++	u32 havewritebytes =0;
++    
++    drminfo_t tmpmm;
++	drminfo_t *drm=&tmpmm;
++	u32 res=0;
++	int isphybuf=0;
++
++    stream_port_t *port = (stream_port_t *)file->private_data;
++    size_t wait_size, write_size;
++
++    if (buf == NULL || count == 0) {
++        return -EINVAL;
++    }
++	
++	res = copy_from_user(drm, buf, sizeof(drminfo_t));
++	if (res) {
++		printk("drm kmalloc failed res[%d]\n",res);	
++		return -EFAULT;
++	}
++
++	realcount = drm->drm_pktsize;  //buf only has drminfo not have esdata;
++	buf = (char *)drm->drm_phy;
++	isphybuf =1;
++	//printk("drm->drm_flag = 0x%x,realcount = %d , buf = 0x%x ", drm->drm_flag,realcount, buf);
++	
++	count = realcount;
++	
++	while (count > 0){
++		if ((stbuf_space(vbuf) < count) ||
++			(stbuf_space(abuf) < count)) {
++			if (file->f_flags & O_NONBLOCK) {
++				write_size=min(stbuf_space(vbuf), stbuf_space(abuf));
++				if(write_size<=188)/*have 188 bytes,write now., */
++					return -EAGAIN;
++			}
++			else{
++				wait_size = min(stbuf_canusesize(vbuf) / 8, stbuf_canusesize(abuf) / 4);
++				if ((port->flag & PORT_FLAG_VID)
++					&& (stbuf_space(vbuf) < wait_size)) {
++					r = stbuf_wait_space(vbuf, wait_size);
++		
++					if (r < 0) {
++						printk("write no space--- no space,%d--%d,r-%d\n",stbuf_space(vbuf),stbuf_space(abuf),r);
++						return r;
++					}
++				}
++		
++				if ((port->flag & PORT_FLAG_AID)
++					&& (stbuf_space(abuf) < wait_size)) {
++					r = stbuf_wait_space(abuf, wait_size);
++		
++					if (r < 0) {
++						printk("write no stbuf_wait_space--- no space,%d--%d,r-%d\n",stbuf_space(vbuf),stbuf_space(abuf),r);
++						return r;
++					}
++				}
++			}
++		}
++		
++		write_size = min(stbuf_space(vbuf), stbuf_space(abuf));
++		write_size = min(count, write_size);
++		//printk("write_size = %d,count = %d, \n", write_size, count);
++		if (write_size > 0) {
++			r = _tsdemux_write(buf, write_size, isphybuf);
++		} else {
++			return -EAGAIN;
++		}
++		
++		havewritebytes += r;
++		
++		//printk("havewritebytes = %d, r = %d, \n", havewritebytes,  r);
++	  	if (havewritebytes == realcount){
++			break;//write ok;
++		}else if (havewritebytes > realcount) {
++			printk(" error ! write too much \n");
++		}
++
++		count -= r;
++	}
++	return re_count;
++}
+ 
+ ssize_t tsdemux_write(struct file *file,
+                       struct stream_buf_s *vbuf,
+@@ -768,7 +867,7 @@ ssize_t tsdemux_write(struct file *file,
+ 	abuf->last_write_jiffies64=jiffies_64;
+ 	write_size=limited_delay_check(file,vbuf,abuf,buf,count);
+     if (write_size > 0) {
+-        return _tsdemux_write(buf, write_size);
++        return _tsdemux_write(buf, write_size, 0);
+     } else {
+         return -EAGAIN;
+     }
+diff --git a/drivers/amlogic/amports/tsdemux.h b/drivers/amlogic/amports/tsdemux.h
+index 025325aac787..56e4a22f5ba8 100755
+--- a/drivers/amlogic/amports/tsdemux.h
++++ b/drivers/amlogic/amports/tsdemux.h
+@@ -74,6 +74,10 @@ struct stream_buf_s;
+ extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid, bool is_hevc);
+ 
+ extern void tsdemux_release(void);
++extern ssize_t drm_tswrite(struct file *file,
++                             struct stream_buf_s *vbuf,
++                             struct stream_buf_s *abuf,
++                             const char __user *buf, size_t count);
+ 
+ extern ssize_t tsdemux_write(struct file *file,
+                              struct stream_buf_s *vbuf,
+-- 
+2.19.0
+

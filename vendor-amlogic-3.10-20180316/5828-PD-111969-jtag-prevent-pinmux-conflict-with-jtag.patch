@@ -1,0 +1,273 @@
+From 616732e1711d6dc5e1fc2e4ac3f60c13e56249a7 Mon Sep 17 00:00:00 2001
+From: Bo Yang <bo.yang@amlogic.com>
+Date: Thu, 10 Sep 2015 12:49:55 +0800
+Subject: [PATCH 5828/5965] PD#111969: jtag: prevent pinmux conflict with jtag
+
+The jtag driver support a new function:
+	is_jtag_disable()
+
+All the modules that multiplex with jtag should call the new
+function to prevent pinmux conflict with when jtag is setup.
+
+Change-Id: Iad5c29300247809092387aa5da786794ad20edc2
+---
+ .../hdmi_tx_hw_20/hdmi_tx_cec_hw.c            |  6 +++++
+ arch/arm/mach-mesong9bb/include/mach/sd.h     | 11 ++++++++
+ .../hdmi_tx_hw_20/hdmi_tx_cec_hw.c            |  6 +++++
+ arch/arm/mach-mesong9tv/include/mach/sd.h     | 11 ++++++++
+ sound/soc/aml/m8/aml_m8.c                     | 27 +++++++++++--------
+ sound/soc/aml/m8/aml_m8_rt5616.c              |  9 +++++--
+ 6 files changed, 57 insertions(+), 13 deletions(-)
+ mode change 100755 => 100644 sound/soc/aml/m8/aml_m8.c
+ mode change 100755 => 100644 sound/soc/aml/m8/aml_m8_rt5616.c
+
+diff --git a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+index a2a78bd22762..1025c15dcc4f 100644
+--- a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+@@ -8,6 +8,7 @@
+ #include <mach/am_regs.h>
+ #include <mach/power_gate.h>
+ #include <linux/amlogic/tvin/tvin.h>
++#include <linux/amlogic/jtag.h>
+ 
+ #include <mach/gpio.h>
+ #include <linux/amlogic/hdmi_tx/hdmi_info_global.h>
+@@ -801,6 +802,9 @@ void cec_enable_irq(void)
+ // 0xc8100014
+ void cec_pinmux_set(cec_pinmux_set_e cnt, int vaule)
+ {
++    if (!is_jtag_disable()) {
++        return;
++    }
+     //To do. gpioao_8/9
+     switch (cnt)
+     {
+@@ -819,7 +823,9 @@ void cec_pinmux_set(cec_pinmux_set_e cnt, int vaule)
+         aml_set_reg32_bits(P_PERIPHS_PIN_MUX_11, 0, 26, 1);
+         //disable JTAG on gpioao_8 pin for aocec
+         // Secureregister[1:0] = 0;
++        if (is_jtag_disable()) {
+         aml_set_reg32_bits(P_AO_SECURE_REG1, 0, 0, 2);
++        }
+         //disable HDMIRX_CEC on gpioao_8 pin
+         // out: pm_hdmitx_cec_gpioAO_8          = pin_mux_reg[16];
+         // in:  pm_hdmitx_cec_gpioAO_8          = pin_mux_reg11[28];
+diff --git a/arch/arm/mach-mesong9bb/include/mach/sd.h b/arch/arm/mach-mesong9bb/include/mach/sd.h
+index f6b7e3dc5471..f337b80cb423 100644
+--- a/arch/arm/mach-mesong9bb/include/mach/sd.h
++++ b/arch/arm/mach-mesong9bb/include/mach/sd.h
+@@ -13,6 +13,7 @@
+ #include <linux/mmc/host.h>
+ #include <linux/earlysuspend.h>
+ 
++#include <linux/amlogic/jtag.h>
+ #include <mach/cpu.h>
+ 
+ #define     AML_ERROR_RETRY_COUNTER         10
+@@ -694,29 +695,39 @@ extern int ext_codec;
+ // P_AO_SECURE_REG1 is "Secure Register 1" in <M8-Secure-AHB-Registers.doc>
+ #ifdef CONFIG_SND_AML_M8_SOC
+ #define aml_jtag_gpioao() do{\
++    if (is_jtag_disable()) {\
+     aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
+     if(!ext_codec)\
+         aml_set_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1))); \
++    }\
+ }while(0)
+ #else
+ #define aml_jtag_gpioao() do{\
++	if (is_jtag_disable()) {\
+ 	aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
++	}\
+ }while(0)
+ #endif
+ 
+ #define aml_jtag_sd() do{\
++	if (is_jtag_disable()) {\
+     aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1))); \
+     aml_set_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
++	}\
+ }while(0)
+ #else
+ /* Secure REG can only be accessed in Secure World if TrustZone enabled.*/
+ #include <mach/meson-secure.h>
+ #define aml_jtag_gpioao() do {\
++	if (is_jtag_disable()) {\
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<5) | (1<<9)))); \
++	}\
+ } while(0)
+ #define aml_jtag_sd() do {\
++	if (is_jtag_disable()) {\
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~(1<<8) | (1<<1))); \
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) | ((1<<5) | (1<<9))); \
++	}\
+ } while(0)
+ #endif /* CONFIG_MESON_TRUSTZONE */
+ 
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+index 9cdda6261789..38ad8a0e7333 100644
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+@@ -8,6 +8,7 @@
+ #include <mach/am_regs.h>
+ #include <mach/power_gate.h>
+ #include <linux/amlogic/tvin/tvin.h>
++#include <linux/amlogic/jtag.h>
+ 
+ #include <mach/gpio.h>
+ #include <linux/amlogic/hdmi_tx/hdmi_info_global.h>
+@@ -801,6 +802,9 @@ void cec_enable_irq(void)
+ // 0xc8100014              
+ void cec_pinmux_set(cec_pinmux_set_e cnt, int vaule)
+ {
++    if (!is_jtag_disable()) {
++        return;
++    }
+     //To do. gpioao_8/9
+     switch(cnt)
+     {
+@@ -819,7 +823,9 @@ void cec_pinmux_set(cec_pinmux_set_e cnt, int vaule)
+         aml_set_reg32_bits(P_PERIPHS_PIN_MUX_11, 0, 26, 1); 
+         //disable JTAG on gpioao_8 pin for aocec
+         // Secureregister[1:0] = 0;
++        if (is_jtag_disable()) {
+         aml_set_reg32_bits(P_AO_SECURE_REG1, 0, 0, 2); 
++        }
+         //disable HDMIRX_CEC on gpioao_8 pin
+         // out: pm_hdmitx_cec_gpioAO_8          = pin_mux_reg[16];
+         // in:  pm_hdmitx_cec_gpioAO_8          = pin_mux_reg11[28];
+diff --git a/arch/arm/mach-mesong9tv/include/mach/sd.h b/arch/arm/mach-mesong9tv/include/mach/sd.h
+index 680f05fcf2ea..9b975705c118 100644
+--- a/arch/arm/mach-mesong9tv/include/mach/sd.h
++++ b/arch/arm/mach-mesong9tv/include/mach/sd.h
+@@ -13,6 +13,7 @@
+ #include <linux/mmc/host.h>
+ #include <linux/earlysuspend.h>
+ 
++#include <linux/amlogic/jtag.h>
+ #include <mach/cpu.h>
+ 
+ #define     AML_ERROR_RETRY_COUNTER         10
+@@ -685,27 +686,37 @@ extern int ext_codec;
+ // P_AO_SECURE_REG1 is "Secure Register 1" in <M8-Secure-AHB-Registers.doc>
+ #ifdef CONFIG_SND_AML_M8_SOC
+ #define aml_jtag_gpioao() do{\
++	if (is_jtag_disable()) {\
+     aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
++	}\
+ }while(0)
+ #else
+ #define aml_jtag_gpioao() do{\
++	if (is_jtag_disable()) {\
+ 	aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
++	}\
+ }while(0)
+ #endif
+ 
+ #define aml_jtag_sd() do{\
++	if (is_jtag_disable()) {\
+     aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1))); \
+     aml_set_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
++	}\
+ }while(0)
+ #else
+ /* Secure REG can only be accessed in Secure World if TrustZone enabled.*/
+ #include <mach/meson-secure.h>
+ #define aml_jtag_gpioao() do {\
++	if (is_jtag_disable()) {\
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<5) | (1<<9)))); \
++	}\
+ } while(0)
+ #define aml_jtag_sd() do {\
++	if (is_jtag_disable()) {\
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~(1<<8) | (1<<1))); \
+ 	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) | ((1<<5) | (1<<9))); \
++	}\
+ } while(0)
+ #endif /* CONFIG_MESON_TRUSTZONE */
+ 
+diff --git a/sound/soc/aml/m8/aml_m8.c b/sound/soc/aml/m8/aml_m8.c
+old mode 100755
+new mode 100644
+index 2cbbf3c4d3f4..62dfb4aca35e
+--- a/sound/soc/aml/m8/aml_m8.c
++++ b/sound/soc/aml/m8/aml_m8.c
+@@ -39,6 +39,7 @@
+ #include "aml_audio_hw.h"
+ #include "../../codecs/aml_m8_codec.h"
+ #include <mach/register.h>
++#include <linux/amlogic/jtag.h>
+ 
+ #ifdef CONFIG_USE_OF
+ #include <linux/of.h>
+@@ -808,19 +809,23 @@ static void aml_m8_pinmux_init(struct snd_soc_card *card)
+ 	const char *str=NULL;
+ 	int ret;
+ 	p_aml_audio = snd_soc_card_get_drvdata(card);   
+-    p_aml_audio->pin_ctl = devm_pinctrl_get_select(card->dev, "aml_snd_m8");
+-    
+-    p_audio = p_aml_audio;
+-    printk("-----ext_codec=%d---\n",ext_codec);
+-//#if USE_EXTERNAL_DAC
+-    if(ext_codec){
++	p_aml_audio->pin_ctl = devm_pinctrl_get_select(card->dev, "aml_snd_m8");
++
++	p_audio = p_aml_audio;
++	printk("-----ext_codec=%d---\n",ext_codec);
++	//#if USE_EXTERNAL_DAC
++	if (ext_codec) {
+ #ifndef CONFIG_MESON_TRUSTZONE
+-    //aml_write_reg32(P_AO_SECURE_REG1,0x00000000);
+-        aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1)));
++	//aml_write_reg32(P_AO_SECURE_REG1,0x00000000);
++	if (is_jtag_disable()) {
++		aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1)));
++	}
+ #else
+-    /* Secure reg can only be accessed in Secure World if TrustZone enabled. */
+-    //meson_secure_reg_write(P_AO_SECURE_REG1, 0x00000000);
+-	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<8) | (1<<1))));
++	/* Secure reg can only be accessed in Secure World if TrustZone enabled. */
++	//meson_secure_reg_write(P_AO_SECURE_REG1, 0x00000000);
++	if (is_jtag_disable()) {
++		meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<8) | (1<<1))));
++	}
+ #endif /* CONFIG_MESON_TRUSTZONE */
+     }
+ //#endif
+diff --git a/sound/soc/aml/m8/aml_m8_rt5616.c b/sound/soc/aml/m8/aml_m8_rt5616.c
+old mode 100755
+new mode 100644
+index 3f7008df802b..78a40f902059
+--- a/sound/soc/aml/m8/aml_m8_rt5616.c
++++ b/sound/soc/aml/m8/aml_m8_rt5616.c
+@@ -49,6 +49,7 @@
+ #include <mach/pinmux.h>
+ #include <plat/io.h>
+ #endif
++#include <linux/amlogic/jtag.h>
+ 
+ #ifdef CONFIG_MESON_TRUSTZONE
+ #include <mach/meson-secure.h>
+@@ -617,11 +618,15 @@ static void aml_m8_pinmux_init(struct snd_soc_card *card)
+ #if USE_EXTERNAL_DAC
+ #ifndef CONFIG_MESON_TRUSTZONE
+     //aml_write_reg32(P_AO_SECURE_REG1,0x00000000);
+-    aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1)));
++    if (is_jtag_disable()) {
++        aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1)));
++    }
+ #else
+     /* Secure reg can only be accessed in Secure World if TrustZone enabled. */
+     //meson_secure_reg_write(P_AO_SECURE_REG1, 0x00000000);
+-	meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<8) | (1<<1))));
++    if (is_jtag_disable()) {
++        meson_secure_reg_write(P_AO_SECURE_REG1, meson_secure_reg_read(P_AO_SECURE_REG1) & (~((1<<8) | (1<<1))));
++    }
+ #endif /* CONFIG_MESON_TRUSTZONE */
+ #endif
+     ret = of_property_read_string(card->dev->of_node, "mute_gpio", &str);
+-- 
+2.19.0
+

@@ -1,0 +1,251 @@
+From d13d5a53ddaef1ad076a606881e9c98155fcd0b7 Mon Sep 17 00:00:00 2001
+From: "dezhi.kong" <dezhi.kong@amlogic.com>
+Date: Thu, 26 Dec 2013 11:23:04 +0800
+Subject: [PATCH 2689/5965] PD#85271;ISP,modify for ar0543
+
+Conflicts:
+
+	drivers/amlogic/camera/ov5647.c
+	drivers/amlogic/tvin/isp/isp_drv.h
+---
+ drivers/amlogic/camera/ar0543.c    | 43 +++++++++++++++++-------------
+ drivers/amlogic/camera/ov5647.c    | 42 +++++++++++++++++------------
+ drivers/amlogic/tvin/isp/isp_drv.c |  2 +-
+ drivers/amlogic/tvin/isp/isp_drv.h |  2 +-
+ drivers/amlogic/tvin/isp/isp_hw.c  |  7 ++---
+ drivers/amlogic/tvin/isp/isp_hw.h  |  2 +-
+ drivers/amlogic/tvin/isp/isp_sm.c  |  5 ++++
+ 7 files changed, 62 insertions(+), 41 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index 0c0791fd1f27..9a7728b06a96 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -88,6 +88,10 @@ static unsigned int vid_limit = 32;
+ //module_param(vid_limit, uint, 0644);
+ //MODULE_PARM_DESC(vid_limit, "capture memory limit in megabytes");
+ 
++static unsigned int vcm_mod = 0;
++module_param(vcm_mod,uint,0664);
++MODULE_PARM_DESC(vcm_mod,"\n vcm_mod,1:DLC;0:LSC.\n");
++
+ static int ar0543_h_active = 800;
+ static int ar0543_v_active = 600;
+ static struct v4l2_fract ar0543_frmintervals_active = {
+@@ -1542,28 +1546,31 @@ static bool AR0543_check_mains_freq(void){// when the fr change,we need to chang
+     return true;
+ }
+ 
+-bool AR0543_set_af_new_step(unsigned int af_step){
++bool AR0543_set_af_new_step(void *priv,unsigned int af_step){
+     struct i2c_adapter *adapter;
+     char buf[3];
+     if(af_step == last_af_step)
+         return true;
+-	/*
+-    diff = (af_step > last_af_step) ? af_step - last_af_step : last_af_step - af_step;
+-    last_af_step = af_step;
+-    if(diff < 256){
+-        codes = 1;
+-    }else if(diff < 512){
+-        codes = 2;	
+-    }else
+-        codes = 3;
+-    vcm_data |= (codes << 2); // bit[3:2]
+-    vcm_data |= (last_af_step << 4);  // bit[4:13]
+-    byte_h  = (vcm_data >> 8) & 0x000000ff;
+-    byte_l  = (vcm_data >> 0) & 0x000000ff;
+-*/	
++    if(vcm_mod == 0){
++	unsigned int diff,vcm_data,codes;
++	diff = (af_step > last_af_step) ? af_step - last_af_step : last_af_step - af_step;
+ 	last_af_step = af_step;
+-    buf[0] = (af_step>>4)&0xff;
+-    buf[1] = (af_step<<4)&0xff;
++	if(diff < 256){
++	codes = 1;
++	}else if(diff < 512){
++	codes = 2;
++	}else
++	codes = 3;
++	vcm_data |= (codes << 2); // bit[3:2]
++	vcm_data |= (last_af_step << 4);  // bit[4:13]
++	buf[0]  = (vcm_data >> 8) & 0x000000ff;
++	buf[1]  = (vcm_data >> 0) & 0x000000ff;
++    }
++    else{
++	last_af_step = af_step;
++	buf[0] = (af_step>>4)&0xff;
++	buf[1] = (af_step<<4)&0xff;
++    }
+     adapter = i2c_get_adapter(4);
+     my_i2c_put_byte_add8(adapter,0x0c,buf,2);
+     return true;
+@@ -3364,7 +3371,7 @@ static int ar0543_open(struct file *file)
+     dev->ae_on = false;
+     AR0543_init_regs(dev);
+     msleep(40);
+-    dw9714_init(1);
++    dw9714_init(vcm_mod);
+     mutex_lock(&dev->mutex);
+     dev->users++;
+     if (dev->users > 1) {
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index ced7821ab559..b2f617f7ab38 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -91,6 +91,10 @@ static unsigned int vid_limit = 32;
+ //module_param(vid_limit, uint, 0644);
+ //MODULE_PARM_DESC(vid_limit, "capture memory limit in megabytes");
+ 
++static unsigned int vcm_mod = 0;
++module_param(vcm_mod,uint,0664);
++MODULE_PARM_DESC(vcm_mod,"\n vcm_mod,1:DLC;0:LSC.\n");
++
+ static int ov5647_h_active=800;
+ static int ov5647_v_active=600;
+ static struct v4l2_fract ov5647_frmintervals_active = {
+@@ -2244,23 +2248,26 @@ bool OV5647_set_af_new_step(void *priv, unsigned int af_step){
+     char buf[3];
+     if(af_step == last_af_step)
+         return true;
+-	/*
+-    diff = (af_step > last_af_step) ? af_step - last_af_step : last_af_step - af_step;
+-    last_af_step = af_step;
+-    if(diff < 256){
+-        codes = 1;
+-    }else if(diff < 512){
+-        codes = 2;	
+-    }else
+-        codes = 3;
+-    vcm_data |= (codes << 2); // bit[3:2]
+-    vcm_data |= (last_af_step << 4);  // bit[4:13]
+-    byte_h  = (vcm_data >> 8) & 0x000000ff;
+-    byte_l  = (vcm_data >> 0) & 0x000000ff;
+-*/
+-	last_af_step = af_step;
+-    buf[0] = (af_step>>4)&0xff;
+-    buf[1] = (af_step<<4)&0xff;
++    if(vcm_mod == 0){
++	    unsigned int diff,vcm_data,codes;
++	    diff = (af_step > last_af_step) ? af_step - last_af_step : last_af_step - af_step;
++	    last_af_step = af_step;
++	    if(diff < 256){
++	        codes = 1;
++	    }else if(diff < 512){
++	        codes = 2;
++	    }else
++	        codes = 3;
++	    vcm_data |= (codes << 2); // bit[3:2]
++	    vcm_data |= (last_af_step << 4);  // bit[4:13]
++	    buf[0]  = (vcm_data >> 8) & 0x000000ff;
++	    buf[1]  = (vcm_data >> 0) & 0x000000ff;
++    }
++    else{
++	    last_af_step = af_step;
++	    buf[0] = (af_step>>4)&0xff;
++	    buf[1] = (af_step<<4)&0xff;
++    }
+     adapter = i2c_get_adapter(4);
+     my_i2c_put_byte_add8(adapter,0x0c,buf,2);
+     return true;
+@@ -4177,6 +4184,7 @@ static int ov5647_open(struct file *file)
+     OV5647_init_regs(dev);
+     msleep(40);
+     dw9714_init(dev->cam_info.vcm_mode);
++    dw9714_init(vcm_mod);
+     mutex_lock(&dev->mutex);
+     dev->users++;
+     if (dev->users > 1) {
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index fd652e78a2ed..6276e6156cf7 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -854,7 +854,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		isp_set_manual_wb(devp->cam_param->xml_wb_manual);
+ 		/*test for wb test disable gamma & lens*/
+ 		if(devp->flag & ISP_FLAG_TEST_WB)
+-			disable_gc_lns(false);
++			disable_gc_lns_pk(false);
+ 		/*enable isp hw*/
+ 		isp_hw_enable(true);
+ 		devp->af_info.x0 = info->h_active/devp->isp_af_parm->win_ratio;
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 4536cf4961e3..63f4bc6250ae 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.12.24a"
++#define ISP_VER					"2013.12.26a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index af34ce289d8f..c5eaa3d12056 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -582,14 +582,16 @@ static void isp_set_gamma_table(struct xml_lut_gc_s *gt)
+ /*
+ *disable gamma correction & lnsd
+ */
+-void disable_gc_lns(bool flag)
++void disable_gc_lns_pk(bool flag)
+ {
+ 	if(flag){
+ 		WR_BITS(ISP_LNS_CTRL,1,LNS_CMOP_ENABLE_BIT,LNS_CMOP_ENABLE_WID);
+ 		WR_BITS(ISP_GMR0_CTRL,1,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++		WR_BITS(ISP_PKNR_ENABLE,1,ISP_PK_EN_BIT,ISP_PK_EN_WID);
+ 	}else{
+ 		WR_BITS(ISP_LNS_CTRL,0,LNS_CMOP_ENABLE_BIT,LNS_CMOP_ENABLE_WID);
+ 		WR_BITS(ISP_GMR0_CTRL,0,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
++		WR_BITS(ISP_PKNR_ENABLE,0,ISP_PK_EN_BIT,ISP_PK_EN_WID);
+ 	}
+ }
+ 
+@@ -742,10 +744,9 @@ void isp_load_def_setting(unsigned int w,unsigned int h,unsigned char bayer_fmt)
+ 	//disable pattern generator
+ 	WR_BITS(ISP_PAT_GEN_CTRL,0,ISP_PAT_ENABLE_BIT,ISP_PAT_ENABLE_WID);
+ 	//disable gamma & lnsd
+-	disable_gc_lns(false);
++	disable_gc_lns_pk(false);
+ 	//disable nr,pk
+ 	WR_BITS(ISP_PKNR_ENABLE,0,ISP_NR_EN_BIT,ISP_NR_EN_WID);
+-	WR_BITS(ISP_PKNR_ENABLE,0,ISP_PK_EN_BIT,ISP_PK_EN_WID);
+ 	//disable defect pixel
+ 	WR_BITS(ISP_DFT_CTRL,0,ISP_DFT_ENABLE_BIT,ISP_DFT_ENABLE_WID);
+ 	WR_BITS(ISP_DFT_CTRL,0,DFTMAP_CORRECT_MODE_BIT,DFTMAP_CORRECT_MODE_WID);
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index 0316bc4e594d..ba0dc3d4bb46 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -117,7 +117,7 @@ extern void isp_awb_set_gain(unsigned int r, unsigned int g, unsigned int b);
+ extern void isp_awb_get_gain(isp_awb_gain_t *awb_gain);
+ extern void set_isp_gamma_table(unsigned short *gamma,unsigned int type);
+ extern void get_isp_gamma_table(unsigned short *gamma,unsigned int type);
+-extern void disable_gc_lns(bool flag);
++extern void disable_gc_lns_pk(bool flag);
+ extern void isp_ls_curve(unsigned int psize_v2h, unsigned int hactive, 
+         unsigned int vactive, unsigned int ocenter_c2l, 
+         unsigned int ocenter_c2t, unsigned int gain_0db, 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 889b11d4627c..c498fd7ac12f 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -1088,6 +1088,11 @@ static unsigned int check_hillside(isp_af_info_t *af_info,xml_algorithm_af_t *af
+ 	cur_ac = af_info->af_fine_data[af_info->valid_step_cnt - 1].af_data.af_ac[0];
+ 	last_ac = af_info->af_fine_data[af_info->valid_step_cnt - 2].af_data.af_ac[0];
+ 	delta_ac = isp_abs64(cur_ac,last_ac);
++	if((cur_ac == 0)||(last_ac == 0)){/*avoid wrong*/
++		if(af_sm_dg&AF_FINE_TUNE)
++			pr_info("[check_hillside]error:ac is 0\n");
++		return 3;
++	}
+ 	delta_ac_ratio = delta_ac*100/((last_ac < cur_ac)?cur_ac:last_ac);
+ 	if(af_sm_dg&AF_FINE_TUNE)
+ 		pr_info("[check hillside]delta_ac_ratio:%d,cur_ac:%d,last_ac:%d .\n",delta_ac_ratio,cur_ac,last_ac);
+-- 
+2.19.0
+

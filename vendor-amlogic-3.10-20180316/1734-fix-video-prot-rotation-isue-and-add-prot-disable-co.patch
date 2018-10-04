@@ -1,0 +1,167 @@
+From d71edbd755c3e023fbfe7b55021342318039eab3 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Wed, 6 Nov 2013 15:22:36 +0800
+Subject: [PATCH 1734/5965] fix video prot rotation isue and add prot disable
+ control
+
+---
+ drivers/amlogic/amports/video.c   | 18 ++++++++++--------
+ drivers/amlogic/ppmgr/ppmgr_dev.h |  1 +
+ drivers/amlogic/ppmgr/ppmgr_drv.c | 22 ++++++++++------------
+ drivers/amlogic/ppmgr/ppmgr_vpp.c |  6 +++---
+ 4 files changed, 24 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 331bd1c553ef..ec4372cfa4b8 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -194,6 +194,8 @@ static u32 next_peek_underflow;
+          CLEAR_VCBUS_REG_MASK(VPP_MISC + cur_dev->vpp_off, \
+            VPP_VD1_PREBLEND|VPP_VD2_PREBLEND|VPP_VD2_POSTBLEND|VPP_VD1_POSTBLEND ); \
+          VD1_MEM_POWER_OFF(); \
++         video_angle = 0; \
++         video_prot.angle_changed |= 0x1; \
+          if(debug_flag& DEBUG_FLAG_BLACKOUT){  \
+             printk("DisableVideoLayer()\n"); \
+          } \
+@@ -1824,13 +1826,6 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             }
+ #endif
+             vf = video_vf_get();
+-            force_blackout = 0;
+-
+-#ifdef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+-            video_3d_format = vf->trans_fmt;
+-#endif
+-
+-            vsync_toggle_frame(vf);
+ #ifdef USE_PROT
+             if (video_prot.video_started) {
+                 video_prot_init(&video_prot, vf);
+@@ -1838,6 +1833,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                 video_prot.video_started = 0;
+             }
+ #endif
++            force_blackout = 0;
++
++#ifdef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
++            video_3d_format = vf->trans_fmt;
++#endif
++
++            vsync_toggle_frame(vf);
+             if (trickmode_fffb == 1) {
+ #ifdef CONFIG_VSYNC_RDMA
+                 if((VSYNC_RD_MPEG_REG(DI_IF1_GEN_REG)&0x1)==0){
+@@ -4172,7 +4174,7 @@ static int __init video_early_init(void)
+ #else
+    	WRITE_VCBUS_REG_BITS(VPP2_OFIFO_SIZE, 0x780,
+                         VPP_OFIFO_SIZE_BIT, VPP_OFIFO_SIZE_WID);
+-#endif                        
++#endif
+    	//WRITE_VCBUS_REG_BITS(VPU_OSD3_MMC_CTRL, 1, 12, 2); //select vdisp_mmc_arb for VIU2_OSD1 request
+    	WRITE_VCBUS_REG_BITS(VPU_OSD3_MMC_CTRL, 2, 12, 2); // select vdin_mmc_arb for VIU2_OSD1 request
+ #endif
+diff --git a/drivers/amlogic/ppmgr/ppmgr_dev.h b/drivers/amlogic/ppmgr/ppmgr_dev.h
+index 3149561dbab6..f41dd65cb6d8 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_dev.h
++++ b/drivers/amlogic/ppmgr/ppmgr_dev.h
+@@ -43,6 +43,7 @@ typedef  struct {
+ 	int display_mode;
+ 	int mirror_flag;
+ 	int use_prot;
++	int disable_prot;
+ 	int started;
+ 	int global_angle;
+ }ppmgr_device_t;
+diff --git a/drivers/amlogic/ppmgr/ppmgr_drv.c b/drivers/amlogic/ppmgr/ppmgr_drv.c
+index eed2e2287f45..770078cde21e 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_drv.c
++++ b/drivers/amlogic/ppmgr/ppmgr_drv.c
+@@ -295,23 +295,22 @@ int get_use_prot(void) {
+     return ppmgr_device.use_prot;
+ }
+ EXPORT_SYMBOL(get_use_prot);
+-
+-#ifdef USE_PROT_CONTROL
+-static ssize_t use_prot_show(struct class *cla, struct class_attribute *attr, char *buf) {
+-    return snprintf(buf, 40, "%d\n", ppmgr_device.use_prot);
++
++static ssize_t disable_prot_show(struct class *cla, struct class_attribute *attr, char *buf) {
++    return snprintf(buf, 40, "%d\n", ppmgr_device.disable_prot);
+ }
+ 
+-static ssize_t use_prot_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count) {
++static ssize_t disable_prot_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count) {
+     size_t r;
+     u32 s_value;
+     r = sscanf(buf, "%d", &s_value);
+     if (s_value != 0 && s_value != 1) {
+         return -EINVAL;
+     }
+-    ppmgr_device.use_prot = s_value;
++    ppmgr_device.disable_prot = s_value;
+     return strnlen(buf, count);
+ }
+-#endif
++
+ static ssize_t orientation_read(struct class *cla,struct class_attribute *attr,char *buf)
+ {
+     //ppmgr_device_t* ppmgr_dev=(ppmgr_device_t*)cla;
+@@ -946,12 +945,10 @@ static struct class_attribute ppmgr_class_attrs[] = {
+            mirror_read,
+            mirror_write),
+     __ATTR_RO(ppmgr_vframe_states),
+-#ifdef USE_PROT_CONTROL
+-    __ATTR(use_prot,
++    __ATTR(disable_prot,
+            S_IRUGO | S_IWUSR,
+-           use_prot_show,
+-           use_prot_store),
+-#endif
++           disable_prot_show,
++           disable_prot_store),
+     __ATTR_NULL
+ };
+ 
+@@ -1151,6 +1148,7 @@ int  init_ppmgr_device(void)
+     if(ppmgr_buffer_init(0) < 0) goto unregister_dev;
+     //if(start_vpp_task()<0) return -1;
+     ppmgr_device.use_prot = 1;
++    ppmgr_device.disable_prot = 0;
+     ppmgr_device.global_angle = 0;
+     ppmgr_device.started = 0;
+     return 0;
+diff --git a/drivers/amlogic/ppmgr/ppmgr_vpp.c b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+index 2a5f5fbe2de2..ab2ccad9a422 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_vpp.c
++++ b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+@@ -484,7 +484,7 @@ void vf_ppmgr_unreg_provider(void)
+     dec_vfp = NULL;
+ 
+     ppmgr_device.started = 0;
+-    ppmgr_device.use_prot = 0;
++    //ppmgr_device.use_prot = 0;
+ 
+     mutex_unlock(&ppmgr_mutex);
+ }
+@@ -2343,7 +2343,7 @@ static int ppmgr_task(void *data)
+             platform_type_t plarform_type;
+             vf = ppmgr_vf_get_dec();
+             if (ppmgr_device.started) {
+-                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE)) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot) {
+                     ppmgr_device.use_prot = 0;
+                     set_video_angle(0);
+                     _ppmgr_angle_write(ppmgr_device.global_angle);
+@@ -2377,7 +2377,7 @@ static int ppmgr_task(void *data)
+             int ret = 0;
+             vf = ppmgr_vf_get_dec();
+             if (ppmgr_device.started) {
+-                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE)) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE) || ppmgr_device.disable_prot) {
+                     ppmgr_device.use_prot = 0;
+                     set_video_angle(0);
+                     _ppmgr_angle_write(ppmgr_device.global_angle);
+-- 
+2.19.0
+

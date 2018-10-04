@@ -1,0 +1,113 @@
+From c4683992c33f6ecd0397e3a10bbb09ace107f507 Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Mon, 2 Dec 2013 15:28:39 +0800
+Subject: [PATCH 2178/5965] pd#83422,fixed read debug info may crashed bug.
+
+---
+ drivers/amlogic/amports/amstream.c |  4 +++-
+ drivers/amlogic/amports/vdec.c     | 16 +++++++++++++---
+ drivers/amlogic/amports/video.c    | 14 +++++++++-----
+ drivers/amlogic/amports/video2.c   |  3 ++-
+ 4 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 4c7cdbeb73c3..31eee28b7fba 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1691,7 +1691,7 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+             pbuf += sprintf(pbuf, "\tbuf size:%#x\n", p->buf_size);
+             pbuf += sprintf(pbuf, "\tbuf canusesize:%#x\n", p->canusebuf_size);
+             pbuf += sprintf(pbuf, "\tbuf regbase:%#lx\n", p->reg_base);
+-            if (p->reg_base) {
++            if (p->reg_base && p->flag & BUF_FLAG_IN_USE) {
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+                 switch_mod_gate_by_name("vdec", 1);
+ #endif
+@@ -1701,6 +1701,8 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+                 switch_mod_gate_by_name("vdec", 0);
+ #endif
++            }else {
++                pbuf += sprintf(pbuf, "\tbuf no used.\n");
+             }
+         } else {
+             u32 sub_wp, sub_rp, data_size;
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index b0df9e9f899e..dffe0ec635ad 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -512,8 +512,16 @@ static ssize_t amrisc_regs_show(struct class *class, struct class_attribute *att
+     int rsize = sizeof(am_risc) / sizeof(struct am_reg);
+     int i;
+     unsigned  val;
+-
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	unsigned long flags;
++	
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++    spin_lock_irqsave(&lock, flags);
++	if(!vdec_on(VDEC_1)){
++		spin_unlock_irqrestore(&lock, flags);
++		pbuf += sprintf(pbuf, "amrisc not power off\n");
++		return (pbuf - buf);
++	}
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     switch_mod_gate_by_type(MOD_VDEC, 1);
+ #endif
+     pbuf += sprintf(pbuf, "amrisc registers show:\n");
+@@ -522,7 +530,9 @@ static ssize_t amrisc_regs_show(struct class *class, struct class_attribute *att
+         pbuf += sprintf(pbuf, "%s(%#x)\t:%#x(%d)\n",
+                         regs[i].name, regs[i].offset, val, val);
+     }
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++    spin_unlock_irqrestore(&lock, flags);
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     switch_mod_gate_by_type(MOD_VDEC, 0);
+ #endif
+     return (pbuf - buf);
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 108ead392678..91ab7acc7c7c 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -3681,14 +3681,18 @@ static ssize_t frame_rate_show(struct class *cla, struct class_attribute* attr,
+     time -= last_frame_time;
+     last_frame_time = tmp;
+     last_frame_count = frame_count;
++    if(time == 0 )
++        return 0;
+     rate = 100*cnt * HZ / time;
+     vsync_rate = 100*vsync_count * HZ / time;
+-    ret = sprintf(buf, "VFrame rate is %d.%02dfps, and the panel refresh rate is %d, duration is: %d,vsync_isr/s=%d.%02d,vsync_pts_inc=%d\n",
+-                  rate/100,rate%100, vinfo->sync_duration_num / vinfo->sync_duration_den, time,vsync_rate/100,vsync_rate%100,vsync_pts_inc);
+-    if((debugflags& DEBUG_FLAG_CALC_PTS_INC) && time>HZ*10 && vsync_rate>0){
+-	if((vsync_rate*vsync_pts_inc/100)!=90000){
+-	  vsync_pts_inc=90000*100/(vsync_rate);
++	if(vinfo->sync_duration_den > 0){
++       ret = sprintf(buf, "VFrame rate is %d.%02dfps, and the panel refresh rate is %d, duration is: %d,vsync_isr/s=%d.%02d,vsync_pts_inc=%d\n",
++                     rate/100,rate%100, vinfo->sync_duration_num / vinfo->sync_duration_den, time,vsync_rate/100,vsync_rate%100,vsync_pts_inc);
+ 	}
++    if((debugflags& DEBUG_FLAG_CALC_PTS_INC) && time>HZ*10 && vsync_rate>0){
++        if((vsync_rate*vsync_pts_inc/100)!=90000){
++            vsync_pts_inc=90000*100/(vsync_rate);
++        }
+     }
+     vsync_count=0;
+     return ret;
+diff --git a/drivers/amlogic/amports/video2.c b/drivers/amlogic/amports/video2.c
+index c83251b7faf3..6af7687d5266 100755
+--- a/drivers/amlogic/amports/video2.c
++++ b/drivers/amlogic/amports/video2.c
+@@ -2655,7 +2655,8 @@ static ssize_t frame_rate_show(struct class *cla, struct class_attribute* attr,
+     last_frame_time = tmp;
+     last_frame_count = frame_count;
+     rate = cnt * HZ / time;
+-    ret = sprintf(buf, "Frame rate is %d, and the panel refresh rate is %d, duration is: %d\n",
++	if(vinfo->sync_duration_den >0)
++        ret = sprintf(buf, "Frame rate is %d, and the panel refresh rate is %d, duration is: %d\n",
+                   rate, vinfo->sync_duration_num / vinfo->sync_duration_den, time);
+     return ret;
+ }
+-- 
+2.19.0
+

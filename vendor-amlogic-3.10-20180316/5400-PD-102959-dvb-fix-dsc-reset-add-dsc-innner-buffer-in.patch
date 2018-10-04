@@ -1,0 +1,150 @@
+From 5b7cc1308e31ff2290d83a60b322a99b74119ea5 Mon Sep 17 00:00:00 2001
+From: Zhiqiang Han <zhiqiang.han@amlogic.com>
+Date: Fri, 6 Feb 2015 14:38:13 +0800
+Subject: [PATCH 5400/5965] PD #102959: dvb: fix dsc reset, add
+ dsc-innner-buffer init
+
+Change-Id: I781541c976c69d930acaac00edc39aef2d48b69c
+---
+ drivers/amlogic/dvb_tv/aml_dmx.c | 38 +++++++++++++-------------------
+ drivers/amlogic/dvb_tv/aml_dvb.c | 14 ++++++++++--
+ drivers/amlogic/dvb_tv/aml_dvb.h |  1 -
+ 3 files changed, 27 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_dmx.c b/drivers/amlogic/dvb_tv/aml_dmx.c
+index b6bb86faa1b0..5cbe230e6053 100755
+--- a/drivers/amlogic/dvb_tv/aml_dmx.c
++++ b/drivers/amlogic/dvb_tv/aml_dmx.c
+@@ -1118,15 +1118,24 @@ int dsc_set_pid(struct aml_dsc *dsc, int pid)
+ 	data = READ_MPEG_REG(TS_PL_PID_DATA);
+ 	if(dsc->id&1) {
+ 		data &= 0xFFFF0000;
+-		data |= pid;
++		data |= pid&0x1fff;
++		if (!dsc->used)
++			data |= 1<<PID_MATCH_DISABLE_LOW;
+ 	} else {
+ 		data &= 0xFFFF;
+-		data |= (pid<<16);
++		data |= (pid&0x1fff)<<16;
++		if (!dsc->used)
++			data |= 1<<PID_MATCH_DISABLE_HIGH;
+ 	}
+ 	WRITE_MPEG_REG(TS_PL_PID_INDEX, (dsc->id & 0x0f)>>1);
+ 	WRITE_MPEG_REG(TS_PL_PID_DATA, data);
+ 	WRITE_MPEG_REG(TS_PL_PID_INDEX, 0);
+-	pr_dbg("set DSC %d PID %d\n", dsc->id, pid);
++
++	if (dsc->used) {
++		pr_dbg("set DSC %d PID %d\n", dsc->id, pid);
++	} else {
++		pr_dbg("disable DSC %d\n", dsc->id);
++	}
+ 	return 0;
+ }
+ 
+@@ -1151,24 +1160,6 @@ int dsc_set_key(struct aml_dsc *dsc, int type, u8 *key)
+ 	return 0;
+ }
+ 
+-int dsc_release(struct aml_dsc *dsc)
+-{
+-	u32 data;
+-
+-	WRITE_MPEG_REG(TS_PL_PID_INDEX, (dsc->id & 0x0f)>>1);
+-	data = READ_MPEG_REG(TS_PL_PID_DATA);
+-	if(dsc->id&1) {
+-		data |= 1<<PID_MATCH_DISABLE_LOW;
+-	} else {
+-		data |= 1<<PID_MATCH_DISABLE_HIGH;
+-	}
+-	WRITE_MPEG_REG(TS_PL_PID_INDEX, (dsc->id & 0x0f)>>1);
+-	WRITE_MPEG_REG(TS_PL_PID_DATA, data);
+-
+-	pr_dbg("release DSC %d\n", dsc->id);
+-	return 0;
+-}
+-
+ /*Set section buffer*/
+ static int dmx_alloc_sec_buffer(struct aml_dmx *dmx)
+ {
+@@ -2216,7 +2207,7 @@ void dmx_reset_hw_ex(struct aml_dvb *dvb, int reset_irq)
+ 	{
+ 		struct aml_dsc *dsc = &dvb->dsc[id];
+ 
+-		if(dsc->used)
++		//if(dsc->used)
+ 		{
+ 			dsc_set_pid(dsc, dsc->pid);
+ 
+@@ -2258,6 +2249,7 @@ void dmx_reset_dmx_hw_ex_unlock(struct aml_dvb *dvb, struct aml_dmx *dmx, int re
+ #endif
+ 
+ 	WRITE_MPEG_REG(RESET3_REGISTER, (dmx->id)? ((dmx->id==1)? RESET_DEMUX1 : RESET_DEMUX2) : RESET_DEMUX0);
++	WRITE_MPEG_REG(RESET3_REGISTER, RESET_DES);
+ 
+ 	{
+ 		int times;
+@@ -2377,7 +2369,7 @@ void dmx_reset_dmx_hw_ex_unlock(struct aml_dvb *dvb, struct aml_dmx *dmx, int re
+ 		{
+ 			struct aml_dsc *dsc = &dvb->dsc[id];
+ 
+-			if(dsc->used)
++			//if(dsc->used)
+ 			{
+ 				dsc_set_pid(dsc, dsc->pid);
+ 
+diff --git a/drivers/amlogic/dvb_tv/aml_dvb.c b/drivers/amlogic/dvb_tv/aml_dvb.c
+index b243857e60e1..ea79ea90f289 100755
+--- a/drivers/amlogic/dvb_tv/aml_dvb.c
++++ b/drivers/amlogic/dvb_tv/aml_dvb.c
+@@ -265,7 +265,7 @@ static int dvb_dsc_open(struct inode *inode, struct file *file)
+ 
+ 	dsc = &dvb->dsc[id];
+ 	dsc->id   = id;
+-	dsc->pid  = -1;
++	dsc->pid  = 0x1fff;
+ 	dsc->set  = 0;
+ 	dsc->dvb  = dvb;
+ 
+@@ -328,7 +328,10 @@ static int dvb_dsc_release(struct inode *inode, struct file *file)
+ 	spin_lock_irqsave(&dvb->slock, flags);
+ 
+ 	dsc->used = 0;
+-	dsc_release(dsc);
++	dsc_set_pid(dsc, 0x1fff);
++
++	dsc->pid  = 0x1fff;
++	dsc->set = 0;
+ 	dvb->dsc_dev->users--;
+ 
+ 	spin_unlock_irqrestore(&dvb->slock, flags);
+@@ -1262,6 +1265,13 @@ static int aml_dvb_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
++	for (i=0; i<DSC_COUNT; i++) {
++		advb->dsc[i].id = i;
++		advb->dsc[i].used = 0;
++		advb->dsc[i].set = 0;
++		advb->dsc[i].pid = 0x1fff;
++	}
++
+ 	/*Register descrambler device*/
+ 	ret = dvb_register_device(&advb->dvb_adapter, &advb->dsc_dev,
+                                    &dvbdev_dsc, advb, DVB_DEVICE_DSC);
+diff --git a/drivers/amlogic/dvb_tv/aml_dvb.h b/drivers/amlogic/dvb_tv/aml_dvb.h
+index 2915ff2ae891..2edb75af6a31 100755
+--- a/drivers/amlogic/dvb_tv/aml_dvb.h
++++ b/drivers/amlogic/dvb_tv/aml_dvb.h
+@@ -240,7 +240,6 @@ extern int dmx_get_ts_serial(aml_ts_source_t src);
+ /*AMLogic dsc interface*/
+ extern int dsc_set_pid(struct aml_dsc *dsc, int pid);
+ extern int dsc_set_key(struct aml_dsc *dsc, int type, u8 *key);
+-extern int dsc_release(struct aml_dsc *dsc);
+ 
+ /*AMLogic ASYNC FIFO interface*/
+ extern int aml_asyncfifo_hw_init(struct aml_asyncfifo *afifo);
+-- 
+2.19.0
+

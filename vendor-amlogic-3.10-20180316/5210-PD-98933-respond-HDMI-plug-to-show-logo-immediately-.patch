@@ -1,0 +1,151 @@
+From a21e09d43dc43b051e3fed604bd48364c16d91e6 Mon Sep 17 00:00:00 2001
+From: "wenbiao.zhang" <wenbiao.zhang@amlogic.com>
+Date: Mon, 15 Dec 2014 13:58:53 +0800
+Subject: [PATCH 5210/5965] PD#98933:  respond HDMI plug to show logo
+ immediately when booting
+
+Squashed commit of the following:
+
+commit 476b9bf0c40e0cda8daccd31afc41bad8c7e8fc9
+Author: wenbiao.zhang <wenbiao.zhang@amlogic.com>
+Date:   Tue Nov 18 10:05:29 2014 +0800
+
+    PD #98933: fix for hdmi can't display error
+
+    Change-Id: I2224639f66dfbfd02bae0000d7f8dd9fcb77b766
+
+commit 7475cc9763b61ea920e27740ba851a659f827b5b
+Author: wenbiao.zhang <wenbiao.zhang@amlogic.com>
+Date:   Thu Nov 13 19:19:32 2014 +0800
+
+    PD #98933:  respond HDMI plug to show logo immediately when booting
+
+    Change-Id: I473137e26cc0425eee473433033c84cbac35250f
+
+Change-Id: Ifb6c6e20d38860d7eb7e29cc7f59ab05545173ab
+---
+ .../aml_logo/logo_display/output_dev_osd.c    | 44 ++++++++++++++++++-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c        | 17 +++++++
+ 2 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+index 7219efb5bb9e..69b100b8e34c 100755
+--- a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
++++ b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+@@ -204,6 +204,43 @@ void set_osd_freescaler(int index, logo_object_t *plogo, vmode_t new_mode) {
+    osd_free_scale_enable_hw(index, 0x10001);
+    osd_enable_hw(1, index);
+ }
++
++#ifdef CONFIG_AM_HDMI_ONLY
++vmode_t tvmode;
++
++// change tv mode and show logo immediatly when hdmi pluged
++int set_mode_and_show_logo(int hpd_state) {
++    int value;
++    logo_object_t* plogo = get_current_logo_obj();
++
++    if((plogo->para.vout_mode & VMODE_MODE_BIT_MASK) > VMODE_4K2K_SMPTE) {
++        return 0;    //  MID
++    }
++
++    printk("hdmi detect: %s.\n", (hpd_state==1)?"plug":"unplug");
++    // osd2 freescale enable,   the logo is shown on osd2, reset freescale.
++    value = aml_read_reg32(P_VPP_OSD_SC_CTRL0) & 0xb;
++    if(value == 0x9) {
++        vmode_t cur_mode;
++        if (hpd_state == 0){
++            cur_mode = cvbsmode_hdmionly;
++        }
++        else{
++            cur_mode = hdmimode_hdmionly;
++        }
++        if(tvmode != cur_mode) {
++            tvmode = cur_mode;
++            osd_enable_hw(0, plogo->para.output_dev_type);
++            set_current_vmode(cur_mode);
++            vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE,&cur_mode) ;
++            set_osd_freescaler(plogo->para.output_dev_type, plogo, cur_mode); 
++        }
++    }
++    return 1;
++}
++EXPORT_SYMBOL(set_mode_and_show_logo);
++
++#endif
+ #endif
+ 
+ static int osd0_init(logo_object_t *plogo)
+@@ -264,8 +301,7 @@ static int osd0_init(logo_object_t *plogo)
+ 		if((cur_mode != (plogo->para.vout_mode & VMODE_MODE_BIT_MASK)) && (cur_mode <= VMODE_4K2K_SMPTE)) {
+ 		    set_osd_freescaler(LOGO_DEV_OSD0, plogo, cur_mode);
+ 		}
+-
+-		#else // MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++#else // MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ 		if((cur_mode != (plogo->para.vout_mode&VMODE_MODE_BIT_MASK)) && (cur_mode < VMODE_VGA)) {
+ 
+ 							plogo->para.loaded = 0;
+@@ -334,6 +370,10 @@ static int osd1_init(logo_object_t *plogo)
+ 		if((cur_mode != (plogo->para.vout_mode & VMODE_MODE_BIT_MASK)) && (cur_mode <= VMODE_4K2K_SMPTE)) {
+ 		    set_osd_freescaler(LOGO_DEV_OSD1, plogo, cur_mode);
+ 		}
++#ifdef CONFIG_AM_HDMI_ONLY
++        tvmode = cur_mode;
++#endif
++        
+ #else // MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ 		if((cur_mode != (plogo->para.vout_mode&VMODE_MODE_BIT_MASK)) && (cur_mode < VMODE_VGA)) {
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index 31e2e36c4c0e..83ae165ba991 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -139,6 +139,7 @@ static int force_vout_index = 0;
+ #endif
+ static int hdmi_prbs_mode = 0xffff; /* 0xffff=disable; 0=PRBS 11; 1=PRBS 15; 2=PRBS 7; 3=PRBS 31*/
+ static int hdmi_480p_force_clk = 0; /* 200, 225, 250, 270 */
++static int hdmi_detect_when_booting = 1;
+ 
+ static int debug_level = INF;     // 1: error  2: important  3: normal  4: detailed
+ 
+@@ -1301,6 +1302,12 @@ edid_op:
+             hdmitx_set_audio(hdmitx_device, &(hdmitx_device->cur_audio_param), hdmi_ch);
+             switch_set_state(&sdev, 1);
+             cec_node_init(hdmitx_device);
++            #ifdef CONFIG_AM_HDMI_ONLY
++            if(hdmi_detect_when_booting) {
++                extern int set_mode_and_show_logo(int hpd_state);
++                hdmi_detect_when_booting = set_mode_and_show_logo(hdmitx_device->hpd_state);
++            }
++            #endif
+         }
+         if(hdmitx_device->hpd_event == 2)
+         {
+@@ -1330,6 +1337,12 @@ edid_op:
+             hdmitx_device->tv_cec_support = 0;
+             switch_set_state(&sdev, 0);
+             hdmitx_device->vic_count = 0;
++            #ifdef CONFIG_AM_HDMI_ONLY
++            if(hdmi_detect_when_booting) {
++                extern int set_mode_and_show_logo(int hpd_state);    
++                hdmi_detect_when_booting = set_mode_and_show_logo(hdmitx_device->hpd_state);
++            }
++            #endif
+         }
+         msleep_interruptible(100);
+     }
+@@ -1943,6 +1956,10 @@ MODULE_PARM_DESC(force_vout_index, "\n force_vout_index\n");
+ module_param(force_vout_index, uint, 0664);
+ #endif
+ 
++MODULE_PARM_DESC(hdmi_detect_when_booting, "\n hdmi_detect_when_booting \n");
++module_param(hdmi_detect_when_booting, int, 0664);
++
++
+ MODULE_PARM_DESC(hdmi_480p_force_clk, "\n hdmi_480p_force_clk \n");
+ module_param(hdmi_480p_force_clk, int, 0664);
+ 
+-- 
+2.19.0
+

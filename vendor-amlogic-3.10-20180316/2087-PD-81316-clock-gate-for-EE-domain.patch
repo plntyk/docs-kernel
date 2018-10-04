@@ -1,0 +1,2153 @@
+From e9e301c7d9b48579544c602116e46ed47757a9e9 Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Thu, 28 Nov 2013 23:11:13 +0800
+Subject: [PATCH 2087/5965] PD #81316: clock gate for EE domain
+
+---
+ arch/arm/mach-meson8/Makefile                 |   2 +-
+ .../arm/mach-meson8/include/mach/power_gate.h |  28 +-
+ arch/arm/mach-meson8/mod_gate.c               | 814 ------------------
+ arch/arm/mach-meson8/power_gate.c             | 700 ++++++++++++++-
+ arch/arm/mach-meson8/usbclock.c               |  12 +-
+ drivers/amlogic/camera/gc2035.c               |   4 +-
+ .../amlogic/usb/dwc_otg/310/dwc_otg_attr.c    |  26 +-
+ sound/soc/aml/aml_audio_hw.c                  |  52 ++
+ sound/soc/aml/aml_audio_hw.h                  |  11 +-
+ sound/soc/aml/aml_i2s.c                       |  53 +-
+ sound/soc/aml/aml_i2s_dai.c                   |  47 +-
+ sound/soc/aml/aml_spdif_dai.c                 |  67 +-
+ sound/soc/codecs/aml_m8_codec.c               |   7 +-
+ 13 files changed, 941 insertions(+), 882 deletions(-)
+ delete mode 100755 arch/arm/mach-meson8/mod_gate.c
+
+diff --git a/arch/arm/mach-meson8/Makefile b/arch/arm/mach-meson8/Makefile
+index 5c47dfc66bb4..dd6c69181148 100755
+--- a/arch/arm/mach-meson8/Makefile
++++ b/arch/arm/mach-meson8/Makefile
+@@ -6,7 +6,7 @@
+ 
+ 
+ obj-y := cpu.o clock.o time.o iomapping.o vpu.o
+-obj-y += power_gate.o mod_gate.o
++obj-y += power_gate.o
+ obj-m :=
+ obj-n :=
+ obj-  :=
+diff --git a/arch/arm/mach-meson8/include/mach/power_gate.h b/arch/arm/mach-meson8/include/mach/power_gate.h
+index f773334e21ab..8dcf9e248ca2 100755
+--- a/arch/arm/mach-meson8/include/mach/power_gate.h
++++ b/arch/arm/mach-meson8/include/mach/power_gate.h
+@@ -3,9 +3,10 @@
+ 
+ #include <mach/am_regs.h>
+ #include <mach/clock.h>
++#include <linux/spinlock.h>
+ /* clock gate control */
+ 
+-#define CLK_GATE_ON(_MOD) \
++#define __CLK_GATE_ON(_MOD) \
+ 	do{                     \
+ 		if(GCLK_ref[GCLK_IDX_##_MOD]++ == 0){ \
+ 			if (0) printk(KERN_INFO "gate on %s %x, %x\n", GCLK_NAME_##_MOD, GCLK_REG_##_MOD, GCLK_MASK_##_MOD); \
+@@ -14,18 +15,35 @@
+ 	}while(0)
+ 
+ 
+-#define CLK_GATE_OFF(_MOD) \
++#define __CLK_GATE_OFF(_MOD) \
+ 	do{                             \
+-		if(GCLK_ref[GCLK_IDX_##_MOD] == 0)    \
+-			break;                  \
+-		if(--GCLK_ref[GCLK_IDX_##_MOD] == 0){ \
++		if(--GCLK_ref[GCLK_IDX_##_MOD] <= 0){ \
+ 			if (0) printk(KERN_INFO "gate off %s %x, %x\n", GCLK_NAME_##_MOD, GCLK_REG_##_MOD, GCLK_MASK_##_MOD); \
+ 			CLEAR_CBUS_REG_MASK(GCLK_REG_##_MOD, GCLK_MASK_##_MOD); \
++			GCLK_ref[GCLK_IDX_##_MOD] = 0; \
+ 		} \
+ 	}while(0)
+ 
+ #define IS_CLK_GATE_ON(_MOD) (READ_CBUS_REG(GCLK_REG_##_MOD) & (GCLK_MASK_##_MOD))
+ #define GATE_INIT(_MOD) GCLK_ref[GCLK_IDX_##_MOD] = IS_CLK_GATE_ON(_MOD)?1:0
++	
++extern spinlock_t gate_lock;
++
++#define CLK_GATE_ON(_MOD) \
++	do{                     \
++		int flags; \
++		spin_lock_irqsave(&gate_lock, flags); \
++		__CLK_GATE_ON(_MOD); \
++		spin_unlock_irqrestore(&gate_lock, flags); \
++	}while(0)
++	
++#define CLK_GATE_OFF(_MOD) \
++	do{                     \
++		int flags; \
++		spin_lock_irqsave(&gate_lock, flags); \
++		__CLK_GATE_OFF(_MOD); \
++		spin_unlock_irqrestore(&gate_lock, flags); \
++	}while(0)
+ 
+ #define GCLK_IDX_DDR         0
+ #define GCLK_NAME_DDR      "DDR"
+diff --git a/arch/arm/mach-meson8/mod_gate.c b/arch/arm/mach-meson8/mod_gate.c
+deleted file mode 100755
+index 82648b91eb84..000000000000
+--- a/arch/arm/mach-meson8/mod_gate.c
++++ /dev/null
+@@ -1,814 +0,0 @@
+-#include <mach/power_gate.h>
+-#include <mach/mod_gate.h>
+-#include <linux/spinlock_types.h>
+-#include <linux/spinlock.h>
+-#include <linux/module.h>
+-#include <mach/am_regs.h>
+-#include <linux/device.h>
+-#include <linux/err.h>
+-#include <linux/hardirq.h>
+-
+-//#define PRINT_DEBUG_INFO
+-#ifdef PRINT_DEBUG_INFO
+-#define PRINT_INFO(...)		printk(__VA_ARGS__)
+-#else
+-#define PRINT_INFO(...)	
+-#endif
+-
+-typedef struct{
+-	const char* name;
+-	const mod_type_t type;
+-	int ref;
+-	int flag;
+-	int dc_en;
+-	int no_share;
+-}mod_record_t;
+-
+-DEFINE_SPINLOCK(mod_lock);
+-
+-static mod_record_t mod_records[MOD_MAX_NUM + 1] = {
+-	{
+-		.name = "vdec",
+-		.type = MOD_VDEC,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "audio",
+-		.type = MOD_AUDIO,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "hdmi",
+-		.type = MOD_HDMI,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "venc",
+-		.type = MOD_VENC,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "tcon",
+-		.type = MOD_TCON,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-		.no_share = 1,
+-	},{
+-		.name = "lvds",
+-		.type = MOD_LVDS,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-		.no_share = 1,
+-	},{
+-		.name = "spi",
+-		.type = MOD_SPI,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "uart0",
+-		.type = MOD_UART0,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "uart1",
+-		.type = MOD_UART1,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "uart2",
+-		.type = MOD_UART2,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "uart3",
+-		.type = MOD_UART3,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "rom",
+-		.type = MOD_ROM,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "efuse",
+-		.type = MOD_EFUSE,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "random_num_gen",
+-		.type = MOD_RANDOM_NUM_GEN,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "ethernet",
+-		.type = MOD_ETHERNET,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "media_cpu",
+-		.type = MOD_MEDIA_CPU,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "ge2d",
+-		.type = MOD_GE2D,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "ahb",
+-		.type = MOD_AHB,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "demux",
+-		.type = MOD_DEMUX,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "smart_card",
+-		.type = MOD_SMART_CARD,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "sdhc",
+-		.type = MOD_SDHC,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "stream",
+-		.type = MOD_STREAM,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "blk_mov",
+-		.type = MOD_BLK_MOV,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "dvin",
+-		.type = MOD_MISC_DVIN,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "usb0",
+-		.type = MOD_USB0,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "usb1",
+-		.type = MOD_USB1,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 0,
+-	},{
+-		.name = "sdio",
+-		.type = MOD_SDIO,
+-		.ref = 0,
+-		.flag = 1,
+-		.dc_en = 1,
+-	},{
+-		.name = NULL,
+-		.type = -1,
+-		.ref = -1,
+-		.flag = -1,
+-		.dc_en = -1,
+-	}, //end of the record array
+-};
+-
+-#if 0
+-static int _switch_gate(mod_type_t type, int flag)
+-{
+-	int ret = 0;
+-	switch(type) {
+-	case MOD_VDEC:
+-		PRINT_INFO("turn %s vdec module\n", flag?"on":"off");
+-		if (flag) {			   
+-			GATE_ON(DOS);
+-			aml_set_reg32_mask(P_HHI_VDEC_CLK_CNTL, 1 << 8);
+-		} else {
+-			GATE_OFF(DOS);
+-			aml_clr_reg32_mask(P_HHI_VDEC_CLK_CNTL, 1 << 8);
+-		}
+-		break;
+-	case MOD_AUDIO:
+-		PRINT_INFO("turn %s audio module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(AIU_AMCLK_MEASURE);
+-			GATE_ON(AIU_AIFIFO2);
+-			GATE_ON(AIU_AUD_MIXER);
+-			GATE_ON(AIU_MIXER_REG);
+-			
+-			GATE_ON(AIU_IEC958);
+-			GATE_ON(AIU_AI_TOP_GLUE);
+-			GATE_ON(AUD_BUF);
+-			GATE_ON(AIU_I2S_OUT);
+-		   // GATE_ON(AIU_AMCLK); //this gate should not be turned off
+-			GATE_ON(AIU_ICE958_AMCLK);
+-			GATE_ON(AIU_AOCLK);   
+-			//GATE_ON(AUD_IN);
+-			GATE_ON(AIU_ADC);
+-			//GATE_ON(AIU_AUDIN_SCLK);
+-		} else {   
+-			  GATE_OFF(AIU_AMCLK_MEASURE);
+-			GATE_OFF(AIU_AIFIFO2);
+-			GATE_OFF(AIU_AUD_MIXER);
+-			GATE_OFF(AIU_MIXER_REG);
+-			
+-			GATE_OFF(AIU_IEC958);
+-			GATE_OFF(AIU_AI_TOP_GLUE);
+-			GATE_OFF(AUD_BUF);
+-			GATE_OFF(AIU_I2S_OUT);		 
+-			//GATE_OFF(AIU_AMCLK); //this gate should not be turned off
+-			GATE_OFF(AIU_ICE958_AMCLK);
+-			GATE_OFF(AIU_AOCLK);
+-			//GATE_OFF(AUD_IN);
+-			GATE_OFF(AIU_ADC);
+-			//GATE_OFF(AIU_AUDIN_SCLK);
+-		}
+-		break;
+-	case MOD_HDMI:
+-		PRINT_INFO("turn %s hdmi module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(HDMI_INTR_SYNC);
+-			GATE_ON(HDMI_RX);
+-			GATE_ON(HDMI_PCLK);
+-		} else {
+-			GATE_OFF(HDMI_INTR_SYNC);
+-			GATE_OFF(HDMI_RX);
+-			GATE_OFF(HDMI_PCLK);
+-		}			
+-		break;
+-	case MOD_VENC:
+-		PRINT_INFO("turn %s venc module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(VCLK2_VENCI);
+-			GATE_ON(VCLK2_VENCI1);
+-			GATE_ON(VCLK2_VENCP);
+-			GATE_ON(VCLK2_VENCP1);
+-			//GATE_ON(VENC_P_TOP);
+-			//GATE_ON(VENC_I_TOP);
+-		   // GATE_ON(VENCI_INT);
+-			//GATE_ON(VENCP_INT);
+-			GATE_ON(VCLK2_ENCI);
+-			GATE_ON(VCLK2_ENCP);
+-			GATE_ON(VCLK2_VENCT);
+-			GATE_ON(VCLK2_VENCT1);
+-			GATE_ON(VCLK2_OTHER);
+-			GATE_ON(VCLK2_OTHER1);
+-			GATE_ON(ENC480P);
+-			//GATE_ON(VENC_DAC);
+-			GATE_ON(DAC_CLK);
+-		} else {
+-			GATE_OFF(VCLK2_VENCI);
+-			GATE_OFF(VCLK2_VENCI1);
+-			GATE_OFF(VCLK2_VENCP);
+-		#ifndef CONFIG_MACH_MESON6_G02_DONGLE
+-			GATE_OFF(VCLK2_VENCP1);
+-		#endif	 
+-			//GATE_OFF(VENC_P_TOP);
+-			//GATE_OFF(VENC_I_TOP);
+-			//GATE_OFF(VENCI_INT);
+-		#ifndef CONFIG_MACH_MESON6_G02_DONGLE	
+-			//GATE_OFF(VENCP_INT);
+-		#endif   
+-			GATE_OFF(VCLK2_ENCI);
+-		#ifndef CONFIG_MACH_MESON6_G02_DONGLE	  
+-			GATE_OFF(VCLK2_ENCP);
+-		#endif
+-			GATE_OFF(VCLK2_VENCT);
+-			GATE_OFF(VCLK2_VENCT1);
+-			GATE_OFF(VCLK2_OTHER);
+-			GATE_OFF(VCLK2_OTHER1);
+-			GATE_OFF(ENC480P);
+-			//GATE_OFF(VENC_DAC);
+-			GATE_OFF(DAC_CLK);
+-		}
+-		break;
+-	case MOD_TCON:
+-		PRINT_INFO("turn %s tcon module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(VCLK2_ENCT);
+-		} else {
+-			GATE_OFF(VCLK2_ENCT);
+-		}
+-		break;
+-	case MOD_LVDS:
+-		PRINT_INFO("turn %s lvds module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(VCLK2_ENCL);
+-		} else {
+-			GATE_OFF(VCLK2_ENCL);
+-		}
+-		break;
+-	case MOD_SPI:
+-		PRINT_INFO("turn %s spi module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(SPICC);
+-			GATE_ON(SPI);
+-		} else {
+-			GATE_OFF(SPICC);
+-			GATE_OFF(SPI);
+-		}
+-		break;
+-	case MOD_UART0:
+-		PRINT_INFO("turn %s uart0 module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(UART0);
+-		} else {
+-			GATE_OFF(UART0);
+-		}
+-		break;
+-	case MOD_UART1:
+-		PRINT_INFO("turn %s uart1 module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(UART1);
+-		} else {
+-			GATE_OFF(UART1);
+-		}
+-		break;
+-	case MOD_UART2:
+-		PRINT_INFO("turn %s uart2 module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(UART2);
+-		} else {
+-			GATE_OFF(UART2);
+-		}
+-		break;
+-	case MOD_UART3:
+-		PRINT_INFO("turn %s uart3 module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(UART3);
+-		} else {
+-			GATE_OFF(UART3);
+-		}
+-		break;
+-	case MOD_ROM:
+-		PRINT_INFO("turn %s rom module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(ROM_CLK);
+-		} else {
+-			GATE_OFF(ROM_CLK);
+-		}
+-		break;
+-	case MOD_EFUSE:
+-		PRINT_INFO("turn %s efuse module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(EFUSE);
+-		} else {
+-			GATE_OFF(EFUSE);
+-		}
+-		break;
+-	case MOD_RANDOM_NUM_GEN:
+-		PRINT_INFO("turn %s random_num_gen module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(RANDOM_NUM_GEN);
+-		} else {
+-			GATE_OFF(RANDOM_NUM_GEN);
+-		}
+-		break;
+-	case MOD_ETHERNET:
+-		PRINT_INFO("turn %s ethernet module\n", flag?"on":"off");
+-		if (flag) {
+-			GATE_ON(ETHERNET);
+-		} else {
+-			GATE_OFF(ETHERNET);
+-		}
+-		break;
+-	case MOD_MEDIA_CPU:
+-		PRINT_INFO("trun %s Audio DSP\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(MEDIA_CPU);
+-		}else{
+-			 GATE_OFF(MEDIA_CPU);
+-		}
+-		break;
+-	case MOD_GE2D:
+-		PRINT_INFO("trun %s GE2D\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(GE2D);
+-		}else{
+-			GATE_OFF(GE2D);
+-		}
+-		break;
+-	case MOD_AHB:
+-		PRINT_INFO("trun %s ahb\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(AHB_ARB0);
+-			GATE_ON(AHB_BRIDGE);
+-			GATE_ON(AHB_DATA_BUS);
+-			GATE_ON(AHB_CONTROL_BUS);
+-		}else{
+-			GATE_OFF(AHB_ARB0);
+-			GATE_OFF(AHB_BRIDGE);
+-			GATE_OFF(AHB_DATA_BUS);
+-			GATE_OFF(AHB_CONTROL_BUS);
+-		}
+-		break;
+-	case MOD_DEMUX:
+-		PRINT_INFO("trun %s demux\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(DEMUX);
+-		}else{
+-			GATE_OFF(DEMUX);
+-		}
+-		break;
+-	case MOD_SMART_CARD:
+-		PRINT_INFO("trun %s smart card\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(SMART_CARD_MPEG_DOMAIN);
+-		}else{
+-			GATE_OFF(SMART_CARD_MPEG_DOMAIN);
+-		}
+-		break;
+-	case MOD_SDHC:
+-		PRINT_INFO("trun %s sdhc\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(SDHC);
+-		}else{
+-			GATE_OFF(SDHC);
+-		}
+-		break;
+-	case MOD_STREAM:
+-		PRINT_INFO("trun %s stream\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(STREAM);
+-		}else{
+-			GATE_OFF(STREAM);
+-		}
+-		break;
+-	case MOD_BLK_MOV:
+-		PRINT_INFO("trun %s blk_mov\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(BLK_MOV);
+-		}else{
+-			GATE_OFF(BLK_MOV);
+-		}
+-		break;
+-	case MOD_MISC_DVIN:
+-		PRINT_INFO("trun %s dvin\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(MISC_DVIN);
+-		}else{
+-			GATE_OFF(MISC_DVIN);
+-		}
+-		break;
+-	case MOD_USB0:
+-		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(USB0);
+-			GATE_ON(MISC_USB0_TO_DDR);
+-		}else{
+-			GATE_OFF(USB0);
+-			GATE_ON(MISC_USB0_TO_DDR);
+-		}
+-		break;
+-	case MOD_USB1:
+-		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(USB1);
+-			GATE_ON(MISC_USB1_TO_DDR);
+-		}else{
+-			GATE_OFF(USB1);
+-			GATE_ON(MISC_USB1_TO_DDR);
+-		}
+-		break;
+-	case MOD_SDIO:
+-		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
+-		if(flag){
+-			GATE_ON(SDIO);
+-		}else{
+-			GATE_OFF(SDIO);
+-		}
+-		break;
+-	default:
+-		PRINT_INFO("mod type not support\n");
+-		ret = -1;
+-		break;
+-	}
+-	return ret;
+-}
+-#endif
+-
+-#if 0
+-static int get_mod(mod_record_t* mod_record)
+-{
+-	int ret = 0;
+-	unsigned long flags;
+-	PRINT_INFO("get mod  %s\n", mod_record->name);
+-	spin_lock_irqsave(&mod_lock, flags);
+-	if (mod_record->no_share)
+-		ret = _switch_gate(mod_record->type, 1);
+-	else {
+-		if(mod_record->ref > 0)
+-			mod_record->ref++;
+-		else {
+-			mod_record->ref = 1;
+-			mod_record->flag = 1;
+-			ret = _switch_gate(mod_record->type, 1);
+-		}  
+-	}
+-	spin_unlock_irqrestore(&mod_lock, flags);
+-	return ret;
+-}
+-#endif
+-
+-#if 0
+-static int put_mod(mod_record_t* mod_record)
+-{
+-	int ret = 0;
+-	unsigned long flags;
+-	PRINT_INFO("put mod  %s\n", mod_record->name);
+-	spin_lock_irqsave(&mod_lock, flags);
+-	if (mod_record->no_share) 
+-		ret = _switch_gate(mod_record->type, 0); 
+-	else {
+-		mod_record->ref--;
+-		if(mod_record->ref <= 0) {
+-			ret = _switch_gate(mod_record->type, 0); 
+-			mod_record->ref = 0;
+-			mod_record->flag = 0;
+-		}else
+-			printk("ref value is %d\n", mod_record->ref);
+-	}
+-	spin_unlock_irqrestore(&mod_lock, flags);
+-	return ret;
+-}
+-#endif
+-
+-#if 0
+-static void _switch_mod_gate_by_type(mod_type_t type, int flag, int dc_protect)
+-{
+-#if 0
+-	if (mod_records[type].dc_en <= 0 && dc_protect)
+-		return;
+-	else {
+-		if (flag)
+-			get_mod(&mod_records[type]);
+-		else
+-			put_mod(&mod_records[type]);
+-	}
+-#endif
+-}
+-#endif
+-
+-void switch_mod_gate_by_type(mod_type_t type, int flag)
+-{
+-	//_switch_mod_gate_by_type(type, flag, 1);
+-}
+-EXPORT_SYMBOL(switch_mod_gate_by_type);
+-
+-static void _switch_mod_gate_by_name(const char* mod_name, int flag, int dc_protect)
+-{
+-#if 0
+-	int i = 0;
+-	//PRINT_INFO("arg mod_name is %s\n", mod_name);
+-	while(mod_records[i].name && i < MOD_MAX_NUM) {
+-		//PRINT_INFO("mod%d name is %s\n", i, mod_records[i].name);
+-		if (!strncmp(mod_name, mod_records[i].name, strlen(mod_name))) {
+-			if(mod_records[i].dc_en <= 0 && dc_protect)
+-				break;
+-			else {
+-				if (flag)
+-					get_mod(&mod_records[i]);
+-				else
+-					put_mod(&mod_records[i]);
+-				break;
+-			}
+-		}
+-		i++;
+-	}
+-#endif
+-}
+-
+-void switch_mod_gate_by_name(const char* mod_name, int flag)
+-{
+-	//_switch_mod_gate_by_name(mod_name, flag, 1);
+-}
+-EXPORT_SYMBOL(switch_mod_gate_by_name);
+-
+-void power_gate_init(void)
+-{
+-	GATE_INIT(DDR);
+-	GATE_INIT(DOS);
+-	GATE_INIT(AHB_BRIDGE);
+-	GATE_INIT(ISA);
+-	GATE_INIT(PL310_CBUS);
+-	GATE_INIT(_1200XXX);
+-	GATE_INIT(SPICC);
+-	GATE_INIT(I2C);
+-	GATE_INIT(SAR_ADC);
+-	GATE_INIT(SMART_CARD_MPEG_DOMAIN);
+-	GATE_INIT(RANDOM_NUM_GEN);
+-	GATE_INIT(UART0);
+-	GATE_INIT(SDHC);
+-	GATE_INIT(STREAM);
+-	GATE_INIT(ASYNC_FIFO);
+-	GATE_INIT(SDIO);
+-	GATE_INIT(AUD_BUF);
+-	GATE_INIT(HIU_PARSER);
+-	GATE_INIT(HDMI_RX);
+-	GATE_INIT(ASSIST_MISC);
+-	GATE_INIT(SPI);
+-	GATE_INIT(AUD_IN);
+-	GATE_INIT(ETHERNET);
+-	GATE_INIT(DEMUX);
+-	GATE_INIT(AIU_AI_TOP_GLUE);
+-	GATE_INIT(AIU_IEC958);
+-	GATE_INIT(AIU_I2S_OUT);
+-	GATE_INIT(AIU_AMCLK_MEASURE);
+-	GATE_INIT(AIU_AIFIFO2);
+-	GATE_INIT(AIU_AUD_MIXER);
+-	GATE_INIT(AIU_MIXER_REG);
+-	GATE_INIT(AIU_ADC);
+-	GATE_INIT(BLK_MOV);
+-	GATE_INIT(AIU_TOP_LEVEL);
+-	GATE_INIT(UART1);
+-	GATE_INIT(CSI_DIG_CLKIN);
+-	GATE_INIT(GE2D);
+-	GATE_INIT(USB0);
+-	GATE_INIT(USB1);
+-	GATE_INIT(RESET);
+-	GATE_INIT(NAND);
+-	GATE_INIT(HIU_PARSER_TOP);
+-	GATE_INIT(USB_GENERAL);
+-	GATE_INIT(AHB_ARB0);
+-	GATE_INIT(EFUSE);
+-	GATE_INIT(ROM_CLK);
+-	GATE_INIT(AHB_DATA_BUS);
+-	GATE_INIT(AHB_CONTROL_BUS);
+-	GATE_INIT(HDMI_INTR_SYNC);
+-	GATE_INIT(HDMI_PCLK);
+-	GATE_INIT(MISC_USB1_TO_DDR);
+-	GATE_INIT(MISC_USB0_TO_DDR);
+-	GATE_INIT(AIU_PCLK);
+-	GATE_INIT(MMC_PCLK);
+-	GATE_INIT(MISC_DVIN);
+-	GATE_INIT(UART2);
+-	GATE_INIT(UART3);
+-	GATE_INIT(VPU_INTR);
+-	GATE_INIT(SECURE_AHP_APB3);
+-	GATE_INIT(CLK81_TO_A9);
+-	GATE_INIT(VCLK2_VENCI);
+-	GATE_INIT(VCLK2_VENCI1);
+-	GATE_INIT(VCLK2_VENCP);
+-	GATE_INIT(VCLK2_VENCP1);
+-	GATE_INIT(VCLK2_VENCT);
+-	GATE_INIT(VCLK2_VENCT1);
+-	GATE_INIT(VCLK2_OTHER);
+-	GATE_INIT(VCLK2_ENCI);
+-	GATE_INIT(VCLK2_ENCP);
+-	GATE_INIT(DAC_CLK);
+-	GATE_INIT(AIU_AOCLK);
+-	GATE_INIT(AIU_ICE958_AMCLK);
+-	GATE_INIT(ENC480P);
+-	GATE_INIT(RANDOM_NUM_GEN1);
+-	GATE_INIT(VCLK2_ENCT);
+-	GATE_INIT(VCLK2_ENCL);
+-	GATE_INIT(MMC_CLK);
+-	GATE_INIT(VCLK2_VENCL);
+-	GATE_INIT(VCLK2_OTHER1);
+-	GATE_INIT(EDP_CLK);
+-	GATE_INIT(MEDIA_CPU);
+-}
+-
+-static struct class* mod_gate_clsp;
+-
+-static ssize_t show_mod_on(struct class* class, struct class_attribute* attr,
+-	char* buf)
+-{
+-	ssize_t size = 0;
+-	int i = 0;
+-	while(mod_records[i].name && i < MOD_MAX_NUM) {
+-		if (mod_records[i].flag > 0)
+-			size += sprintf(buf + size, "%s\n", mod_records[i].name);
+-		i++;
+-	}
+-	return size;
+-}
+-
+-static ssize_t store_mod_on(struct class* class, struct class_attribute* attr,
+-   const char* buf, size_t count )
+-{
+-	char tmp_str[32];
+-	memset(tmp_str, 0, 32);
+-	strncpy(tmp_str, buf, 32);
+-	while(tmp_str[0] && tmp_str[strlen(tmp_str)-1] < 33 )
+-	tmp_str[strlen(tmp_str)-1] = 0;
+-	_switch_mod_gate_by_name(tmp_str, 1, 0);
+-	return count;
+-}
+-
+-static ssize_t show_mod_off(struct class* class, struct class_attribute* attr,
+-	char* buf)
+-{
+-	ssize_t size = 0;
+-	int i = 0;
+-	while(mod_records[i].name && i < MOD_MAX_NUM) {
+-		if (mod_records[i].flag <= 0)
+-			size += sprintf(buf + size, "%s\n", mod_records[i].name);
+-		i++;
+-	}
+-	return size;
+-}
+-
+-static ssize_t store_mod_off(struct class* class, struct class_attribute* attr,
+-   const char* buf, size_t count )
+-{
+-	char tmp_str[32];
+-	memset(tmp_str, 0, 32);
+-	strncpy(tmp_str, buf, 32);
+-	while(tmp_str[0] && tmp_str[strlen(tmp_str)-1] < 33 )
+-		tmp_str[strlen(tmp_str)-1] = 0;
+-	_switch_mod_gate_by_name(tmp_str, 0, 0);
+-	return count;
+-}
+-
+-static ssize_t show_dynamical_control(struct class* class, struct class_attribute* attr,
+-	char* buf)
+-{
+-	ssize_t size = 0;
+-	int i = 0;
+-	while(mod_records[i].name && i < MOD_MAX_NUM) {
+-		if (mod_records[i].dc_en > 0)
+-			size += sprintf(buf + size, "%s\n", mod_records[i].name);
+-		i++;
+-	}
+-	return size;
+-}
+-
+-static ssize_t store_dynamical_control(struct class* class, struct class_attribute* attr,
+-	const char* buf, size_t count )
+-{
+-	int i = 0;
+-	char tmp_str[32];
+-	  
+-	PRINT_INFO("arg mod_name is %s\n", buf);
+-	while(mod_records[i].name && i < MOD_MAX_NUM) {
+-		memset(tmp_str, 0, 32);
+-		strncpy(tmp_str, buf, 32);
+-		while(tmp_str[0] && tmp_str[strlen(tmp_str)-1] < 33 )
+-			tmp_str[strlen(tmp_str)-1] = 0;
+-		//PRINT_INFO("mod%d name is %s\n", i, mod_records[i].name);
+-		if (!strncmp(tmp_str, mod_records[i].name, strlen(tmp_str))) {
+-			mod_records[i].dc_en = 1;
+-			break;
+-		}
+-		i++;
+-	}
+-	return count;
+-}
+-
+-static struct class_attribute aml_mod_attrs[]={
+-	__ATTR(mod_on,  S_IRUGO | S_IWUSR, show_mod_on, store_mod_on),
+-	__ATTR(mod_off,  S_IRUGO | S_IWUSR, show_mod_off, store_mod_off),
+-	__ATTR(dynamical_control,  S_IRUGO | S_IWUSR, show_dynamical_control, store_dynamical_control),
+-	__ATTR_NULL,
+-};
+-
+-static int __init mode_gate_mgr_init(void)
+-{
+-	int ret = 0, i = 0;
+-	power_gate_init();
+-	mod_gate_clsp = class_create(THIS_MODULE, "aml_mod");
+-	if(IS_ERR(mod_gate_clsp)){
+-		ret = PTR_ERR(mod_gate_clsp);
+-		return ret;
+-	}
+-	for(i = 0; aml_mod_attrs[i].attr.name; i++){
+-		if(class_create_file(mod_gate_clsp, &aml_mod_attrs[i]) < 0)
+-			goto err;
+-	}
+-	return 0;
+-err:
+-	for(i=0; aml_mod_attrs[i].attr.name; i++){
+-		class_remove_file(mod_gate_clsp, &aml_mod_attrs[i]);
+-	}
+-	class_destroy(mod_gate_clsp); 
+-	return -1;  
+-}
+-arch_initcall(mode_gate_mgr_init);
+diff --git a/arch/arm/mach-meson8/power_gate.c b/arch/arm/mach-meson8/power_gate.c
+index 7d6323f1845a..113752e9c77e 100755
+--- a/arch/arm/mach-meson8/power_gate.c
++++ b/arch/arm/mach-meson8/power_gate.c
+@@ -1,11 +1,707 @@
+-#include <linux/module.h>
+-#include <mach/am_regs.h>
+ #include <mach/power_gate.h>
+ #include <mach/mod_gate.h>
++#include <linux/spinlock_types.h>
++#include <linux/spinlock.h>
++#include <linux/module.h>
++#include <mach/am_regs.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/hardirq.h>
+ 
+ unsigned char GCLK_ref[GCLK_IDX_MAX];
+ EXPORT_SYMBOL(GCLK_ref);
+ 
++//#define PRINT_DEBUG_INFO
++#ifdef PRINT_DEBUG_INFO
++#define PRINT_INFO(...)		printk(__VA_ARGS__)
++#else
++#define PRINT_INFO(...)	
++#endif
++
++typedef struct{
++	const char* name;
++	const mod_type_t type;
++	int ref;
++	int flag;
++	int dc_en;
++	int no_share;
++}mod_record_t;
++
++DEFINE_SPINLOCK(gate_lock);
++
++static mod_record_t mod_records[MOD_MAX_NUM + 1] = {
++	{
++		.name = "vdec",
++		.type = MOD_VDEC,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "audio",
++		.type = MOD_AUDIO,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "hdmi",
++		.type = MOD_HDMI,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "venc",
++		.type = MOD_VENC,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "tcon",
++		.type = MOD_TCON,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++		.no_share = 1,
++	},{
++		.name = "lvds",
++		.type = MOD_LVDS,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++		.no_share = 1,
++	},{
++		.name = "spi",
++		.type = MOD_SPI,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "uart0",
++		.type = MOD_UART0,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "uart1",
++		.type = MOD_UART1,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "uart2",
++		.type = MOD_UART2,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "uart3",
++		.type = MOD_UART3,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "rom",
++		.type = MOD_ROM,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "efuse",
++		.type = MOD_EFUSE,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "random_num_gen",
++		.type = MOD_RANDOM_NUM_GEN,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "ethernet",
++		.type = MOD_ETHERNET,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "media_cpu",
++		.type = MOD_MEDIA_CPU,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "ge2d",
++		.type = MOD_GE2D,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "ahb",
++		.type = MOD_AHB,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "demux",
++		.type = MOD_DEMUX,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "smart_card",
++		.type = MOD_SMART_CARD,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "sdhc",
++		.type = MOD_SDHC,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "stream",
++		.type = MOD_STREAM,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "blk_mov",
++		.type = MOD_BLK_MOV,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "dvin",
++		.type = MOD_MISC_DVIN,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "usb0",
++		.type = MOD_USB0,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "usb1",
++		.type = MOD_USB1,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 0,
++	},{
++		.name = "sdio",
++		.type = MOD_SDIO,
++		.ref = 0,
++		.flag = 1,
++		.dc_en = 1,
++	},{
++		.name = NULL,
++		.type = -1,
++		.ref = -1,
++		.flag = -1,
++		.dc_en = -1,
++	}, //end of the record array
++};
++
++
++static int _switch_gate(mod_type_t type, int flag)
++{
++	int ret = 0;
++	switch(type) {
++	case MOD_VDEC:
++		PRINT_INFO("turn %s vdec module\n", flag?"on":"off");
++		if (flag) {			   
++			//__CLK_GATE_ON(DOS);
++			//aml_set_reg32_mask(P_HHI_VDEC_CLK_CNTL, 1 << 8);
++		} else {
++			//__CLK_GATE_OFF(DOS);
++			//aml_clr_reg32_mask(P_HHI_VDEC_CLK_CNTL, 1 << 8);
++		}
++		break;
++	case MOD_AUDIO:
++		PRINT_INFO("turn %s audio module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(AIU_AI_TOP_GLUE);
++			__CLK_GATE_ON(AIU_IEC958);
++			__CLK_GATE_ON(AIU_I2S_OUT);
++			__CLK_GATE_ON(AIU_AMCLK_MEASURE);
++			__CLK_GATE_ON(AIU_AIFIFO2);
++			__CLK_GATE_ON(AIU_AUD_MIXER);
++			__CLK_GATE_ON(AIU_MIXER_REG);
++			__CLK_GATE_ON(AIU_ADC);
++			__CLK_GATE_ON(AIU_TOP_LEVEL);
++			__CLK_GATE_ON(AIU_PCLK);
++			__CLK_GATE_ON(AIU_AOCLK);
++			__CLK_GATE_ON(AIU_ICE958_AMCLK);
++		} else { 
++			__CLK_GATE_OFF(AIU_AI_TOP_GLUE);
++			__CLK_GATE_OFF(AIU_IEC958);
++			__CLK_GATE_OFF(AIU_I2S_OUT);
++			__CLK_GATE_OFF(AIU_AMCLK_MEASURE);
++			__CLK_GATE_OFF(AIU_AIFIFO2);
++			__CLK_GATE_OFF(AIU_AUD_MIXER);
++			__CLK_GATE_OFF(AIU_MIXER_REG);
++			__CLK_GATE_OFF(AIU_ADC);
++			__CLK_GATE_OFF(AIU_TOP_LEVEL);
++			__CLK_GATE_OFF(AIU_PCLK);
++			__CLK_GATE_OFF(AIU_AOCLK);
++			__CLK_GATE_OFF(AIU_ICE958_AMCLK);
++	  
++		}
++		break;
++	#if 0
++	case MOD_HDMI:
++		PRINT_INFO("turn %s hdmi module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(HDMI_INTR_SYNC);
++			__CLK_GATE_ON(HDMI_RX);
++			__CLK_GATE_ON(HDMI_PCLK);
++		} else {
++			__CLK_GATE_OFF(HDMI_INTR_SYNC);
++			__CLK_GATE_OFF(HDMI_RX);
++			__CLK_GATE_OFF(HDMI_PCLK);
++		}			
++		break;
++	case MOD_VENC:
++		PRINT_INFO("turn %s venc module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(VCLK2_VENCI);
++			__CLK_GATE_ON(VCLK2_VENCI1);
++			__CLK_GATE_ON(VCLK2_VENCP);
++			__CLK_GATE_ON(VCLK2_VENCP1);
++			__CLK_GATE_ON(VCLK2_ENCI);
++			__CLK_GATE_ON(VCLK2_ENCP);
++			__CLK_GATE_ON(VCLK2_VENCT);
++			__CLK_GATE_ON(VCLK2_VENCT1);
++			__CLK_GATE_ON(VCLK2_OTHER);
++			__CLK_GATE_ON(VCLK2_OTHER1);
++			__CLK_GATE_ON(ENC480P);
++			//__CLK_GATE_ON(VENC_DAC);
++			__CLK_GATE_ON(DAC_CLK);
++		} else {
++			__CLK_GATE_OFF(VCLK2_VENCI);
++			__CLK_GATE_OFF(VCLK2_VENCI1);
++			__CLK_GATE_OFF(VCLK2_VENCP);
++		#ifndef CONFIG_MACH_MESON6_G02_DONGLE
++			__CLK_GATE_OFF(VCLK2_VENCP1);
++		#endif	 
++		
++			__CLK_GATE_OFF(VCLK2_ENCI);
++		#ifndef CONFIG_MACH_MESON6_G02_DONGLE	  
++			__CLK_GATE_OFF(VCLK2_ENCP);
++		#endif
++			__CLK_GATE_OFF(VCLK2_VENCT);
++			__CLK_GATE_OFF(VCLK2_VENCT1);
++			__CLK_GATE_OFF(VCLK2_OTHER);
++			__CLK_GATE_OFF(VCLK2_OTHER1);
++			__CLK_GATE_OFF(ENC480P);
++			__CLK_GATE_OFF(DAC_CLK);
++		}
++		break;
++	case MOD_TCON:
++		PRINT_INFO("turn %s tcon module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(VCLK2_ENCT);
++		} else {
++			__CLK_GATE_OFF(VCLK2_ENCT);
++		}
++		break;
++	case MOD_LVDS:
++		PRINT_INFO("turn %s lvds module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(VCLK2_ENCL);
++		} else {
++			__CLK_GATE_OFF(VCLK2_ENCL);
++		}
++		break;
++	#endif
++	case MOD_SPI:
++		PRINT_INFO("turn %s spi module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(SPICC);
++			__CLK_GATE_ON(SPI);
++		} else {
++			__CLK_GATE_OFF(SPICC);
++			__CLK_GATE_OFF(SPI);
++		}
++		break;
++	case MOD_UART0:
++		PRINT_INFO("turn %s uart0 module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(UART0);
++		} else {
++			__CLK_GATE_OFF(UART0);
++		}
++		break;
++	case MOD_UART1:
++		PRINT_INFO("turn %s uart1 module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(UART1);
++		} else {
++			__CLK_GATE_OFF(UART1);
++		}
++		break;
++	case MOD_UART2:
++		PRINT_INFO("turn %s uart2 module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(UART2);
++		} else {
++			__CLK_GATE_OFF(UART2);
++		}
++		break;
++	case MOD_UART3:
++		PRINT_INFO("turn %s uart3 module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(UART3);
++		} else {
++			__CLK_GATE_OFF(UART3);
++		}
++		break;
++	case MOD_ROM:
++		PRINT_INFO("turn %s rom module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(ROM_CLK);
++		} else {
++			__CLK_GATE_OFF(ROM_CLK);
++		}
++		break;
++	case MOD_EFUSE:
++		PRINT_INFO("turn %s efuse module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(EFUSE);
++		} else {
++			__CLK_GATE_OFF(EFUSE);
++		}
++		break;
++	case MOD_RANDOM_NUM_GEN:
++		PRINT_INFO("turn %s random_num_gen module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(RANDOM_NUM_GEN);
++		} else {
++			__CLK_GATE_OFF(RANDOM_NUM_GEN);
++		}
++		break;
++	case MOD_ETHERNET:
++		PRINT_INFO("turn %s ethernet module\n", flag?"on":"off");
++		if (flag) {
++			__CLK_GATE_ON(ETHERNET);
++		} else {
++			__CLK_GATE_OFF(ETHERNET);
++		}
++		break;
++	case MOD_MEDIA_CPU:
++		PRINT_INFO("trun %s Audio DSP\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(MEDIA_CPU);
++		}else{
++			 __CLK_GATE_OFF(MEDIA_CPU);
++		}
++		break;
++	case MOD_GE2D:
++		PRINT_INFO("trun %s GE2D\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(GE2D);
++		}else{
++			__CLK_GATE_OFF(GE2D);
++		}
++		break;
++	case MOD_AHB:
++		PRINT_INFO("trun %s ahb\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(AHB_ARB0);
++			__CLK_GATE_ON(AHB_BRIDGE);
++			__CLK_GATE_ON(AHB_DATA_BUS);
++			__CLK_GATE_ON(AHB_CONTROL_BUS);
++		}else{
++			__CLK_GATE_OFF(AHB_ARB0);
++			__CLK_GATE_OFF(AHB_BRIDGE);
++			__CLK_GATE_OFF(AHB_DATA_BUS);
++			__CLK_GATE_OFF(AHB_CONTROL_BUS);
++		}
++		break;
++	case MOD_DEMUX:
++		PRINT_INFO("trun %s demux\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(DEMUX);
++		}else{
++			__CLK_GATE_OFF(DEMUX);
++		}
++		break;
++	case MOD_SMART_CARD:
++		PRINT_INFO("trun %s smart card\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(SMART_CARD_MPEG_DOMAIN);
++		}else{
++			__CLK_GATE_OFF(SMART_CARD_MPEG_DOMAIN);
++		}
++		break;
++	case MOD_SDHC:
++		PRINT_INFO("trun %s sdhc\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(SDHC);
++		}else{
++			__CLK_GATE_OFF(SDHC);
++		}
++		break;
++	case MOD_STREAM:
++		PRINT_INFO("trun %s stream\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(STREAM);
++		}else{
++			__CLK_GATE_OFF(STREAM);
++		}
++		break;
++	case MOD_BLK_MOV:
++		PRINT_INFO("trun %s blk_mov\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(BLK_MOV);
++		}else{
++			__CLK_GATE_OFF(BLK_MOV);
++		}
++		break;
++	case MOD_MISC_DVIN:
++		PRINT_INFO("trun %s dvin\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(MISC_DVIN);
++		}else{
++			__CLK_GATE_OFF(MISC_DVIN);
++		}
++		break;
++	case MOD_USB0:
++		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(USB_GENERAL);
++			__CLK_GATE_ON(USB0);
++			__CLK_GATE_ON(MISC_USB0_TO_DDR);
++		}else{
++			__CLK_GATE_OFF(USB0);
++			__CLK_GATE_OFF(MISC_USB0_TO_DDR);
++			__CLK_GATE_OFF(USB_GENERAL);
++		}
++		break;
++	case MOD_USB1:
++		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(USB_GENERAL);
++			__CLK_GATE_ON(USB1);
++			__CLK_GATE_ON(MISC_USB1_TO_DDR);
++		}else{
++			__CLK_GATE_OFF(USB1);
++			__CLK_GATE_ON(MISC_USB1_TO_DDR);
++			__CLK_GATE_OFF(USB_GENERAL);
++		}
++		break;
++	case MOD_SDIO:
++		PRINT_INFO("trun %s rdma\n", flag? " on" : "off");
++		if(flag){
++			__CLK_GATE_ON(SDIO);
++		}else{
++			__CLK_GATE_OFF(SDIO);
++		}
++		break;
++	default:
++		PRINT_INFO("mod type not support\n");
++		ret = -1;
++		break;
++	}
++	return ret;
++}
++
++static int get_mod(mod_record_t* mod_record)
++{
++	int ret = 0;
++	unsigned long flags;
++	PRINT_INFO("get mod  %s\n", mod_record->name);
++	spin_lock_irqsave(&gate_lock, flags);
++	ret = _switch_gate(mod_record->type, 1);
++	spin_unlock_irqrestore(&gate_lock, flags);
++	return ret;
++}
++
++static int put_mod(mod_record_t* mod_record)
++{
++	int ret = 0;
++	unsigned long flags;
++	PRINT_INFO("put mod  %s\n", mod_record->name);
++	spin_lock_irqsave(&gate_lock, flags);
++	ret = _switch_gate(mod_record->type, 0); 
++	spin_unlock_irqrestore(&gate_lock, flags);
++	return ret;
++}
++
++void switch_mod_gate_by_type(mod_type_t type, int flag)
++{
++	if (flag)
++		get_mod(&mod_records[type]);
++	else
++		put_mod(&mod_records[type]);
++}
++EXPORT_SYMBOL(switch_mod_gate_by_type);
++
++void switch_mod_gate_by_name(const char* mod_name, int flag)
++{
++	int i = 0;
++	//PRINT_INFO("arg mod_name is %s\n", mod_name);
++	while(mod_records[i].name && i < MOD_MAX_NUM) {
++		//PRINT_INFO("mod%d name is %s\n", i, mod_records[i].name);
++		if (!strncmp(mod_name, mod_records[i].name, strlen(mod_name))) {
++			if (flag)
++				get_mod(&mod_records[i]);
++			else
++				put_mod(&mod_records[i]);
++			break;
++		}
++		i++;
++	}
++}
++EXPORT_SYMBOL(switch_mod_gate_by_name);
++
++void power_gate_init(void)
++{
++	GATE_INIT(DDR);
++	GATE_INIT(DOS);
++	GATE_INIT(AHB_BRIDGE);
++	GATE_INIT(ISA);
++	GATE_INIT(PL310_CBUS);
++	GATE_INIT(_1200XXX);
++	GATE_INIT(SPICC);
++	GATE_INIT(I2C);
++	GATE_INIT(SAR_ADC);
++	GATE_INIT(SMART_CARD_MPEG_DOMAIN);
++	GATE_INIT(RANDOM_NUM_GEN);
++	GATE_INIT(UART0);
++	GATE_INIT(SDHC);
++	GATE_INIT(STREAM);
++	GATE_INIT(ASYNC_FIFO);
++	GATE_INIT(SDIO);
++	GATE_INIT(AUD_BUF);
++	GATE_INIT(HIU_PARSER);
++	GATE_INIT(HDMI_RX);
++	GATE_INIT(ASSIST_MISC);
++	GATE_INIT(SPI);
++	GATE_INIT(AUD_IN);
++	GATE_INIT(ETHERNET);
++	GATE_INIT(DEMUX);
++	GATE_INIT(AIU_AI_TOP_GLUE);
++	GATE_INIT(AIU_IEC958);
++	GATE_INIT(AIU_I2S_OUT);
++	GATE_INIT(AIU_AMCLK_MEASURE);
++	GATE_INIT(AIU_AIFIFO2);
++	GATE_INIT(AIU_AUD_MIXER);
++	GATE_INIT(AIU_MIXER_REG);
++	GATE_INIT(AIU_ADC);
++	GATE_INIT(BLK_MOV);
++	GATE_INIT(AIU_TOP_LEVEL);
++	GATE_INIT(UART1);
++	GATE_INIT(CSI_DIG_CLKIN);
++	GATE_INIT(GE2D);
++	GATE_INIT(USB0);
++	GATE_INIT(USB1);
++	GATE_INIT(RESET);
++	GATE_INIT(NAND);
++	GATE_INIT(HIU_PARSER_TOP);
++	GATE_INIT(USB_GENERAL);
++	GATE_INIT(AHB_ARB0);
++	GATE_INIT(EFUSE);
++	GATE_INIT(ROM_CLK);
++	GATE_INIT(AHB_DATA_BUS);
++	GATE_INIT(AHB_CONTROL_BUS);
++	GATE_INIT(HDMI_INTR_SYNC);
++	GATE_INIT(HDMI_PCLK);
++	GATE_INIT(MISC_USB1_TO_DDR);
++	GATE_INIT(MISC_USB0_TO_DDR);
++	GATE_INIT(AIU_PCLK);
++	GATE_INIT(MMC_PCLK);
++	GATE_INIT(MISC_DVIN);
++	GATE_INIT(UART2);
++	GATE_INIT(UART3);
++	GATE_INIT(VPU_INTR);
++	GATE_INIT(SECURE_AHP_APB3);
++	GATE_INIT(CLK81_TO_A9);
++	GATE_INIT(VCLK2_VENCI);
++	GATE_INIT(VCLK2_VENCI1);
++	GATE_INIT(VCLK2_VENCP);
++	GATE_INIT(VCLK2_VENCP1);
++	GATE_INIT(VCLK2_VENCT);
++	GATE_INIT(VCLK2_VENCT1);
++	GATE_INIT(VCLK2_OTHER);
++	GATE_INIT(VCLK2_ENCI);
++	GATE_INIT(VCLK2_ENCP);
++	GATE_INIT(DAC_CLK);
++	GATE_INIT(AIU_AOCLK);
++	GATE_INIT(AIU_ICE958_AMCLK);
++	GATE_INIT(ENC480P);
++	GATE_INIT(RANDOM_NUM_GEN1);
++	GATE_INIT(VCLK2_ENCT);
++	GATE_INIT(VCLK2_ENCL);
++	GATE_INIT(MMC_CLK);
++	GATE_INIT(VCLK2_VENCL);
++	GATE_INIT(VCLK2_OTHER1);
++	GATE_INIT(EDP_CLK);
++	GATE_INIT(MEDIA_CPU);
++}
++
++#if 1 //disable sysfs interface.
++
++static struct class* mod_gate_clsp;
++
++static ssize_t store_mod_on(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	#if 0
++	char tmp_str[32];
++	memset(tmp_str, 0, 32);
++	strncpy(tmp_str, buf, 32);
++	while(tmp_str[0] && tmp_str[strlen(tmp_str)-1] < 33 )
++	tmp_str[strlen(tmp_str)-1] = 0;
++	//switch_mod_gate_by_name(tmp_str, 1);
++	#endif
++	return count;
++}
++
++static ssize_t store_mod_off(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	#if 0
++	char tmp_str[32];
++	memset(tmp_str, 0, 32);
++	strncpy(tmp_str, buf, 32);
++	while(tmp_str[0] && tmp_str[strlen(tmp_str)-1] < 33 )
++		tmp_str[strlen(tmp_str)-1] = 0;
++	switch_mod_gate_by_name(tmp_str, 0);
++	#endif
++	return count;
++}
++
++static struct class_attribute aml_mod_attrs[]={
++	__ATTR(mod_on,  S_IRUGO | S_IWUSR, NULL, store_mod_on),
++	__ATTR(mod_off,  S_IRUGO | S_IWUSR, NULL, store_mod_off),
++	__ATTR_NULL,
++};
++
++static int __init mode_gate_mgr_init(void)
++{
++	int ret = 0, i = 0;
++	power_gate_init();
++	mod_gate_clsp = class_create(THIS_MODULE, "aml_mod");
++	if(IS_ERR(mod_gate_clsp)){
++		ret = PTR_ERR(mod_gate_clsp);
++		return ret;
++	}
++	for(i = 0; aml_mod_attrs[i].attr.name; i++){
++		if(class_create_file(mod_gate_clsp, &aml_mod_attrs[i]) < 0)
++			goto err;
++	}
++	return 0;
++err:
++	for(i=0; aml_mod_attrs[i].attr.name; i++){
++		class_remove_file(mod_gate_clsp, &aml_mod_attrs[i]);
++	}
++	class_destroy(mod_gate_clsp); 
++	return -1;  
++}
++arch_initcall(mode_gate_mgr_init);
++#endif
+ 
+ int  video_dac_enable(unsigned char enable_mask)
+ {
+diff --git a/arch/arm/mach-meson8/usbclock.c b/arch/arm/mach-meson8/usbclock.c
+index ab14c3e5f6f5..1e4b9df43fb5 100755
+--- a/arch/arm/mach-meson8/usbclock.c
++++ b/arch/arm/mach-meson8/usbclock.c
+@@ -27,7 +27,9 @@
+ #include <mach/clock.h>
+ #include <mach/am_regs.h>
+ #include <mach/usbclock.h>
+-
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++#include <mach/mod_gate.h>
++#endif
+ /*
+  * M chip USB clock setting
+  */
+@@ -68,7 +70,11 @@ int clk_enable_usb(struct clk *clk)
+ 		//for(i = 0; i < 1000; i++)
+ 		//	udelay(time_dly);
+ 	}
++	
+ 	clk_name = (char*)clk->priv;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name(clk_name, 1);
++#endif	
+ 	peri_a = (usb_peri_reg_t *)P_USB_ADDR0;
+ 	peri_b = (usb_peri_reg_t *)P_USB_ADDR8;
+ 
+@@ -137,7 +143,9 @@ int clk_disable_usb(struct clk *clk)
+ 		printk(KERN_ERR "bad usb clk name: %s\n",clk_name);
+ 		return -1;
+ 	}
+-
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name(clk_name, 0);
++#endif
+ 	//if(init_count){
+ 	//	init_count--;
+ 		//uart.d32 = peri->dbg_uart;
+diff --git a/drivers/amlogic/camera/gc2035.c b/drivers/amlogic/camera/gc2035.c
+index d0460f4edbde..16bb75d53339 100755
+--- a/drivers/amlogic/camera/gc2035.c
++++ b/drivers/amlogic/camera/gc2035.c
+@@ -3036,7 +3036,7 @@ static int gc2035_open(struct file *file)
+     }
+ #endif
+ 
+-#ifdef CONFIG_ARCH_MESON6
++#ifdef MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ 	switch_mod_gate_by_name("ge2d", 1);
+ #endif	
+ 	aml_cam_init(&dev->cam_info);
+@@ -3166,7 +3166,7 @@ static int gc2035_close(struct file *file)
+ 	power_down_gc2035(dev);
+ #endif
+ 	aml_cam_uninit(&dev->cam_info);
+-#ifdef CONFIG_ARCH_MESON6
++#ifdef MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ 	switch_mod_gate_by_name("ge2d", 0);
+ #endif	
+ 	wake_unlock(&(dev->wake_lock));
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_attr.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_attr.c
+index db5bf99dbaf4..83bc9b7881f8 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_attr.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_attr.c
+@@ -319,7 +319,7 @@
+  To power down the USB:
+  echo 0 > /sys/devices/lm0/buspower
+  */
+-
++#include <mach/am_regs.h>
+ #include "dwc_otg_os_dep.h"
+ #include "dwc_os.h"
+ #include "dwc_otg_driver.h"
+@@ -328,7 +328,9 @@
+ #include "dwc_otg_pcd_if.h"
+ #include "dwc_otg_hcd_if.h"
+ #include "dwc_otg_cil.h"
+-
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++#include <mach/mod_gate.h>
++#endif
+ /*
+  * MACROs for defining sysfs attribute
+  */
+@@ -741,7 +743,27 @@ static ssize_t peri_sleepm_store(struct device *_dev,
+ 	uint32_t in = simple_strtoul(buf, NULL, 16);
+ 	ctrl.d32 = DWC_READ_REG32(&otg_dev->core_if->usb_peri_reg->ctrl);
+ 	ctrl.b.sleepm = in?0:1;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	if(!in)
++	{
++		if(lm_dev->id== 0)
++			switch_mod_gate_by_name("usb0", 1);
++		else
++			switch_mod_gate_by_name("usb1", 1);
++
++	}
++#endif
+ 	DWC_WRITE_REG32(&otg_dev->core_if->usb_peri_reg->ctrl,ctrl.d32);
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	if(in)
++	{
++		if(lm_dev->id== 0)
++			switch_mod_gate_by_name("usb0", 0);
++		else
++			switch_mod_gate_by_name("usb1", 0);
++	}
++#endif
+ 	return count;
+ }
+ 
+diff --git a/sound/soc/aml/aml_audio_hw.c b/sound/soc/aml/aml_audio_hw.c
+index 0ebc825f88c8..6bee95fab332 100755
+--- a/sound/soc/aml/aml_audio_hw.c
++++ b/sound/soc/aml/aml_audio_hw.c
+@@ -1225,3 +1225,55 @@ unsigned int audio_hdmi_init_ready()
+ {
+ 	return 	READ_MPEG_REG_BITS(AIU_HDMI_CLK_DATA_CTRL, 0, 2);
+ }
++/* power gate control for iec958 audio out */
++unsigned audio_spdifout_pg_enable(unsigned char enable)
++{
++	if(enable){
++			WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 1,14, 1);					
++			AUDIO_CLK_GATE_ON(AIU_IEC958);
++			AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
++	}
++	else{
++			AUDIO_CLK_GATE_OFF(AIU_IEC958);
++			AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);	
++			WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 0,14, 1);								
++	}
++	return 0;
++}
++/*
++	power gate control for normal aiu  domain including i2s in/out
++	TODO: move i2s out /adc related gate to i2s cpu dai driver 
++*/
++unsigned audio_aiu_pg_enable(unsigned char enable)
++{
++	if(enable){
++		AUDIO_CLK_GATE_ON(AIU_AMCLK_MEASURE);
++		AUDIO_CLK_GATE_ON(AIU_AIFIFO2);
++		AUDIO_CLK_GATE_ON(AIU_AUD_MIXER);
++		AUDIO_CLK_GATE_ON(AIU_MIXER_REG);
++		AUDIO_CLK_GATE_ON(AIU_AI_TOP_GLUE);
++		AUDIO_CLK_GATE_ON(AIU_AOCLK);   		
++		AUDIO_CLK_GATE_ON(AIU_I2S_OUT);
++		AUDIO_CLK_GATE_ON(AIU_ADC);		
++        AUDIO_CLK_GATE_ON(AUD_IN);
++        AUDIO_CLK_GATE_ON(AIU_IEC958);
++        AUDIO_CLK_GATE_ON(AIU_PCLK);
++        AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
++        AUDIO_CLK_GATE_ON(AIU_TOP_LEVEL);
++	}
++	else{
++		AUDIO_CLK_GATE_OFF(AIU_AMCLK_MEASURE);
++		AUDIO_CLK_GATE_OFF(AIU_AIFIFO2);
++		AUDIO_CLK_GATE_OFF(AIU_AUD_MIXER);
++		AUDIO_CLK_GATE_OFF(AIU_MIXER_REG);
++		AUDIO_CLK_GATE_OFF(AIU_AI_TOP_GLUE);
++		AUDIO_CLK_GATE_OFF(AIU_AOCLK);   		
++		AUDIO_CLK_GATE_OFF(AIU_I2S_OUT);
++		AUDIO_CLK_GATE_OFF(AIU_ADC);			
++        AUDIO_CLK_GATE_OFF(AUD_IN);
++        AUDIO_CLK_GATE_OFF(AIU_IEC958);
++        AUDIO_CLK_GATE_OFF(AIU_PCLK);
++        AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);   
++        AUDIO_CLK_GATE_OFF(AIU_TOP_LEVEL);
++	}
++}
+diff --git a/sound/soc/aml/aml_audio_hw.h b/sound/soc/aml/aml_audio_hw.h
+index 03f67846c7e0..587b9c7f75a3 100755
+--- a/sound/soc/aml/aml_audio_hw.h
++++ b/sound/soc/aml/aml_audio_hw.h
+@@ -1,6 +1,13 @@
+ #ifndef __AML_AUDIO_HW_H__
+ #define __AML_AUDIO_HW_H__
+-
++#include <mach/power_gate.h>
++#if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON6
++#define AUDIO_CLK_GATE_ON(a)
++#define AUDIO_CLK_GATE_OFF(a)
++#else
++#define AUDIO_CLK_GATE_ON(a) CLK_GATE_ON(a)
++#define AUDIO_CLK_GATE_OFF(a) CLK_GATE_OFF(a)
++#endif
+ 
+ typedef struct {
+     unsigned short pll;
+@@ -129,6 +136,8 @@ void audio_util_set_dac_format(unsigned format);
+ unsigned int audio_hdmi_init_ready(void);
+ unsigned int read_iec958_rd_ptr(void);
+ void audio_in_spdif_enable(int flag);
++unsigned audio_spdifout_pg_enable(unsigned char enable);
++unsigned audio_aiu_pg_enable(unsigned char enable);
+ 
+ #include "mach/cpu.h"
+ 
+diff --git a/sound/soc/aml/aml_i2s.c b/sound/soc/aml/aml_i2s.c
+index 92cb2eea23b8..6de450895e1b 100755
+--- a/sound/soc/aml/aml_i2s.c
++++ b/sound/soc/aml/aml_i2s.c
+@@ -68,7 +68,8 @@ static int audio_type_info = -1;
+ static int audio_sr_info = -1;
+ extern unsigned audioin_mode;
+ 
+-
++static DEFINE_MUTEX(gate_mutex);
++static unsigned audio_gate_status = 0;
+ 
+ EXPORT_SYMBOL(aml_i2s_playback_start_addr);
+ EXPORT_SYMBOL(aml_i2s_capture_start_addr);
+@@ -442,7 +443,8 @@ static int aml_i2s_open(struct snd_pcm_substream *substream)
+ {
+ 	ALSA_TRACE();
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+-	struct aml_runtime_data *prtd;
++	struct aml_runtime_data *prtd = runtime->private_data;
++	audio_stream_t *s ;		
+ 	int ret = 0;
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+ 		snd_soc_set_runtime_hwparams(substream, &aml_i2s_hardware);
+@@ -466,17 +468,17 @@ static int aml_i2s_open(struct snd_pcm_substream *substream)
+ 		printk("set period error\n");
+ 		goto out;
+ 	}
+-
+-	prtd = kzalloc(sizeof(struct aml_runtime_data), GFP_KERNEL);
+-	if (prtd == NULL) {
+-		printk("alloc aml_runtime_data error\n");
+-		ret = -ENOMEM;
+-		goto out;
++	if(!prtd){
++		prtd = kzalloc(sizeof(struct aml_runtime_data), GFP_KERNEL);
++		if (prtd == NULL) {
++			printk("alloc aml_runtime_data error\n");
++			ret = -ENOMEM;
++			goto out;
++		}
++		prtd->substream = substream;
++		runtime->private_data = prtd;
+ 	}
+-
+-	//WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 1,14, 1);			
+-	//WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL9, 1,14, 1);
+-	prtd->substream = substream;
++//	WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 1,14, 1);
+ #if USE_HRTIMER == 0    
+ 	prtd->timer.function = &aml_i2s_timer_callback;
+ 	prtd->timer.data = (unsigned long)substream;
+@@ -489,9 +491,18 @@ static int aml_i2s_open(struct snd_pcm_substream *substream)
+ 
+     printk("hrtimer inited..\n");
+ #endif
+-	runtime->private_data = prtd;
+ 
+ 	spin_lock_init(&prtd->s.lock);
++	s= &prtd->s;
++	WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL9, 1,14, 1);
++	mutex_lock(&gate_mutex);
++	if(audio_gate_status == 0){
++		audio_aiu_pg_enable(1);
++		ALSA_DEBUG("aml_pcm_open  device type %x \n", s->device_type);
++		
++	}
++	audio_gate_status  |= s->device_type;
++	mutex_unlock(&gate_mutex);		
+  out:
+ 	return ret;
+ }
+@@ -501,16 +512,22 @@ static int aml_i2s_close(struct snd_pcm_substream *substream)
+ 	struct aml_runtime_data *prtd = substream->runtime->private_data;
+ 	audio_stream_t *s = &prtd->s;	
+ 	ALSA_TRACE();
+-	if(s->device_type == AML_AUDIO_SPDIFOUT){
+-	//	WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 0,14, 1);
+-
+-    }			
++	mutex_lock(&gate_mutex);
++	audio_gate_status  &= ~s->device_type;	
++	if(audio_gate_status == 0){
++		ALSA_DEBUG("aml_pcm_close  device type %x \n", s->device_type);		
++		audio_aiu_pg_enable(0);
++	}
++	mutex_unlock(&gate_mutex);		
++//	if(s->device_type == AML_AUDIO_SPDIFOUT)
++//		WRITE_MPEG_REG_BITS( HHI_MPLL_CNTL8, 0,14, 1);			
+ #if USE_HRTIMER == 0
+ 	del_timer_sync(&prtd->timer);
+ #else
+     hrtimer_cancel(&prtd->hrtimer);
+ #endif
+-	kfree(prtd);
++	if(prtd)
++		kfree(prtd);
+ 	return 0;
+ }
+ 
+diff --git a/sound/soc/aml/aml_i2s_dai.c b/sound/soc/aml/aml_i2s_dai.c
+index 67fac27ad6c9..9bf499e581fb 100755
+--- a/sound/soc/aml/aml_i2s_dai.c
++++ b/sound/soc/aml/aml_i2s_dai.c
+@@ -1,19 +1,25 @@
+-#include <linux/init.h>
+ #include <linux/module.h>
+-#include <linux/interrupt.h>
+-#include <linux/device.h>
++#include <linux/moduleparam.h>
++#include <linux/platform_device.h>
++#include <linux/init.h>
++#include <linux/errno.h>
++#include <linux/ioctl.h>
+ #include <linux/delay.h>
+-#include <linux/clk.h>
++#include <linux/slab.h>
++#include <linux/dma-mapping.h>
++#include <linux/soundcard.h>
++#include <linux/timer.h>
++#include <linux/debugfs.h>
++#include <linux/major.h>
+ 
+ #include <sound/core.h>
+ #include <sound/pcm.h>
+-#include <sound/pcm_params.h>
+ #include <sound/initval.h>
++#include <sound/control.h>
+ #include <sound/soc.h>
+-
+-#include <mach/hardware.h>
+-//#include <sound/soc-dai.h>
+-
++#include <sound/pcm_params.h>
++#include <mach/am_regs.h>
++#include <mach/pinmux.h>
+ #include "aml_i2s_dai.h"
+ #include "aml_pcm.h"
+ #include "aml_i2s.h"
+@@ -66,7 +72,30 @@ static int aml_dai_i2s_startup(struct snd_pcm_substream *substream,
+ #ifdef AML_DAI_DEBUG
+ 	printk("***Entered %s:%s\n", __FILE__,__func__);
+ #endif
++	int ret = 0;
++    	struct snd_pcm_runtime *runtime = substream->runtime;
++    	struct aml_runtime_data *prtd = (struct aml_runtime_data *)runtime->private_data;
++	audio_stream_t *s;	
++	if(prtd == NULL){
++		prtd = (struct aml_runtime_data *)kzalloc(sizeof(struct aml_runtime_data), GFP_KERNEL);
++		if (prtd == NULL) {
++			printk("alloc aml_runtime_data error\n");
++			ret = -ENOMEM;
++			goto out;
++		}
++		prtd->substream = substream;
++		runtime->private_data = prtd;		
++	}
++	s = &prtd->s; 
++	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
++		s->device_type = AML_AUDIO_I2SOUT;
++	}	
++	else{
++		s->device_type = AML_AUDIO_I2SIN;	
++	}	
+ 	return 0;
++out:
++	return ret;
+ }
+ 
+ static void aml_dai_i2s_shutdown(struct snd_pcm_substream *substream,
+diff --git a/sound/soc/aml/aml_spdif_dai.c b/sound/soc/aml/aml_spdif_dai.c
+index 2d23f42c7c4d..e4047f425aaa 100755
+--- a/sound/soc/aml/aml_spdif_dai.c
++++ b/sound/soc/aml/aml_spdif_dai.c
+@@ -154,15 +154,11 @@ static void aml_hw_iec958_init(struct snd_pcm_substream *substream)
+ 			sample_rate	=	AUDIO_CLK_FREQ_441;
+ 			break;
+ 	};		
+-	//audio_set_clk(sample_rate, AUDIO_CLK_256FS);
+-	//audio_util_set_dac_format(AUDIO_ALGOUT_DAC_FORMAT_DSP);	
+-	//audio_set_i2s_clk(sample_rate, AUDIO_CLK_256FS);
+     printk(KERN_INFO "enterd %s,set_clock:%d,sample_rate=%d\n",__func__,set_clock,sample_rate);
+     if(set_clock != sample_rate){
+         set_clock = sample_rate;
+         audio_set_958_clk(sample_rate, AUDIO_CLK_256FS);
+     }
+-	//audio_util_set_dac_i2s_format(AUDIO_ALGOUT_DAC_FORMAT_DSP);
+ 	audio_util_set_dac_958_format(AUDIO_ALGOUT_DAC_FORMAT_DSP);
+ 
+ 	switch(runtime->format){
+@@ -233,7 +229,7 @@ static void aml_hw_iec958_init(struct snd_pcm_substream *substream)
+                 aout_notifier_call_chain(AOUT_EVENT_RAWDATA_AC_3,substream);
+         }
+         else if(IEC958_mode_codec == 3){
+-                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS_HD,substream);
++                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS,substream);
+         }
+         else if(IEC958_mode_codec == 4){
+                 aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DOBLY_DIGITAL_PLUS,substream);
+@@ -261,14 +257,51 @@ void	aml_alsa_hw_reprepare(void)
+ static int aml_dai_spdif_startup(struct snd_pcm_substream *substream,
+ 					struct snd_soc_dai *dai)
+ {	  	
+-#ifdef AML_DAI_DEBUG
+-	printk("***Entered %s:%s\n", __FILE__,__func__);
+-#endif
++	ALSA_DEBUG();
++    	ALSA_TRACE();	
++	int ret = 0;
++    	struct snd_pcm_runtime *runtime = substream->runtime;
++    	struct aml_runtime_data *prtd = runtime->private_data;
++	audio_stream_t *s;	
++	if(!prtd){
++		prtd = (struct aml_runtime_data *)kzalloc(sizeof(struct aml_runtime_data), GFP_KERNEL);
++		if (prtd == NULL) {
++			printk("alloc aml_runtime_data error\n");
++			ret = -ENOMEM;
++			goto out;
++		}
++		prtd->substream = substream;
++		runtime->private_data = prtd;		
++	}
++	s = &prtd->s; 
++	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
++		s->device_type = AML_AUDIO_SPDIFOUT;
++		audio_spdifout_pg_enable(1);
++	}	
++	else{
++		s->device_type = AML_AUDIO_SPDIFIN;
++	}	
++		
+ 	return 0;
++out:
++	return ret;
++}
++static void aml_dai_spdif_shutdown(struct snd_pcm_substream *substream,
++				struct snd_soc_dai *dai)
++{
++	ALSA_DEBUG();
++    	ALSA_TRACE();	
++    	struct snd_pcm_runtime *runtime = substream->runtime;
++	struct snd_dma_buffer *buf = &substream->dma_buffer;	
++		
++	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
++		memset((void*)runtime->dma_area,0,snd_pcm_lib_buffer_bytes(substream));
++		audio_spdifout_pg_enable(0);	
++	}
++	
+ }
+ 
+ 
+-
+ static int aml_dai_spdif_prepare(struct snd_pcm_substream *substream,
+ 					struct snd_soc_dai *dai)
+ {
+@@ -279,7 +312,6 @@ static int aml_dai_spdif_prepare(struct snd_pcm_substream *substream,
+     	struct aml_runtime_data *prtd = runtime->private_data;
+ 	audio_stream_t *s = &prtd->s;	
+ 	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+-		s->device_type = AML_AUDIO_SPDIFOUT;
+ 		if(playback_substream_handle != (unsigned)substream)
+ 			playback_substream_handle = (unsigned)substream;
+ 		aml_hw_iec958_init((struct snd_pcm_substream *)playback_substream_handle);		
+@@ -292,7 +324,6 @@ static int aml_dai_spdif_prepare(struct snd_pcm_substream *substream,
+ 			ppp[0] = 0x78787878;
+ 			ppp[1] = 0x78787878;
+ 		}		
+-		s->device_type = AML_AUDIO_SPDIFIN;
+ 	}	
+ 
+ 	return 0;
+@@ -310,18 +341,7 @@ static int aml_dai_spdif_hw_params(struct snd_pcm_substream *substream,
+ 	return 0;
+ }
+ 
+-static void aml_dai_spdif_shutdown(struct snd_pcm_substream *substream,
+-				struct snd_soc_dai *dai)
+-{
+-	ALSA_DEBUG();
+-    	struct snd_pcm_runtime *runtime = substream->runtime;
+-	struct snd_dma_buffer *buf = &substream->dma_buffer;	
+-		
+-	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+-		memset((void*)runtime->dma_area,0,snd_pcm_lib_buffer_bytes(substream));
+-	}
+-	
+-}
++
+ 
+ #ifdef CONFIG_PM
+ static int aml_dai_spdif_suspend(struct snd_soc_dai *cpu_dai)
+@@ -347,6 +367,7 @@ static struct snd_soc_dai_ops spdif_dai_ops = {
+ 	.prepare = aml_dai_spdif_prepare,
+ 	.hw_params	= aml_dai_spdif_hw_params,
+ 	.shutdown	= aml_dai_spdif_shutdown,
++	.startup	= aml_dai_spdif_startup,	
+ };
+ 
+ static struct snd_soc_dai_driver aml_spdif_dai[] = {
+diff --git a/sound/soc/codecs/aml_m8_codec.c b/sound/soc/codecs/aml_m8_codec.c
+index 76179128eacb..71377f62aeec 100755
+--- a/sound/soc/codecs/aml_m8_codec.c
++++ b/sound/soc/codecs/aml_m8_codec.c
+@@ -60,7 +60,7 @@ unsigned int acodec_regbank[252] = {0x00, 0x05, 0x00, 0x01, 0x7d, 0x02, 0x7d, 0x
+                                    };
+ 
+ extern void audio_set_i2s_clk(unsigned freq, unsigned fs_config);
+-
++extern unsigned audio_aiu_pg_enable(unsigned char enable);
+ void adac_wr_reg (unsigned long addr, unsigned long data)
+ {
+     // Write high byte for 16-bit register
+@@ -1133,9 +1133,10 @@ static const struct snd_soc_dapm_route aml_m8_audio_map[] = {
+ 
+ static int aml_m8_soc_probe(struct snd_soc_codec *codec){
+ 	struct snd_soc_dapm_context *dapm = &codec->dapm;
+-	
++	audio_aiu_pg_enable(1);
+ 	aml_m8_codec_reset(codec);
+-    codec->dapm.bias_level = SND_SOC_BIAS_STANDBY;
++	audio_aiu_pg_enable(0);
++    	codec->dapm.bias_level = SND_SOC_BIAS_STANDBY;
+ #if 0	
+ 	aml_m8_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
+ 	snd_soc_add_codec_controls(codec, amlm8_snd_controls,
+-- 
+2.19.0
+

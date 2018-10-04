@@ -1,0 +1,1516 @@
+From b302cd8e4eb236803c770eda265c8e4f97bebb58 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Mon, 4 Nov 2013 14:09:12 +0800
+Subject: [PATCH 1639/5965] add video prot rotation support
+
+---
+ drivers/amlogic/amports/Makefile     |   4 +-
+ drivers/amlogic/amports/video.c      | 197 +++++++++++++++-----
+ drivers/amlogic/amports/video_prot.c | 261 +++++++++++++++++++++++++++
+ drivers/amlogic/amports/video_prot.h |  46 +++++
+ drivers/amlogic/amports/vpp.c        |  12 +-
+ drivers/amlogic/ppmgr/ppmgr_dev.h    |   9 +-
+ drivers/amlogic/ppmgr/ppmgr_drv.c    | 161 ++++++++++-------
+ drivers/amlogic/ppmgr/ppmgr_vpp.c    |  53 +++++-
+ 8 files changed, 625 insertions(+), 118 deletions(-)
+ create mode 100755 drivers/amlogic/amports/video_prot.c
+ create mode 100755 drivers/amlogic/amports/video_prot.h
+
+diff --git a/drivers/amlogic/amports/Makefile b/drivers/amlogic/amports/Makefile
+index 559ca0ee9882..5bfa0dd92da8 100755
+--- a/drivers/amlogic/amports/Makefile
++++ b/drivers/amlogic/amports/Makefile
+@@ -80,8 +80,8 @@ obj-$(CONFIG_AM_JPEGDEC) += jpegdec.o
+ 
+ obj-$(CONFIG_AM_ENCODER) += encoder.o
+ obj-$(CONFIG_AM_VIDEO) += amvideo.o
+-amvideo-objs := video.o vpp.o
+-amvideo-y    := video.o vpp.o
++amvideo-objs := video.o vpp.o video_prot.o
++amvideo-y    := video.o vpp.o video_prot.o
+ 
+ obj-$(CONFIG_AM_VIDEO2) += amvideo2.o
+ amvideo2-objs := video2.o vpp2.o
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index c6cc6f0c6876..170ddd0d9c33 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -83,6 +83,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_DEFAULT_LEVEL_DESC, LOG_MASK_DESC);
+ #include "amve.h"
+ #include "cm_regs.h"
+ #include "amcm.h"
++#include "video_prot.h"
+ 
+ static int debugflags=0;
+ static int output_fps = 0;
+@@ -138,6 +139,11 @@ static u32 next_peek_underflow;
+ #define VD2_MEM_POWER_ON() switch_vpu_mem_pd_vmod(VPU_VIU_VD2, VPU_MEM_POWER_ON)
+ #define VD1_MEM_POWER_OFF() switch_vpu_mem_pd_vmod(VPU_VIU_VD1, VPU_MEM_POWER_DOWN)
+ #define VD2_MEM_POWER_OFF() switch_vpu_mem_pd_vmod(VPU_VIU_VD2, VPU_MEM_POWER_DOWN)
++#define USE_PROT
++#define PROT2_MEM_POWER_ON() switch_vpu_mem_pd_vmod(VPU_PIC_ROT2, VPU_MEM_POWER_ON)
++#define PROT3_MEM_POWER_ON() switch_vpu_mem_pd_vmod(VPU_PIC_ROT3, VPU_MEM_POWER_ON)
++#define PROT2_MEM_POWER_OFF() switch_vpu_mem_pd_vmod(VPU_PIC_ROT2, VPU_MEM_POWER_DOWN)
++#define PROT3_MEM_POWER_OFF() switch_vpu_mem_pd_vmod(VPU_PIC_ROT3, VPU_MEM_POWER_DOWN)
+ #else
+ #define VD1_MEM_POWER_ON()
+ #define VD2_MEM_POWER_ON()
+@@ -215,7 +221,7 @@ static u32 next_peek_underflow;
+ 
+ #define MAX_ZOOM_RATIO 300
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define VPP_PREBLEND_VD_V_END_LIMIT 2304
+ #else
+ #define VPP_PREBLEND_VD_V_END_LIMIT 1080
+@@ -254,7 +260,7 @@ typedef struct{
+     int viu_off;
+ }video_dev_t;
+ video_dev_t video_dev[2]={
+-    {0x1d00-0x1d00, 0x1a00-0x1a00},    
++    {0x1d00-0x1d00, 0x1a00-0x1a00},
+     {0x1900-0x1d00, 0x1e00-0x1a00}
+ };
+ video_dev_t *cur_dev = &video_dev[0];
+@@ -284,6 +290,17 @@ static int content_top = 0, content_left = 0, content_w = 0, content_h = 0;
+ static int scaler_pos_changed = 0;
+ #endif
+ 
++#ifdef USE_PROT
++static video_prot_t video_prot;
++static u32 video_angle = 0;
++extern int get_use_prot();
++int get_prot_on() { return video_prot.status; }
++u32 get_video_angle() { return video_prot.angle; }
++#else
++int get_prot_on() { return 0; }
++u32 get_video_angle() { return 0; }
++#endif
++
+ #ifdef CONFIG_AM_VIDEO2
+ void set_clone_frame_rate(unsigned int frame_rate, unsigned int delay);
+ #endif
+@@ -445,7 +462,7 @@ static u32 vsync_freerun = 0;
+ /* frame rate calculate */
+ static u32 last_frame_count = 0;
+ static u32 frame_count = 0;
+-static u32 new_frame_count = 0; 
++static u32 new_frame_count = 0;
+ static u32 last_frame_time = 0;
+ static u32 timer_count  =0 ;
+ static u32 vsync_count  =0 ;
+@@ -733,11 +750,22 @@ static void zoom_display_vert(void)
+     }
+ }
+ 
+-u32 property_changed_true=0;	
++u32 property_changed_true=0;
+ static void vsync_toggle_frame(vframe_t *vf)
+ {
+     u32 first_picture = 0;
+ 
++#ifdef USE_PROT
++    if (video_prot.angle_changed & 0x2) {
++        first_picture = 1;
++    }
++    if (get_use_prot()) {
++    	video_prot_revert_vframe(&video_prot, vf);
++    }
++    if (video_prot.status) {
++        video_prot_set_canvas(vf);
++    }
++#endif
+     frame_count++;
+     if(debug_flag& DEBUG_FLAG_PRINT_TOGGLE_FRAME){
+         printk("%s()\n", __func__);
+@@ -800,7 +828,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+                 else{
+                     video_vf_put(cur_dispbuf);
+                 }
+-#endif                
++#endif
+             }
+             else{
+                 int i;
+@@ -815,7 +843,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+             }
+ #else
+             video_vf_put(cur_dispbuf);
+-#endif            
++#endif
+         }
+ 
+     } else {
+@@ -848,7 +876,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+         canvas_copy(vf->canvas1Addr & 0xff, disp_canvas_index[rdma_canvas_id][3]);
+         canvas_copy((vf->canvas1Addr >> 8) & 0xff, disp_canvas_index[rdma_canvas_id][4]);
+         canvas_copy((vf->canvas1Addr >> 16) & 0xff, disp_canvas_index[rdma_canvas_id][5]);
+-    
++
+ 	VSYNC_WR_MPEG_REG(VD1_IF0_CANVAS0 + cur_dev->viu_off, disp_canvas[rdma_canvas_id][0]);
+         //if(cur_frame_par && (cur_frame_par->vpp_2pic_mode == 1))
+ 	    VSYNC_WR_MPEG_REG(VD1_IF0_CANVAS1 + cur_dev->viu_off, disp_canvas[rdma_canvas_id][0]);
+@@ -984,7 +1012,12 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+             r |= VDIF_FORMAT_RGB888_YUV444 | VDIF_DEMUX_MODE_RGB_444;
+         }
+     }
+-
++#ifdef USE_PROT
++    if (video_prot.status) {
++        r |= VDIF_DEMUX_MODE | VDIF_LAST_LINE | 3 << VDIF_BURSTSIZE_Y_BIT | 1 << VDIF_BURSTSIZE_CB_BIT | 1 << VDIF_BURSTSIZE_CR_BIT;
++        r &= 0xffffffbf;
++    }
++#endif
+     VSYNC_WR_MPEG_REG(VD1_IF0_GEN_REG + cur_dev->viu_off, r);
+     VSYNC_WR_MPEG_REG(VD2_IF0_GEN_REG, r);
+ 
+@@ -994,6 +1027,13 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+     } else {
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0,0,1);
+     }
++#ifdef USE_PROT
++    if (video_prot.angle == 2) {
++        VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0xf, 2, 4);
++    } else {
++        VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0, 2, 4);
++    }
++#endif
+ #endif
+ 
+     /* chroma formatter */
+@@ -1061,6 +1101,14 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+                        VFORMATTER_EN);
+     }
+ 
++#ifdef USE_PROT
++    if (video_prot.status) {
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
++        VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 1, 17, 1);
++    }
++#endif
++
+     /* LOOP/SKIP pattern */
+     pat = vpat[frame_par->vscale_skip_count];
+ 
+@@ -1335,7 +1383,7 @@ static inline bool vpts_expire(vframe_t *cur_vf, vframe_t *next_vf)
+                             pts -=  (next_vf->pts - cur_vf->pts)/ 2;
+                             printk("next frame pts 0x%x, next_vf->pts 0x%x\n", pts, next_vf->pts);
+                         }
+-                    }*/  
++                    }*/
+                 }
+             #endif
+                 vsync_pts_inc_adj = 0;
+@@ -1509,7 +1557,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+     const char* dev_id_s = (const char*)dev_id;
+     int dev_id_len = strlen(dev_id_s);
+     if(cur_dev == &video_dev[1]){
+-        if(cur_dev_idx == 0){    
++        if(cur_dev_idx == 0){
+             cur_dev = &video_dev[0];
+             vinfo = get_current_vinfo();
+     	      vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
+@@ -1518,7 +1566,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         }
+     }
+     else{
+-        if(cur_dev_idx != 0){    
++        if(cur_dev_idx != 0){
+             cur_dev = &video_dev[1];
+             vinfo = get_current_vinfo2();
+     	      vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
+@@ -1532,7 +1580,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         return IRQ_HANDLED;
+     }
+     //printk("%s: %s\n", __func__, dev_id_s);
+-#endif    
++#endif
+ 
+ 
+ #ifdef CONFIG_AM_VIDEO_LOG
+@@ -1551,7 +1599,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         case 2:
+             enc_line = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
+             break;
+-        case 3:    
++        case 3:
+             enc_line = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
+             break;
+     }
+@@ -1577,7 +1625,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 	    if(enable_rdma_log_count>0)
+ 	        enable_rdma_log_count--;
+     }
+-#endif            
++#endif
+ 
+ #if defined(CONFIG_AM_VECM)
+ 	/* amvecm video latch function */
+@@ -1636,10 +1684,10 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+     		while(((READ_VCBUS_REG(ENCL_INFO_READ)>>16)&0x1fff)<50){
+     							;
+     	        }
+-    	    }						
++    	    }
+ #endif
+-	    goto exit;	
+-	}	
++	    goto exit;
++	}
+ 	rdma_canvas_id = 0;
+ 	next_rdma_canvas_id = 1;
+     }
+@@ -1651,7 +1699,28 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         }
+         dispbuf_to_put_num = 0;
+     }
+-#endif            
++#endif
++#ifdef USE_PROT
++    if (video_prot.angle_changed & 0x2) {
++        if (video_prot.angle == 1 || video_prot.angle == 3) {
++            PROT2_MEM_POWER_ON();
++            PROT3_MEM_POWER_ON();
++            video_prot.power_down = 0;
++        }
++        video_prot_reset(&video_prot);
++        video_prot.angle_changed &= 0x1;
++        if (video_prot.power_down) {
++            PROT2_MEM_POWER_OFF();
++            PROT3_MEM_POWER_OFF();
++            video_prot.power_down = 0;
++        }
++    }
++    if (video_prot.angle_changed & 0x1) {
++        video_prot.angle_changed = 0x2;
++        video_property_changed = 1;
++        video_prot_set_angle(&video_prot, video_angle);
++    }
++#endif
+ 
+     if (osd_prov && osd_prov->ops && osd_prov->ops->get){
+         vf = osd_prov->ops->get(osd_prov->op_arg);
+@@ -1664,7 +1733,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             goto SET_FILTER;
+         }
+     }
+-	
++
+     if ((!cur_dispbuf) || (cur_dispbuf == &vf_local)) {
+ 
+         vf = video_vf_peek();
+@@ -1737,7 +1806,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #endif
+ 
+             vsync_toggle_frame(vf);
+-
++#ifdef USE_PROT
++            if (video_prot.video_started) {
++                video_prot_init(&video_prot, vf);
++                video_prot.angle_changed |= 0x1;
++                video_prot.video_started = 0;
++            }
++#endif
+             if (trickmode_fffb == 1) {
+ #ifdef CONFIG_VSYNC_RDMA
+                 if((VSYNC_RD_MPEG_REG(DI_IF1_GEN_REG)&0x1)==0){
+@@ -1747,10 +1822,10 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                     atomic_set(&trickmode_framedone, 1);
+                     video_notify_flag |= VIDEO_NOTIFY_TRICK_WAIT;
+                 }
+-#else                
++#else
+                 atomic_set(&trickmode_framedone, 1);
+                 video_notify_flag |= VIDEO_NOTIFY_TRICK_WAIT;
+-#endif                
++#endif
+                 break;
+             }
+ 
+@@ -1787,6 +1862,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                 }
+ #endif
+                 vf = video_vf_get();
++#ifdef USE_PROT
++                if (video_prot.video_started) {
++                    video_prot_init(&video_prot, vf);
++                    video_prot.angle_changed |= 0x1;
++                    video_prot.video_started = 0;
++                }
++#endif
+                 vsync_toggle_frame(vf);
+                 frame_repeat_count = 0;
+ 
+@@ -1971,8 +2053,8 @@ SET_FILTER:
+ 	            printk("call process_fun\n");
+         }
+ #endif
+-        cur_dispbuf->process_fun(cur_dispbuf->private_data, 
+-            zoom_start_x_lines|(cur_frame_par->vscale_skip_count<<24)|(frame_par_di_set<<16), 
++        cur_dispbuf->process_fun(cur_dispbuf->private_data,
++            zoom_start_x_lines|(cur_frame_par->vscale_skip_count<<24)|(frame_par_di_set<<16),
+             zoom_end_x_lines, zoom_start_y_lines, zoom_end_y_lines, cur_dispbuf);
+     }
+ 
+@@ -1988,8 +2070,8 @@ exit:
+ 	        enable_rdma_log(0);
+     }
+     rdma_enable_pre = is_vsync_rdma_enable();
+-#endif    
+-    
++#endif
++
+     if(timer_count > 50){
+         timer_count = 0 ;
+         video_notify_flag |= VIDEO_NOTIFY_FRAME_WAIT;
+@@ -2014,7 +2096,7 @@ exit:
+         case 2:
+             enc_line = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
+             break;
+-        case 3:    
++        case 3:
+             enc_line = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
+             break;
+     }
+@@ -2227,7 +2309,7 @@ static void video_vf_unreg_provider(void)
+         dispbuf_to_put[dispbuf_to_put_num] = NULL;
+     }
+     cur_rdma_buf = NULL;
+-#endif            
++#endif
+     if (cur_dispbuf) {
+         vf_local = *cur_dispbuf;
+         cur_dispbuf = &vf_local;
+@@ -2259,7 +2341,9 @@ static void video_vf_unreg_provider(void)
+     vsync_pts_112 = 0;
+     vsync_pts_125 = 0;
+     vsync_freerun = 0;
+-
++#ifdef USE_PROT
++    video_prot.video_started = 0;
++#endif
+     spin_unlock_irqrestore(&lock, flags);
+     atomic_set(&video_unreg_flag, 0);
+ 
+@@ -2278,14 +2362,16 @@ static void video_vf_light_unreg_provider(void)
+         dispbuf_to_put[dispbuf_to_put_num] = NULL;
+     }
+     cur_rdma_buf = NULL;
+-#endif            
++#endif
+ 
+     if (cur_dispbuf) {
+         vf_local = *cur_dispbuf;
+         cur_dispbuf = &vf_local;
+     }
+ 
+-
++#ifdef USE_PROT
++    video_prot.video_started = 1;
++#endif
+     spin_unlock_irqrestore(&lock, flags);
+ }
+ 
+@@ -2450,14 +2536,14 @@ unsigned int vf_keep_current(void)
+         canvas_read(y_index,&cs0);
+         canvas_read(u_index,&cs1);
+         canvas_read(v_index,&cs2);
+-		
++
+         if ((Y_BUFFER_SIZE < (cs0.width *cs0.height)) || (U_BUFFER_SIZE < (cs1.width *cs1.height))
+             || (V_BUFFER_SIZE < (cs2.width *cs2.height))) {
+             printk("## [%s::%d] error: yuv data size larger than buf size: %x,%x,%x, %x,%x, %x,%x, %x,%x,\n", __FUNCTION__,__LINE__,
+                 Y_BUFFER_SIZE,U_BUFFER_SIZE, V_BUFFER_SIZE, cs0.width,cs0.height, cs1.width,cs1.height, cs2.width,cs2.height);
+             return -1;
+         }
+-		
++
+         if (keep_phy_addr(keep_y_addr) != canvas_get_addr(y_index) && /*must not the same address*/
+             canvas_dup(keep_y_addr_remap, canvas_get_addr(y_index), (cs0.width *cs0.height)) &&
+             canvas_dup(keep_u_addr_remap, canvas_get_addr(u_index), (cs1.width *cs1.height)) &&
+@@ -2499,9 +2585,9 @@ u8 is_vpp_postblend(void)
+     return 0;
+ }
+ EXPORT_SYMBOL(is_vpp_postblend);
+- 
++
+ void pause_video(unsigned char pause_flag)
+-{ 
++{
+     atomic_set(&video_pause_flag, pause_flag?1:0);
+ }
+ EXPORT_SYMBOL(pause_video);
+@@ -3589,10 +3675,10 @@ static ssize_t device_resolution_show(struct class *cla, struct class_attribute*
+ #ifdef CONFIG_SUPPORT_VIDEO_ON_VPP2
+     const vinfo_t *info;
+     if(cur_dev == &video_dev[0]){
+-        info = get_current_vinfo();    
++        info = get_current_vinfo();
+     }
+     else{
+-        info = get_current_vinfo2();    
++        info = get_current_vinfo2();
+     }
+ #else
+      const vinfo_t *info = get_current_vinfo();
+@@ -3677,7 +3763,7 @@ static ssize_t trickmode_duration_store(struct class *cla, struct class_attribut
+ static ssize_t video_vsync_pts_inc_upint_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+     if (vsync_pts_inc_upint)
+-        return sprintf(buf, "%d, vsync_freerun %d, 1.25xInc %d, 1.12xInc %d, 1xInc %d\n", 
++        return sprintf(buf, "%d, vsync_freerun %d, 1.25xInc %d, 1.12xInc %d, 1xInc %d\n",
+             vsync_pts_inc_upint, vsync_freerun, vsync_pts_125, vsync_pts_112, vsync_pts_100);
+     else
+         return sprintf(buf, "%d\n", vsync_pts_inc_upint);
+@@ -3706,7 +3792,7 @@ static ssize_t fps_info_show(struct class *cla, struct class_attribute *attr, ch
+     u32 time = jiffies;
+     u32 input_fps = 0;
+     u32 tmp = time;
+-    
++
+     time -= last_frame_time;
+     last_frame_time = tmp;
+     last_frame_count = frame_count;
+@@ -3723,6 +3809,29 @@ static ssize_t fps_info_show(struct class *cla, struct class_attribute *attr, ch
+     }
+     return sprintf(buf, "input_fps:0x%x output_fps:0x%x drop_fps:0x%x\n", input_fps, output_fps, input_fps - output_fps);
+ }
++#ifdef USE_PROT
++void set_video_angle(u32 s_value) {
++    if ((s_value >= 0 && s_value <= 3) && (video_angle != s_value)) {
++        video_angle = s_value;
++        video_prot.angle_changed |= 0x1;
++    }
++}
++
++static ssize_t video_angle_show(struct class *cla, struct class_attribute *attr, char *buf) {
++    return snprintf(buf, 40, "%d\n", video_prot.angle);
++}
++
++static ssize_t video_angle_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count) {
++    size_t r;
++    u32 s_value;
++    r = sscanf(buf, "%d", &s_value);
++    if (r != 1) {
++        return -EINVAL;
++    }
++    set_video_angle(s_value);
++    return strnlen(buf, count);
++}
++#endif
+ 
+ static struct class_attribute amvideo_class_attrs[] = {
+     __ATTR(axis,
+@@ -3797,6 +3906,12 @@ static struct class_attribute amvideo_class_attrs[] = {
+     S_IRUGO | S_IWUSR,
+     video_vsync_pts_inc_upint_show,
+     video_vsync_pts_inc_upint_store),
++#ifdef USE_PROT
++    __ATTR(angle,
++    S_IRUGO | S_IWUSR,
++    video_angle_show,
++    video_angle_store),
++#endif
+     __ATTR_RO(device_resolution),
+     __ATTR_RO(frame_addr),
+     __ATTR_RO(frame_canvas_width),
+@@ -3914,11 +4029,11 @@ int vout2_notify_callback(struct notifier_block *block, unsigned long cmd , void
+ 	spin_unlock_irqrestore(&lock, flags);
+ 	break;
+ 	case VOUT_EVENT_OSD_PREBLEND_ENABLE:
+-	vpp_set_osd_layer_preblend(para);	
++	vpp_set_osd_layer_preblend(para);
+ 	break;
+ 	case VOUT_EVENT_OSD_DISP_AXIS:
+ 	vpp_set_osd_layer_position(para);
+-	break;	
++	break;
+     }
+     return 0;
+ }
+diff --git a/drivers/amlogic/amports/video_prot.c b/drivers/amlogic/amports/video_prot.c
+new file mode 100755
+index 000000000000..3f49ab403048
+--- /dev/null
++++ b/drivers/amlogic/amports/video_prot.c
+@@ -0,0 +1,261 @@
++/*
++ * Amlogic Meson
++ * frame buffer driver
++ *
++ * Copyright (C) 2013 Amlogic, Inc.
++ *
++ * Author:  Amlogic R&D Group
++ *
++ */
++#include "video_prot.h"
++
++static int set_prot_NV21(u32 x_start, u32 x_end, u32 y_start, u32 y_end, u32 y_step, u32 angle, u32 pat_val) {
++
++    u32 data32;
++    if (angle == 0 || angle == 2) {
++           data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (0 << 2) | (0 << 0);
++           aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++           data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (0 << 3) | (0 << 2) | (0 << 0);
++           aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++
++           return 0;
++    }
++
++    u32 x_start_uv = x_start >> 1;
++    u32 x_end_uv = x_end >> 1;
++    u32 y_start_uv = y_start >> 1;
++    u32 y_end_uv = y_end >> 1;
++    u32 y_len = (y_end - y_start) / (y_step + 1);
++    u32 y_len_uv = (y_end_uv - y_start_uv) / (y_step + 1);
++
++    y_end = y_start + (y_step + 1) * y_len;
++    y_end_uv = y_start_uv + (y_step + 1) * y_len_uv;
++
++    data32 = (x_end << 16) | (x_start << 0);
++    aml_write_reg32(P_VPU_PROT2_X_START_END, data32);
++    data32 = (x_end_uv << 16) | (x_start_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_X_START_END, data32);
++
++    data32 = (y_end << 16) | (y_start << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_START_END, data32);
++    data32 = (y_end_uv << 16) | (y_start_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_Y_START_END, data32);
++
++    data32 = (y_step << 16) | (y_len << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_LEN_STEP, data32);
++    data32 = (y_step << 16) | (y_len_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_Y_LEN_STEP, data32);
++
++    data32 = (PAT_START_PTR << 4) | (PAT_END_PTR << 0);
++    aml_write_reg32(P_VPU_PROT2_RPT_LOOP, data32);
++    aml_write_reg32(P_VPU_PROT3_RPT_LOOP, data32);
++    aml_write_reg32(P_VPU_PROT2_RPT_PAT, pat_val);
++    aml_write_reg32(P_VPU_PROT3_RPT_PAT, pat_val);
++    data32 = (CUGT << 20) | (CID_MODE << 16) | (CID_VALUE << 8);
++    aml_write_reg32(P_VPU_PROT2_DDR, data32);
++    aml_write_reg32(P_VPU_PROT3_DDR, data32);
++    data32 = (REQ_ONOFF_EN << 31) | (REQ_OFF_MIN << 16) | (REQ_ON_MAX << 0);
++    aml_write_reg32(P_VPU_PROT2_REQ_ONOFF, data32);
++    aml_write_reg32(P_VPU_PROT3_REQ_ONOFF, data32);
++
++    if (angle == 1) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (1 << 3) | (0 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (1 << 3) | (0 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++    } else if (angle == 3) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (1 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (0 << 3) | (1 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++    }
++
++    return 0;
++}
++
++static int set_prot_422(u32 x_start, u32 x_end, u32 y_start, u32 y_end, u32 y_step, u32 angle, u32 pat_val) {
++
++    u32 data32;
++
++    if (angle == 0 || angle == 2) {
++           data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (0 << 2) | (0 << 0);
++           aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++           data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (0 << 3) | (0 << 2) | (0 << 0);
++           aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++
++           return 0;
++    }
++
++    u32 x_start_uv = x_start >> 1;
++    u32 x_end_uv = x_end >> 1;
++    u32 y_start_uv = y_start >> 1;
++    u32 y_end_uv = y_end;
++    u32 y_len = (y_end - y_start) / (y_step + 1);
++    u32 y_len_uv = (y_end_uv - y_start_uv) / (y_step + 1);
++
++    y_end = y_start + (y_step + 1) * y_len;
++    y_end_uv = y_start_uv + (y_step + 1) * y_len_uv;
++
++    data32 = (x_end << 16) | (x_start << 0);
++    aml_write_reg32(P_VPU_PROT2_X_START_END, data32);
++    data32 = (x_end_uv << 16) | (x_start_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_X_START_END, data32);
++
++    data32 = (y_end << 16) | (y_start << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_START_END, data32);
++    data32 = (y_end_uv << 16) | (y_start_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_Y_START_END, data32);
++
++    data32 = (y_step << 16) | (y_len << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_LEN_STEP, data32);
++    data32 = (y_step << 16) | (y_len_uv << 0);
++    aml_write_reg32(P_VPU_PROT3_Y_LEN_STEP, data32);
++
++    data32 = (PAT_START_PTR << 4) | (PAT_END_PTR << 0);
++    aml_write_reg32(P_VPU_PROT2_RPT_LOOP, data32);
++    aml_write_reg32(P_VPU_PROT3_RPT_LOOP, data32);
++    aml_write_reg32(P_VPU_PROT2_RPT_PAT, pat_val);
++    aml_write_reg32(P_VPU_PROT3_RPT_PAT, pat_val);
++    data32 = (CUGT << 20) | (CID_MODE << 16) | (CID_VALUE << 8);
++    aml_write_reg32(P_VPU_PROT2_DDR, data32);
++    aml_write_reg32(P_VPU_PROT3_DDR, data32);
++    data32 = (REQ_ONOFF_EN << 31) | (REQ_OFF_MIN << 16) | (REQ_ON_MAX << 0);
++    aml_write_reg32(P_VPU_PROT2_REQ_ONOFF, data32);
++    aml_write_reg32(P_VPU_PROT3_REQ_ONOFF, data32);
++
++    if (angle == 1) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (1 << 3) | (0 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (1 << 3) | (0 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++    } else if (angle == 3) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (1 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (1 << 4) | (0 << 3) | (1 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT3_GEN_CNTL, data32);
++    }
++
++    return 0;
++}
++
++static int set_prot_444(u32 x_start, u32 x_end, u32 y_start, u32 y_end, u32 y_step, u32 angle, u32 pat_val) {
++
++    u32 data32;
++
++    if (angle == 0 || angle == 2) {
++           data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (0 << 2) | (0 << 0);
++           aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++
++           return 0;
++    }
++    u32 y_len = (y_end - y_start) / (y_step + 1);
++
++    y_end = y_start + (y_step + 1) * y_len;
++
++    data32 = (x_end << 16) | (x_start << 0);
++    aml_write_reg32(P_VPU_PROT2_X_START_END, data32);
++
++    data32 = (y_end << 16) | (y_start << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_START_END, data32);
++
++    data32 = (y_step << 16) | (y_len << 0);
++    aml_write_reg32(P_VPU_PROT2_Y_LEN_STEP, data32);
++
++    data32 = (PAT_START_PTR << 4) | (PAT_END_PTR << 0);
++    aml_write_reg32(P_VPU_PROT2_RPT_LOOP, data32);
++    aml_write_reg32(P_VPU_PROT2_RPT_PAT, pat_val);
++    data32 = (CUGT << 20) | (CID_MODE << 16) | (CID_VALUE << 8);
++    aml_write_reg32(P_VPU_PROT2_DDR, data32);
++    data32 = (REQ_ONOFF_EN << 31) | (REQ_OFF_MIN << 16) | (REQ_ON_MAX << 0);
++    aml_write_reg32(P_VPU_PROT2_REQ_ONOFF, data32);
++
++    if (angle == 1) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (1 << 3) | (0 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++    } else if (angle == 3) {
++        data32 = (HOLD_LINES << 8) | (LITTLE_ENDIAN << 7) | (0 << 6) | (0 << 4) | (0 << 3) | (1 << 2) | (1 << 0);
++        aml_write_reg32(P_VPU_PROT2_GEN_CNTL, data32);
++    }
++
++    return 0;
++}
++
++void video_prot_reset(video_prot_t* video_prot) {
++    u32 data32;
++
++    aml_write_reg32(P_VPU_PROT2_CLK_GATE, video_prot->status);
++    aml_write_reg32(P_VPU_PROT3_CLK_GATE, video_prot->status);
++    aml_write_reg32(P_VD1_IF0_PROT_CNTL, (video_prot->status) << 31 | 1080 << 16 | 1080);
++    aml_set_reg32_bits(P_VPU_PROT2_MMC_CTRL, video_prot->status, 12, 3);
++    aml_set_reg32_bits(P_VPU_PROT3_MMC_CTRL, video_prot->status, 12, 3);
++
++}
++
++void video_prot_init(video_prot_t* video_prot, vframe_t *vf) {
++    u32 tmp;
++
++    if (vf->width > 1920 || vf->height > 1088) {
++        video_prot->is_4k2k = 1;
++        video_prot->y_step = 1;
++        video_prot->pat_val = 0x80;
++    } else {
++        video_prot->is_4k2k = 0;
++        video_prot->y_step = 0;
++        video_prot->pat_val = 0x0;
++    }
++    video_prot->src_vframe_ratio = (vf->ratio_control & DISP_RATIO_ASPECT_RATIO_MASK) >> DISP_RATIO_ASPECT_RATIO_BIT;
++    video_prot->src_vframe_width = vf->width;
++    video_prot->src_vframe_height = vf->height;
++    video_prot->x_end = vf->width - 1;
++    video_prot->y_end = vf->height - 1;
++    video_prot->viu_type = vf->type;
++
++}
++
++void video_prot_set_angle(video_prot_t* video_prot, u32 angle) {
++
++    u32 data32;
++
++    video_prot->angle = angle;
++
++    if (video_prot->viu_type & VIDTYPE_VIU_NV21) {
++        set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++    } else if (video_prot->viu_type & VIDTYPE_VIU_422) {
++        set_prot_422(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++    } else if (video_prot->viu_type & VIDTYPE_VIU_444) {
++        set_prot_444(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, angle, video_prot->pat_val);
++    } else {
++        set_prot_NV21(0, video_prot->x_end, 0, video_prot->y_end, video_prot->y_step, 0, video_prot->pat_val);
++    }
++    video_prot->status = video_prot->angle % 2;
++}
++
++void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf) {
++
++    if (video_prot->viu_type & (VIDTYPE_VIU_444 | VIDTYPE_VIU_422 | VIDTYPE_VIU_NV21)) {
++        if (video_prot->angle == 1 || video_prot->angle == 3) {
++            if (video_prot->is_4k2k) {
++                vf->width = video_prot->src_vframe_height / (video_prot->y_step + 1);
++                vf->height = video_prot->src_vframe_width >> 1;
++            } else {
++                vf->width = video_prot->src_vframe_height;
++                vf->height = video_prot->src_vframe_width;
++            }
++            vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
++            vf->ratio_control |= (0x10000 / video_prot->src_vframe_ratio) << DISP_RATIO_ASPECT_RATIO_BIT;
++        } else if (video_prot->angle == 0 || video_prot->angle == 2) {
++            vf->width = video_prot->src_vframe_width;
++            vf->height = video_prot->src_vframe_height;
++            vf->ratio_control &= ~DISP_RATIO_ASPECT_RATIO_MASK;
++            vf->ratio_control |= video_prot->src_vframe_ratio << DISP_RATIO_ASPECT_RATIO_BIT;
++        }
++    }
++
++}
++
++void video_prot_set_canvas(vframe_t *vf) {
++    aml_set_reg32_bits(P_VPU_PROT2_DDR, vf->canvas0Addr & 0xff, 0, 8);
++    if (!(vf->type & VIDTYPE_VIU_444)) {
++        aml_set_reg32_bits(P_VPU_PROT3_DDR, (vf->canvas0Addr >> 8) & 0xff, 0, 8);
++    }
++}
+diff --git a/drivers/amlogic/amports/video_prot.h b/drivers/amlogic/amports/video_prot.h
+new file mode 100755
+index 000000000000..9d78ce4fdf6a
+--- /dev/null
++++ b/drivers/amlogic/amports/video_prot.h
+@@ -0,0 +1,46 @@
++#ifndef  _VIDEO_PROT_H
++#define _VIDEO_PROT_H
++
++#include <linux/kernel.h>
++#include <plat/regops.h>
++#include <mach/am_regs.h>
++#include <linux/amlogic/amlog.h>
++#include <linux/amlogic/amports/vframe.h>
++#include <linux/amlogic/amports/canvas.h>
++
++#define  CUGT           0
++#define  CID_VALUE      161
++#define	 CID_MODE       6
++#define	 REQ_ONOFF_EN   0
++#define  REQ_ON_MAX     0
++#define	 REQ_OFF_MIN    0
++#define  PAT_VAL        0x00000000
++#define  PAT_START_PTR  1
++#define  PAT_END_PTR    1
++#define  HOLD_LINES     14
++#define  LITTLE_ENDIAN  0
++
++typedef struct {
++    u32 status;
++    u32 video_started;
++    u32 viu_type;
++    u32 power_down;
++    u32 x_end;
++    u32 y_end;
++    u32 y_step;
++    u32 pat_val;
++    u32 is_4k2k;
++    u32 angle;
++    u32 angle_changed;
++    u32 src_vframe_width;
++    u32 src_vframe_height;
++    u32 src_vframe_ratio;
++} video_prot_t;
++
++//extern void early_init_prot();
++extern void video_prot_init(video_prot_t* video_prot, vframe_t *vf);
++extern void video_prot_set_angle(video_prot_t* video_prot, u32 angle);
++extern void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf);
++extern void video_prot_set_canvas(vframe_t *vf);
++extern void video_prot_reset(video_prot_t* video_prot);
++#endif
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+index 61e4542de096..8c01669bf9dd 100755
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -26,6 +26,7 @@
+ #include <linux/amlogic/amports/vframe.h>
+ #include "video.h"
+ #include "vpp.h"
++#include "video_prot.h"
+ 
+ #include <linux/amlogic/amports/vframe_provider.h>
+ 
+@@ -162,6 +163,7 @@ static u32 video_source_crop_top, video_source_crop_left, video_source_crop_bott
+ static s32 video_layer_global_offset_x, video_layer_global_offset_y;
+ static s32 osd_layer_top,osd_layer_left,osd_layer_width,osd_layer_height;
+ static u32 video_speed_check_width=1800, video_speed_check_height=1400;
++extern int get_prot_on();
+ 
+ #define ZOOM_BITS       18
+ #define PHASE_BITS      8
+@@ -280,7 +282,7 @@ vpp_process_speed_check(u32 width_in,
+     // output screen hight (height_out) vs. screen height (height_screen) ratio, output frame rate
+ 
+     // if (((height_in/1296) * (height_screen / height_out) * ((vinfo->sync_duration_num/vinfo->sync_duration_den)/60)) > 1) {
+-    if ((height_in * height_screen * vinfo->sync_duration_num) > (VPP_SPEED_FACTOR * height_out * vinfo->sync_duration_den * 60)) {
++    if (!get_prot_on() && ((height_in * height_screen * vinfo->sync_duration_num) > (VPP_SPEED_FACTOR * height_out * vinfo->sync_duration_den * 60))) {
+         // @60hz output, vpp can process 1296 lines when output window fully running, it's a measured result and can be adjustable
+         return 1;
+     }
+@@ -293,7 +295,7 @@ vpp_process_speed_check(u32 width_in,
+    if((height_in > 1080)&&(next_frame_par->vscale_skip_count== 0 )){
+    		return 1;
+    }
+-   
++
+     if (video_speed_check_width * video_speed_check_height * height_out > height_screen * width_in * height_in) {
+         return 0;
+     }
+@@ -379,7 +381,7 @@ RESTART:
+     } else {
+         aspect_factor = div_u64((unsigned long long)w_in * height_out * (aspect_factor << 8), width_out * h_in * aspect_ratio_out);
+     }
+-    
++
+     if(osd_layer_preblend)
+     aspect_factor=0x100;
+ 
+@@ -678,7 +680,7 @@ vpp_set_filters(u32 wide_mode,
+                 wide_mode = VIDEO_WIDEOPTION_FULL_STRETCH;
+             }
+         }
+-        if (vf->ratio_control & DISP_RATIO_FORCE_NORMALWIDE) 
++        if (vf->ratio_control & DISP_RATIO_FORCE_NORMALWIDE)
+             wide_mode = VIDEO_WIDEOPTION_NORMAL;
+         else if (vf->ratio_control & DISP_RATIO_FORCE_FULL_STRETCH)
+             wide_mode = VIDEO_WIDEOPTION_FULL_STRETCH;
+@@ -727,7 +729,7 @@ void vpp_set_osd_layer_position(s32  *para)
+ 	{
+ 		printk("para[3] is null\n");
+ 		return ;
+-	}	
++	}
+ 	if(para[2] < 2 || para[3] < 2) return ;
+ 
+ 	osd_layer_left=para[0];
+diff --git a/drivers/amlogic/ppmgr/ppmgr_dev.h b/drivers/amlogic/ppmgr/ppmgr_dev.h
+index c45ea7df6a94..3149561dbab6 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_dev.h
++++ b/drivers/amlogic/ppmgr/ppmgr_dev.h
+@@ -10,11 +10,11 @@ typedef  struct {
+ 	unsigned  int 		dbg_enable;
+ 	char* buffer_start;
+ 	unsigned int buffer_size;
+-	
++
+ 	unsigned angle;
+ 	unsigned orientation;
+-	unsigned videoangle; 
+-	
++	unsigned videoangle;
++
+ 	int bypass;
+ 	int disp_width;
+ 	int disp_height;
+@@ -42,6 +42,9 @@ typedef  struct {
+ 	int receiver_format;
+ 	int display_mode;
+ 	int mirror_flag;
++	int use_prot;
++	int started;
++	int global_angle;
+ }ppmgr_device_t;
+ 
+ typedef struct ppframe_s {
+diff --git a/drivers/amlogic/ppmgr/ppmgr_drv.c b/drivers/amlogic/ppmgr/ppmgr_drv.c
+index d945deb2ed98..d6cb1526d7e6 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_drv.c
++++ b/drivers/amlogic/ppmgr/ppmgr_drv.c
+@@ -38,7 +38,7 @@ static int ppmgr_flag_change = 0;
+ static int property_change = 0;
+ static int buff_change = 0;
+ 
+-static platform_type_t platform_type = PLATFORM_MID; 
++static platform_type_t platform_type = PLATFORM_MID;
+ ppmgr_device_t  ppmgr_device;
+ #ifdef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+ extern void Reset3Dclear(void);
+@@ -59,30 +59,30 @@ int get_bypass_mode(void)
+ 
+ int get_property_change(void)
+ {
+-    return property_change;	
++    return property_change;
+ }
+ void set_property_change(int flag)
+ {
+-    property_change = flag;	
++    property_change = flag;
+ }
+ 
+ int get_buff_change(void)
+ {
+-    return buff_change;	
++    return buff_change;
+ }
+ void set_buff_change(int flag)
+ {
+-    buff_change = flag;	
++    buff_change = flag;
+ }
+ 
+ #ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
+ bool get_scaler_pos_reset(void)
+ {
+-    return scaler_pos_reset;	
++    return scaler_pos_reset;
+ }
+ void set_scaler_pos_reset(bool flag)
+ {
+-    scaler_pos_reset = flag;	
++    scaler_pos_reset = flag;
+ }
+ #endif
+ 
+@@ -170,7 +170,7 @@ void set_ppmgr_direction3d(unsigned angle)
+ * Utilities.
+ *
+ ************************************************************************/
+-static ssize_t _ppmgr_angle_write(unsigned long val)
++ssize_t _ppmgr_angle_write(unsigned long val)
+ {
+     unsigned long angle = val;
+ 
+@@ -187,7 +187,7 @@ static ssize_t _ppmgr_angle_write(unsigned long val)
+         }
+     }
+ 
+-    if(angle != ppmgr_device.angle ){		
++    if(angle != ppmgr_device.angle ){
+         property_change = 1;
+     }
+ 
+@@ -248,10 +248,13 @@ static ssize_t show_ppmgr_info(struct class *cla,struct class_attribute *attr,ch
+     get_ppmgr_buf_info(&bstart,&bsize);
+     return snprintf(buf,80,"buffer:\n start:%x.\tsize:%d\n",(unsigned int)bstart,bsize/(1024*1024));
+ }
+-
++
++extern void set_video_angle(u32 s_value);
++
+ static ssize_t angle_read(struct class *cla,struct class_attribute *attr,char *buf)
+-{
+-    return snprintf(buf,80,"current angel is %d\n",ppmgr_device.angle);
++{
++    return snprintf(buf,80,"current angel is %d\n",ppmgr_device.global_angle);
++
+ }
+ 
+ static ssize_t angle_write(struct class *cla,
+@@ -263,11 +266,20 @@ static ssize_t angle_write(struct class *cla,
+     unsigned long angle  =  simple_strtoul(buf, &endp, 0);
+     printk("==%ld==\n",angle);
+ 
+-    if (_ppmgr_angle_write(angle) < 0) {
+-        return -EINVAL;
++    if (angle > 3 || angle < 0) {
++        size = endp - buf;
++        return count;
+     }
+-/*	
+-    if(angle != ppmgr_device.angle ){		
++    ppmgr_device.global_angle = angle;
++    if (!ppmgr_device.use_prot) {
++        if (_ppmgr_angle_write(angle) < 0) {
++            return -EINVAL;
++        }
++    } else {
++       set_video_angle(angle);
++    }
++/*
++    if(angle != ppmgr_device.angle ){
+         property_change = 1;
+     }
+     ppmgr_device.angle = angle;
+@@ -279,6 +291,25 @@ static ssize_t angle_write(struct class *cla,
+     return count;
+ }
+ 
++int get_use_prot() {
++    return ppmgr_device.use_prot;
++}
++#ifdef USE_PROT_CONTROL
++static ssize_t use_prot_show(struct class *cla, struct class_attribute *attr, char *buf) {
++    return snprintf(buf, 40, "%d\n", ppmgr_device.use_prot);
++}
++
++static ssize_t use_prot_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count) {
++    size_t r;
++    u32 s_value;
++    r = sscanf(buf, "%d", &s_value);
++    if (s_value != 0 && s_value != 1) {
++        return -EINVAL;
++    }
++    ppmgr_device.use_prot = s_value;
++    return strnlen(buf, count);
++}
++#endif
+ static ssize_t orientation_read(struct class *cla,struct class_attribute *attr,char *buf)
+ {
+     //ppmgr_device_t* ppmgr_dev=(ppmgr_device_t*)cla;
+@@ -350,7 +381,7 @@ static ssize_t rect_write(struct class *cla,struct class_attribute *attr,const c
+     int i;
+     buflen=strlen(buf);
+     value_array[0]=value_array[1]=value_array[2]=value_array[3]= -1;
+-	
++
+     for(i=0;i<4;i++) {
+         if(buflen==0) {
+             printk(errstr);
+@@ -364,10 +395,10 @@ static ssize_t rect_write(struct class *cla,struct class_attribute *attr,const c
+             *tokenlen=',';
+             strp= tokenlen+1;
+             buflen=strlen(strp);
+-        }  else 
++        }  else
+             break;
+     }
+-	
++
+     if(value_array[0]>=0) ppmgr_device.left= value_array[0];
+     if(value_array[1]>=0) ppmgr_device.left= value_array[1];
+     if(value_array[2]>0) ppmgr_device.left= value_array[2];
+@@ -377,7 +408,7 @@ static ssize_t rect_write(struct class *cla,struct class_attribute *attr,const c
+ }
+ 
+ static ssize_t disp_read(struct class *cla,struct class_attribute *attr,char *buf)
+-{	
++{
+     return snprintf(buf,80,"disp width is %d ; disp height is %d \n",ppmgr_device.disp_width, ppmgr_device.disp_height);
+ }
+ static void set_disp_para(const char *para)
+@@ -469,7 +500,7 @@ static ssize_t receiver_read(struct class *cla,struct class_attribute *attr,char
+ {
+ 	if(ppmgr_device.receiver==1)
+ 		return snprintf(buf,80,"video stream out to video4linux\n");
+-	else 
++	else
+ 		return snprintf(buf,80,"video stream out to vlayer\n");
+ }
+ 
+@@ -499,7 +530,7 @@ static ssize_t platform_type_read(struct class *cla,struct class_attribute *attr
+ 		return snprintf(buf,80,"current platform is MID\n");
+ 	}else if(platform_type ==PLATFORM_MID_VERTICAL){
+         	return snprintf(buf,80,"current platform is vertical MID\n");
+-	}else{ 
++	}else{
+ 		return snprintf(buf,80,"current platform is MBX\n");
+ 	}
+ }
+@@ -602,7 +633,7 @@ static ssize_t direction_3d_read(struct class *cla,struct class_attribute *attr,
+ {
+     const char *direction_str[] = {"0 degree", "90 degree", "180 degree","270 degree"};
+     //unsigned mode = get_ppmgr_3dmode();
+-    //mode = ((mode & PPMGR_3D_PROCESS_3D_ROTATE_DIRECTION_MASK)>>PPMGR_3D_PROCESS_3D_ROTATE_DIRECTION_VAULE_SHIFT);    
++    //mode = ((mode & PPMGR_3D_PROCESS_3D_ROTATE_DIRECTION_MASK)>>PPMGR_3D_PROCESS_3D_ROTATE_DIRECTION_VAULE_SHIFT);
+     //return snprintf(buf,80,"current 3d direction is %d:%s\n",mode,direction_str[mode]);
+     unsigned angle = get_ppmgr_direction3d();
+     return snprintf(buf,80,"current 3d direction is %d:%s\n",angle,direction_str[angle]);
+@@ -755,7 +786,7 @@ static void set_cut_window(const char *para)
+ 	      ppmgr_cutwin_left = left ;
+      }
+  }
+- 
++
+ static ssize_t cut_win_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+     return snprintf(buf, 80, "cut win top is %d ; cut win left is %d \n", ppmgr_cutwin_top,ppmgr_cutwin_left);
+@@ -831,26 +862,26 @@ static struct class_attribute ppmgr_class_attrs[] = {
+     __ATTR(bypass,
+            S_IRUGO | S_IWUSR,
+            bypass_read,
+-           bypass_write),   
+-           
++           bypass_write),
++
+     __ATTR(disp,
+            S_IRUGO | S_IWUSR,
+            disp_read,
+-           disp_write),          
++           disp_write),
+ 
+     __ATTR(orientation,
+            S_IRUGO | S_IWUSR,
+            orientation_read,
+-           orientation_write),           
++           orientation_write),
+ #ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
+     __ATTR(ppscaler,
+            S_IRUGO | S_IWUSR,
+            ppscaler_read,
+-           ppscaler_write),       
++           ppscaler_write),
+     __ATTR(ppscaler_rect,
+            S_IRUGO | S_IWUSR,
+            ppscaler_rect_read,
+-           ppscaler_rect_write),   
++           ppscaler_rect_write),
+ #endif
+        __ATTR(vtarget,
+            S_IRUGO | S_IWUSR,
+@@ -860,27 +891,27 @@ static struct class_attribute ppmgr_class_attrs[] = {
+     __ATTR(ppmgr_3d_mode,
+            S_IRUGO | S_IWUSR,
+            _3dmode_read,
+-           _3dmode_write),      
++           _3dmode_write),
+     __ATTR(viewmode,
+            S_IRUGO | S_IWUSR,
+            viewmode_read,
+-           viewmode_write), 
++           viewmode_write),
+     __ATTR(doublemode,
+            S_IRUGO | S_IWUSR,
+            doublemode_read,
+-           doublemode_write), 
++           doublemode_write),
+     __ATTR(switchmode,
+            S_IRUGO | S_IWUSR,
+            switchmode_read,
+-           switchmode_write), 
++           switchmode_write),
+     __ATTR(direction_3d,
+            S_IRUGO | S_IWUSR,
+            direction_3d_read,
+-           direction_3d_write), 
++           direction_3d_write),
+     __ATTR(scale_down,
+            S_IRUGO | S_IWUSR,
+            scale_down_read,
+-           scale_down_write), 
++           scale_down_write),
+     __ATTR(depth,
+ 			S_IRUGO | S_IWUSR,
+ 			read_depth,
+@@ -888,19 +919,19 @@ static struct class_attribute ppmgr_class_attrs[] = {
+     __ATTR(view_mode,
+ 			S_IRUGO | S_IWUSR,
+ 			read_view_mode,
+-			write_view_mode),		
++			write_view_mode),
+     __ATTR(vertical_sample,
+ 			S_IRUGO | S_IWUSR,
+ 			read_vertical_sample,
+-			write_vertical_sample),	
++			write_vertical_sample),
+     __ATTR(scale_width,
+ 			S_IRUGO | S_IWUSR,
+ 			read_scale_width,
+-			write_scale_width),								
++			write_scale_width),
+     __ATTR(axis,
+     		S_IRUGO | S_IWUSR,
+ 		    cut_win_show,
+-		    cut_win_store),	
++		    cut_win_store),
+ #endif
+ 
+     __ATTR(platform_type,
+@@ -913,6 +944,12 @@ static struct class_attribute ppmgr_class_attrs[] = {
+            mirror_read,
+            mirror_write),
+     __ATTR_RO(ppmgr_vframe_states),
++#ifdef USE_PROT_CONTROL
++    __ATTR(use_prot,
++           S_IRUGO | S_IWUSR,
++           use_prot_show,
++           use_prot_store),
++#endif
+     __ATTR_NULL
+ };
+ 
+@@ -948,7 +985,7 @@ void get_ppmgr_buf_info(char** start,unsigned int* size) {
+     *size=ppmgr_device.buffer_size;
+ }
+ 
+-static int ppmgr_open(struct inode *inode, struct file *file) 
++static int ppmgr_open(struct inode *inode, struct file *file)
+ {
+     ppmgr_device.open_count++;
+     return 0;
+@@ -961,9 +998,9 @@ static long ppmgr_ioctl(struct file *file,
+     int ret = 0;
+ #if 0
+     ge2d_context_t *context=(ge2d_context_t *)filp->private_data;
+-    config_para_t     ge2d_config;	
++    config_para_t     ge2d_config;
+     ge2d_para_t  para ;
+-    int flag;    	
++    int flag;
+     frame_info_t frame_info;
+ #endif
+ #ifdef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+@@ -985,12 +1022,12 @@ static long ppmgr_ioctl(struct file *file,
+             break;
+ #ifdef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+         case PPMGR_IOC_ENABLE_PP:
+-            mode=(int)argp;    
++            mode=(int)argp;
+             platform_type_t plarform_type;
+             plarform_type = get_platform_type();
+             if( plarform_type == PLATFORM_TV){
+-            	set_ppmgr_status(mode);            
+-            }else{            
++            	set_ppmgr_status(mode);
++            }else{
+           	  set_ppmgr_3dmode(mode);
+          	}
+             break;
+@@ -1027,7 +1064,7 @@ static long ppmgr_ioctl(struct file *file,
+ #endif
+         default :
+             return -ENOIOCTLCMD;
+-		
++
+     }
+     return ret;
+ }
+@@ -1036,7 +1073,7 @@ static int ppmgr_release(struct inode *inode, struct file *file)
+ {
+ #ifdef CONFIG_ARCH_MESON
+     ge2d_context_t *context=(ge2d_context_t *)file->private_data;
+-	
++
+     if(context && (0==destroy_ge2d_work_queue(context)))
+     {
+         ppmgr_device.open_count--;
+@@ -1057,9 +1094,9 @@ static int ppmgr_release(struct inode *inode, struct file *file)
+ 
+ static const struct file_operations ppmgr_fops = {
+     .owner   = THIS_MODULE,
+-    .open    = ppmgr_open,  
++    .open    = ppmgr_open,
+     .unlocked_ioctl  = ppmgr_ioctl,
+-    .release = ppmgr_release, 	
++    .release = ppmgr_release,
+ };
+ 
+ int  init_ppmgr_device(void)
+@@ -1068,14 +1105,14 @@ int  init_ppmgr_device(void)
+ 
+     strcpy(ppmgr_device.name,"ppmgr");
+     ret=register_chrdev(0,ppmgr_device.name,&ppmgr_fops);
+-    if(ret <=0) 
++    if(ret <=0)
+     {
+         amlog_level(LOG_LEVEL_HIGH,"register ppmgr device error\r\n");
+         return  ret ;
+     }
+     ppmgr_device.major=ret;
+     ppmgr_device.dbg_enable=0;
+-	
++
+     ppmgr_device.angle=0;
+     ppmgr_device.bypass =0 ;
+     ppmgr_device.videoangle=0;
+@@ -1100,7 +1137,7 @@ int  init_ppmgr_device(void)
+     ppmgr_device.mirror_flag  = 0;
+     ppmgr_device.canvas_width = ppmgr_device.canvas_height = 0;
+     amlog_level(LOG_LEVEL_LOW,"ppmgr_dev major:%d\r\n",ret);
+-    
++
+     if((ppmgr_device.cla = init_ppmgr_cls())==NULL) return -1;
+     ppmgr_device.dev=device_create(ppmgr_device.cla,NULL,MKDEV(ppmgr_device.major,0),NULL,ppmgr_device.name);
+     if (IS_ERR(ppmgr_device.dev)) {
+@@ -1108,12 +1145,14 @@ int  init_ppmgr_device(void)
+         goto unregister_dev;
+     }
+     buff_change = 0;
+-    ppmgr_register();  
++    ppmgr_register();
+     if(ppmgr_buffer_init(0) < 0) goto unregister_dev;
+     //if(start_vpp_task()<0) return -1;
+-    
++    ppmgr_device.use_prot = 1;
++    ppmgr_device.global_angle = 0;
++    ppmgr_device.started = 0;
+     return 0;
+-	
++
+ unregister_dev:
+     class_unregister(ppmgr_device.cla);
+     return -1;
+@@ -1122,22 +1161,22 @@ unregister_dev:
+ int uninit_ppmgr_device(void)
+ {
+     stop_ppmgr_task();
+-    
++
+     if(ppmgr_device.cla)
+     {
+         if(ppmgr_device.dev)
+             device_destroy(ppmgr_device.cla, MKDEV(ppmgr_device.major, 0));
+         class_unregister(ppmgr_device.cla);
+     }
+-    
++
+     unregister_chrdev(ppmgr_device.major, ppmgr_device.name);
+     return  0;
+ }
+ 
+ /*******************************************************************
+- * 
++ *
+  * interface for Linux driver
+- * 
++ *
+  * ******************************************************************/
+ 
+ MODULE_AMLOG(AMLOG_DEFAULT_LEVEL, 0xff, LOG_LEVEL_DESC, LOG_MASK_DESC);
+@@ -1205,7 +1244,7 @@ ppmgr_init_module(void)
+     }
+ 
+     return err;
+-	
++
+ }
+ 
+ static void __exit
+diff --git a/drivers/amlogic/ppmgr/ppmgr_vpp.c b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+index a71aa307ecfb..3ff66b981ca3 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_vpp.c
++++ b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+@@ -312,7 +312,7 @@ static int ppmgr_event_cb(int type, void *data, void *private_data)
+     }
+ #endif
+     if(type & VFRAME_EVENT_RECEIVER_FRAME_WAIT){
+-        if(task_running){
++        if(task_running && !ppmgr_device.use_prot){
+             if(get_property_change()){
+                 //printk("--ppmgr: get angle changed msg.\n");
+                 set_property_change(0);
+@@ -465,6 +465,7 @@ const vframe_receiver_op_t* vf_ppmgr_reg_provider(void)
+     if (start_ppmgr_task() == 0) {
+         r = &ppmgr_vf_receiver;
+     }
++    ppmgr_device.started = 1;
+ 
+     mutex_unlock(&ppmgr_mutex);
+ 
+@@ -481,6 +482,9 @@ void vf_ppmgr_unreg_provider(void)
+ 
+     dec_vfp = NULL;
+ 
++    ppmgr_device.started = 0;
++    ppmgr_device.use_prot = 0;
++
+     mutex_unlock(&ppmgr_mutex);
+ }
+ 
+@@ -1760,7 +1764,7 @@ static void process_vf_change(vframe_t *vf, ge2d_context_t *context, config_para
+     temp_vf.duration = vf->duration;
+     temp_vf.duration_pulldown = vf->duration_pulldown;
+     temp_vf.pts = vf->pts;
+-    temp_vf.pts_us64= vf->pts_us64;
++    temp_vf.pts_us64 = vf->pts_us64;
+     temp_vf.type = VIDTYPE_VIU_444 | VIDTYPE_VIU_SINGLE_PLANE | VIDTYPE_VIU_FIELD;
+     temp_vf.canvas0Addr = temp_vf.canvas1Addr = ass_index;
+     cur_angle = (ppmgr_device.videoangle + vf->orientation)%4;
+@@ -2257,6 +2261,9 @@ static struct task_struct *task=NULL;
+ extern int video_property_notify(int flag);
+ extern vframe_t* get_cur_dispbuf(void);
+ extern platform_type_t get_platform_type();
++extern void set_video_angle(u32 s_value);
++extern ssize_t _ppmgr_angle_write(unsigned long val);
++
+ static int ppmgr_task(void *data)
+ {
+     struct sched_param param = {.sched_priority = MAX_RT_PRIO - 1 };
+@@ -2336,6 +2343,18 @@ static int ppmgr_task(void *data)
+             int process_type = TYPE_NONE;
+             platform_type_t plarform_type;
+             vf = ppmgr_vf_get_dec();
++            if (ppmgr_device.started) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE)) {
++                    ppmgr_device.use_prot = 0;
++                    set_video_angle(0);
++                    _ppmgr_angle_write(ppmgr_device.global_angle);
++                } else {
++                    ppmgr_device.use_prot = 1;
++                    set_video_angle(ppmgr_device.global_angle);
++                    _ppmgr_angle_write(0);
++                }
++                ppmgr_device.started = 0;
++            }
+             plarform_type = get_platform_type();
+             if( plarform_type == PLATFORM_TV){
+             	process_type = get_tv_process_type(vf);
+@@ -2358,6 +2377,18 @@ static int ppmgr_task(void *data)
+ #else
+             int ret = 0;
+             vf = ppmgr_vf_get_dec();
++            if (ppmgr_device.started) {
++                if (!(vf->type & (VIDTYPE_VIU_422 | VIDTYPE_VIU_444 | VIDTYPE_VIU_NV21)) || (vf->type & VIDTYPE_INTERLACE)) {
++                    ppmgr_device.use_prot = 0;
++                    set_video_angle(0);
++                    _ppmgr_angle_write(ppmgr_device.global_angle);
++                } else {
++                    ppmgr_device.use_prot = 1;
++                    set_video_angle(ppmgr_device.global_angle);
++                    _ppmgr_angle_write(0);
++                }
++                ppmgr_device.started = 0;
++            }
+             ret = process_vf_deinterlace(vf, context, &ge2d_config);
+             process_vf_rotate(vf, context, &ge2d_config,(ret>0)?ret:0);
+ #endif
+@@ -2509,11 +2540,21 @@ int ppmgr_buffer_init(int vout_mode)
+     if(vout_mode == 0){
+ 	    ppmgr_device.vinfo = get_current_vinfo();
+ 
+-	    if (ppmgr_device.disp_width == 0)
+-	        ppmgr_device.disp_width = ppmgr_device.vinfo->width;
++	    if (ppmgr_device.disp_width == 0) {
++	        if (ppmgr_device.vinfo->width <= 1280) {
++	            ppmgr_device.disp_width = ppmgr_device.vinfo->width;
++	        } else {
++	            ppmgr_device.disp_width = 1280;
++	        }
++	    }
+ 
+-	    if (ppmgr_device.disp_height == 0)
+-	        ppmgr_device.disp_height = ppmgr_device.vinfo->height;
++	    if (ppmgr_device.disp_height == 0) {
++	        if (ppmgr_device.vinfo->height <= 736) {
++	            ppmgr_device.disp_height = ppmgr_device.vinfo->height;
++	        } else {
++	            ppmgr_device.disp_height = 736;
++	        }
++	    }
+             if (get_platform_type() == PLATFORM_MID_VERTICAL) {
+                 int DISP_SIZE = ppmgr_device.disp_width > ppmgr_device.disp_height ?
+                         ppmgr_device.disp_width : ppmgr_device.disp_height;
+-- 
+2.19.0
+

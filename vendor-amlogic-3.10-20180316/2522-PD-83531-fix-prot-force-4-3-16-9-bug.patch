@@ -1,0 +1,208 @@
+From a39aad8c5e884e55e493936574ff52ff22033128 Mon Sep 17 00:00:00 2001
+From: "shuai.cao" <shuai.cao@amlogic.com>
+Date: Thu, 12 Dec 2013 11:00:26 +0800
+Subject: [PATCH 2522/5965] PD#: 83531 fix prot force 4:3 & 16:9 bug
+
+---
+ drivers/amlogic/amports/video.c            | 22 +++++++--------
+ drivers/amlogic/amports/video_prot.c       |  7 ++---
+ drivers/amlogic/amports/vpp.c              | 32 ++++++++++++++++------
+ include/linux/amlogic/amports/video_prot.h |  1 +
+ 4 files changed, 37 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 0525fe1acc94..1aa51bde7865 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -353,8 +353,8 @@ static u32 use_prot = 0;
+ static u32 prot_axis_changed = 0;
+ static video_prot_t video_prot;
+ static u32 video_angle = 0;
+-int get_prot_on(void) { return video_prot.status; }
+-EXPORT_SYMBOL(get_prot_on);
++int get_prot_status(void) { return video_prot.status; }
++EXPORT_SYMBOL(get_prot_status);
+ u32 get_video_angle(void) { return video_prot.angle; }
+ EXPORT_SYMBOL(get_video_angle);
+ extern void prot_get_parameter(u32 wide_mode, vframe_t * vf, vpp_frame_par_t * next_frame_par, const vinfo_t *vinfo);
+@@ -576,7 +576,7 @@ static struct work_struct vpu_delay_work;
+ static int vpu_clk_level = 0;
+ static DEFINE_SPINLOCK(delay_work_lock);
+ static int vpu_delay_work_flag = 0;
+-static int vpu_mem_power_off_count; 
++static int vpu_mem_power_off_count;
+ #endif
+ 
+ static u32 vpts_ref = 0;
+@@ -1021,7 +1021,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+         (cur_dispbuf->height != vf->height) ||
+         (cur_dispbuf->ratio_control != vf->ratio_control) ||
+         ((cur_dispbuf->type_backup & VIDTYPE_INTERLACE) !=
+-         (vf->type_backup & VIDTYPE_INTERLACE)) || 
++         (vf->type_backup & VIDTYPE_INTERLACE)) ||
+          prot_axis_changed & 0x2) {
+         amlog_mask(LOG_MASK_FRAMEINFO,
+                    "%s %dx%d ar=0x%x\n",
+@@ -1065,7 +1065,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+ 
+                 spin_lock_irqsave(&lock, flags);
+                 vpu_delay_work_flag |= VPU_DELAYWORK_VPU_CLK;
+-                spin_unlock_irqrestore(&lock, flags); 
++                spin_unlock_irqrestore(&lock, flags);
+             }
+         } else {
+             if (vpu_clk_level == 1) {
+@@ -2768,7 +2768,7 @@ static void _set_video_window(int *p)
+ {
+     int w, h;
+     int *parsed = p;
+-    
++
+     prot_axis_changed |= 0x1;
+     if (parsed[0] < 0 && parsed[2] < 2) {
+         parsed[2] = 2;
+@@ -3577,9 +3577,9 @@ static ssize_t video_test_screen_store(struct class *cla, struct class_attribute
+ 
+     WRITE_VCBUS_REG(VPP_MISC, data);
+ 
+-     if(debug_flag& DEBUG_FLAG_BLACKOUT){  
+-        printk("%s write(VPP_MISC,%x) write(VPP_DUMMY_DATA1, %x)\n",__func__, data, test_screen&0x00ffffff); 
+-     } 
++     if(debug_flag& DEBUG_FLAG_BLACKOUT){
++        printk("%s write(VPP_MISC,%x) write(VPP_DUMMY_DATA1, %x)\n",__func__, data, test_screen&0x00ffffff);
++     }
+     return count;
+ }
+ 
+@@ -4295,7 +4295,7 @@ static void do_vpu_delay_work(struct work_struct *work)
+ 
+                 switch_vpu_mem_pd_vmod(VPU_VIU_VD1, VPU_MEM_POWER_DOWN);
+                 switch_vpu_mem_pd_vmod(VPU_DI_POST, VPU_MEM_POWER_DOWN);
+-                
++
+ #if 0
+ if (READ_VCBUS_REG(VPP_MISC) & 0x4000) {
+ 	enable_rdma(0);
+@@ -4311,7 +4311,7 @@ printk("mem power down, 0x%x\n", READ_VCBUS_REG(VPP_MISC));
+                 switch_vpu_mem_pd_vmod(VPU_VIU_VD2, VPU_MEM_POWER_DOWN);
+             }
+         }
+-    } 
++    }
+ 
+     spin_unlock_irqrestore(&delay_work_lock, flags);
+ }
+diff --git a/drivers/amlogic/amports/video_prot.c b/drivers/amlogic/amports/video_prot.c
+index 1984e4b9e3ce..d1179b40c1fd 100755
+--- a/drivers/amlogic/amports/video_prot.c
++++ b/drivers/amlogic/amports/video_prot.c
+@@ -177,7 +177,6 @@ static int set_prot_444(u32 x_start, u32 x_end, u32 y_start, u32 y_end, u32 y_st
+ }
+ 
+ void video_prot_reset(video_prot_t* video_prot) {
+-    u32 data32;
+ 
+     VSYNC_WR_MPEG_REG(VPU_PROT2_CLK_GATE, video_prot->status);
+     VSYNC_WR_MPEG_REG(VPU_PROT3_CLK_GATE, video_prot->status);
+@@ -188,7 +187,6 @@ void video_prot_reset(video_prot_t* video_prot) {
+ }
+ 
+ void video_prot_init(video_prot_t* video_prot, vframe_t *vf) {
+-    u32 tmp;
+ 
+     if (vf->width > 1920 || vf->height > 1088) {
+         video_prot->is_4k2k = 1;
+@@ -214,7 +212,6 @@ void video_prot_init(video_prot_t* video_prot, vframe_t *vf) {
+ 
+ void video_prot_set_angle(video_prot_t* video_prot, u32 angle) {
+ 
+-    u32 data32;
+     u32 angle_orientation = (angle + video_prot->src_vframe_orientation) % 4;
+ 
+     video_prot->angle = angle;
+@@ -268,7 +265,7 @@ void video_prot_set_canvas(vframe_t *vf) {
+ void video_prot_axis (video_prot_t* video_prot, u32 video_angle, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end) {
+     u32 reset_axis = 0;
+     u32 angle_orientation = (video_angle + video_prot->src_vframe_orientation) % 4;
+-    
++
+     if (vd_start > 0 || hd_start > 0) {
+         if (angle_orientation == 1) {
+             video_prot->x_start = vd_start;
+@@ -304,7 +301,7 @@ void video_prot_axis (video_prot_t* video_prot, u32 video_angle, u32 hd_start, u
+         u32 y_start_uv = 0;
+         u32 y_end_uv = 0;
+         u32 y_len_uv = 0;
+-        
++
+         reset_axis = 0;
+         y_end = y_start + (y_step + 1) * y_len;
+         if (video_prot->viu_type & VIDTYPE_VIU_NV21) {
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+index f67f6bfccd6d..862b2cc491a2 100755
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -370,17 +370,31 @@ RESTART:
+ 
+     /* keep 8 bits resolution for aspect conversion */
+     if (wide_mode == VIDEO_WIDEOPTION_4_3) {
+-        if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
+-            aspect_factor = 0x155;
+-        else
+-            aspect_factor = 0xc0;
++        if (get_prot_status()) {
++            if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
++                aspect_factor = 0xc0;
++            else
++                aspect_factor = 0x155;
++        } else {
++            if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
++                aspect_factor = 0x155;
++            else
++                aspect_factor = 0xc0;
++        }
+         wide_mode = VIDEO_WIDEOPTION_NORMAL;
+     }
+     else if (wide_mode == VIDEO_WIDEOPTION_16_9) {
+-        if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
+-            aspect_factor = 0x1c7;
+-        else
+-            aspect_factor = 0x90;
++        if (get_prot_status()) {
++            if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
++                aspect_factor = 0x90;
++            else
++                aspect_factor = 0x1c7;
++        } else {
++            if(vpp_flags & VPP_FLAG_PORTRAIT_MODE)
++                aspect_factor = 0x1c7;
++            else
++                aspect_factor = 0x90;
++        }
+         wide_mode = VIDEO_WIDEOPTION_NORMAL;
+     }
+ 
+@@ -736,7 +750,7 @@ vpp_set_filters(u32 wide_mode,
+     vpp_set_filters2(src_width, src_height, vinfo, vpp_flags, next_frame_par);
+ }
+ 
+-void 
++void
+ prot_get_parameter(u32 wide_mode,
+                 vframe_t *vf,
+                 vpp_frame_par_t *next_frame_par,
+diff --git a/include/linux/amlogic/amports/video_prot.h b/include/linux/amlogic/amports/video_prot.h
+index a4529f9fcefe..add797e1d373 100755
+--- a/include/linux/amlogic/amports/video_prot.h
++++ b/include/linux/amlogic/amports/video_prot.h
+@@ -49,6 +49,7 @@ void video_prot_revert_vframe(video_prot_t* video_prot, vframe_t *vf);
+ void video_prot_set_canvas(vframe_t *vf);
+ void video_prot_reset(video_prot_t* video_prot);
+ u32 get_video_angle(void);
++int get_prot_status(void);
+ void set_video_angle(u32 s_value);
+ void video_prot_axis (video_prot_t* video_prot, u32 video_angle, u32 hd_start, u32 hd_end, u32 vd_start, u32 vd_end);
+ #endif
+-- 
+2.19.0
+

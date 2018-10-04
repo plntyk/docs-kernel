@@ -1,0 +1,516 @@
+From 9d7e70bfb2b5bab86c326eba59007a86774e4f71 Mon Sep 17 00:00:00 2001
+From: "brian.zhu" <brian.zhu@amlogic.com>
+Date: Tue, 31 Dec 2013 17:07:42 +0800
+Subject: [PATCH 2688/5965] PD#85002:change the miracast resolution to 1024x768
+ x24 fps
+
+---
+ drivers/amlogic/amports/video.c        |   2 +
+ drivers/amlogic/tvin/isp/isp_drv.c     |   3 +
+ drivers/amlogic/tvin/isp/isp_hw.c      |  22 ++--
+ drivers/amlogic/tvin/vdin/vdin_ctl.c   |  20 ++--
+ drivers/amlogic/tvin/vdin/vdin_drv.c   | 160 +++++++++----------------
+ drivers/amlogic/tvin/viu/viuin.c       |  35 +++++-
+ drivers/amlogic/tvin_v4l2/vdin_v4l2.c  |   3 +
+ include/linux/amlogic/tvin/tvin_v4l2.h |   2 +
+ 8 files changed, 119 insertions(+), 128 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 30184e52e8f9..68d988e5454c 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -1803,11 +1803,13 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 	/* amvecm video latch function */
+ 	amvecm_video_latch();
+ #endif
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+     vdin_ops=get_vdin_v4l2_ops();
+     if(vdin_ops){
+ 	arg.cmd = VDIN_CMD_ISR;
+ 	vdin_ops->tvin_vdin_func(1,&arg);
+     }
++#endif
+     vout_type = detect_vout_type();
+     hold_line = calc_hold_line();
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index f26c2f395f61..fd652e78a2ed 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -1052,6 +1052,9 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 		        devp->wave = param->xml_wave;
+ 		        torch_level(devp->flash.mode_pol_inv,devp->flash.led1_pol_inv,devp->flash.pin_mux_inv,devp->flash.torch_pol_inv,devp->wave,param->level);
+ 		        break;
++		case CMD_ISP_BYPASS:
++			isp_bypass_all();
++			break;
+ 	        default:
+ 		        break;
+ 	}
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 179ab6f3f3e5..af34ce289d8f 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -325,22 +325,14 @@ void isp_set_matrix(xml_csc_t *csc, unsigned int height)
+ 		for(i=0;i<XML_CSC;i++)
+ 		        WR(ISP_MATRIX_PRE_OFST0_1+i, *(start+i));
+ 	} else {
+-	    if(height==0)
+-	    {
+-			printk("isp_set_matrix2\n");
+-			start = isp_matrix_lup[2];
++	        if(height==0) {
++	    	        start = isp_matrix_lup[2];
+ 			for(i=0;i<XML_CSC;i++)
+-			{
+-			        WR(ISP_MATRIX_PRE_OFST0_1+i, *(start+i));
+-					printk("xxx=%x,%x\n",RD(ISP_MATRIX_PRE_OFST0_1+i),*(start+i));
+-			}
+-			printk("xxx=%x\n",RD(ISP_MATRIX_COEF00_01));
+-	    }
+-		else
+-		{
+-		start = (height>720)?isp_matrix_lup[1]:isp_matrix_lup[0];
+-		for(i=0;i<XML_CSC;i++)
+-		        WR(ISP_MATRIX_PRE_OFST0_1+i, *(start+i));
++			        WR(ISP_MATRIX_PRE_OFST0_1+i, *(start+i));			
++	        }else{
++		        start = (height>720)?isp_matrix_lup[1]:isp_matrix_lup[0];
++		        for(i=0;i<XML_CSC;i++)
++		                WR(ISP_MATRIX_PRE_OFST0_1+i, *(start+i));
+ 		}
+ 	}
+ }
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index bbbaeec1155a..abdbf51d979f 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -473,12 +473,12 @@ static inline void vdin_set_top(unsigned int offset, enum tvin_port_e port, enum
+ 			break;
+ 		case 0x80: // dvin
+ 			vdin_mux = VDIN_MUX_DVIN;
+-			WR_BITS(VDIN_ASFIFO_CTRL3, 0xe4, VDI6_ASFIFO_CTRL_BIT, VDI6_ASFIFO_CTRL_WID);
++			WR_BITS(VDIN_ASFIFO_CTRL3, 0xe2, VDI6_ASFIFO_CTRL_BIT, VDI6_ASFIFO_CTRL_WID);
++			break;
++		case 0xc0: //viu
++			vdin_mux = VDIN_MUX_VIU;
++			WR_BITS(VDIN_ASFIFO_CTRL3, 0xf4, VDI6_ASFIFO_CTRL_BIT, VDI6_ASFIFO_CTRL_WID);
+ 			break;
+-                case 0xc0:
+-                        vdin_mux = VDIN_MUX_VIU;
+-			WR_BITS(VDIN_ASFIFO_CTRL3, 0xe2, VDI7_ASFIFO_CTRL_BIT, VDI7_ASFIFO_CTRL_WID);
+-                        break;
+ 		case 0x100://mipi in mybe need modify base on truth
+ 			vdin_mux = VDIN_MUX_MIPI;
+ 			WR_BITS(VDIN_ASFIFO_CTRL3, 0xe0, VDI7_ASFIFO_CTRL_BIT, VDI7_ASFIFO_CTRL_WID);
+@@ -1358,7 +1358,7 @@ inline void vdin_set_default_regmap(unsigned int offset)
+ 	// [    2]  asfifo_656.rst_on_vs        = 0
+ 	// [    1]  asfifo_656.clr_ov_flag      = 0
+ 	// [    0]  asfifo_656.rst              = 0
+-	WR(VDIN_ASFIFO_CTRL0, 0x00e400e0);
++	//WR(VDIN_ASFIFO_CTRL0, 0x00000000);
+ 	// [   23] asfifo_hdmi.de_en            = 1
+ 	// [   22] asfifo_hdmi.vs_en            = 1
+ 	// [   21] asfifo_hdmi.hs_en            = 1
+@@ -1375,7 +1375,7 @@ inline void vdin_set_default_regmap(unsigned int offset)
+ 	// [    2] asfifo_cvd2.rst_on_vs        = 1
+ 	// [    1] asfifo_cvd2.clr_ov_flag      = 0
+ 	// [    0] asfifo_cvd2.rst              = 0
+-	WR(VDIN_ASFIFO_CTRL1, 0x00e400e4);
++	//WR(VDIN_ASFIFO_CTRL1, 0x00000000);
+ 	// [28:16]         top.input_width_m1   = 0
+ 	// [12: 0]         top.output_width_m1  = 0
+ 	WR(VDIN_WIDTHM1I_WIDTHM1O, 0x00000000);
+@@ -1408,10 +1408,10 @@ inline void vdin_set_default_regmap(unsigned int offset)
+ 	// [    2] asfifo_dvin.rst_on_vs        = 1
+ 	// [    1] asfifo_dvin.clr_ov_flag      = 0
+ 	// [    0] asfifo_dvin.rst              = 0
+-	WR(VDIN_ASFIFO_CTRL2, 0x000000e4);
++	//WR(VDIN_ASFIFO_CTRL2, 0x00000000);
+         //Bit 15:8 vdi7 asfifo_ctrl
+ 	//Bit 7:0 vdi6 asfifo_ctrl
+-	WR(VDIN_ASFIFO_CTRL3, 0x000000e2);
++	//WR(VDIN_ASFIFO_CTRL3, 0x00000000);
+ 
+ 
+ 	// [    0]      matrix.en               = 0 ***sub_module.enable***
+@@ -2084,7 +2084,7 @@ void vdin_set_cm2(unsigned int offset,unsigned int w,unsigned int h,unsigned int
+ 		WR(VDIN_CHROMA_DATA_PORT,cm2[160+i]);
+ 	}
+ 	/*config cm2 frame size*/
+-	WR(VDIN_CHROMA_ADDR_PORT,0x205);
++	WR(VDIN_CHROMA_ADDR_PORT,FRM_SIZE_REG);
+ 	WR(VDIN_CHROMA_DATA_PORT,h<<16|w);
+ 	
+     WR_BITS(VDIN_CM_BRI_CON_CTRL, 1, CM_TOP_EN_BIT,CM_TOP_EN_WID);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 4cc9a2f24d9b..835239ae9c9a 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -200,6 +200,21 @@ void vdin_timer_func(unsigned long arg)
+ 	devp->timer.expires = jiffies + VDIN_PUT_INTERVAL;
+ 	add_timer(&devp->timer);
+ }
++static void parse_param(char *buf_orig,char **parm)
++{
++	char *ps, *token;
++	unsigned int n=0;
++	ps = buf_orig;
++        while(1) {
++                token = strsep(&ps, " \n");
++                if (token == NULL)
++                        break;
++                if (*token == '\0')
++                        continue;
++                parm[n++] = token;
++        }
++}
++
+ static ssize_t sig_det_show(struct device *dev,struct device_attribute *attr,char *buf)
+ {
+ 	return sprintf(buf,"%d\n",callmaster_status);
+@@ -608,12 +623,12 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	udelay(start_provider_delay);
+ 	vf_reg_provider(&devp->vprov);
+ 	vf_notify_receiver(devp->name,VFRAME_EVENT_PROVIDER_START,NULL);
+-if(devp->parm.port != TVIN_PORT_VIU){
+-        /*enable irq */
+-        enable_irq(devp->irq);
+-}
+-        /*disable audio&video sync used for libplayer*/
+-        tsync_set_enable(0);
++	if(devp->parm.port != TVIN_PORT_VIU){
++		/*enable irq */
++		enable_irq(devp->irq);
++	}
++	/*disable audio&video sync used for libplayer*/
++	tsync_set_enable(0);
+ 	/* enable system_time */
+ 	timestamp_pcrscr_enable(1);
+ }
+@@ -654,30 +669,36 @@ static void vdin_stop_dec(struct vdin_dev_s *devp)
+ int start_tvin_service(int no ,vdin_parm_t *para)
+ {
+ 	struct tvin_frontend_s *fe;
+-        int ret = 0;
++	int ret = 0;
+ 	struct vdin_dev_s *devp = vdin_devp[no];
+-        if(IS_ERR(devp)){
+-                printk(KERN_ERR "[vdin..]%s vdin%d has't registered,please register.\n",__func__,no);
+-                return -1;
+-        }
++	if(IS_ERR(devp)){
++		printk(KERN_ERR "[vdin..]%s vdin%d has't registered,please register.\n",__func__,no);
++		return -1;
++	}
+ 	devp->start_time = jiffies_to_msecs(jiffies);
+-        if (devp->flags & VDIN_FLAG_DEC_STARTED) {
+-		pr_err("%s: port 0x%x, decode started already.\n",__func__,para->port);
++	if (devp->flags & VDIN_FLAG_DEC_STARTED) {
++	pr_err("%s: port 0x%x, decode started already.\n",__func__,para->port);
+ 		ret = -EBUSY;
+ 	}
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(para->port != TVIN_PORT_VIU){
+-	ret = request_irq(devp->irq, vdin_v4l2_isr, IRQF_SHARED, devp->irq_name, (void *)devp);
+-        /*disable vsync irq until vdin configured completely*/
+-        disable_irq_nosync(devp->irq);
++		ret = request_irq(devp->irq, vdin_v4l2_isr, IRQF_SHARED, devp->irq_name, (void *)devp);
++		/*disable vsync irq until vdin configured completely*/
++		disable_irq_nosync(devp->irq);
+ 	}
+-        /*config the vdin use default value*/
+-        vdin_set_default_regmap(devp->addr_offset);
++#else
++	ret = request_irq(devp->irq, vdin_v4l2_isr, IRQF_SHARED, devp->irq_name, (void *)devp);
++	/*disable vsync irq until vdin configured completely*/
++	disable_irq_nosync(devp->irq);
++#endif
++	/*config the vdin use default value*/
++	vdin_set_default_regmap(devp->addr_offset);
+ 
+-	devp->parm.port         = para->port;
+-        #ifdef CONFIG_ARCH_MESON6
+-        if(para->port == TVIN_PORT_ISP)
+-                devp->parm.port = TVIN_PORT_CAMERA;
+-        #endif
++	devp->parm.port = para->port;
++#ifdef CONFIG_ARCH_MESON6
++	if(para->port == TVIN_PORT_ISP)
++		devp->parm.port = TVIN_PORT_CAMERA;
++#endif
+ 	devp->parm.info.fmt     = para->fmt;
+ 	//add for camera random resolution
+ 	if(para->fmt >= TVIN_SIG_FMT_MAX){
+@@ -761,8 +782,8 @@ int stop_tvin_service(int no)
+ 	devp->flags &= (~VDIN_FLAG_DEC_OPENED);
+ 	devp->flags &= (~VDIN_FLAG_DEC_STARTED);
+ 	if(devp->parm.port!= TVIN_PORT_VIU){
+-	/* free irq */
+-	free_irq(devp->irq,(void *)devp);
++		/* free irq */
++		free_irq(devp->irq,(void *)devp);
+ 	}
+ 	end_time = jiffies_to_msecs(jiffies);
+ 	pr_info("[vdin]:vdin start time:%ums,stop time:%ums,run time:%u.\n",devp->start_time,end_time,end_time-devp->start_time);
+@@ -1308,19 +1329,6 @@ irq_handled:
+ static unsigned char skip_ratio = 1;
+ module_param(skip_ratio,uint,0664);
+ MODULE_PARM_DESC(skip_ratio,"\n vdin skip frame ratio 1/ratio will reserved.\n");
+-static unsigned int vsync_enter_line_max = 0;
+-module_param(vsync_enter_line_max,uint,0664);
+-MODULE_PARM_DESC(vsync_enter_line_max,"\n vdin skip frame ratio 1/ratio will reserved.\n");
+-static unsigned int vsync_exit_line_max = 0;
+-module_param(vsync_exit_line_max,uint,0664);
+-MODULE_PARM_DESC(vsync_exit_line_max,"\n vdin skip frame ratio 1/ratio will reserved.\n");
+-
+-static unsigned int vsync_enter_line_curr = 0;
+-module_param(vsync_enter_line_curr,uint,0664);
+-MODULE_PARM_DESC(vsync_enter_line_curr,"\n vdin skip frame ratio 1/ratio will reserved.\n");
+-static unsigned int vsync_exit_line_curr = 0;
+-module_param(vsync_exit_line_curr,uint,0664);
+-MODULE_PARM_DESC(vsync_exit_line_curr,"\n vdin skip frame ratio 1/ratio will reserved.\n");
+ 
+ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ {
+@@ -1335,25 +1343,8 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 	int ret = 0;
+ 	if (!devp)
+                 return IRQ_HANDLED;
+-	switch(READ_VCBUS_REG(VPU_VIU_VENC_MUX_CTRL)&0x3){
+-                case 0:
+-                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCL_INFO_READ)>>16)&0x1fff;
+-                        break;
+-                case 1:
+-                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCI_INFO_READ)>>16)&0x1fff;
+-                        break;
+-                case 2:
+-                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
+-                        break;
+-                case 3:
+-                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
+-                        break;
+-        }
+-        if(vsync_enter_line_curr > vsync_enter_line_max)
+-                vsync_enter_line_max = vsync_enter_line_curr;
+-
+ 	isr_log(devp->vfp);
+-                irq_cnt++;
++        irq_cnt++;
+ 	spin_lock_irqsave(&devp->isr_lock, flags);
+         if(devp)
+ 	        /* avoid null pointer oops */
+@@ -1366,6 +1357,8 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 	}
+ 	
+         if(!vdin_write_done_check(devp->addr_offset, devp)){
++		if(vdin_dbg_en)
++			pr_info("[vdin.%u] write undone skiped.\n",devp->index);
+                 goto irq_handled;
+         }   
+ 
+@@ -1464,23 +1457,6 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 
+ 
+ irq_handled:
+-	switch(READ_VCBUS_REG(VPU_VIU_VENC_MUX_CTRL)&0x3){
+-		case 0:
+-			vsync_exit_line_curr = (READ_VCBUS_REG(ENCL_INFO_READ)>>16)&0x1fff;
+-			break;
+-		case 1:
+-			vsync_exit_line_curr = (READ_VCBUS_REG(ENCI_INFO_READ)>>16)&0x1fff;
+-			break;
+-		case 2:
+-			vsync_exit_line_curr = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
+-			break;
+-		case 3:
+-			vsync_exit_line_curr = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
+-			break;
+-	}
+-	if(vsync_exit_line_curr > vsync_exit_line_max)
+-		vsync_exit_line_max = vsync_exit_line_curr;
+-
+ 	spin_unlock_irqrestore(&devp->isr_lock, flags);
+ 	isr_log(devp->vfp);
+ 	return IRQ_HANDLED;
+@@ -2053,9 +2029,8 @@ static void vdin_dump_state(vdin_dev_t *devp)
+ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,const char *buf, size_t len)
+ {
+         unsigned int n=0, fps=0;
+-        unsigned char ret=0;
+-        char *buf_orig, *ps, *token;
+-        char *parm[6] = {NULL};
++        char ret=0,*buf_orig,*parm[6] = {NULL};
++        cam_parameter_t tmp_isp;
+         struct vdin_dev_s *devp;
+ 
+         if(!buf)
+@@ -2063,15 +2038,7 @@ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,
+         buf_orig = kstrdup(buf, GFP_KERNEL);
+         //printk(KERN_INFO "input cmd : %s",buf_orig);
+         devp = dev_get_drvdata(dev);
+-        ps = buf_orig;
+-        while (1) {
+-                token = strsep(&ps, " \n");
+-                if (token == NULL)
+-                        break;
+-                if (*token == '\0')
+-                        continue;
+-                parm[n++] = token;
+-        }
++        parse_param(buf_orig,&parm);
+ 
+         if(!strcmp(parm[0],"cm2")){
+ 		set_chroma_regs(devp->addr_offset,devp->h_active,devp->v_active);
+@@ -2080,8 +2047,13 @@ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,
+ 			fps = (VDIN_CRYSTAL + (devp->cycle>>3))/devp->cycle;
+                 pr_info("%u f/s\n",fps);
+         }else if(!strcmp(parm[0], "bypass_isp")){
+-        vdin_bypass_isp(devp->addr_offset);
+-        pr_info("vdin bypass isp.\n");
++                vdin_bypass_isp(devp->addr_offset);
++		if(devp->parm.port == TVIN_PORT_ISP){
++			tmp_isp.cam_command = CMD_ISP_BYPASS;
++			if(devp->frontend->dec_ops->ioctl)
++				devp->frontend->dec_ops->ioctl(devp->frontend,(void *)&tmp_isp);
++		}
++                pr_info("vdin bypass isp.\n");
+         }
+         else if(!strcmp(parm[0],"capture")){
+ 		if(parm[3] != NULL){
+@@ -2349,20 +2321,6 @@ static ssize_t vdin_isr_log_store(struct device *dev,
+ 
+ static DEVICE_ATTR(isr_log,  0664, vdin_isr_log_show, vdin_isr_log_store);
+ #endif
+-static void parse_param(char *buf_orig,char **parm)
+-{
+-	char *ps, *token;
+-	unsigned int n=0;
+-	ps = buf_orig;
+-        while(1) {
+-                token = strsep(&ps, " \n");
+-                if (token == NULL)
+-                        break;
+-                if (*token == '\0')
+-                        continue;
+-                parm[n++] = token;
+-        }
+-}
+ 
+ static ssize_t vdin_crop_show(struct device * dev,
+ struct device_attribute *attr, char * buf)
+diff --git a/drivers/amlogic/tvin/viu/viuin.c b/drivers/amlogic/tvin/viu/viuin.c
+index a48dcd801106..44dc084a2ec1 100755
+--- a/drivers/amlogic/tvin/viu/viuin.c
++++ b/drivers/amlogic/tvin/viu/viuin.c
+@@ -70,12 +70,29 @@ static int gamma_type = 2;
+ module_param(gamma_type, int, 0664);
+ MODULE_PARM_DESC(gamma_type, "adjust gamma type");
+ 
++static unsigned int vsync_enter_line_curr = 0;
++module_param(vsync_enter_line_curr,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_curr,"\n encoder process line num when enter isr.\n");
++
++static unsigned int vsync_enter_line_max = 0;
++module_param(vsync_enter_line_max,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_max,"\n max encoder process line num when enter isr.\n");
++
++static unsigned int vsync_enter_line_threshold = 23;
++module_param(vsync_enter_line_threshold,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_threshold,"\n max encoder process line num over threshold drop the frame.\n");
++
++static unsigned int vsync_enter_line_threshold_overflow_count = 0;
++module_param(vsync_enter_line_threshold_overflow_count,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_threshold_overflow_count,"\n count of overflow encoder process line num over threshold drop the frame.\n");
++
+ typedef struct viuin_s{
+         unsigned int flag;
+         struct vframe_prop_s *prop;
+         /*add for tvin frontend*/
+         struct tvin_frontend_s frontend;
+         struct vdin_parm_s parm;
++	unsigned int enc_info_addr;
+ }viuin_t;
+ 
+ #ifdef CONFIG_GAMMA_AUTO_TUNE
+@@ -517,15 +534,19 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+         switch(RD_BITS(VPU_VIU_VENC_MUX_CTRL,0,2)){
+                 case 0:
+                         WR_BITS(VPU_VIU_VENC_MUX_CTRL,0x88,4,8);
++			devp->enc_info_addr = ENCL_INFO_READ;
+                         break;
+                 case 1:                        
+                         WR_BITS(VPU_VIU_VENC_MUX_CTRL,0x11,4,8);
++			devp->enc_info_addr = ENCI_INFO_READ;
+                         break;
+                 case 2:                        
+                         WR_BITS(VPU_VIU_VENC_MUX_CTRL,0x22,4,8);
++			devp->enc_info_addr = ENCP_INFO_READ;
+                         break;
+                 case 3:                        
+                         WR_BITS(VPU_VIU_VENC_MUX_CTRL,0x44,4,8);
++			devp->enc_info_addr = ENCT_INFO_READ;
+                         break;
+                 default:
+                         break;
+@@ -549,6 +570,8 @@ static void viuin_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt)
+ 		        printk("[viuin..]%s viu_in is started already.\n",__func__);
+ 		return;
+ 	}
++	vsync_enter_line_max = 0;
++	vsync_enter_line_threshold_overflow_count = 0;
+ 	devp->flag = AMVIUIN_DEC_START;
+ 	
+ 	return;
+@@ -563,11 +586,19 @@ static void viuin_stop(struct tvin_frontend_s *fe, enum tvin_port_e port)
+                 printk("[viuin..]%s viu in dec isn't start.\n",__func__);
+         
+ }
++
+ static int viuin_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ {	
+-        viuin_t *devp = container_of(fe,viuin_t,frontend);
++	viuin_t *devp = container_of(fe,viuin_t,frontend);
++	vsync_enter_line_curr = (READ_VCBUS_REG(devp->enc_info_addr)>>16)&0x1fff;
++	if(vsync_enter_line_curr > vsync_enter_line_max)
++                vsync_enter_line_max = vsync_enter_line_curr;
++	if(vsync_enter_line_curr > vsync_enter_line_threshold){
++		vsync_enter_line_threshold_overflow_count++;
++		return TVIN_BUF_SKIP;
++	}
+ #ifdef CONFIG_GAMMA_AUTO_TUNE
+-        if (gamma_tune_en) {	
++	if (gamma_tune_en) {	
+ 		devp->prop = fe->private_data;
+ 		// calculate dnlp target data
+ 		ve_dnlp_calculate_tgt(devp->prop);
+diff --git a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+index 46488c132b5c..1e54c59bfc27 100755
+--- a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
++++ b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+@@ -110,6 +110,9 @@ const char *cam_cmd_to_str(cam_command_t cmd)
+                 case CAM_COMMAND_TORCH:
+ 			return "CAM_COMMAND_TORCH";
+ 			break;
++		case CMD_ISP_BYPASS:
++			return "CMD_ISP_BYPASS";
++			break;
+ 		default:
+ 			break;
+ 	}
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index f01a10747aea..edbb142f1ff1 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -249,6 +249,8 @@ typedef enum cam_command_e {
+         CAM_COMMAND_SET_FLASH_MODE,
+         // torch related
+         CAM_COMMAND_TORCH,
++        //bypass isp for raw data
++        CMD_ISP_BYPASS,
+ } cam_command_t;
+ extern const char *cam_cmd_to_str(cam_command_t cmd);
+ 
+-- 
+2.19.0
+

@@ -1,0 +1,153 @@
+From 5f7a55b4e9300b0c8d4cf22d9bed1b6d5122ac58 Mon Sep 17 00:00:00 2001
+From: Dezhi Kong <dezhi.kong@amlogic.com>
+Date: Thu, 19 Mar 2015 16:29:22 +0800
+Subject: [PATCH 5488/5965] PD#104001: pq: enable wb default
+
+Change-Id: Ie9980baaac73b8f7d042b5be2cf49ec8217adbfd
+---
+ drivers/amlogic/amvecm/amvecm.c               | 28 ++++++++++-------
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        | 30 ++++++++++++-------
+ 2 files changed, 37 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/amlogic/amvecm/amvecm.c b/drivers/amlogic/amvecm/amvecm.c
+index 7c6781ac451c..9c8ff216109c 100755
+--- a/drivers/amlogic/amvecm/amvecm.c
++++ b/drivers/amlogic/amvecm/amvecm.c
+@@ -139,12 +139,17 @@ module_param(pq_load_en, uint, 0664);
+ MODULE_PARM_DESC(pq_load_en, "\n pq_load_en \n");
+ 
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
+-bool wb_gamma_en = 0;  // wb_gamma_en enable/disable
++bool gamma_en = 0;  // wb_gamma_en enable/disable
+ #else
+-bool wb_gamma_en = 1;
++bool gamma_en = 1;
+ #endif
+-module_param(wb_gamma_en, bool, 0664);
+-MODULE_PARM_DESC(wb_gamma_en, "\n wb_gamma_en \n");
++module_param(gamma_en, bool, 0664);
++MODULE_PARM_DESC(gamma_en, "\n gamma_en \n");
++
++bool wb_en = 1;  // wb_en enable/disable
++module_param(wb_en, bool, 0664);
++MODULE_PARM_DESC(wb_en, "\n wb_en \n");
++
+ 
+ extern unsigned int cm_size;
+ extern unsigned int ve_size;
+@@ -696,16 +701,19 @@ static long amvecm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 	gamma ioctl
+ 	**********************************************************************/
+ 	case AMVECM_IOC_GAMMA_TABLE_EN:
+-		if (!wb_gamma_en)
++		if (!gamma_en)
+ 			return (-EINVAL);
+ 
+ 		vecm_latch_flag |= FLAG_GAMMA_TABLE_EN;
+ 		break;
+ 	case AMVECM_IOC_GAMMA_TABLE_DIS:
++		if (!gamma_en)
++			return (-EINVAL);
++
+ 		vecm_latch_flag |= FLAG_GAMMA_TABLE_DIS;
+ 		break;
+ 	case AMVECM_IOC_GAMMA_TABLE_R:
+-		if (!wb_gamma_en)
++		if (!gamma_en)
+ 			return (-EINVAL);
+ 
+ 		if (copy_from_user(&video_gamma_table_r, (void __user *)arg, sizeof(struct tcon_gamma_table_s)))
+@@ -714,7 +722,7 @@ static long amvecm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			vecm_latch_flag |= FLAG_GAMMA_TABLE_R;
+ 		break;
+ 	case AMVECM_IOC_GAMMA_TABLE_G:
+-		if (!wb_gamma_en)
++		if (!gamma_en)
+ 			return (-EINVAL);
+ 
+ 		if (copy_from_user(&video_gamma_table_g, (void __user *)arg, sizeof(struct tcon_gamma_table_s)))
+@@ -723,7 +731,7 @@ static long amvecm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			vecm_latch_flag |= FLAG_GAMMA_TABLE_G;
+ 		break;
+ 	case AMVECM_IOC_GAMMA_TABLE_B:
+-		if (!wb_gamma_en)
++		if (!gamma_en)
+ 			return (-EINVAL);
+ 
+ 		if (copy_from_user(&video_gamma_table_b, (void __user *)arg, sizeof(struct tcon_gamma_table_s)))
+@@ -732,7 +740,7 @@ static long amvecm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			vecm_latch_flag |= FLAG_GAMMA_TABLE_B;
+ 		break;
+ 	case AMVECM_IOC_S_RGB_OGO:
+-		if (!wb_gamma_en)
++		if (!wb_en)
+ 			return (-EINVAL);
+ 
+ 		if (copy_from_user(&video_rgb_ogo, (void __user *)arg, sizeof(struct tcon_rgb_ogo_s)))
+@@ -741,7 +749,7 @@ static long amvecm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			ve_ogo_param_update();
+ 		break;
+ 	case AMVECM_IOC_G_RGB_OGO:
+-		if (!wb_gamma_en)
++		if (!wb_en)
+ 			return (-EINVAL);
+ 
+ 		if (copy_to_user((void __user *)arg, &video_rgb_ogo, sizeof(struct tcon_rgb_ogo_s))){
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index 29da862b750a..90015e24d275 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -64,6 +64,10 @@ static unsigned int atvdemod_afc_offset = 500;
+ module_param( atvdemod_afc_offset, uint, 0644) ; 
+ MODULE_PARM_DESC( atvdemod_afc_offset, "\n atvdemod_afc_offset\n");
+ 
++static unsigned int atvdemod_timer_en = 1;
++module_param( atvdemod_timer_en, uint, 0644);
++MODULE_PARM_DESC( atvdemod_afc_offset, "\n atvdemod_afc_offset\n");
++
+ static unsigned int mix1_freq = 0;
+ static unsigned int timer_init_flag = 0;
+ extern struct amlatvdemod_device_s *amlatvdemod_devp;
+@@ -1136,9 +1140,11 @@ void atvdemod_timer_hander(unsigned long arg)
+ int atvdemod_init(void)
+ {
+ 	//unsigned long data32;
+-	if(timer_init_flag == 1){
+-		del_timer_sync(&atvdemod_timer);
+-		timer_init_flag = 0;
++	if (atvdemod_timer_en == 1) {
++		if (timer_init_flag == 1) {
++			del_timer_sync(&atvdemod_timer);
++			timer_init_flag = 0;
++		}
+ 	}
+ 	//clocks_set_hdtv ();
+ 	//1.set system clock
+@@ -1178,14 +1184,16 @@ int atvdemod_init(void)
+ 		delay_us(400);
+ 	}*/
+ 	#if 1//temp mark
+-	/*atvdemod timer hander*/
+-	init_timer(&atvdemod_timer);
+-	//atvdemod_timer.data = (ulong) devp;
+-	atvdemod_timer.function = atvdemod_timer_hander;
+-	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*300;//after 3s enable demod auto detect
+-	add_timer(&atvdemod_timer);
+-	mix1_freq = atv_dmd_rd_byte(APB_BLOCK_ADDR_MIXER_1,0x0);
+-	timer_init_flag = 1;
++	if (atvdemod_timer_en == 1) {
++		/*atvdemod timer hander*/
++		init_timer(&atvdemod_timer);
++		//atvdemod_timer.data = (ulong) devp;
++		atvdemod_timer.function = atvdemod_timer_hander;
++		atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*300;//after 3s enable demod auto detect
++		add_timer(&atvdemod_timer);
++		mix1_freq = atv_dmd_rd_byte(APB_BLOCK_ADDR_MIXER_1,0x0);
++		timer_init_flag = 1;
++	}
+ 	#endif
+ 	pr_info("delay done\n");
+ 	return(0);
+-- 
+2.19.0
+

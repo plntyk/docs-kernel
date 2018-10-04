@@ -1,0 +1,103 @@
+From a3ccd650f82bee3309d877547ab0b4aebceadc92 Mon Sep 17 00:00:00 2001
+From: jiwei chen <jiwei.chen@amlogic.com>
+Date: Wed, 20 Nov 2013 15:17:51 +0800
+Subject: [PATCH 1994/5965] isp,add tune exposure function for debug.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c | 13 +++++++++++--
+ drivers/amlogic/tvin/isp/isp_sm.c  | 19 ++++++++++++++++++-
+ drivers/amlogic/tvin/isp/isp_sm.h  |  1 +
+ 3 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 3900bb4d3de8..259d06c08d86 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -699,17 +699,26 @@ static DEVICE_ATTR(lens, 0664, ls_show, ls_store);
+ 
+ 
+ static int isp_thread(isp_dev_t *devp) {
++	unsigned newstep = 0;
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 	printk("isp_thread is run! \n");
+ 	while (1) {
+ 		//printk("ae_flag = %d\n",ae_flag);
+-	if(ae_flag)
++	if(ae_flag&0x1)
+ 	{
+-		ae_flag = 0;
++		ae_flag &= (~0x1);
+ 		printk("set new step %d \n",ae_new_step);
+ 		if(func&&func->set_aet_new_step)
+ 		func->set_aet_new_step(ae_new_step,true,true);
+ 	}
++	if(ae_flag&0x2)
++	{
++		ae_flag &= (~0x2);
++		newstep = isp_tune_exposure(devp);
++		printk("set new step2 %d \n",newstep);
++		if(func&&func->set_aet_new_step)
++		func->set_aet_new_step(newstep,true,true);		
++	}
+ 	if(ae_sens.send)
+ 	{
+ 		if(isp_debug)
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 72de46061ae2..1ec546c718b6 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -106,6 +106,10 @@ static unsigned int awb_debug4 = 0;
+ module_param(awb_debug4,uint,0664);
+ MODULE_PARM_DESC(awb_debug4,"\n debug flag for awb.\n");
+ 
++static unsigned int exposure_extra = 1024;
++module_param(exposure_extra,uint,0664);
++MODULE_PARM_DESC(exposure_extra,"\n debug exposure for ae.\n");
++
+ #define AF_FLAG_PR			0x00000001
+ #define AF_FLAG_AE			0x00000002
+ #define AF_FLAG_AWB			0x00000004
+@@ -248,6 +252,20 @@ unsigned int isp_ae_cal_new_para(isp_dev_t *devp)
+     return new_step;
+ }
+ 
++unsigned int isp_tune_exposure(isp_dev_t *devp)
++{
++    struct isp_ae_sm_s *aepa = &sm_state.isp_ae_parm;
++    struct cam_function_s *func = &devp->cam_param->cam_function;
++    unsigned int new_step = 0;
++	unsigned int gain_cur = 0;
++	unsigned int gain_target = 0;
++	if(func&&func->get_aet_current_gain)
++	gain_cur = func->get_aet_current_gain();	
++	gain_target = (gain_cur*exposure_extra + 512) >> 10;
++	new_step = find_step(func, 0, aepa->max_step, gain_target);
++	return new_step;
++}
++
+ int isp_ae_save_current_para(isp_dev_t *devp)
+ {
+     struct cam_function_s *func = &devp->cam_param->cam_function;
+@@ -344,7 +362,6 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			        printk("ISP_AE_STATUS_UNSTABLE\n");
+ 			    sm_state.ae_down = false;
+ 			    sm_state.isp_ae_parm.isp_ae_state = AE_REST;
+-			    step = AE_SUCCESS;
+ 			} else
+ 			sm_state.isp_ae_parm.isp_ae_state = AE_SHUTTER_ADJUST;
+ 			break;
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.h b/drivers/amlogic/tvin/isp/isp_sm.h
+index 5da84d135e42..073e06a6f0ee 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.h
++++ b/drivers/amlogic/tvin/isp/isp_sm.h
+@@ -233,6 +233,7 @@ extern int isp_capture_sm(isp_dev_t *devp);
+ extern unsigned long long div64(unsigned long long n, unsigned long long d);
+ extern void isp_af_save_current_para(isp_dev_t *devp);
+ extern void isp_set_manual_exposure(isp_dev_t *devp);
++extern unsigned int isp_tune_exposure(isp_dev_t *devp);
+ #endif
+ 
+ 
+-- 
+2.19.0
+

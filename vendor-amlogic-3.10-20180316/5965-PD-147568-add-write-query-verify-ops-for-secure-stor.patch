@@ -1,0 +1,481 @@
+From c714a87f0794b02cc96862d1148a69c58d37df99 Mon Sep 17 00:00:00 2001
+From: Jiamin Ma <jiamin.ma@amlogic.com>
+Date: Fri, 14 Jul 2017 15:22:08 +0800
+Subject: [PATCH 5965/5965] PD#147568: add write/query/verify ops for secure
+ storage key via /dev/unifykeys
+
+unifykey: add write/query/verify ops for secure storage key via /dev/unifykeys
+
+Change-Id: I9330d6c1963dd1e74cc5cf2ad32a7079f1be16f0
+Signed-off-by: Jiamin Ma <jiamin.ma@amlogic.com>
+---
+ arch/arm/configs/meson8b_tee_defconfig        |   2 +
+ .../mach-meson8b/include/mach/meson-secure.h  |  15 ++
+ arch/arm/mach-meson8b/meson-secure.c          |  18 +++
+ drivers/amlogic/Kconfig                       |   1 +
+ drivers/amlogic/Makefile                      |   1 +
+ drivers/amlogic/keymanage/key_manage.c        |  56 +++++++
+ drivers/amlogic/keymanage/key_manage.h        |  19 +++
+ drivers/amlogic/secure_storage_keys/Kconfig   |  13 ++
+ drivers/amlogic/secure_storage_keys/Makefile  |   1 +
+ .../secure_storage_keys/secure_storage_keys.c | 142 ++++++++++++++++++
+ include/linux/amlogic/secure_storage_keys.h   |  19 +++
+ 11 files changed, 287 insertions(+)
+ mode change 100755 => 100644 arch/arm/mach-meson8b/include/mach/meson-secure.h
+ mode change 100755 => 100644 arch/arm/mach-meson8b/meson-secure.c
+ create mode 100644 drivers/amlogic/secure_storage_keys/Kconfig
+ create mode 100644 drivers/amlogic/secure_storage_keys/Makefile
+ create mode 100644 drivers/amlogic/secure_storage_keys/secure_storage_keys.c
+ create mode 100644 include/linux/amlogic/secure_storage_keys.h
+
+diff --git a/arch/arm/configs/meson8b_tee_defconfig b/arch/arm/configs/meson8b_tee_defconfig
+index cf4c603ebf43..096fd705a6c2 100644
+--- a/arch/arm/configs/meson8b_tee_defconfig
++++ b/arch/arm/configs/meson8b_tee_defconfig
+@@ -213,6 +213,8 @@ CONFIG_AML_PMU=y
+ CONFIG_AML1216=y
+ CONFIG_AML1218=y
+ CONFIG_RICOH_PMU=y
++CONFIG_UNIFY_KEY_MANAGE=y
++CONFIG_SECURESTORAGEKEY=y
+ CONFIG_SECURITYKEY=y
+ CONFIG_EFUSE=y
+ CONFIG_AML_PLATFORM_THERMAL=y
+diff --git a/arch/arm/mach-meson8b/include/mach/meson-secure.h b/arch/arm/mach-meson8b/include/mach/meson-secure.h
+old mode 100755
+new mode 100644
+index 11bf8f24bb7f..df15e08f74b1
+--- a/arch/arm/mach-meson8b/include/mach/meson-secure.h
++++ b/arch/arm/mach-meson8b/include/mach/meson-secure.h
+@@ -110,6 +110,21 @@ struct efuse_hal_api_arg{
+ #define EFUSE_HAL_API_VERIFY_IMG 3
+ extern int meson_trustzone_efuse(struct efuse_hal_api_arg* arg);
+ 
++/* secure storage HAL_API arg */
++struct storage_hal_api_arg {
++	unsigned int cmd;
++	unsigned int namelen;
++	unsigned int name_phy_addr;
++	unsigned int datalen;
++	unsigned int data_phy_addr;
++	unsigned int retval_phy_addr;
++};
++#define STORAGE_HAL_API_INIT            0
++#define STORAGE_HAL_API_WRITE           1
++#define STORAGE_HAL_API_QUERY           2
++#define STORAGE_HAL_API_READ            3
++#define STORAGE_HAL_API_VERIFY          4
++int meson_trustzone_storage(struct storage_hal_api_arg *arg);
+ 
+ //memconfig HAL_API arg
+ struct memconfig{
+diff --git a/arch/arm/mach-meson8b/meson-secure.c b/arch/arm/mach-meson8b/meson-secure.c
+old mode 100755
+new mode 100644
+index f03f586cfe5a..a03b538b98a7
+--- a/arch/arm/mach-meson8b/meson-secure.c
++++ b/arch/arm/mach-meson8b/meson-secure.c
+@@ -130,6 +130,24 @@ int meson_trustzone_efuse(struct efuse_hal_api_arg* arg)
+ }
+ EXPORT_SYMBOL(meson_trustzone_efuse);
+ 
++int meson_trustzone_storage(struct storage_hal_api_arg *arg)
++{
++	int ret;
++
++	if (!arg)
++		return -1;
++
++	set_cpus_allowed_ptr(current, cpumask_of(0));
++
++	ret = meson_smc_hal_api(TRUSTZONE_HAL_API_STORAGE, __pa(arg));
++
++	set_cpus_allowed_ptr(current, cpu_all_mask);
++
++	return ret;
++}
++EXPORT_SYMBOL(meson_trustzone_storage);
++
++
+ uint32_t meson_secure_reg_read(uint32_t addr)
+ {
+ 	uint32_t ret;
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+index 5ecb77b788ae..fdb7acd1236f 100644
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -21,6 +21,7 @@ source "drivers/amlogic/gpio/Kconfig"
+ source "drivers/amlogic/pinctrl/Kconfig"
+ source "drivers/amlogic/power/Kconfig"
+ source "drivers/amlogic/securitykeys/Kconfig"
++source "drivers/amlogic/secure_storage_keys/Kconfig"
+ source "drivers/amlogic/keymanage/Kconfig"
+ source "drivers/amlogic/efuse/Kconfig"
+ source "drivers/amlogic/defendkey/Kconfig"
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+index 9963a6f8df58..25741afab6c9 100644
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -26,6 +26,7 @@ obj-$(CONFIG_DEINTERLACE) += deinterlace/
+ obj-y += watchdog/
+ obj-y += secure/
+ obj-y += securitykeys/
++obj-y += secure_storage_keys/
+ obj-y += keymanage/
+ 
+ obj-y += uart/
+diff --git a/drivers/amlogic/keymanage/key_manage.c b/drivers/amlogic/keymanage/key_manage.c
+index 503d23a1bf91..315a114e8793 100644
+--- a/drivers/amlogic/keymanage/key_manage.c
++++ b/drivers/amlogic/keymanage/key_manage.c
+@@ -10,6 +10,7 @@
+ #include <asm/uaccess.h>
+ #include <linux/amlogic/efuse.h>
+ #include <linux/amlogic/securitykey.h>
++#include <linux/amlogic/secure_storage_keys.h>
+ #include <linux/of.h>
+ #include "key_manage.h"
+ 
+@@ -168,6 +169,18 @@ static int key_securestorage_query(char *keyname,unsigned int *keystate)
+ #endif
+ 	return err;
+ }
++
++static int key_securestorage_verify(char *keyname,
++		unsigned int *query_return, char *hashval, int hashlen)
++{
++	int err = -EINVAL;
++#ifdef CONFIG_SECURESTORAGEKEY
++	err = securestore_key_verify(keyname, query_return, hashval, hashlen);
++#endif
++	return err;
++}
++
++
+ static int key_securestorage_uninit(void)
+ {
+ #ifdef CONFIG_SECURESTORAGEKEY
+@@ -318,6 +331,7 @@ int key_unify_write(char *keyname,unsigned char *keydata,unsigned int datalen)
+ 	int err=0;
+ 	struct key_item_t *key_manage;
+ 	enum key_manager_df_e key_df;
++
+ 	key_manage = unifykey_find_item_by_name(keyname);
+ 	if(key_manage == NULL){
+ 		printk("%s:%d,%s key name is not exist\n",__func__,__LINE__,keyname);
+@@ -374,6 +388,8 @@ int key_unify_read(char *keyname,unsigned char *keydata,unsigned int datalen,uns
+ 		printk("%s:%d,%s key name is invalid\n",__func__,__LINE__,keyname);
+ 		return -EINVAL;
+ 	}
++
++	err = -EPERM;
+ 	if(key_manage->permit & KEY_M_PERMIT_READ){
+ 		err = -EINVAL;
+ 		key_df = key_manage->df;
+@@ -393,6 +409,7 @@ int key_unify_read(char *keyname,unsigned char *keydata,unsigned int datalen,uns
+ 				break;
+ 		}
+ 	}
++
+ 	return err;
+ }
+ EXPORT_SYMBOL(key_unify_read);
+@@ -556,6 +573,43 @@ static long unifykey_unlocked_ioctl(struct file *file, unsigned int cmd, unsigne
+ 				appitem->reserve = kitem->reserve;
+ 			}
+ 			break;
++		case KEYUNIFY_QUERY:
++			{
++				struct key_query_arg_t *qitem;
++				struct key_item_t      *kitem;
++				int                    err;
++
++				qitem = (struct key_query_arg_t *)arg;
++				kitem = unifykey_find_item_by_id(qitem->id);
++				if (!kitem)
++					return -EFAULT;
++				err = key_unify_query(kitem->name,
++					&(qitem->state), &(qitem->permit));
++				if (err < 0)
++					return -EFAULT;
++			}
++			break;
++		case SSTOREKEY_VERIFY:
++			{
++				struct key_verify_arg_t *vitem;
++				struct key_item_t       *kitem;
++				char                    hash[32];
++				int			err;
++
++
++				vitem = (struct key_verify_arg_t *)arg;
++				kitem = unifykey_find_item_by_id(vitem->id);
++				if (!kitem)
++					return -EFAULT;
++				if (vitem->hash_len > 32)
++					return -EFAULT;
++				memcpy(hash, vitem->hash_val, vitem->hash_len);
++				err = key_securestorage_verify(kitem->name,
++					&(vitem->state), hash, vitem->hash_len);
++				if (err < 0)
++					return -EFAULT;
++			}
++			break;
+ 		default:
+ 			return -ENOTTY;
+ 	}
+@@ -569,6 +623,7 @@ static ssize_t unifykey_read( struct file *file, char __user *buf, size_t count,
+ 	unsigned int reallen;
+ 	struct key_item_t *item;
+ 	char *local_buf;
++
+ 	local_buf = kzalloc(count, GFP_KERNEL);
+ 	if(!local_buf){
+ 		printk(KERN_INFO "memory not enough,%s:%d\n",__func__,__LINE__);
+@@ -604,6 +659,7 @@ static ssize_t unifykey_write( struct file *file, const char __user *buf, size_t
+ 	int id;
+ 	struct key_item_t *item;
+ 	char *local_buf;
++
+ 	local_buf = kzalloc(count, GFP_KERNEL);
+ 	if(!local_buf){
+ 		printk(KERN_INFO "memory not enough,%s:%d\n",__func__,__LINE__);
+diff --git a/drivers/amlogic/keymanage/key_manage.h b/drivers/amlogic/keymanage/key_manage.h
+index 1dabddaebdf1..678a5b12f7bf 100644
+--- a/drivers/amlogic/keymanage/key_manage.h
++++ b/drivers/amlogic/keymanage/key_manage.h
+@@ -6,6 +6,10 @@
+ 
+ #define KEYUNIFY_INIT_INFO				_IO('f', 0x60)
+ #define KEYUNIFY_ITEM_GEG				_IO('f', 0x61)
++#define KEYUNIFY_QUERY					_IO('f', 0x62)
++#define SSTOREKEY_VERIFY				_IO('f', 0x63)
++
++
+ 
+ enum key_manager_dev_e{
+        KEY_M_UNKNOW_DEV=0,
+@@ -57,6 +61,21 @@ struct key_item_t{
+ 	struct key_item_t *next;
+ };
+ 
++/*for ioctl*/
++struct key_query_arg_t {
++	int          id;
++	unsigned int state;
++	unsigned int permit;
++};
++
++struct key_verify_arg_t {
++	int          id;
++	char         hash_val[36];
++	int          hash_len;
++	unsigned int state;
++};
++
++
+ struct key_info_t{
+ 	int key_num;
+ 	int efuse_version;
+diff --git a/drivers/amlogic/secure_storage_keys/Kconfig b/drivers/amlogic/secure_storage_keys/Kconfig
+new file mode 100644
+index 000000000000..e3fe6b937330
+--- /dev/null
++++ b/drivers/amlogic/secure_storage_keys/Kconfig
+@@ -0,0 +1,13 @@
++#
++# Amlogic efuse device configuration
++#
++
++menu "key secure storage Support"
++
++config SECURESTORAGEKEY
++	bool "secure storage Driver"
++	default n
++	help
++	    unify key secure storage driver.
++
++endmenu
+diff --git a/drivers/amlogic/secure_storage_keys/Makefile b/drivers/amlogic/secure_storage_keys/Makefile
+new file mode 100644
+index 000000000000..cf4c16a3b0c6
+--- /dev/null
++++ b/drivers/amlogic/secure_storage_keys/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_SECURESTORAGEKEY)	+= secure_storage_keys.o
+diff --git a/drivers/amlogic/secure_storage_keys/secure_storage_keys.c b/drivers/amlogic/secure_storage_keys/secure_storage_keys.c
+new file mode 100644
+index 000000000000..860b46f8ef48
+--- /dev/null
++++ b/drivers/amlogic/secure_storage_keys/secure_storage_keys.c
+@@ -0,0 +1,142 @@
++#include <linux/module.h>
++#include <linux/string.h>
++#include <linux/types.h>
++#include <linux/uaccess.h>
++#include <mach/meson-secure.h>
++
++
++#define AESKEY_SIZE   0x30
++
++#define SMC_ENOMEM          7
++#define SMC_EOPNOTSUPP      6
++#define SMC_EINVAL_ADDR     5
++#define SMC_EINVAL_ARG      4
++#define SMC_ERROR           3
++#define SMC_INTERRUPTED     2
++#define SMC_PENDING         1
++#define SMC_SUCCESS         0
++
++
++/*
++ * function name: securestore_key_init
++ *  seed : make random
++ * len  : > 0
++ * return : 0: ok, other: fail
++ * */
++int securestore_key_init(char *seed, int len)
++{
++	/* uboot will handle the init job */
++	return 0;
++}
++
++/*
++*    securestore_key_query - query whether key was burned.
++*    @keyname : key name will be queried.
++*    @query_result: query return value, 0: key was NOT burned;
++*				1: key was burned; others: reserved.
++*
++*    return: 0: successful; others: failed.
++*/
++int securestore_key_query(char *keyname, unsigned int *query_return)
++{
++	int err;
++	struct storage_hal_api_arg cmd_arg;
++	unsigned int retval;
++
++	cmd_arg.cmd = STORAGE_HAL_API_QUERY;
++	cmd_arg.namelen = strlen(keyname);
++	cmd_arg.name_phy_addr = virt_to_phys(keyname);
++	cmd_arg.datalen = 0;
++	cmd_arg.data_phy_addr = virt_to_phys(0);
++	cmd_arg.retval_phy_addr = virt_to_phys(&retval);
++	err = meson_trustzone_storage(&cmd_arg);
++	if (err)
++		pr_err("%s:%d,meson_trustzone_storage query fail\n",
++			__func__, __LINE__);
++	*query_return = retval;
++	return err;
++}
++
++/*
++*    securestore_key_verify - query whether key was burned.
++*    @keyname : key name will be queried.
++*    @query_result: query return value,  0: key exist and hash right;
++*		-1: hash error, -2:key not exist; others: reserved.
++*    @hashval : hash value
++*    @hashlen : hash value len(byte unit)
++*    return: 0: successful; others: failed.
++*/
++int securestore_key_verify(char *keyname, unsigned int *query_return,
++			char *hashval, int hashlen)
++{
++	int err = 0;
++	struct storage_hal_api_arg cmd_arg;
++	unsigned int retval;
++	cmd_arg.cmd = STORAGE_HAL_API_VERIFY;
++	cmd_arg.namelen = strlen(keyname);
++	cmd_arg.name_phy_addr = virt_to_phys(keyname);
++	cmd_arg.datalen = hashlen;
++	cmd_arg.data_phy_addr = virt_to_phys(hashval);
++	cmd_arg.retval_phy_addr = virt_to_phys(&retval);
++	err = meson_trustzone_storage(&cmd_arg);
++	if (err)
++		pr_info("%s:%d,meson_trustzone_storage query fail\n",
++				__func__, __LINE__);
++	*query_return = retval;
++	return err;
++}
++
++/*
++ *function name: securestore_key_read
++ *function:  securestore_key_read is disabled to read
++ *
++ * */
++int securestore_key_read(char *keyname, char *keybuf,
++	unsigned int keylen, unsigned int *reallen)
++{
++	/* all secure storage keys cannot be read out */
++	return -EPERM;
++}
++/* funtion name: securestore_key_write
++ * keyname : key name is ascii string
++ * keybuf : key buf
++ * keylen : key buf len
++ * keytype: 0: no care key type, 1: aes key, 2:rsa key
++ *          if aes/rsa key, uboot tool need decrypt
++ *
++ * return  0: ok, 0x1fe: no space, other fail
++ * */
++int securestore_key_write(char *keyname, char *keybuf,
++		unsigned int keylen, int keytype)
++{
++	int err;
++
++	struct storage_hal_api_arg cmd_arg;
++	unsigned int retval;
++	cmd_arg.cmd = STORAGE_HAL_API_WRITE;
++	cmd_arg.namelen = strlen(keyname);
++	cmd_arg.name_phy_addr = virt_to_phys(keyname);
++	cmd_arg.datalen = keylen;
++	cmd_arg.data_phy_addr = virt_to_phys(keybuf);
++	cmd_arg.retval_phy_addr = virt_to_phys(&retval);
++	err = meson_trustzone_storage(&cmd_arg);
++	if (err) {
++		if (err == SMC_ENOMEM) {
++			err = 0x1fe;
++			pr_info("%s:%d,secure storage no space to save key\n",
++				__func__, __LINE__);
++		} else
++			pr_info("%s:%d,write a key secure storage fail\n",
++				__func__, __LINE__);
++		return err;
++	}
++
++	return err;
++}
++/*function name: securestore_key_uninit
++ *functiion :
++ * */
++int securestore_key_uninit(void)
++{
++	return 0;
++}
+diff --git a/include/linux/amlogic/secure_storage_keys.h b/include/linux/amlogic/secure_storage_keys.h
+new file mode 100644
+index 000000000000..aae10cd0b58b
+--- /dev/null
++++ b/include/linux/amlogic/secure_storage_keys.h
+@@ -0,0 +1,19 @@
++#ifndef __SECURE_STORAGE_KEYS_H__
++#define __SECURE_STORAGE_KEYS_H__
++#include <linux/module.h>
++#include <linux/types.h>
++#include <mach/meson-secure.h>
++
++
++int securestore_key_init(char *seed, int len);
++int securestore_key_query(char *keyname, unsigned int *query_return);
++int securestore_key_verify(char *keyname, unsigned int *query_return,
++			char *hashval, int hashlen);
++int securestore_key_read(char *keyname, char *keybuf, unsigned int keylen,
++			 unsigned int *reallen);
++int securestore_key_write(char *keyname, char *keybuf, unsigned int keylen,
++			int keytype);
++int securestore_key_uninit(void);
++
++#endif
++
+-- 
+2.19.0
+

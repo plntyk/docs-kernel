@@ -1,0 +1,516 @@
+From fe06a2c706818ecca1b12d929b26f29e163fe6c8 Mon Sep 17 00:00:00 2001
+From: Xu Jintao <jintao.xu@amlogic.com>
+Date: Fri, 27 Feb 2015 15:46:08 +0800
+Subject: [PATCH 5425/5965] PD#99905: omx: decoder drop frame
+
+Change-Id: I5f7864443b90b247360ed59091de5f443130ff88
+Signed-off-by: Xu Jintao <jintao.xu@amlogic.com>
+---
+ drivers/amlogic/amports/video.c            |  7 ++
+ drivers/amlogic/ionvideo/ionvideo.c        | 73 +++++++++++++++------
+ drivers/amlogic/ionvideo/ionvideo.h        |  4 +-
+ drivers/amlogic/ionvideo/trace/ionvideo.h  | 74 ++++++++++++++++++++++
+ drivers/amlogic/video_dev/amlvideo.c       | 21 ++++--
+ drivers/amlogic/video_dev/trace/amlvideo.h | 69 ++++++++++++++++++++
+ include/linux/amlogic/amports/amstream.h   |  1 +
+ 7 files changed, 225 insertions(+), 24 deletions(-)
+ create mode 100644 drivers/amlogic/ionvideo/trace/ionvideo.h
+ create mode 100644 drivers/amlogic/video_dev/trace/amlvideo.h
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 391bc55cde4b..c8a8f1a69404 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -4263,6 +4263,10 @@ static long amvideo_ioctl(struct file *file,
+         }
+         break;
+ 
++    case AMSTREAM_IOC_GET_OMX_VPTS:
++        put_user(omx_pts, (unsigned long __user *)arg);
++        break;
++
+     case AMSTREAM_IOC_TRICKMODE:
+         if (arg == TRICKMODE_I) {
+             trickmode_i = 1;
+@@ -6407,6 +6411,9 @@ module_param(cur_dev_idx, uint, 0664);
+ MODULE_PARM_DESC(new_frame_count, "\n new_frame_count\n");
+ module_param(new_frame_count, uint, 0664);
+ 
++MODULE_PARM_DESC(omx_pts, "\n omx_pts\n");
++module_param(omx_pts, uint, 0664);
++
+ #ifdef TV_REVERSE
+ module_param(reverse,bool,0644);
+ MODULE_PARM_DESC(reverse,"reverse /disable reverse");
+diff --git a/drivers/amlogic/ionvideo/ionvideo.c b/drivers/amlogic/ionvideo/ionvideo.c
+index abaffda3ae63..e4874ce8df13 100755
+--- a/drivers/amlogic/ionvideo/ionvideo.c
++++ b/drivers/amlogic/ionvideo/ionvideo.c
+@@ -7,6 +7,8 @@
+  */
+ #include "ionvideo.h"
+ 
++#define CREATE_TRACE_POINTS
++#include "trace/ionvideo.h"
+ #define IONVIDEO_MODULE_NAME "ionvideo"
+ 
+ #define IONVIDEO_VERSION "1.0"
+@@ -42,6 +44,7 @@ static unsigned int skip_frames = 0;
+ module_param(skip_frames, uint, 0664);
+ MODULE_PARM_DESC(skip_frames, "skip frames");
+ 
++static struct ionvideo_dmaqueue* cur_dma_q = NULL;
+ 
+ static const struct ionvideo_fmt formats[] = {
+     {
+@@ -235,28 +238,29 @@ static void ionvideo_thread_tick(struct ionvideo_dev *dev) {
+     struct ionvideo_buffer *buf;
+     unsigned long flags = 0;
+     struct vframe_s* vf;
++    static int vf_wait_cnt = 0;
+ 
+ 	int w ,h ;
+     dprintk(dev, 4, "Thread tick\n");
+-    /* video seekTo clear list */
+ 
+     if(!dev){
+ 		return;
+ 	}
+     vf = vf_peek(RECEIVER_NAME);
+     if (!vf) {
++        vf_wait_cnt++;
+         msleep(5);
+         return;
+     }
+-    if((vf->width >= 1920) &&(vf->height >= 1080)&&(vf->type & VIDTYPE_INTERLACE)){    	    	
++    if ((vf->width >= 1920) && (vf->height >= 1080) && (vf->type & VIDTYPE_INTERLACE)) {
+ 		dev->ppmgr2_dev.dst_width = vf->width*scaling_rate/100;
+-		dev->ppmgr2_dev.dst_height = vf->height*scaling_rate/100 ;
+-		w = dev->ppmgr2_dev.dst_width ; 
+-		h = dev->ppmgr2_dev.dst_height ;
++		dev->ppmgr2_dev.dst_height = vf->height*scaling_rate/100;
++		w = dev->ppmgr2_dev.dst_width;
++		h = dev->ppmgr2_dev.dst_height;
+ 	}else{
+ 		w = vf->width;
+-		h = vf->height; 
+-	}    
++		h = vf->height;
++	}
+     if (freerun_mode == 0 && ionvideo_size_changed(dev, w , h)) {
+         msleep(10);
+         return;
+@@ -265,19 +269,24 @@ static void ionvideo_thread_tick(struct ionvideo_dev *dev) {
+     if (list_empty(&dma_q->active)) {
+         dprintk(dev, 3, "No active queue to serve\n");
+         spin_unlock_irqrestore(&dev->slock, flags);
+-        msleep(5);
++        schedule_timeout_interruptible(msecs_to_jiffies(20));
+         return;
+     }
+     buf = list_entry(dma_q->active.next, struct ionvideo_buffer, list);
+     spin_unlock_irqrestore(&dev->slock, flags);
+     /* Fill buffer */
++    trace_fillbuf(buf->vb.v4l2_buf.index, 1, vf_wait_cnt);
+     if (ionvideo_fillbuff(dev, buf)) {
+         return;
+     }
++    trace_fillbuf(buf->vb.v4l2_buf.index, 0, vf_wait_cnt);
++    vf_wait_cnt = 0;
++
+     spin_lock_irqsave(&dev->slock, flags);
+     list_del(&buf->list);
+     spin_unlock_irqrestore(&dev->slock, flags);
+     vb2_buffer_done(&buf->vb, VB2_BUF_STATE_DONE);
++    dma_q->vb_ready++;
+     dprintk(dev, 4, "[%p/%d] done\n", buf, buf->vb.v4l2_buf.index);
+ }
+ 
+@@ -334,8 +343,6 @@ static int ionvideo_start_generating(struct ionvideo_dev *dev) {
+     dev->ms = 0;
+     //dev->jiffies = jiffies;
+ 
+-    dma_q->frame = 0;
+-    //dma_q->ini_jiffies = jiffies;
+     dma_q->kthread = kthread_run(ionvideo_thread, dev, dev->v4l2_dev.name);
+ 
+     if (IS_ERR(dma_q->kthread)) {
+@@ -455,7 +462,11 @@ static void buffer_queue(struct vb2_buffer *vb) {
+ 
+ static int start_streaming(struct vb2_queue *vq, unsigned int count) {
+     struct ionvideo_dev *dev = vb2_get_drv_priv(vq);
++    struct ionvideo_dmaqueue *dma_q = &dev->vidq;
++
++    cur_dma_q = dma_q;
+     is_actived = 1;
++    dma_q->vb_ready = 0;
+     dprintk(dev, 2, "%s\n", __func__);
+     return ionvideo_start_generating(dev);
+ }
+@@ -463,6 +474,7 @@ static int start_streaming(struct vb2_queue *vq, unsigned int count) {
+ /* abort streaming and wait for last buffer */
+ static int stop_streaming(struct vb2_queue *vq) {
+     struct ionvideo_dev *dev = vb2_get_drv_priv(vq);
++    cur_dma_q = NULL;
+     is_actived = 0;
+     dprintk(dev, 2, "%s\n", __func__);
+     ionvideo_stop_generating(dev);
+@@ -504,8 +516,8 @@ static int vidioc_open(struct file *file) {
+     dev->once_record = 1;
+     dev->ppmgr2_dev.bottom_first = 0;
+     skip_frames = 0;
+-    dprintk(dev, 2, "vidioc_open\n");
+     printk("ionvideo open\n");
++    trace_onoffbuf(1);
+     return v4l2_fh_open(file);
+ }
+ 
+@@ -520,6 +532,7 @@ static int vidioc_release(struct file *file) {
+         dev->fd_num--;
+     }
+     dev->once_record = 0;
++    trace_onoffbuf(0);
+     return vb2_fop_release(file);
+ }
+ 
+@@ -641,6 +654,7 @@ static int vidioc_enum_framesizes(struct file *file, void *fh, struct v4l2_frmsi
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p) {
+     struct ionvideo_dev *dev = video_drvdata(file);
++    struct ionvideo_dmaqueue *dma_q = &dev->vidq;
+     struct ppmgr2_device* ppmgr2_dev = &(dev->ppmgr2_dev);
+     int ret = 0;
+ 
+@@ -660,7 +674,8 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p) {
+             return -ENOMEM;
+         }
+     }
+-
++    wake_up_interruptible(&dma_q->wq);
++    trace_qdqbuf(p->index, 1, ret);
+     return ret;
+ }
+ 
+@@ -757,10 +772,19 @@ static int vidioc_synchronization_dqbuf(struct file *file, void *priv, struct v4
+ }
+ 
+ static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p){
++    struct ionvideo_dev *dev = video_drvdata(file);
++    struct ionvideo_dmaqueue *dma_q = &dev->vidq;
++    int ret = 0;
++
+     if (freerun_mode == 0) {
+         return vidioc_synchronization_dqbuf(file, priv, p);
+     }
+-    return vb2_ioctl_dqbuf(file, priv, p);
++    ret = vb2_ioctl_dqbuf(file, priv, p);
++    if (ret == 0) {
++        dma_q->vb_ready--;
++        trace_qdqbuf(p->index, 0, 0);
++    }
++    return ret;
+ }
+ 
+ #define NUM_INPUTS 10
+@@ -927,6 +951,7 @@ static int __init ionvideo_create_instance(int inst)
+     /* init video dma queues */
+     INIT_LIST_HEAD(&dev->vidq.active);
+     init_waitqueue_head(&dev->vidq.wq);
++    dev->vidq.pdev = dev;
+ 
+     vfd = &dev->vdev;
+     *vfd = ionvideo_template;
+@@ -961,17 +986,29 @@ free_dev:
+     return ret;
+ }
+ 
++static u32 buf_num_queue(struct vb2_queue *q)
++{
++    return atomic_read(&q->queued_count);
++}
++
+ static ssize_t vframe_states_show(struct class *class, struct class_attribute* attr, char* buf)
+ {
+     int ret = 0;
+     vframe_states_t states;
+ //    unsigned long flags;
+-	
++
+     if (ionvideo_vf_get_states(&states) == 0) {
+-        ret += sprintf(buf + ret, "vframe_pool_size=%d\n", states.vf_pool_size);
+-        ret += sprintf(buf + ret, "vframe buf_free_num=%d\n", states.buf_free_num);
+-        ret += sprintf(buf + ret, "vframe buf_recycle_num=%d\n", states.buf_recycle_num);
+-        ret += sprintf(buf + ret, "vframe buf_avail_num=%d\n", states.buf_avail_num);
++        ret += sprintf(buf + ret, "codec buffer state:\n");
++        ret += sprintf(buf + ret, "\tvframe_pool_size=%d\n", states.vf_pool_size);
++        ret += sprintf(buf + ret, "\tvframe buf_free_num=%d\n", states.buf_free_num);
++        ret += sprintf(buf + ret, "\tvframe buf_recycle_num=%d\n", states.buf_recycle_num);
++        ret += sprintf(buf + ret, "\tvframe buf_avail_num=%d\n", states.buf_avail_num);
++        if (cur_dma_q) {
++            ret += sprintf(buf + ret, "ionv buffer state:\n");
++            ret += sprintf(buf + ret, "\t buffer number:%d\n", cur_dma_q->pdev->vb_vidq.num_buffers);
++            ret += sprintf(buf + ret, "\t buffer filled:%d\n", cur_dma_q->vb_ready);
++            ret += sprintf(buf + ret, "\t buffer in driver:%d\n", buf_num_queue(&cur_dma_q->pdev->vb_vidq));
++        }
+     } else {
+         ret += sprintf(buf + ret, "vframe no states\n");
+     }
+diff --git a/drivers/amlogic/ionvideo/ionvideo.h b/drivers/amlogic/ionvideo/ionvideo.h
+index 27e193118101..470e81223910 100755
+--- a/drivers/amlogic/ionvideo/ionvideo.h
++++ b/drivers/amlogic/ionvideo/ionvideo.h
+@@ -81,8 +81,8 @@ struct ionvideo_dmaqueue {
+     struct task_struct *kthread;
+     wait_queue_head_t wq;
+     /* Counters to control fps rate */
+-    int frame;
+-    int ini_jiffies;
++    int vb_ready;
++    struct ionvideo_dev* pdev;
+ };
+ 
+ struct ppmgr2_device {
+diff --git a/drivers/amlogic/ionvideo/trace/ionvideo.h b/drivers/amlogic/ionvideo/trace/ionvideo.h
+new file mode 100644
+index 000000000000..b671b8f54f40
+--- /dev/null
++++ b/drivers/amlogic/ionvideo/trace/ionvideo.h
+@@ -0,0 +1,74 @@
++#undef TRACE_SYSTEM
++#define TRACE_INCLUDE_PATH ../../drivers/amlogic/ionvideo/trace
++#define TRACE_SYSTEM ionvideo
++
++#if !defined(_TRACE_IONVIDEO_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_IONVIDEO_H
++
++#include "../ionvideo.h"
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(qdqbuf,
++    TP_PROTO(int idx, int que, u64 ts),
++
++    TP_ARGS(idx, que, ts),
++
++    TP_STRUCT__entry(
++            __field(u32, idx)
++            __field(u32, que)
++            __field(u64, ts)
++    ),
++
++    TP_fast_assign(
++            __entry->idx = idx;
++            __entry->que = que;
++            __entry->ts = ts;
++    ),
++
++    TP_printk("%s: buf%d", __entry->que? "[Q]": "\t\t[D]",
++            __entry->idx)
++);
++
++TRACE_EVENT(fillbuf,
++    TP_PROTO(int idx, int begin, int vf_wait),
++
++    TP_ARGS(idx, begin, vf_wait),
++
++    TP_STRUCT__entry(
++            __field(u32, idx)
++            __field(u32, begin)
++            __field(u32, vf_wait)
++    ),
++
++    TP_fast_assign(
++            __entry->idx = idx;
++            __entry->begin = begin;
++            __entry->vf_wait = vf_wait;
++    ),
++
++    TP_printk("\t%s buf%d W:%d",
++                    __entry->begin?"[>>]":"[<<]",
++                    __entry->idx, __entry->vf_wait)
++);
++
++TRACE_EVENT(onoffbuf,
++    TP_PROTO(int que),
++
++    TP_ARGS(que),
++
++    TP_STRUCT__entry(
++            __field(u32, que)
++    ),
++
++    TP_fast_assign(
++            __entry->que = que;
++    ),
++
++    TP_printk("\t\t @[%s]@", __entry->que? "StreamON": "SteamOFF")
++);
++
++#endif /* if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ) */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
++
+diff --git a/drivers/amlogic/video_dev/amlvideo.c b/drivers/amlogic/video_dev/amlvideo.c
+index b8176ff03a88..92f2d58b0c09 100755
+--- a/drivers/amlogic/video_dev/amlvideo.c
++++ b/drivers/amlogic/video_dev/amlvideo.c
+@@ -43,6 +43,9 @@
+ #include <linux/amlogic/amports/vfp.h>
+ 
+ #define AVMLVIDEO_MODULE_NAME "amlvideo"
++#define CREATE_TRACE_POINTS
++#include "trace/amlvideo.h"
++
+ 
+ /* Wake up at about 30 fps */
+ #define WAKE_NUMERATOR 30
+@@ -516,6 +519,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p) {
+     int ret = 0;
+     if (omx_secret_mode == true) {
++        trace_qbuf(p->index);
+         return ret;
+     }
+     if (ppmgrvf) {
+@@ -564,16 +568,21 @@ static int freerun_cleancache_dqbuf(struct v4l2_buffer *p) {
+     return ret;
+ }
+ 
++static int my_wf_debug = 0;
++static int my_wb_debug = 0;
++
+ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     int ret = 0;
++    int omx_ready = 0;
+     if (omx_secret_mode == true) {
+-        if (vfq_level(&q_ready)>AMLVIDEO_POOL_SIZE-1) {
+-            msleep(10);
++        omx_ready = vfq_level(&q_ready);
++        if (omx_ready > AMLVIDEO_POOL_SIZE-1) {
++            my_wb_debug++;
+             return -EAGAIN;
+         }
+     }
+     if (!vf_peek(RECEIVER_NAME)) {
+-        msleep(10);
++        my_wf_debug++;
+         return -EAGAIN;
+     }
+     if (omx_secret_mode != true) {
+@@ -599,7 +608,9 @@ static int freerun_dqbuf(struct v4l2_buffer *p) {
+             p->timestamp.tv_usec = vpts_last + (DUR2PTS(ppmgrvf->duration));
+         }
+         vpts_last = p->timestamp.tv_usec;
+-        //printk("p->timestamp.tv_usec=%d\n",p->timestamp.tv_usec);
++        trace_dqbuf(p->index, my_wf_debug, my_wb_debug, omx_ready);
++        my_wf_debug = 0;
++        my_wb_debug = 0;
+         return ret;
+     }   
+     if (ppmgrvf->pts != 0) {
+@@ -730,6 +741,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     ret = videobuf_streamon(&fh->vb_vidq);
+     if (ret == 0)
+         fh->is_streamed_on = 1;
++    trace_onoff(1);
+     return ret;
+ }
+ 
+@@ -741,6 +753,7 @@ static int vidioc_streamoff(struct file *file, void *priv, enum v4l2_buf_type i)
+     ret = videobuf_streamoff(&fh->vb_vidq);
+     if (ret == 0)
+         fh->is_streamed_on = 0;
++    trace_onoff(0);
+     return ret;
+ }
+ 
+diff --git a/drivers/amlogic/video_dev/trace/amlvideo.h b/drivers/amlogic/video_dev/trace/amlvideo.h
+new file mode 100644
+index 000000000000..12e954a35276
+--- /dev/null
++++ b/drivers/amlogic/video_dev/trace/amlvideo.h
+@@ -0,0 +1,69 @@
++#undef TRACE_SYSTEM
++#define TRACE_INCLUDE_PATH ../../drivers/amlogic/video_dev/trace
++#define TRACE_SYSTEM amlvideo
++
++#if !defined(_TRACE_IONVIDEO_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_IONVIDEO_H
++
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(qbuf,
++    TP_PROTO(int idx),
++
++    TP_ARGS(idx),
++
++    TP_STRUCT__entry(
++            __field(u32, idx)
++    ),
++
++    TP_fast_assign(
++            __entry->idx = idx;
++    ),
++
++    TP_printk("[Q]: buf%d", __entry->idx)
++);
++
++TRACE_EVENT(dqbuf,
++    TP_PROTO(int idx, int wf, int wb, int wq),
++
++    TP_ARGS(idx, wf, wb, wq),
++
++    TP_STRUCT__entry(
++            __field(u32, idx)
++            __field(u32, wf)
++            __field(u32, wb)
++            __field(u32, wq)
++    ),
++
++    TP_fast_assign(
++            __entry->idx = idx;
++            __entry->wf = wf;
++            __entry->wb = wb;
++            __entry->wq = wq;
++	),
++
++    TP_printk("\t\t[D]: buf%d wf:%d, wb:%d, qlv:%d", __entry->idx,
++        __entry->wf, __entry->wb, __entry->wq)
++);
++
++TRACE_EVENT(onoff,
++    TP_PROTO(int que),
++
++    TP_ARGS(que),
++
++    TP_STRUCT__entry(
++            __field(u32, que)
++    ),
++
++    TP_fast_assign(
++            __entry->que = que;
++    ),
++
++    TP_printk("\t\t @[%s]@", __entry->que? "StreamON": "SteamOFF")
++);
++
++#endif /* if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ) */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
++
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 1c4d032cb169..77537e8ef06a 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -153,6 +153,7 @@
+ #define AMSTREAM_IOC_GET_SUBTITLE_INFO       _IOR(AMSTREAM_IOC_MAGIC, 0xad, unsigned long)
+ #define AMSTREAM_IOC_SET_SUBTITLE_INFO       _IOW(AMSTREAM_IOC_MAGIC, 0xae, unsigned long)
+ #define AMSTREAM_IOC_SET_OMX_VPTS            _IOW(AMSTREAM_IOC_MAGIC, 0xaf, unsigned long)
++#define AMSTREAM_IOC_GET_OMX_VPTS            _IOW(AMSTREAM_IOC_MAGIC, 0xb0, unsigned long)
+ 
+ #define AMSTREAM_IOC_GET_TRICK_VPTS          _IOR(AMSTREAM_IOC_MAGIC, 0xf0, unsigned long)
+ #define AMSTREAM_IOC_DISABLE_SLOW_SYNC       _IOR(AMSTREAM_IOC_MAGIC, 0xf1, unsigned long)
+-- 
+2.19.0
+

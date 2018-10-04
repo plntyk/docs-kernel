@@ -1,0 +1,115 @@
+From 5bf448a25fca93d2bb9f27110fb947c1decf9891 Mon Sep 17 00:00:00 2001
+From: Shijie Rong <shijie.rong@amlogic.com>
+Date: Fri, 14 Aug 2015 11:12:28 +0800
+Subject: [PATCH 5789/5965] PD#110914: dvb: use cma memory for dtv demod
+
+Change-Id: Ia0abd9e4d32505e911c956af9d880b12eb887551
+---
+ arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd | 13 +++++++--
+ drivers/amlogic/dvb_tv/aml_fe.c              | 28 +++++++++++++++++++-
+ drivers/amlogic/dvb_tv/aml_fe.h              |  5 ++++
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+index 1973aacf3316..abe4f2696dc5 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+@@ -121,6 +121,12 @@
+ 			linux,contiguous-region;
+ 			reg = <0x00000000 0x00500000>;
+ 		};
++
++		cma_dvb: region@5 {
++			region_name = "cma_dvb";
++			linux,contiguous-region;
++			reg = <0x00000000 0x00a00000>;
++		};
+ 	};
+ 
+ 
+@@ -1552,8 +1558,11 @@
+ 		fe0_ts = <2>;
+ 		fe0_dev = <0>;
+ 		dtv_demod0_mem = <1>;
+-		reserve-memory = <0x1400000>;
+-		reserve-iomap = "true";
++	//	reserve-memory = <0x1400000>;
++	//	reserve-iomap = "true";
++	//for cma
++		max_size = <10>;//10M
++		linux,contiguous-region = <&cma_dvb>;
+ 		//pinctrl-names = "default";
+ 		//pinctrl-0 = <&dvb_fe_pins>;
+ 	//	fe0_mem = <0>;
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index 21a40c7df940..de2a9436e8ee 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -756,12 +756,17 @@ static int aml_fe_dev_init(struct aml_dvb *dvb, struct platform_device *pdev, am
+ {
+ #ifndef CONFIG_OF
+ 	struct resource *res;
++#endif
++#ifdef CONFIG_CMA
++	struct page *dvb_page;
+ #endif
+ 	char *name = NULL;
+ 	char buf[32];
+ 	int ret;
+ 	u32 value;
+ 	const char *str;
++	long *mem_buf;
++	int cma_flag;
+ 
+ 	switch(type){
+ 		case AM_DEV_TUNER:
+@@ -1008,8 +1013,29 @@ static int aml_fe_dev_init(struct aml_dvb *dvb, struct platform_device *pdev, am
+ #endif /*CONFIG_OF*/
+ 
+ #ifdef CONFIG_OF
++
++	cma_flag = 0;
++#ifdef CONFIG_CMA
++//	int memstart;
++//	int memend;
++//	int memsize;
++
++	snprintf(buf, sizeof(buf), "max_size");
++	ret = of_property_read_u32(pdev->dev.of_node, buf, &value);
++	if (ret < 0) {
++		pr_error("%s%d cma size undefined.\n", name, id);
++		cma_flag = 0;
++	} else {
++		dvb_page = dma_alloc_from_contiguous(&(pdev->dev), (ret * SZ_1M) >> PAGE_SHIFT, 0);
++		dev->mem_start=page_to_phys(dvb_page);
++		mem_buf=(long*)phys_to_virt(dev->mem_start);
++		printk("memstart is %x,memsize is %xm\n",dev->mem_start,ret);
++		cma_flag = 1;
++	}
++
++#endif
++	if (cma_flag == 0)
+ 	{
+-		long *mem_buf;
+ 		int memstart;
+ 		int memend;
+ 		int memsize;
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.h b/drivers/amlogic/dvb_tv/aml_fe.h
+index 9b120a07f8ef..a9c6e7fef235 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.h
++++ b/drivers/amlogic/dvb_tv/aml_fe.h
+@@ -31,6 +31,11 @@
+ #include "aml_dvb.h"
+ #include "linux/videodev2.h"
+ 
++#include <linux/dma-contiguous.h>
++#include <linux/dma-mapping.h>
++#include <linux/sizes.h>
++
++
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ 
+ 
+-- 
+2.19.0
+

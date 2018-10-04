@@ -1,0 +1,1238 @@
+From 12ea529a8c7b5bee70a27ed514668c177f8629c3 Mon Sep 17 00:00:00 2001
+From: Bo Yang <bo.yang@amlogic.com>
+Date: Thu, 12 Mar 2015 15:48:38 +0800
+Subject: [PATCH 5458/5965] PD#103677: g9bb: di: add dnr,3d detection,3d
+ function
+
+by kele.bai@amlogic.com
+
+Change-Id: I79fcfed59dfd97512fdd35c9174f8094dfa62b9f
+---
+ drivers/amlogic/amports/rdma.c            |   2 +-
+ drivers/amlogic/amports/vpp.c             |  82 ++--
+ drivers/amlogic/amports/vpp.h             |   2 +-
+ drivers/amlogic/deinterlace/Makefile      |  11 +-
+ drivers/amlogic/deinterlace/deinterlace.c | 136 ++++---
+ drivers/amlogic/deinterlace/deinterlace.h |  32 +-
+ drivers/amlogic/deinterlace/detect3d.c    |   2 +-
+ drivers/amlogic/deinterlace/detect3d.h    |   7 +-
+ drivers/amlogic/deinterlace/dnr.c         | 451 ++++++++++++++++++++++
+ drivers/amlogic/deinterlace/dnr.h         |  99 +++++
+ 10 files changed, 699 insertions(+), 125 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/amports/vpp.c
+ mode change 100755 => 100644 drivers/amlogic/deinterlace/deinterlace.c
+ create mode 100644 drivers/amlogic/deinterlace/dnr.c
+ create mode 100644 drivers/amlogic/deinterlace/dnr.h
+
+diff --git a/drivers/amlogic/amports/rdma.c b/drivers/amlogic/amports/rdma.c
+index 12ec9e24371f..760b7ffa4134 100755
+--- a/drivers/amlogic/amports/rdma.c
++++ b/drivers/amlogic/amports/rdma.c
+@@ -76,7 +76,7 @@
+ 
+ 
+ //#define RDMA_CHECK_PRE
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
+ #undef READ_BACK_SUPPORT
+ #else
+ #define READ_BACK_SUPPORT
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+old mode 100755
+new mode 100644
+index 0c38886f0e7c..8f83a6bdfaf4
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -1062,11 +1062,11 @@ static void vpp_set_scaler(u32 src_width,
+     ver_sc_multiple_num = height_out/src_height;
+ 
+     //just calcuate the enable sclaer module
+-    if((hor_sc_multiple_num>=4) || (ver_sc_multiple_num>=4)){
+-        next_frame_par->supsc0_enable =1;
++    if ((hor_sc_multiple_num >= 4) || (ver_sc_multiple_num >= 4)) {
++        next_frame_par->supsc0_enable = (src_width > SUPER_CORE0_WIDTH_MAX?0:1);
+         next_frame_par->supsc1_enable =1;
+-    }else if((hor_sc_multiple_num>=2)||(ver_sc_multiple_num>=2)){
+-        if(src_width > SUPER_CORE0_WIDTH_MAX && src_width <= SUPER_CORE1_WIDTH_MAX){
++    } else if ((hor_sc_multiple_num>=2)||(ver_sc_multiple_num >= 2)) {
++        if (src_width > SUPER_CORE0_WIDTH_MAX && src_width <= SUPER_CORE1_WIDTH_MAX) {
+             next_frame_par->supsc0_enable =0;
+             next_frame_par->supsc1_enable =1;
+         }else{
+@@ -1077,10 +1077,7 @@ static void vpp_set_scaler(u32 src_width,
+         next_frame_par->supsc0_enable =0;
+         next_frame_par->supsc1_enable =0;
+     }
+-    if (hor_sc_multiple_num>=4){
+-        next_frame_par->supsc0_hori_ratio = 1;
+-        next_frame_par->supsc1_hori_ratio = 1;
+-    }else if (hor_sc_multiple_num>=2){
++    if (hor_sc_multiple_num >= 2) {
+         next_frame_par->supsc0_hori_ratio = next_frame_par->supsc0_enable?1:0;
+         next_frame_par->supsc1_hori_ratio = next_frame_par->supsc1_enable?1:0;
+     }else {
+@@ -1088,59 +1085,56 @@ static void vpp_set_scaler(u32 src_width,
+         next_frame_par->supsc1_hori_ratio = 0;
+     }
+ 
+-    if (ver_sc_multiple_num>=4) {
+-    	next_frame_par->supsc0_vert_ratio = 1;
+-    	next_frame_par->supsc1_vert_ratio = 1;
+-    }else if (ver_sc_multiple_num>=2){
++    if (ver_sc_multiple_num >= 2) {
+     	next_frame_par->supsc0_vert_ratio = next_frame_par->supsc0_enable?1:0;
+     	next_frame_par->supsc1_vert_ratio = next_frame_par->supsc1_enable?1:0;
+-    }else{
++    } else {
+     	next_frame_par->supsc0_vert_ratio = 0;
+     	next_frame_par->supsc1_vert_ratio = 0;
+     }
+-    if(bypass_spscl0){
++    if (bypass_spscl0) {
+ 	next_frame_par->supsc0_enable = 0;
+ 	next_frame_par->supsc0_hori_ratio = 0;
+ 	next_frame_par->supsc0_vert_ratio = 0;
+     }
+-    if(bypass_spscl1){
++    if (bypass_spscl1) {
+ 	next_frame_par->supsc1_enable = 0;
+ 	next_frame_par->supsc1_hori_ratio = 0;
+ 	next_frame_par->supsc1_vert_ratio = 0;
+     }
+     spsc0_h_in = src_height;
+     spsc0_w_in = src_width;
+-    if(super_debug)
++    if (super_debug)
+         printk("supsc0_hori=%d,supsc1_hori=%d,supsc0_vert=%d,supsc1_vert=%d\n",next_frame_par->supsc0_hori_ratio,next_frame_par->supsc1_hori_ratio,next_frame_par->supsc0_vert_ratio,next_frame_par->supsc1_vert_ratio);
+-	//select the scaler path:[super 1   =>>   ppscaler  =>>  super 2 ]  or   [super 1   =>>   super 2  =>>  ppsaler]
+-    if(next_frame_par->supscl_path == sup0_sp1_pp_scpath){
+-	ppsc_h_out =  height_out;
+-	ppsc_w_out =  width_out;
+-	spsc1_h_in = spsc0_h_out = (spsc0_h_in << next_frame_par->supsc0_vert_ratio);
+-	spsc1_w_in = spsc0_w_out = (spsc0_w_in << next_frame_par->supsc0_hori_ratio);
+-	ppsc_h_in  = spsc1_h_out = (spsc1_h_in << next_frame_par->supsc1_vert_ratio);
+-	ppsc_w_in  = spsc1_w_out = (spsc1_w_in << next_frame_par->supsc1_hori_ratio);
+-
+-    }else if(next_frame_par->supscl_path == sup0_pp_sp1_scpath){
+-	ppsc_h_in = (spsc0_h_in << next_frame_par->supsc0_vert_ratio);
+-	ppsc_w_in = (spsc0_w_in << next_frame_par->supsc0_hori_ratio);
+-	spsc1_h_out =  height_out;
+-	spsc1_w_out =  width_out;
+-	ppsc_h_out = (spsc1_h_out >> next_frame_par->supsc1_vert_ratio);
+-	ppsc_w_out = (spsc1_w_out >> next_frame_par->supsc1_hori_ratio);
+-	spsc1_h_in = ppsc_h_out;
+-	spsc1_w_in = ppsc_w_out;
++        //select the scaler path:[super 1   =>>   ppscaler  =>>  super 2 ]  or   [super 1   =>>   super 2  =>>  ppsaler]
++    if (next_frame_par->supscl_path == sup0_sp1_pp_scpath) {
++        ppsc_h_out =  height_out;
++        ppsc_w_out =  width_out;
++        spsc1_h_in = spsc0_h_out = (spsc0_h_in << next_frame_par->supsc0_vert_ratio);
++        spsc1_w_in = spsc0_w_out = (spsc0_w_in << next_frame_par->supsc0_hori_ratio);
++        ppsc_h_in  = spsc1_h_out = (spsc1_h_in << next_frame_par->supsc1_vert_ratio);
++        ppsc_w_in  = spsc1_w_out = (spsc1_w_in << next_frame_par->supsc1_hori_ratio);
++
++    } else if (next_frame_par->supscl_path == sup0_pp_sp1_scpath) {
++        ppsc_h_in = (spsc0_h_in << next_frame_par->supsc0_vert_ratio);
++        ppsc_w_in = (spsc0_w_in << next_frame_par->supsc0_hori_ratio);
++        spsc1_h_out =  height_out;
++        spsc1_w_out =  width_out;
++        ppsc_h_out = (spsc1_h_out >> next_frame_par->supsc1_vert_ratio);
++        ppsc_w_out = (spsc1_w_out >> next_frame_par->supsc1_hori_ratio);
++        spsc1_h_in = ppsc_h_out;
++        spsc1_w_in = ppsc_w_out;
+ 
+-    }else{
+-	next_frame_par->supsc0_enable =0;
+-	next_frame_par->supsc1_enable =0;
+-	ppsc_h_in = src_height;
+-	ppsc_w_in = src_width;
+-	ppsc_h_out = height_out;
+-	ppsc_w_out = width_out;
+-	spsc1_h_in = 0;
+-	spsc1_w_in = 0;
+-	//spsc1_h_in  spsc1_w_in are just iinitialized
++    } else {
++        next_frame_par->supsc0_enable =0;
++        next_frame_par->supsc1_enable =0;
++        ppsc_h_in = src_height;
++        ppsc_w_in = src_width;
++        ppsc_h_out = height_out;
++        ppsc_w_out = width_out;
++        spsc1_h_in = 0;
++        spsc1_w_in = 0;
++        //spsc1_h_in  spsc1_w_in are just iinitialized
+     }
+     vpp_set_filters2(ppsc_w_in, ppsc_h_in, ppsc_w_out, ppsc_h_out, vinfo, vpp_flags, next_frame_par,vf);
+     if(next_frame_par->supscl_path == sup0_pp_sp1_scpath){
+diff --git a/drivers/amlogic/amports/vpp.h b/drivers/amlogic/amports/vpp.h
+index 28b9a658eb52..53de8e698857 100755
+--- a/drivers/amlogic/amports/vpp.h
++++ b/drivers/amlogic/amports/vpp.h
+@@ -124,7 +124,7 @@ typedef struct {
+     u32  supsc1_vert_ratio;
+ } vpp_frame_par_t;
+ 
+-#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)
++#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9BB)
+ #define TV_3D_FUNCTION_OPEN
+ #define TV_REVERSE
+ #endif
+diff --git a/drivers/amlogic/deinterlace/Makefile b/drivers/amlogic/deinterlace/Makefile
+index 627ebf70da1c..fc86ba29802a 100755
+--- a/drivers/amlogic/deinterlace/Makefile
++++ b/drivers/amlogic/deinterlace/Makefile
+@@ -5,9 +5,10 @@
+ di-objs = deinterlace.o \
+     deinterlace_hw.o \
+     deinterlace_pd.o \
+-    detect3d.o
+-    
+-    
++    detect3d.o \
++    dnr.o
++
++
++
++obj-$(CONFIG_DEINTERLACE) += di.o
+ 
+-obj-$(CONFIG_DEINTERLACE) += di.o 
+-									
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+old mode 100755
+new mode 100644
+index bc48998f1b5e..ea4e22943d0a
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -60,7 +60,9 @@
+ #ifdef DET3D
+ #include "detect3d.h"
+ #endif
+-
++#ifdef NEW_DI_V4
++#include "dnr.h"
++#endif
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ #define RUN_DI_PROCESS_IN_IRQ
+ #define RUN_REG_IN_IRQ
+@@ -155,10 +157,16 @@ MODULE_PARM_DESC(overturn,"overturn /disable reverse");
+ static bool check_start_drop_prog = false;
+ module_param(check_start_drop_prog,bool,0644);
+ MODULE_PARM_DESC(check_start_drop_prog,"enable/disable progress start drop function");
+-
++#ifdef NEW_DI_V3
+ static bool mcpre_en = true;
+ module_param(mcpre_en,bool,0644);
+ MODULE_PARM_DESC(mcpre_en,"enable/disable me in pre");
++#endif
++#ifdef NEW_DI_V4
++static bool dnr_en = true;
++module_param(dnr_en,bool,0644);
++MODULE_PARM_DESC(dnr_en,"enable/disable dnr in pre");
++#endif
+ #define CHECK_VDIN_BUF_ERROR
+ 
+ #define DEVICE_NAME "deinterlace"
+@@ -190,7 +198,7 @@ static dev_t di_id;
+ static struct class *di_class;
+ 
+ #define INIT_FLAG_NOT_LOAD 0x80
+-static char version_s[] = "2015-1-29a";//enable pre vdin link when input2pre
++static char version_s[] = "2015-3-2a";//enable pre vdin link when input2pre
+ static unsigned char boot_init_flag=0;
+ static int receiver_is_amvideo = 1;
+ 
+@@ -309,7 +317,7 @@ static bool use_2_interlace_buff = false;
+ 
+         bit[5]:
+          when two field buffers are used for decoder (bit[4] is 0): 0, use process_count; 1, handle prog frame as two interlace frames
+-        bit[6]:(bit[4] is 0,bit[5] is 0,use_2_interlace_buff is 0): 0, process progress frame as field,blend by post; 
++        bit[6]:(bit[4] is 0,bit[5] is 0,use_2_interlace_buff is 0): 0, process progress frame as field,blend by post;
+                                                                     1, process progress frame as field,process by normal di
+ 
+     */
+@@ -3379,7 +3387,7 @@ static void pre_de_process(void)
+     blkhsize = (di_pre_stru.di_nrwr_mif.end_x+4)/5;
+     Wr(MCDI_HV_SIZEIN, (di_pre_stru.di_nrwr_mif.end_y+1)|((di_pre_stru.di_nrwr_mif.end_x+1) << 16));
+     Wr(MCDI_HV_BLKSIZEIN,(overturn?3:0) << 30|blkhsize << 16 |(di_pre_stru.di_nrwr_mif.end_y+1));
+-    Wr(MCDI_BLKTOTAL,blkhsize*(di_pre_stru.di_nrwr_mif.end_y+1));		
++    Wr(MCDI_BLKTOTAL,blkhsize*(di_pre_stru.di_nrwr_mif.end_y+1));
+ #endif
+     // set interrupt mask for pre module.
+ #ifdef NEW_DI_V1
+@@ -3473,7 +3481,7 @@ static void pre_de_process(void)
+         di_mtn_1_ctrl1 &= (~(1<<29));//disable txt
+         cont_rd = 1;
+ 	}
+-        if(di_pre_stru.field_count_for_cont >= 3){
++        if (di_pre_stru.field_count_for_cont >= 3) {
+             di_mtn_1_ctrl1 |= 1<<29;//enable txt
+             #ifndef NEW_DI_V3
+             Wr(DI_CLKG_CTRL, 0xfeff0000); //di enable nr clock gate
+@@ -3482,30 +3490,37 @@ static void pre_de_process(void)
+             #endif
+             Wr(DI_PRE_CTRL, Rd(DI_PRE_CTRL)|(cont_rd<<25));
+             #ifdef NEW_DI_V3
+-            if(di_pre_stru.cur_prog_flag == 0)
++            if (di_pre_stru.cur_prog_flag == 0)
+                 Wr(DI_MTN_CTRL1, (mcpre_en?0x3000:0)|Rd(DI_MTN_CTRL1));//enable me(mc di)
+-            if(di_pre_stru.field_count_for_cont == 4){
++            if (di_pre_stru.field_count_for_cont == 4) {
+             	di_mtn_1_ctrl1 &= (~(1<<30)); // enable contp2rd and contprd
+             	Wr(MCDI_MOTINEN,1<<1|1);    //enable motin refinement
+             }
+-            if(di_pre_stru.field_count_for_cont == 5){         
++            if (di_pre_stru.field_count_for_cont == 5) {
+                 Wr(MCDI_CTRL_MODE,0x1bffffff);//disalbe reflinfo
++                #ifdef NEW_DI_V4
++                Wr(DNR_CTRL,dnr_en?0x1ff00:0);
++                #endif
+             }
+        	    #else
+ 	    di_mtn_1_ctrl1 &= (~(1<<30)); // enable contp2rd and contprd
+ 	    #endif
++
+         }else{
+             #ifdef NEW_DI_V3
+-            Wr_reg_bits(MCDI_CTRL_MODE,1,9,1); // ref	
++            Wr_reg_bits(MCDI_CTRL_MODE,1,9,1); // ref
+             Wr_reg_bits(MCDI_CTRL_MODE,1,16,1);// qme
+-            Wr_reg_bits(MCDI_CTRL_MODE,0,28,1);// close linf    
++            Wr_reg_bits(MCDI_CTRL_MODE,0,28,1);// close linf
+             Wr(MCDI_MOTINEN,0);    //disable motin refinement
+             Wr(DI_MTN_CTRL1, (0xffffcfff&Rd(DI_MTN_CTRL1)));//disable me(mc di)
+             #endif
++            #ifdef NEW_DI_V4
++            Wr(DNR_CTRL,0);
++            #endif
+         }
+ 		    di_pre_stru.field_count_for_cont++;
+     }
+-    else if(get_new_mode_flag()==0){
++    else if (get_new_mode_flag()==0) {
+         di_mtn_1_ctrl1 &= (~(1<<31)); // disable contwr
+     }
+ 	Wr(DI_MTN_1_CTRL1, di_mtn_1_ctrl1);
+@@ -3513,11 +3528,11 @@ static void pre_de_process(void)
+     di_apply_reg_cfg(0);
+ #endif
+ #ifdef SUPPORT_MPEG_TO_VDIN
+-	    if(mpeg2vdin_flag){
++	    if (mpeg2vdin_flag) {
+ 		vdin_arg_t vdin_arg;
+ 		vdin_v4l2_ops_t *vdin_ops = get_vdin_v4l2_ops();
+ 		vdin_arg.cmd = VDIN_CMD_FORCE_GO_FIELD;
+-		if(vdin_ops->tvin_vdin_func)
++		if (vdin_ops->tvin_vdin_func)
+ 		    vdin_ops->tvin_vdin_func(0,&vdin_arg);
+ 	    }
+ #endif
+@@ -3526,7 +3541,7 @@ static void pre_de_process(void)
+ 
+ static void pre_de_done_buf_clear(void)
+ {
+-    if(di_pre_stru.di_wr_buf){
++    if (di_pre_stru.di_wr_buf) {
+         di_pre_stru.di_wr_buf->pre_ref_count = 0;
+         di_pre_stru.di_wr_buf->post_ref_count = 0;
+         queue_in(di_pre_stru.di_wr_buf, QUEUE_RECYCLE);
+@@ -4006,8 +4021,8 @@ static unsigned char pre_de_buf_config(void)
+         queue_out(di_buf);
+         change_type = is_source_change(vframe);
+         /* source change, when i mix p,force p as i*/
+-        if(change_type == 1 || (change_type == 2 && di_pre_stru.cur_prog_flag == 1)){ 
+-            if(di_pre_stru.di_mem_buf_dup_p){
++        if (change_type == 1 || (change_type == 2 && di_pre_stru.cur_prog_flag == 1)) {
++            if (di_pre_stru.di_mem_buf_dup_p) {
+             	/*avoid only 2 i field then p field*/
+             	if((di_pre_stru.cur_prog_flag == 0) && use_2_interlace_buff)
+             	    di_pre_stru.di_mem_buf_dup_p->post_proc_flag = -1;
+@@ -4015,9 +4030,9 @@ static unsigned char pre_de_buf_config(void)
+                 di_pre_stru.di_mem_buf_dup_p = NULL;
+ 
+             }
+-            if(di_pre_stru.di_chan2_buf_dup_p){
++            if (di_pre_stru.di_chan2_buf_dup_p) {
+             	/*avoid only 1 i field then p field*/
+-            	if((di_pre_stru.cur_prog_flag == 0) && use_2_interlace_buff)
++                if ((di_pre_stru.cur_prog_flag == 0) && use_2_interlace_buff)
+             	    di_pre_stru.di_chan2_buf_dup_p->post_proc_flag = -1;
+             	di_pre_stru.di_chan2_buf_dup_p->pre_ref_count = 0;
+                 di_pre_stru.di_chan2_buf_dup_p = NULL;
+@@ -4030,8 +4045,8 @@ static unsigned char pre_de_buf_config(void)
+             di_pre_stru.cur_width = di_buf->vframe->width;
+             di_pre_stru.cur_height= di_buf->vframe->height;
+             di_pre_stru.cur_prog_flag = is_progressive(di_buf->vframe);
+-            if(di_pre_stru.cur_prog_flag){
+-            	if((use_2_interlace_buff)&&!(prog_proc_config&0x10))
++            if (di_pre_stru.cur_prog_flag) {
++                if ((use_2_interlace_buff)&&!(prog_proc_config&0x10))
+                     di_pre_stru.prog_proc_type = 2;
+                 else
+               	    di_pre_stru.prog_proc_type = prog_proc_config&0x10;
+@@ -4048,14 +4063,14 @@ static unsigned char pre_de_buf_config(void)
+             di_set_para_by_tvinfo(vframe);
+ #endif
+ #ifdef SUPPORT_MPEG_TO_VDIN
+-	    if((!is_from_vdin(vframe))&&(vframe->sig_fmt == TVIN_SIG_FMT_NULL)&&
++	    if ((!is_from_vdin(vframe)) && (vframe->sig_fmt == TVIN_SIG_FMT_NULL) &&
+ 	    	(mpeg2vdin_en)){
+ 		vdin_arg_t vdin_arg;
+ 		vdin_v4l2_ops_t *vdin_ops = get_vdin_v4l2_ops();
+ 		vdin_arg.cmd = VDIN_CMD_MPEGIN_START;
+ 		vdin_arg.h_active = di_pre_stru.cur_width;
+ 		vdin_arg.v_active = di_pre_stru.cur_height;
+-		if(vdin_ops->tvin_vdin_func){
++		if (vdin_ops->tvin_vdin_func) {
+ 		    vdin_ops->tvin_vdin_func(0,&vdin_arg);
+ 		}
+ 		mpeg2vdin_flag = 1;
+@@ -4067,22 +4082,22 @@ static unsigned char pre_de_buf_config(void)
+         }
+         else{
+             /* check if top/bot interleaved */
+-            if(di_pre_stru.cur_prog_flag == 0){
+-            	if(change_type == 2)//source is i interleaves p fields
++            if (di_pre_stru.cur_prog_flag == 0) {
++                if (change_type == 2)//source is i interleaves p fields
+             	    di_pre_stru.force_interlace = true;
+-                if((di_pre_stru.cur_inp_type & VIDTYPE_TYPEMASK) ==
+-                    (di_buf->vframe->type & VIDTYPE_TYPEMASK)){
++                if ((di_pre_stru.cur_inp_type & VIDTYPE_TYPEMASK) ==
++                    (di_buf->vframe->type & VIDTYPE_TYPEMASK)) {
+ #ifdef CHECK_VDIN_BUF_ERROR
+                     if ((di_buf->vframe->type & VIDTYPE_TYPEMASK) == VIDTYPE_INTERLACE_TOP)
+                         same_field_top_count++;
+                     else
+                         same_field_bot_count++;
+ #endif
+-                    if(di_pre_stru.same_field_source_flag<same_field_source_flag_th){
++                    if (di_pre_stru.same_field_source_flag < same_field_source_flag_th) {
+                         /*some source's filed is top or bot always*/
+                         di_pre_stru.same_field_source_flag++;
+ 
+-                    if(skip_wrong_field && is_from_vdin(di_buf->vframe)){
++                    if (skip_wrong_field && is_from_vdin(di_buf->vframe)) {
+                         recycle_vframe_type_pre(di_buf);
+                         return 0;
+                     }
+@@ -4206,7 +4221,7 @@ static unsigned char pre_de_buf_config(void)
+                     else{
+                         di_pre_stru.process_count = 0;
+                     }
+-                    
++
+                     di_pre_stru.di_inp_buf = di_buf;
+ #ifdef DI_DEBUG
+                     di_print("%s: %s[%d] => di_inp_buf, process_count %d\n",
+@@ -4568,6 +4583,10 @@ static irqreturn_t de_irq(int irq, void *dev_instance)
+ 
+ #ifdef NEW_DI_V3
+     get_mcinfo_from_reg_in_irq();
++#endif
++#ifdef NEW_DI_V4
++    if (dnr_en)
++        run_dnr_in_irq(di_pre_stru.di_nrwr_mif.end_x+1,di_pre_stru.di_nrwr_mif.end_y+1);
+ #endif
+     di_pre_stru.pre_de_process_done = 1;
+     di_pre_stru.pre_de_busy = 0;
+@@ -4913,7 +4932,7 @@ static int de_post_process(void* arg, unsigned zoom_start_x_lines,
+ 		break;
+ 	    default:
+ 		break;
+-	}    
++	}
+      	di_post_stru.next_canvas_id = di_post_stru.canvas_id?0:1;
+ #endif
+ 	switch(di_buf->pulldown_mode){
+@@ -5795,7 +5814,7 @@ static int process_post_vframe(void)
+                         reset_pulldown_state();
+                         di_buf->pulldown_mode = PULL_DOWN_BLEND_2; /* blend with di_buf->di_buf_dup_p[2] */
+                     }
+-                    else{ 
++                    else{
+                     	if(blend_mode == -2)
+                             pulldown_mode_hise = pulldown_process(di_buf, buffer_keep_count);
+                     }
+@@ -5823,15 +5842,15 @@ static int process_post_vframe(void)
+                             di_buf->vframe->process_fun = NULL;
+                             di_buf->process_fun_index = PROCESS_FUN_NULL;
+                         }
+-                        else{
+-                       	    if(di_buf->pulldown_mode == -1)
+-                         	di_buf->pulldown_mode = PULL_DOWN_NORMAL;
+-                            else if(di_buf->pulldown_mode == 0)
+-                        	di_buf->pulldown_mode = PULL_DOWN_BLEND_0;
+-                            else if(di_buf->pulldown_mode == 1)
+-                        	di_buf->pulldown_mode = PULL_DOWN_BLEND_2;
++                        else {
++                            if (di_buf->pulldown_mode == -1)
++                                di_buf->pulldown_mode = PULL_DOWN_NORMAL;
++                            else if (di_buf->pulldown_mode == 0)
++                                di_buf->pulldown_mode = PULL_DOWN_BLEND_0;
++                            else if (di_buf->pulldown_mode == 1)
++                                di_buf->pulldown_mode = PULL_DOWN_BLEND_2;
+                		    /*for debug*/
+-                            if(blend_mode != -2)				
++                            if (blend_mode != -2)
+                                 di_buf->pulldown_mode = blend_mode;
+                             di_buf->vframe->process_fun = de_post_process;
+                             di_buf->process_fun_index = PROCESS_FUN_DI;
+@@ -5840,11 +5859,11 @@ static int process_post_vframe(void)
+                         di_buf->di_buf[0] = di_buf->di_buf_dup_p[0];
+                         di_buf->di_buf[1] = NULL;
+                         queue_out(di_buf->di_buf[0]);
+-			if(frame_count == 0){
++			if (frame_count == 0) {
+                             di_post_stru.start_pts = di_buf->vframe->pts;
+                     	}
+                         di_lock_irqfiq_save(irq_flag2, fiq_flag);
+-                        if((frame_count<start_frame_drop_count)||
++                        if ((frame_count<start_frame_drop_count)||
+                             (di_buf->di_buf_dup_p[0]->throw_flag)||(di_buf->di_buf_dup_p[1]->throw_flag)||
+                             (di_buf->di_buf_dup_p[2]->throw_flag)){
+                             queue_in(di_buf, QUEUE_TMP);
+@@ -5854,8 +5873,8 @@ static int process_post_vframe(void)
+ #endif
+                         }
+                         else{
+-			    if(frame_count == start_frame_drop_count){
+-                                if((di_post_stru.start_pts != 0) && (di_buf->vframe->pts == 0))
++			    if (frame_count == start_frame_drop_count) {
++                                if ((di_post_stru.start_pts != 0) && (di_buf->vframe->pts == 0))
+                                     di_buf->vframe->pts = di_post_stru.start_pts;
+                                 di_post_stru.start_pts = 0;
+                             }
+@@ -5875,8 +5894,8 @@ static int process_post_vframe(void)
+         }
+         else{
+ #ifdef DET3D
+-            if((ready_di_buf->vframe->trans_fmt == 0)&&bypass_post_state){
+-                if(det3d_en && di_pre_stru.det3d_trans_fmt != 0){
++            if ((ready_di_buf->vframe->trans_fmt == 0) && bypass_post_state) {
++                if (det3d_en && di_pre_stru.det3d_trans_fmt != 0) {
+                     ready_di_buf->vframe->trans_fmt = di_pre_stru.det3d_trans_fmt;
+                     set3d_view(di_pre_stru.det3d_trans_fmt, ready_di_buf->vframe);
+                 }
+@@ -6112,10 +6131,10 @@ static int process_post_vframe(void)
+                	    queue_in(di_buf, QUEUE_TMP);
+                     recycle_vframe_type_post(di_buf);
+                     printk("%s drop field %d.\n",__func__,di_buf->di_buf_dup_p[0]->seq);
+-                }else{ 
++                }else{
+                     di_buf->di_buf[1] = di_buf->di_buf_dup_p[1];
+                     queue_out(di_buf->di_buf[1]);
+-	
++
+                     di_lock_irqfiq_save(irq_flag2, fiq_flag);
+                     if((frame_count == 0) && check_start_drop_prog){
+                         di_post_stru.start_pts = di_buf->vframe->pts;
+@@ -7219,6 +7238,9 @@ static int di_probe(struct platform_device *pdev)
+     device_create_file(di_device.dev, &dev_attr_status);
+     device_create_file(di_device.dev, &dev_attr_provider_vframe_status);
+     device_create_file(di_device.dev, &dev_attr_frame_format);
++    #ifdef NEW_DI_V4
++    dnr_init(di_device.dev);
++    #endif
+     mem = &memobj;
+     r = find_reserve_block(pdev->dev.of_node->name,0);
+     if(r < 0){
+@@ -7233,21 +7255,21 @@ static int di_probe(struct platform_device *pdev)
+                 return -EFAULT;
+             }
+             name= of_get_property(pdev->dev.of_node,"share-memory-offset",NULL);
+-            if(name)
++            if (name)
+                 offset= of_read_ulong(name,1);
+-            else{
++            else {
+                 pr_error("\ndeinterlace memory resource undefined3.\n");
+                 return -EFAULT;
+             }
+             name= of_get_property(pdev->dev.of_node,"share-memory-size",NULL);
+             if(name)
+                 size= of_read_ulong(name,1);
+-            else{
+-	        pr_error("\ndeinterlace memory resource undefined4.\n");
+-	        return -EFAULT;
+-        }			
+-	mem->start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
+-	mem->end = mem->start+ size-1;
++            else {
++                pr_error("\ndeinterlace memory resource undefined4.\n");
++                return -EFAULT;
++            }
++            mem->start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
++            mem->end = mem->start+ size-1;
+ 	}
+     }else{
+         mem->start = (phys_addr_t)get_reserve_block_addr(r);
+@@ -7694,7 +7716,7 @@ module_param(update_post_reg_count, uint, 0664);
+ module_param(use_2_interlace_buff,bool,0664);
+ MODULE_PARM_DESC(use_2_interlace_buff,"/n debug for progress interlace mixed source /n");
+ 
+-MODULE_DESCRIPTION("AMLOGIC HDMI TX driver");
++MODULE_DESCRIPTION("AMLOGIC DEINTERLACE driver");
+ MODULE_LICENSE("GPL");
+ MODULE_VERSION("1.0.0");
+ 
+diff --git a/drivers/amlogic/deinterlace/deinterlace.h b/drivers/amlogic/deinterlace/deinterlace.h
+index e2e7dc515a2e..cfcad4962594 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.h
++++ b/drivers/amlogic/deinterlace/deinterlace.h
+@@ -16,16 +16,6 @@
+ #define NEW_KEEP_LAST_FRAME
+ #endif
+ 
+-#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)
+-#ifndef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+-#define CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
+-#endif
+-#if (MESON_CPU_TYPE!=MESON_CPU_TYPE_MESONG9TV)
+-#define D2D3_SUPPORT
+-#endif
+-#define DET3D
+-//#define SUPPORT_MPEG_TO_VDIN
+-#endif
+ #define SUPPORT_MPEG_TO_VDIN //for all ic after m6c@20140731
+ 
+ #if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)
+@@ -43,10 +33,28 @@
+ #define NEW_DI_V1 //from m6tvc
+ #define NEW_DI_V2 //from m6tvd(noise meter bug fix,improvement for 2:2 pull down)
+ #define NEW_DI_V3 //from g9tv(mcdi added,d2d3 removed)
+-#elif (MESON_CPU_TYPE > MESON_CPU_TYPE_MESONG9TV)
++#elif (MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9BB)
++#define NEW_DI_TV
++#define NEW_DI_V1 //from m6tvc
++#define NEW_DI_V2 //from m6tvd(noise meter bug fix,improvement for 2:2 pull down)
++#define NEW_DI_V3 //from g9tv(mcdi added,d2d3 removed)
++#define NEW_DI_V4 //from g9tvbb(dnr added)
++#elif (MESON_CPU_TYPE > MESON_CPU_TYPE_MESONG9BB)
+ #define NEW_DI_V1 //from m6tvc
+ #define NEW_DI_V2 //from m6tvd(noise meter bug fix,improvement for 2:2 pull down)
+-#define NEW_DI_V3
++#define NEW_DI_V3 //from g9tv(mcdi added,d2d3 removed)
++#define NEW_DI_V4 //from g9tvbb(dnr added)
++#endif
++
++#if ((MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9BB))
++#ifndef CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
++#define CONFIG_POST_PROCESS_MANAGER_3D_PROCESS
++#endif
++#if (MESON_CPU_TYPE < MESON_CPU_TYPE_MESONG9TV)
++#define D2D3_SUPPORT
++#endif
++#define DET3D
++//#define SUPPORT_MPEG_TO_VDIN
+ #endif
+ 
+ #ifndef CONFIG_VSYNC_RDMA
+diff --git a/drivers/amlogic/deinterlace/detect3d.c b/drivers/amlogic/deinterlace/detect3d.c
+index 66a0e0c208a5..a3d792792ec4 100755
+--- a/drivers/amlogic/deinterlace/detect3d.c
++++ b/drivers/amlogic/deinterlace/detect3d.c
+@@ -4,7 +4,7 @@
+ /* Amlogic Headers */
+ #include <mach/am_regs.h>
+ 
+-#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)||( MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TV)
+ /* Local include */
+ #include <linux/amlogic/tvin/tvin.h>
+ #include "detect3d.h"
+diff --git a/drivers/amlogic/deinterlace/detect3d.h b/drivers/amlogic/deinterlace/detect3d.h
+index fba2a535833d..42e178e44376 100755
+--- a/drivers/amlogic/deinterlace/detect3d.h
++++ b/drivers/amlogic/deinterlace/detect3d.h
+@@ -1,7 +1,7 @@
+ #ifndef _DET3D_H
+ #define _DET3D_H
+ 
+-#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TV)||(MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)||( MESON_CPU_TYPE==MESON_CPU_TYPE_MESONG9TV)
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TV)
+ //***************************************************************************
+ //******** DET3D REGISTERS ********
+ //***************************************************************************
+@@ -290,7 +290,7 @@ typedef enum det3d_fmt_e {
+ //****************************************************************************
+ extern void det3d_enable(bool flag);
+ extern enum det3d_fmt_e det3d_fmt_detect(void);
+-#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
+ #define WRITE_DET3D_REG(x,val)				WRITE_VCBUS_REG(x,val)
+ #define WRITE_DET3D_REG_BITS(x,val,start,length)		WRITE_VCBUS_REG_BITS(x,val,start,length)
+ #define READ_DET3D_REG(x)					READ_VCBUS_REG(x)
+@@ -302,7 +302,6 @@ extern enum det3d_fmt_e det3d_fmt_detect(void);
+ #define READ_DET3D_REG_BITS(x,start,length)		READ_CBUS_REG_BITS(x,start,length)
+ #endif
+ 
+-#endif  // _DET3D_H
+-
++#endif
+ 
+ #endif  // _DET3D_H
+diff --git a/drivers/amlogic/deinterlace/dnr.c b/drivers/amlogic/deinterlace/dnr.c
+new file mode 100644
+index 000000000000..75838c2ad6c0
+--- /dev/null
++++ b/drivers/amlogic/deinterlace/dnr.c
+@@ -0,0 +1,451 @@
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <linux/device.h>
++#include <mach/am_regs.h>
++#include "dnr.h"
++
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9BB)
++static DNR_PRM_t dnr_param;
++static DNR_PRM_t *pDnrPrm = &dnr_param;
++static bool dnr_pr = false;
++module_param(dnr_pr,bool,0644);
++MODULE_PARM_DESC(dnr_pr,"/n print dnr debug information /n");
++static int dnr_prm_init(DNR_PRM_t *pPrm)
++{
++    pPrm->prm_sw_gbs_ctrl = 0; // 0: update gbs, 1: update hoffst & gbs, 2: update voffst & gbs, 3: update all (hoffst & voffst & gbs).
++
++    pPrm->prm_gbs_vldcntthd  =  4;
++    pPrm->prm_gbs_cnt_min    = 32;
++    pPrm->prm_gbs_ratcalcmod =  1;// 0: use LR, 1: use Dif
++    pPrm->prm_gbs_ratthd[0]  = 40;
++    pPrm->prm_gbs_ratthd[1]  = 80;
++    pPrm->prm_gbs_ratthd[2]  = 120;
++    pPrm->prm_gbs_difthd[0]  = 25;
++    pPrm->prm_gbs_difthd[1]  = 75;
++    pPrm->prm_gbs_difthd[2]  = 125;
++    pPrm->prm_gbs_bsdifthd   = 1;
++    pPrm->prm_gbs_calcmod    = 1; // 0:dif0, 1:dif1, 2: dif2
++
++    pPrm->sw_gbs = 0;
++    pPrm->sw_gbs_vld_flg = 0;
++    pPrm->sw_gbs_vld_cnt = 0;
++
++    pPrm->prm_hbof_minthd    = 32;
++    pPrm->prm_hbof_ratthd0   = 150;
++    pPrm->prm_hbof_ratthd1   = 150;
++    pPrm->prm_hbof_vldcntthd = 4;
++    pPrm->sw_hbof            = 0;
++    pPrm->sw_hbof_vld_flg    = 0;
++    pPrm->sw_hbof_vld_cnt    = 0;
++
++    pPrm->prm_vbof_minthd    = 32;
++    pPrm->prm_vbof_ratthd0   = 150;
++    pPrm->prm_vbof_ratthd1   = 120;
++    pPrm->prm_vbof_vldcntthd = 4;
++    pPrm->sw_vbof         = 0;
++    pPrm->sw_vbof_vld_flg = 0;
++    pPrm->sw_vbof_vld_cnt = 0;
++
++    return 0;
++}
++int global_bs_calc_sw(int *pGbsVldCnt,
++                      int *pGbsVldFlg,
++                      int *pGbs,
++                      int nGbsStatLR,
++                      int nGbsStatLL,
++                      int nGbsStatRR,
++                      int nGbsStatDif,
++                      int nGbsStatCnt,
++                      int prm_gbs_vldcntthd, //prm below
++                      int prm_gbs_cnt_min,
++                      int prm_gbs_ratcalcmod,
++                      int prm_gbs_ratthd[3],
++                      int prm_gbs_difthd[3],
++                      int prm_gbs_bsdifthd,
++                      int prm_gbs_calcmod)
++{
++    int nMax, nMin;
++    int nDif0, nDif1, nDif2;
++    int nDif, nRat;
++    int nCurGbs;
++
++    nMax = max(max(nGbsStatLR, nGbsStatLL), nGbsStatRR);
++    nMin = min(min(nGbsStatLR, nGbsStatLL), nGbsStatRR);
++
++    nDif0 = nMax==0 ? 0 : 512*(nMax - nMin)/nMax;
++    nDif0 = min(511, nDif0);
++
++    nDif1 = nGbsStatLR==0 ? 0 : 512*abs(nGbsStatLR - (nGbsStatLL + nGbsStatRR)/2)/nGbsStatLR;
++    nDif1 = min(511, nDif1);
++
++    nDif2 = nGbsStatLR==0 ? 0 : 512*abs(nGbsStatLR - max(nGbsStatLL, nGbsStatRR))/nGbsStatLR;
++    nDif2 = min(511, nDif2);
++
++    if ( 0 == prm_gbs_ratcalcmod) {
++        nRat = 16 * nGbsStatLR / max(prm_gbs_cnt_min, nGbsStatCnt);
++    }
++    else {
++        nRat = 16 * nGbsStatDif / max(prm_gbs_cnt_min, nGbsStatCnt);
++    }
++
++    nDif = 0 == prm_gbs_calcmod ? nDif0 : (1 == prm_gbs_calcmod ? nDif1 : nDif2);
++
++    if ( nGbsStatLR < max(nGbsStatLL, nGbsStatRR)) {
++        if (nGbsStatCnt <= prm_gbs_cnt_min || nRat <= prm_gbs_ratthd[0] ) {
++            nCurGbs = 0;
++        }
++        else if ( nRat <= prm_gbs_ratthd[1] ) {
++            nCurGbs = 1;
++        }
++        else if ( nRat <= prm_gbs_ratthd[2] ) {
++            nCurGbs = 2;
++        }
++        else {
++            nCurGbs = 3;
++        }
++    }
++    else {
++        if (nGbsStatCnt <= prm_gbs_cnt_min || nDif <= prm_gbs_difthd[0] ) {
++            nCurGbs = 0;
++        }
++        else if ( nDif <= prm_gbs_difthd[1] ) {
++            nCurGbs = 1;
++        }
++        else if ( nDif <= prm_gbs_difthd[2] ) {
++            nCurGbs = 2;
++        }
++        else {
++            nCurGbs = 3;
++        }
++    }
++
++    //
++    if ((nCurGbs != 0 && 0 == *pGbs) || (nCurGbs != 0 && abs(nCurGbs - *pGbs) <= prm_gbs_bsdifthd)) {
++        (*pGbsVldCnt) ++;
++    }
++    else {
++        *pGbsVldCnt = 0;
++    }
++
++    if ( *pGbsVldCnt >= prm_gbs_vldcntthd ) {
++        *pGbsVldFlg = 1;
++    }
++    else{
++        *pGbsVldFlg = 0;
++    }
++
++    *pGbs = nCurGbs;
++
++    // print debug info.
++    //printk("GBS info at Field: LR = %6d, LL = %6d, RR = %6d, DIF = %6d, CNT = %6d, DIF0 = %5d, DIF1 = %5d, DIF2 = %5d, RAT = %5d, GBS = %4d, GBS Flag = %4d, GBS Cnt = %4d.\n",nGbsStatLR,nGbsStatLL,nGbsStatRR,nGbsStatDif,nGbsStatCnt,	nDif0,nDif1,nDif2,nRat,	*pGbs,*pGbsVldFlg,*pGbsVldCnt);
++
++    return 0;
++}
++
++#ifdef DNR_HV_SHIFT
++int hor_blk_ofst_calc_sw(int *pHbOfVldCnt,
++                         int *pHbOfVldFlg,
++                         int *pHbOfst,
++                         int nHbOfStatCnt[32],
++			 int nXst,
++			 int nXed,
++                         int prm_hbof_minthd,
++                         int prm_hbof_ratthd0,
++			 int prm_hbof_ratthd1,
++			 int prm_hbof_vldcntthd,
++			 int nRow,
++			 int nCol)
++{
++    int i=0;
++
++    int nCurHbOfst=0;
++    int nRat0=0, nRat1=0;
++
++    int nMax1=0;
++    int nMax2=0;
++    int nMaxIdx=0;
++
++    //get 2 maximum, move to RTL part
++    nMax1 = nMax2 = 0;
++    for (i = 0; i < 8; i++ ) {
++        if ( nHbOfStatCnt[i] > nMax1 ) {
++            nMax2 = nMax1;
++            nMax1 = nHbOfStatCnt[i];
++            nMaxIdx = i;
++        }
++        else if (nHbOfStatCnt[i] > nMax2) {
++            nMax2 = nHbOfStatCnt[i];
++        }
++    }//i
++
++    // decide if offset valid
++    nCurHbOfst = -1;
++    nRat0 = 256*nMax1/((nXed - nXst)/8)/nRow;
++    nRat1 = 128*nMax1/max(nMax2, prm_hbof_minthd);
++    if ( nRat0 >= prm_hbof_ratthd0 && nRat1 >= prm_hbof_ratthd1) {
++        nCurHbOfst = (nMaxIdx+1)%8;
++    }
++
++    if ( nCurHbOfst == *pHbOfst ) {
++        (*pHbOfVldCnt) ++;
++    }
++    else {
++        *pHbOfVldCnt = 0;
++    }
++
++    if ( *pHbOfVldCnt >= prm_hbof_vldcntthd ) {
++        *pHbOfVldFlg = 1;
++    }
++    else {
++        *pHbOfVldFlg = 0;
++    }
++
++    *pHbOfst = (nCurHbOfst == -1) ? 0 : nCurHbOfst;
++
++    /* print for debug
++    printk("Hoff info at Field: ");
++    for ( i = 0; i < 32; i++ ) {
++	printk("%5d, ",  nHbOfStatCnt[i]);
++    }
++    */
++    if (dnr_pr)
++      pr_info("Max1 = %5d, Max2 = %5d, MaxIdx = %5d, Rat0 = %5d, Rat1 = %5d, CurHbOfst = %5d, HbOfVldFlg = %d, HbOfVldCnt = %d.\n", nMax1, nMax2, nMaxIdx, nRat0, nRat1, nCurHbOfst, *pHbOfVldFlg, *pHbOfVldCnt);
++
++
++    return 0;
++}
++int ver_blk_ofst_calc_sw(int *pVbOfVldCnt,
++                         int *pVbOfVldFlg,
++                         int *pVbOfst,
++                         int nVbOfStatCnt[32],
++			 int nYst,
++			 int nYed,
++                         int prm_vbof_minthd,
++                         int prm_vbof_ratthd0,
++			 int prm_vbof_ratthd1,
++                         int prm_vbof_vldcntthd,
++			 int nRow,
++			 int nCol)
++{
++    int i=0;
++
++    int nCurVbOfst=0;
++    int nRat0=0, nRat1=0;
++
++    int nMax1=0;
++    int nMax2=0;
++    int nMaxIdx=0;
++
++    // get 2 maximum, move to RTL part
++    nMax1 = nMax2 = 0;
++    for (i = 0; i < 8; i++ ) {
++        if ( nVbOfStatCnt[i] > nMax1 ) {
++            nMax2 = nMax1;
++            nMax1 = nVbOfStatCnt[i];
++            nMaxIdx = i;
++        }
++        else if (nVbOfStatCnt[i] > nMax2) {
++            nMax2 = nVbOfStatCnt[i];
++        }
++    }//i
++
++    // decide if offset valid
++    nCurVbOfst = -1;
++    nRat0 = 256*nMax1/((nYed - nYst)/8)/nCol;
++    nRat1 = 128*nMax1/max(nMax2, prm_vbof_minthd);
++    if ( nRat0 >= prm_vbof_ratthd0 && nRat1 >= prm_vbof_ratthd1) {
++        nCurVbOfst = (nMaxIdx+1)%8;
++    }
++
++    if ( nCurVbOfst == *pVbOfst ) {
++        (*pVbOfVldCnt) ++;
++    }
++    else {
++        *pVbOfVldCnt = 0;
++    }
++
++    if ( *pVbOfVldCnt >= prm_vbof_vldcntthd ) {
++        *pVbOfVldFlg = 1;
++    }
++    else {
++        *pVbOfVldFlg = 0;
++    }
++
++    *pVbOfst = (nCurVbOfst == -1) ? 0 : nCurVbOfst;
++
++    /* print for debug
++    printk("Voff info at Field: ");
++    for ( i = 0; i < 32; i++ ) {
++        printk("%5d, ",  nVbOfStatCnt[i]);
++    }//i
++    //printk("Max1 = %5d, Max2 = %5d, MaxIdx = %5d, Rat0 = %5d, Rat1 = %5d, CurVbOfst = %5d, VbOfVldFlg = %d, VbOfVldCnt = %d.\n", nMax1, nMax2, nMaxIdx, nRat0, nRat1, nCurVbOfst, *pVbOfVldFlg, *pVbOfVldCnt);
++*/
++    return 0;
++}
++#endif
++
++void run_dnr_in_irq(int nCol,int nRow)
++{
++    int ro_gbs_stat_lr=0,ro_gbs_stat_ll=0,ro_gbs_stat_rr=0,ro_gbs_stat_dif=0,ro_gbs_stat_cnt=0;
++    //int reg_dnr_stat_xst=0,reg_dnr_stat_xed=0,reg_dnr_stat_yst=0,reg_dnr_stat_yed=0;
++#ifdef DNR_HV_SHIFT
++    int ro_hbof_stat_cnt[32],ro_vbof_stat_cnt[32],i=0;
++#endif
++    Wr(DNR_HVSIZE,nCol<<16|nRow);
++    Wr(DNR_STAT_X_START_END,nCol-1);
++    Wr(DNR_STAT_Y_START_END,nRow-1);
++    ro_gbs_stat_lr = Rd(DNR_RO_GBS_STAT_LR);
++    ro_gbs_stat_ll = Rd(DNR_RO_GBS_STAT_LL);
++    ro_gbs_stat_rr = Rd(DNR_RO_GBS_STAT_RR);
++    ro_gbs_stat_dif = Rd(DNR_RO_GBS_STAT_DIF);
++    ro_gbs_stat_cnt = Rd(DNR_RO_GBS_STAT_CNT);
++
++    global_bs_calc_sw(&pDnrPrm->sw_gbs_vld_cnt,
++                      &pDnrPrm->sw_gbs_vld_flg,
++		      &pDnrPrm->sw_gbs,
++		      ro_gbs_stat_lr,
++		      ro_gbs_stat_ll,
++		      ro_gbs_stat_rr,
++		      ro_gbs_stat_dif,
++		      ro_gbs_stat_cnt,
++		      pDnrPrm->prm_gbs_vldcntthd, //prm below
++		      pDnrPrm->prm_gbs_cnt_min,
++		      pDnrPrm->prm_gbs_ratcalcmod,
++		      pDnrPrm->prm_gbs_ratthd,
++		      pDnrPrm->prm_gbs_difthd,
++		      pDnrPrm->prm_gbs_bsdifthd,
++		      pDnrPrm->prm_gbs_calcmod);
++#ifdef DNR_HV_SHIFT
++    for (i=0;i<32;i++)
++	ro_hbof_stat_cnt[i] = Rd(DNR_RO_HBOF_STAT_CNT_0+i);
++    for (i=0;i<32;i++)
++	ro_vbof_stat_cnt[i] = Rd(DNR_RO_VBOF_STAT_CNT_0+i);
++    hor_blk_ofst_calc_sw(&pDnrPrm->sw_hbof_vld_cnt,
++			 &pDnrPrm->sw_hbof_vld_flg,
++			 &pDnrPrm->sw_hbof,
++			 ro_hbof_stat_cnt,
++			 0,
++			 nCol-1,
++			 pDnrPrm->prm_hbof_minthd,
++			 pDnrPrm->prm_hbof_ratthd0,
++			 pDnrPrm->prm_hbof_ratthd1,
++			 pDnrPrm->prm_hbof_vldcntthd,
++			 nRow,
++			 nCol);
++
++    ver_blk_ofst_calc_sw(&pDnrPrm->sw_vbof_vld_cnt,
++			 &pDnrPrm->sw_vbof_vld_flg,
++			 &pDnrPrm->sw_vbof,
++			 ro_vbof_stat_cnt,
++			 0,
++			 nRow-1,
++			 pDnrPrm->prm_vbof_minthd,
++			 pDnrPrm->prm_vbof_ratthd0,
++			 pDnrPrm->prm_vbof_ratthd1,
++			 pDnrPrm->prm_vbof_vldcntthd,
++			 nRow,
++			 nCol);
++#endif
++    // update hardware registers
++    if ( 0 == pDnrPrm->prm_sw_gbs_ctrl) {
++	Wr(DNR_GBS,(1==pDnrPrm->sw_gbs_vld_flg)?pDnrPrm->sw_gbs : 0);
++    }
++    else if ( 1 == pDnrPrm->prm_sw_gbs_ctrl){
++	Wr_reg_bits(DNR_BLK_OFFST,1==pDnrPrm->sw_hbof_vld_flg?pDnrPrm->sw_hbof:0,4,3);
++	Wr(DNR_GBS,(1==pDnrPrm->sw_hbof_vld_flg&&1==pDnrPrm->sw_gbs_vld_flg)?pDnrPrm->sw_gbs:0);
++    }
++    else if ( 2 == pDnrPrm->prm_sw_gbs_ctrl){
++	Wr_reg_bits(DNR_BLK_OFFST,1==pDnrPrm->sw_vbof_vld_flg?pDnrPrm->sw_vbof:0,0,3);
++	Wr(DNR_GBS,(1==pDnrPrm->sw_vbof_vld_flg &&1==pDnrPrm->sw_gbs_vld_flg)?pDnrPrm->sw_gbs:0);
++    }
++    else if ( 3 == pDnrPrm->prm_sw_gbs_ctrl){
++	Wr_reg_bits(DNR_BLK_OFFST,1==pDnrPrm->sw_hbof_vld_flg ? pDnrPrm->sw_hbof : 0,4,3);
++	Wr_reg_bits(DNR_BLK_OFFST,1==pDnrPrm->sw_vbof_vld_flg ? pDnrPrm->sw_vbof : 0,0,3);
++	Wr(DNR_GBS,(1==pDnrPrm->sw_hbof_vld_flg&&1==pDnrPrm->sw_vbof_vld_flg&&1==pDnrPrm->sw_gbs_vld_flg)?pDnrPrm->sw_gbs:0);
++    }
++}
++
++static void parse_cmd_params(char *buf_orig,char **parm)
++{
++    char *ps, *token;
++    unsigned int n=0;
++
++    ps = buf_orig;
++    while (1) {
++        token = strsep(&ps, " \n");
++        if (token == NULL)
++            break;
++        if (*token == '\0')
++            continue;
++        parm[n++] = token;
++    }
++}
++
++static dnr_param_t dnr_params[]=
++{
++    {"prm_sw_gbs_ctrl",&(dnr_param.prm_sw_gbs_ctrl)},
++    {"prm_gbs_vldcntthd",&(dnr_param.prm_gbs_vldcntthd)},
++    {"prm_gbs_cnt_min", &(dnr_param.prm_gbs_cnt_min)},
++    {"prm_gbs_ratcalcmod",&(dnr_param.prm_gbs_ratcalcmod)},
++    {"prm_gbs_ratthd[0]",&(dnr_param.prm_gbs_ratthd[0])},
++    {"prm_gbs_ratthd[1]",&(dnr_param.prm_gbs_ratthd[1])},
++    {"prm_gbs_ratthd[2]",&(dnr_param.prm_gbs_ratthd[2])},
++    {"prm_gbs_difthd[0]",&(dnr_param.prm_gbs_difthd[0])},
++    {"prm_gbs_difthd[1]",&(dnr_param.prm_gbs_difthd[1])},
++    {"prm_gbs_difthd[2]",&(dnr_param.prm_gbs_difthd[2])},
++    {"prm_gbs_bsdifthd",&(dnr_param.prm_gbs_bsdifthd)},
++    {"prm_gbs_calcmod",&(dnr_param.prm_gbs_calcmod)},
++    {"sw_gbs",&(dnr_param.sw_gbs)},
++    {"sw_gbs_vld_flg",&(dnr_param.sw_gbs_vld_flg)},
++    {"sw_gbs_vld_cnt",&(dnr_param.sw_gbs_vld_cnt)},
++    {"prm_hbof_minthd",&(dnr_param.prm_hbof_minthd)},
++    {"prm_hbof_ratthd0",&(dnr_param.prm_hbof_ratthd0)},
++    {"prm_hbof_ratthd1",&(dnr_param.prm_hbof_ratthd1)},
++    {"prm_hbof_vldcntthd",&(dnr_param.prm_hbof_vldcntthd)},
++    {"sw_hbof",&(dnr_param.sw_hbof)},
++    {"sw_hbof_vld_flg",&(dnr_param.sw_hbof_vld_flg)},
++    {"sw_hbof_vld_cnt",&(dnr_param.sw_hbof_vld_cnt)},
++    {"prm_vbof_minthd",&(dnr_param.prm_vbof_minthd)},
++    {"prm_vbof_ratthd0",&(dnr_param.prm_vbof_ratthd0)},
++    {"prm_vbof_ratthd1",&(dnr_param.prm_vbof_ratthd1)},
++    {"prm_vbof_vldcntthd",&(dnr_param.prm_vbof_vldcntthd)},
++    {"sw_vbof",&(dnr_param.sw_vbof)},
++    {"sw_vbof_vld_flg",&(dnr_param.sw_vbof_vld_flg)},
++    {"sw_vbof_vld_cnt",&(dnr_param.sw_vbof_vld_cnt)},
++    {"", NULL}
++};
++static ssize_t dnr_param_store(struct device *dev, struct device_attribute *attr,const char *buff,size_t count)
++{
++    int i=0,vaule=0;
++    char *parm[2]={NULL},*buf_orig;
++
++    buf_orig = kstrdup(buff, GFP_KERNEL);
++    parse_cmd_params(buf_orig,(char**)(&parm));
++    for (i=0;dnr_params[i].addr;i++) {
++	if (!strcmp(parm[0],dnr_params[i].name)) {
++            vaule = simple_strtol(parm[1],NULL,10);
++	    *(dnr_params[i].addr) = vaule;
++	    pr_info("%s=%d.\n",dnr_params[i].name,*(dnr_params[i].addr));
++	}
++    }
++
++    return count;
++}
++
++static ssize_t dnr_param_show(struct device *dev,struct device_attribute *attr,char *buff)
++{
++    ssize_t len=0;
++    int i=0;
++    for (i=0;dnr_params[i].addr;i++)
++        len += sprintf(buff+len,"%s=%d.\n",dnr_params[i].name,*(dnr_params[i].addr));
++    return len;
++}
++static DEVICE_ATTR(dnr_param, 0664, dnr_param_show, dnr_param_store);
++
++void dnr_init(struct device *dev)
++{
++    dnr_prm_init(&dnr_param);
++    device_create_file(dev, &dev_attr_dnr_param);
++}
++#endif
+diff --git a/drivers/amlogic/deinterlace/dnr.h b/drivers/amlogic/deinterlace/dnr.h
+new file mode 100644
+index 000000000000..61f522e33b37
+--- /dev/null
++++ b/drivers/amlogic/deinterlace/dnr.h
+@@ -0,0 +1,99 @@
++#ifndef _DNR_H
++#define _DNR_H
++
++#define Wr(adr, val) WRITE_VCBUS_REG(adr, val)
++#define Rd(adr) READ_VCBUS_REG(adr)
++#define Wr_reg_bits(adr, val, start, len) WRITE_VCBUS_REG_BITS(adr, val, start, len)
++
++typedef struct dnr_param_s{
++    char *name;
++    int *addr;
++}dnr_param_t;
++
++typedef struct {
++    int prm_sw_gbs_ctrl;
++    int prm_gbs_vldcntthd;
++    int prm_gbs_cnt_min;
++    int prm_gbs_ratcalcmod;
++    int prm_gbs_ratthd[3];
++    int prm_gbs_difthd[3];
++    int prm_gbs_bsdifthd;
++    int prm_gbs_calcmod;
++    int sw_gbs;
++    int sw_gbs_vld_flg;
++    int sw_gbs_vld_cnt;
++    int prm_hbof_minthd;
++    int prm_hbof_ratthd0;
++    int prm_hbof_ratthd1;
++    int prm_hbof_vldcntthd;
++    int sw_hbof;
++    int sw_hbof_vld_flg;
++    int sw_hbof_vld_cnt;
++    int prm_vbof_minthd;
++    int prm_vbof_ratthd0;
++    int prm_vbof_ratthd1;
++    int prm_vbof_vldcntthd;
++    int sw_vbof;
++    int sw_vbof_vld_flg;
++    int sw_vbof_vld_cnt;
++}DNR_PRM_t;//used for software
++// software parameters initialization£¬ initializing before used
++void dnr_init(struct device *dev);
++
++int global_bs_calc_sw(int *pGbsVldCnt,
++                      int *pGbsVldFlg,
++                      int *pGbs,
++                      int nGbsStatLR,
++                      int nGbsStatLL,
++                      int nGbsStatRR,
++                      int nGbsStatDif,
++                      int nGbsStatCnt,
++                      int prm_gbs_vldcntthd, //prm below
++                      int prm_gbs_cnt_min,
++                      int prm_gbs_ratcalcmod,
++                      int prm_gbs_ratthd[3],
++                      int prm_gbs_difthd[3],
++                      int prm_gbs_bsdifthd,
++                      int prm_gbs_calcmod);
++
++int hor_blk_ofst_calc_sw(int *pHbOfVldCnt,
++                         int *pHbOfVldFlg,
++                         int *pHbOfst,
++                         int nHbOfStatCnt[32],
++			 int nXst,
++			 int nXed,
++                         int prm_hbof_minthd,
++                         int prm_hbof_ratthd0,
++			 int prm_hbof_ratthd1,
++                         int prm_hbof_vldcntthd,
++			 int nRow,
++			 int nCol);
++
++int hor_blk_ofst_calc_sw(int *pHbOfVldCnt,
++                         int *pHbOfVldFlg,
++                         int *pHbOfst,
++                         int nHbOfStatCnt[32],
++			 int nXst,
++			 int nXed,
++                         int prm_hbof_minthd,
++                         int prm_hbof_ratthd0,
++			 int prm_hbof_ratthd1,
++			 int prm_hbof_vldcntthd,
++			 int nRow,
++			 int nCol);
++
++int ver_blk_ofst_calc_sw(int *pVbOfVldCnt,
++                         int *pVbOfVldFlg,
++                         int *pVbOfst,
++                         int nVbOfStatCnt[32],
++			 int nYst,
++			 int nYed,
++                         int prm_vbof_minthd,
++                         int prm_vbof_ratthd0,
++			 int prm_vbof_ratthd1,
++                         int prm_vbof_vldcntthd,
++			 int nRow,
++			 int nCol);
++void run_dnr_in_irq(int nCol,int nRow);
++#endif
++
+-- 
+2.19.0
+

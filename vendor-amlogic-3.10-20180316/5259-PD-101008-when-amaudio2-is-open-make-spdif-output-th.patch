@@ -1,0 +1,240 @@
+From a9a38a116b9e04ddb43841f1f812b24fcf7ca952 Mon Sep 17 00:00:00 2001
+From: "zhe.wang" <zhe.wang@amlogic.com>
+Date: Wed, 24 Dec 2014 16:55:21 +0800
+Subject: [PATCH 5259/5965] PD#101008: when amaudio2 is open, make spdif output
+ the same as i2s output
+
+Change-Id: I20ed0b8c84ba8dfe851bab16f2ed8d60d3f311c1
+---
+ arch/arm/configs/meson8_defconfig   |  1 +
+ drivers/amlogic/amaudio2/amaudio2.c | 23 ++++++++++++++++
+ sound/soc/aml/m8/aml_i2s.c          | 15 +----------
+ sound/soc/aml/m8/aml_i2s_dai.c      | 11 ++++++++
+ sound/soc/aml/m8/aml_spdif_dai.c    | 42 ++++++++++++++---------------
+ 5 files changed, 57 insertions(+), 35 deletions(-)
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 7821ce19b7a8..deba4e7c1f98 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -273,6 +273,7 @@ CONFIG_AM_HDMI_ONLY=y
+ CONFIG_VIUIN=y
+ CONFIG_TVIN_ISP=y
+ CONFIG_AML_SII9233=y
++CONFIG_AMAUDIO2=y
+ CONFIG_POST_PROCESS_MANAGER=y
+ CONFIG_POST_PROCESS_MANAGER_PPSCALER=y
+ CONFIG_VIDEO_AMLOGIC_CAPTURE=y
+diff --git a/drivers/amlogic/amaudio2/amaudio2.c b/drivers/amlogic/amaudio2/amaudio2.c
+index 594c22962e96..f84f4f0a1baf 100755
+--- a/drivers/amlogic/amaudio2/amaudio2.c
++++ b/drivers/amlogic/amaudio2/amaudio2.c
+@@ -104,6 +104,7 @@ static int direct_right_gain = 128;
+ static int music_gain = 128;
+ static int audio_out_mode = 0;
+ static int audio_out_read_enable = 0;
++int amaudio2_enable = 0;
+ 
+ static irqreturn_t i2s_out_callback(int irq, void* data);
+ static unsigned get_i2s_out_size(void);
+@@ -716,12 +717,34 @@ static ssize_t store_audio_read_enable(struct class* class, struct class_attribu
+   	return count;
+ }
+ 
++static ssize_t show_aml_amaudio2_enable(struct class* class, struct class_attribute* attr,
++    char* buf)
++{
++	return sprintf(buf, "%d\n", amaudio2_enable);
++}
++
++static ssize_t store_aml_amaudio2_enable(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	if(buf[0] == '0'){
++		printk(KERN_INFO "amaudio2 is disable!\n");
++		amaudio2_enable = 0;
++	}else if(buf[0] == '1'){
++		printk(KERN_INFO "amaudio2 is enable!\n");
++		amaudio2_enable = 1;
++	}else{
++		printk(KERN_INFO "Invalid argument!\n");
++	}
++  	return count;
++}
++
+ static struct class_attribute amaudio_attrs[]={
+ 	__ATTR(aml_audio_out_mode,  S_IRUGO | S_IWUSR, show_audio_out_mode, store_audio_out_mode),
+ 	__ATTR(aml_direct_left_gain,  S_IRUGO | S_IWUSR, show_direct_left_gain, store_direct_left_gain),
+ 	__ATTR(aml_direct_right_gain,  S_IRUGO | S_IWUSR, show_direct_right_gain, store_direct_right_gain),
+ 	__ATTR(aml_music_gain,  S_IRUGO | S_IWUSR, show_music_gain, store_music_gain),
+ 	__ATTR(aml_audio_read_enable,  S_IRUGO | S_IWUSR, show_audio_read_enable, store_audio_read_enable),
++	__ATTR(aml_amaudio2_enable,  S_IRUGO | S_IWUSR | S_IWGRP, show_aml_amaudio2_enable, store_aml_amaudio2_enable),
+ 	__ATTR_RO(status),
+ 	__ATTR_NULL
+ };
+diff --git a/sound/soc/aml/m8/aml_i2s.c b/sound/soc/aml/m8/aml_i2s.c
+index 7e33583cd224..f3a6698f4f8c 100755
+--- a/sound/soc/aml/m8/aml_i2s.c
++++ b/sound/soc/aml/m8/aml_i2s.c
+@@ -43,16 +43,10 @@
+ #define ALSA_TRACE()
+ #endif
+ 
+-
+ unsigned int aml_i2s_playback_start_addr = 0;
+-unsigned int aml_i2s_capture_start_addr  = 0;
+-unsigned int aml_i2s_playback_end_addr = 0;
+-unsigned int aml_i2s_capture_end_addr = 0;
+-
+ unsigned int aml_i2s_playback_phy_start_addr = 0;
++unsigned int aml_i2s_capture_start_addr  = 0;
+ unsigned int aml_i2s_capture_phy_start_addr  = 0;
+-unsigned int aml_i2s_playback_phy_end_addr = 0;
+-unsigned int aml_i2s_capture_phy_end_addr = 0;
+ 
+ unsigned int aml_i2s_capture_buf_size = 0;
+ unsigned int aml_i2s_playback_enable = 1;
+@@ -488,25 +482,18 @@ static int aml_i2s_open(struct snd_pcm_substream *substream)
+ 	struct snd_dma_buffer *buf = &substream->dma_buffer;
+ 	audio_stream_t *s= &prtd->s;
+ 	int ret = 0;
+-	unsigned int size = 0;
+ 	ALSA_TRACE();
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+ 		snd_soc_set_runtime_hwparams(substream, &aml_i2s_hardware);
+ 		if(s->device_type == AML_AUDIO_I2SOUT){
+-			size = aml_i2s_hardware.buffer_bytes_max;
+ 			aml_i2s_playback_start_addr = (unsigned int)buf->area;
+-			aml_i2s_playback_end_addr = (unsigned int)buf->area + size;
+ 			aml_i2s_playback_phy_start_addr = buf->addr;
+-			aml_i2s_playback_phy_end_addr = buf->addr+size;
+ 		}
+ 	}else{
+ 		snd_soc_set_runtime_hwparams(substream, &aml_i2s_capture);
+ 		if(s->device_type == AML_AUDIO_I2SIN){
+-			size = aml_i2s_capture.buffer_bytes_max;
+ 			aml_i2s_capture_start_addr = (unsigned int)buf->area;
+-			aml_i2s_capture_end_addr = (unsigned int)buf->area + size;
+ 			aml_i2s_capture_phy_start_addr = buf->addr;
+-			aml_i2s_capture_phy_end_addr = buf->addr+size;
+ 		}
+ 	}
+ 
+diff --git a/sound/soc/aml/m8/aml_i2s_dai.c b/sound/soc/aml/m8/aml_i2s_dai.c
+index 9679c60080c8..57955e7224fb 100755
+--- a/sound/soc/aml/m8/aml_i2s_dai.c
++++ b/sound/soc/aml/m8/aml_i2s_dai.c
+@@ -38,6 +38,7 @@ static int i2s_pos_sync = 0;
+ #define ALSA_TRACE()   
+ #endif
+ 
++extern int amaudio2_enable;
+ static int i2sbuf[32+16];
+ static void  aml_i2s_play(void)
+ {
+@@ -111,6 +112,7 @@ static void aml_dai_i2s_shutdown(struct snd_pcm_substream *substream,
+ }
+ #define AOUT_EVENT_IEC_60958_PCM 0x1
+ extern int aout_notifier_call_chain(unsigned long val,void * v);
++extern void aml_hw_iec958_init(struct snd_pcm_substream *substream);
+ 
+ static int aml_dai_i2s_prepare(struct snd_pcm_substream *substream,
+ 					struct snd_soc_dai *dai)
+@@ -189,6 +191,9 @@ static int aml_dai_i2s_prepare(struct snd_pcm_substream *substream,
+     else{       
+         s->device_type = AML_AUDIO_I2SOUT;
+         aml_hw_i2s_init(runtime);
++        if(amaudio2_enable == 1){
++            aml_hw_iec958_init(substream);
++        }
+     }
+     if(runtime->channels == 8){
+         printk("[%s,%d]8ch PCM output->notify HDMI\n",__FUNCTION__,__LINE__);
+@@ -210,6 +215,9 @@ static int aml_dai_i2s_trigger(struct snd_pcm_substream *substream, int cmd,
+ 			if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+ 				printk("aiu i2s playback enable\n\n");
+ 				audio_out_i2s_enable(1);
++				if(amaudio2_enable == 1){
++					audio_hw_958_enable(1);
++				}
+ 			}else{
+ 				audio_in_i2s_enable(1);
+ 				ppp = (int*)(rtd->dma_area+rtd->dma_bytes*2-8);
+@@ -223,6 +231,9 @@ static int aml_dai_i2s_trigger(struct snd_pcm_substream *substream, int cmd,
+ 			if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+ 				printk("aiu i2s playback disable\n\n");
+ 				audio_out_i2s_enable(0);
++				if(amaudio2_enable == 1){
++					audio_hw_958_enable(0);
++				}
+ 			}else{
+ 				audio_in_i2s_enable(0);
+ 			}
+diff --git a/sound/soc/aml/m8/aml_spdif_dai.c b/sound/soc/aml/m8/aml_spdif_dai.c
+index de04935fad9b..6e89d33fdf63 100755
+--- a/sound/soc/aml/m8/aml_spdif_dai.c
++++ b/sound/soc/aml/m8/aml_spdif_dai.c
+@@ -143,7 +143,7 @@ special call by the audiodsp,add these code,as there are three cases for 958 s/p
+ 2)PCM  output for  all audio, when pcm mode is selected by user .
+ 3)PCM  output for audios except ac3/dts,when raw output mode is selected by user
+ */
+-static void aml_hw_iec958_init(struct snd_pcm_substream *substream)
++void aml_hw_iec958_init(struct snd_pcm_substream *substream)
+ {
+     _aiu_958_raw_setting_t set;
+     _aiu_958_channel_status_t chstat;
+@@ -312,31 +312,31 @@ static void aml_hw_iec958_init(struct snd_pcm_substream *substream)
+ 	if(IEC958_mode_codec == 4 || IEC958_mode_codec == 5 || IEC958_mode_codec == 7 ||IEC958_mode_codec == 8){  //dd+
+ 		WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 0, 4, 2); // 4x than i2s
+         	printk("IEC958_mode_codec/%d  4x than i2s\n",IEC958_mode_codec);
+-	}else
++	}else{
+ #if OVERCLOCK == 1 || IEC958_OVERCLOCK == 1	
+ 		WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 3, 4, 2);//512fs divide 4 == 128fs
+ #else
+ 		WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 1, 4, 2); //256fs divide 2 == 128fs
+ #endif
+-        if(IEC958_mode_codec == 2){
+-                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_AC_3,substream);
+-        }
+-        else if(IEC958_mode_codec == 3){
+-                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS,substream);
+-        }
+-        else if(IEC958_mode_codec == 4){
+-                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DOBLY_DIGITAL_PLUS,substream);
+-        }else if(IEC958_mode_codec == 5){
+-                aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS_HD,substream);
+-        }else if(IEC958_mode_codec == 7 || IEC958_mode_codec == 8){
+-		    WRITE_MPEG_REG(AIU_958_CHSTAT_L0, 0x1902);
+-		    WRITE_MPEG_REG(AIU_958_CHSTAT_L1, 0x900);
+-		    WRITE_MPEG_REG(AIU_958_CHSTAT_R0, 0x1902);
+-		    WRITE_MPEG_REG(AIU_958_CHSTAT_R1, 0x900);    
+-        	aout_notifier_call_chain(AOUT_EVENT_RAWDATA_MAT_MLP,substream);
+-        }else{
+-	        aout_notifier_call_chain(AOUT_EVENT_IEC_60958_PCM,substream);
+-        }
++	}
++    if(IEC958_mode_codec == 2){
++        aout_notifier_call_chain(AOUT_EVENT_RAWDATA_AC_3,substream);
++    }else if(IEC958_mode_codec == 3){
++        aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS,substream);
++    }else if(IEC958_mode_codec == 4){
++        aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DOBLY_DIGITAL_PLUS,substream);
++    }else if(IEC958_mode_codec == 5){
++        aout_notifier_call_chain(AOUT_EVENT_RAWDATA_DTS_HD,substream);
++    }else if(IEC958_mode_codec == 7 || IEC958_mode_codec == 8){
++		WRITE_MPEG_REG(AIU_958_CHSTAT_L0, 0x1902);
++		WRITE_MPEG_REG(AIU_958_CHSTAT_L1, 0x900);
++		WRITE_MPEG_REG(AIU_958_CHSTAT_R0, 0x1902);
++		WRITE_MPEG_REG(AIU_958_CHSTAT_R1, 0x900);    
++        aout_notifier_call_chain(AOUT_EVENT_RAWDATA_MAT_MLP,substream);
++    }else{
++	    aout_notifier_call_chain(AOUT_EVENT_IEC_60958_PCM,substream);
++    }
++    ALSA_PRINT("spdif dma %x,phy addr %x\n",(unsigned)runtime->dma_area,(unsigned)runtime->dma_addr);
+ }
+ /*
+ special call by the audiodsp,add these code,as there are three cases for 958 s/pdif output
+-- 
+2.19.0
+

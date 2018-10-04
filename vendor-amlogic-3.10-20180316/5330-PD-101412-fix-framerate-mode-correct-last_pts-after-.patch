@@ -1,0 +1,146 @@
+From aeb59c2df9c1ecfab6a7a8fd0693a434ca862a5b Mon Sep 17 00:00:00 2001
+From: "spike.liao" <spike.liao@amlogic.com>
+Date: Thu, 15 Jan 2015 14:55:19 +0800
+Subject: [PATCH 5330/5965] PD #101412 fix framerate mode,correct last_pts
+ after vf->duration changed
+
+Conflicts:
+	drivers/amlogic/deinterlace/deinterlace.c
+
+Change-Id: Icb368fc03ee5f76d3eaef7f43ee32ce8b8514bfd
+---
+ drivers/amlogic/deinterlace/deinterlace.c    | 35 ++++++++++++--------
+ drivers/amlogic/deinterlace/deinterlace_hw.c | 16 +++++++--
+ 2 files changed, 34 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+index e95c712fb684..0c8de69060c4 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -1660,6 +1660,7 @@ typedef struct{
+     int pre_de_irq_timeout_count;
+     int pre_throw_flag;
+     int bad_frame_throw_count;
++    bool force_interlace;
+ }di_pre_stru_t;
+ static di_pre_stru_t di_pre_stru;
+ 
+@@ -1690,7 +1691,8 @@ static void dump_di_pre_stru(void)
+ #ifdef DET3D
+     printk("vframe_interleave_flag = %d\n", di_pre_stru.vframe_interleave_flag);
+ #endif
+-    printk("left_right 		   = %d\n", di_pre_stru.left_right);
++    printk("left_right 		 = %d\n", di_pre_stru.left_right);
++    printk("force_interlace        = %s\n",di_pre_stru.force_interlace?"true":"false");
+ }
+ 
+ typedef struct{
+@@ -2231,7 +2233,8 @@ static unsigned char is_source_change(vframe_t* vframe)
+     	((di_pre_stru.cur_inp_type&VIDTYPE_VIU_FIELD)!=(vframe->type&VIDTYPE_VIU_FIELD))
+     	){
+     	/* just scan mode changed */
+-    	pr_info("DI I<->P.\n");
++    	if(!di_pre_stru.force_interlace)
++    	    pr_info("DI I<->P.\n");
+     	return 2;
+     }
+     return 0;
+@@ -4055,6 +4058,8 @@ static unsigned char pre_de_buf_config(void)
+         else{
+             /* check if top/bot interleaved */
+             if(di_pre_stru.cur_prog_flag == 0){
++            	if(change_type == 2)//source is i interleaves p fields
++            	    di_pre_stru.force_interlace = true;
+                 if((di_pre_stru.cur_inp_type & VIDTYPE_TYPEMASK) ==
+                     (di_buf->vframe->type & VIDTYPE_TYPEMASK)){
+ #ifdef CHECK_VDIN_BUF_ERROR
+@@ -4072,15 +4077,6 @@ static unsigned char pre_de_buf_config(void)
+                         return 0;
+                     }
+                 }
+-                /* process p fields in i source as interlace*/
+-                if((di_buf->vframe->type & VIDTYPE_TYPEMASK) == VIDTYPE_PROGRESSIVE){
+-               	    if((di_pre_stru.cur_inp_type & VIDTYPE_TYPEMASK) == VIDTYPE_INTERLACE_TOP){
+-                        di_buf->vframe->type|=VIDTYPE_INTERLACE_BOTTOM;
+-                }
+-                    else{
+-                        di_buf->vframe->type|=VIDTYPE_INTERLACE_TOP;
+-                    }
+-                }
+             }
+                 else{
+                     di_pre_stru.same_field_source_flag=0;
+@@ -4182,15 +4178,26 @@ static unsigned char pre_de_buf_config(void)
+                 else{
+                     //n
+                     di_buf->post_proc_flag = 0;
+-                    if(prog_proc_config & 0x40)
++                    if((prog_proc_config&0x40) || di_pre_stru.force_interlace){
+                     	di_buf->post_proc_flag = 1;
+-                    di_pre_stru.di_inp_buf = di_buf;
++                    }
+                     if(di_pre_stru.prog_proc_type == 0){
+-                        di_pre_stru.process_count = 1;
++                      	if(change_type == 2){
++               	            if((di_pre_stru.cur_inp_type & VIDTYPE_TYPEMASK) == VIDTYPE_INTERLACE_TOP){
++                                di_pre_stru.process_count = 0;
++                            }
++                            else{
++                                di_pre_stru.process_count = 1;
++                            }
++                        }else{
++                            di_pre_stru.process_count = 1;
++                        }
+                     }
+                     else{
+                         di_pre_stru.process_count = 0;
+                     }
++                    
++                    di_pre_stru.di_inp_buf = di_buf;
+ #ifdef DI_DEBUG
+                     di_print("%s: %s[%d] => di_inp_buf, process_count %d\n",
+                         __func__, vframe_type_name[di_buf->type], di_buf->index, di_pre_stru.process_count);
+diff --git a/drivers/amlogic/deinterlace/deinterlace_hw.c b/drivers/amlogic/deinterlace/deinterlace_hw.c
+index e5443e8abfdb..a44f2a5a6b02 100755
+--- a/drivers/amlogic/deinterlace/deinterlace_hw.c
++++ b/drivers/amlogic/deinterlace/deinterlace_hw.c
+@@ -287,7 +287,14 @@ static void set_di_chan2_mif ( DI_MIF_t *mif, int urgent, int hold_line );
+ static void set_di_if0_mif ( DI_MIF_t *mif, int urgent, int hold_line );
+ 
+ static void di_nr_init(void);
+-
++#ifdef NEW_DI_V2
++static void ma_di_init(void)
++{
++    //420->422 chrome difference is large motion is large,flick
++    Wr(DI_MTN_1_CTRL4, 0x01800880);
++    Wr(DI_MTN_1_CTRL7, 0x0a800480);
++}
++#endif
+ #ifdef NEW_DI_V3
+ static void mc_di_param_init(void)
+ {
+@@ -331,6 +338,9 @@ void di_hw_init(void)
+ #endif
+ 	//nr default setting
+     di_nr_init();
++#if (defined NEW_DI_V2 && !defined NEW_DI_TV)
++    ma_di_init();
++#endif
+ #ifdef NEW_DI_V3
+     mc_di_param_init();
+ #endif
+@@ -2205,8 +2215,8 @@ static void di_nr_init()
+     Wr(NR3_SUREMOT_CGAIN,0x22264014);
+ #elif (defined NEW_DI_V1)
+     Wr(DI_NR_CTRL0,0xc60c0804);
+-    Wr(DI_NR_CTRL1,0x403e3c3a);
+-    Wr(DI_NR_CTRL2,0x08010a01);
++    Wr(DI_NR_CTRL1,0xbf3f8080);
++    Wr(DI_NR_CTRL2,0x3f3f8080);
+     Wr(DI_NR_CTRL3,0x001002d0);
+     Wr(NR2_3DEN_MODE, 0x77);
+     Wr(NR2_SNR_SAD_CFG, 0x134f);
+-- 
+2.19.0
+

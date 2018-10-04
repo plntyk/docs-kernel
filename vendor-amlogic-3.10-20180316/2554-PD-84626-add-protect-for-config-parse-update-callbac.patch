@@ -1,0 +1,2654 @@
+From b455d0a6bb27251688c29767b08791292041c7c5 Mon Sep 17 00:00:00 2001
+From: "xiaoyu.yuan" <xiaoyu.yuan@droid05.amlogic.com>
+Date: Wed, 18 Dec 2013 23:06:40 +0800
+Subject: [PATCH 2554/5965] PD #84626 :add protect for config parse && update
+ callback function
+
+---
+ drivers/amlogic/camera/ar0543.c               | 217 ++++----
+ drivers/amlogic/camera/ar0833.c               | 206 ++++---
+ drivers/amlogic/camera/common/config_parser.c | 518 +++++++++++-------
+ drivers/amlogic/camera/common/config_parser.h |  31 +-
+ drivers/amlogic/camera/ov5647.c               | 184 +++----
+ drivers/amlogic/tvin/isp/isp_drv.c            |  26 +-
+ drivers/amlogic/tvin/isp/isp_sm.c             |  27 +-
+ include/linux/amlogic/tvin/tvin_v4l2.h        |  19 +-
+ 8 files changed, 703 insertions(+), 525 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index cca44ad9d98f..97ab25c6847f 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -97,16 +97,12 @@ static struct v4l2_fract ar0543_frmintervals_active = {
+ 
+ static int ar0543_have_open=0;
+ 
+-extern configure *cf;
++
+ static camera_mode_t ar0543_work_mode = CAMERA_PREVIEW;
+ static struct class *cam_class;
+ static unsigned int g_ae_manual_exp;
+ static unsigned int g_ae_manual_ag;
+ static unsigned int g_ae_manual_vts;
+-extern sensor_aet_info_t *sensor_aet_info; // point to 1 of up to 16 aet information
+-extern sensor_aet_t *sensor_aet_table;
+-extern unsigned int sensor_aet_step;
+-
+ static unsigned int exp_mode;
+ static unsigned int change_cnt;
+ static unsigned int current_fmt;
+@@ -135,6 +131,7 @@ static int t_index = -1;
+ static int dest_hactive = 640;
+ static int dest_vactive = 480;
+ static bool bDoingAutoFocusMode = false;
++static configure_t *cf;
+ /* supported controls */
+ static struct v4l2_queryctrl ar0543_qctrl[] = {
+ 	{
+@@ -175,7 +172,7 @@ static struct v4l2_queryctrl ar0543_qctrl[] = {
+ 		.flags         = V4L2_CTRL_FLAG_DISABLED,
+ 	},{
+ 		.id            = V4L2_CID_DO_WHITE_BALANCE,
+-		.type          = V4L2_CTRL_TYPE_INTEGER,
++		.type          = V4L2_CTRL_TYPE_MENU,
+ 		.name          = "white balance",
+ 		.minimum       = 0,
+ 		.maximum       = 6,
+@@ -291,6 +288,30 @@ static struct v4l2_frmivalenum ar0543_frmivalenum[]={
+                                 .denominator	= 30,
+                         }
+                 }
++        },{
++                .index 		= 0,
++                .pixel_format	= V4L2_PIX_FMT_NV21,
++                .width		= 1280,
++                .height		= 960,
++                .type		= V4L2_FRMIVAL_TYPE_DISCRETE,
++                {
++                        .discrete	={
++                                .numerator	= 1,
++                                .denominator	= 30,
++                        }
++                }
++        },{
++                .index 		= 0,
++                .pixel_format	= V4L2_PIX_FMT_NV21,
++                .width		= 2048,
++                .height		= 1536,
++                .type		= V4L2_FRMIVAL_TYPE_DISCRETE,
++                {
++                        .discrete	={
++                                .numerator	= 1,
++                                .denominator	= 15,
++                        }
++                }
+         },{
+                 .index 		= 0,
+                 .pixel_format	= V4L2_PIX_FMT_NV21,
+@@ -616,11 +637,16 @@ struct ar0543_device {
+ 	struct vdin_v4l2_ops_s *vops;
+ 	
+ 	fe_arg_t fe_arg;
++	
++	vdin_arg_t vdin_arg;
+ 	/* wake lock */
+ 	struct wake_lock	wake_lock;
+ 	/* ae status */
+ 	bool ae_on;
+ 	
++	camera_priv_data_t camera_priv_data;
++	
++	configure_t *configure;
+ 	/* Control 'registers' */
+ 	int 			   qctl_regs[ARRAY_SIZE(ar0543_qctrl)];
+ };
+@@ -1486,16 +1512,23 @@ static ssize_t aet_manual_show(struct class *cls,struct class_attribute *attr, c
+ static CLASS_ATTR(aet_debug, 0664, aet_manual_show, aet_manual_store);
+ 
+ /* ar0543 uses exp+ag mode */
+-static bool AR0543_set_aet_new_step(unsigned int new_step, bool exp_mode, bool ag_mode){
+-  unsigned int exp = 0, ag = 0, vts = 0;
+-  if ((!exp_mode) || (!ag_mode) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
++static bool AR0543_set_aet_new_step(void *priv,unsigned int new_step, bool exp_mode, bool ag_mode){
++  	unsigned int exp = 0, ag = 0, vts = 0;
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv; 
++	sensor_aet_t *sensor_aet_table = camera_priv_data->sensor_aet_table;
++	sensor_aet_info_t *sensor_aet_info = camera_priv_data->sensor_aet_info;
++	
++	if(camera_priv_data == NULL || sensor_aet_table == NULL || sensor_aet_info == NULL)
++		return false;	
++  	if (((!exp_mode) && (!ag_mode))  || (new_step > sensor_aet_info[aet_index].tbl_max_step))
+ 		return(false);
+ 	else
+ 	{
+-		sensor_aet_step = new_step;
+-		exp = sensor_aet_table[sensor_aet_step].exp;
+-		ag = sensor_aet_table[sensor_aet_step].ag;
+-		vts = sensor_aet_table[sensor_aet_step].vts;
++		camera_priv_data->sensor_aet_step = new_step;
++		exp = sensor_aet_table[camera_priv_data->sensor_aet_step].exp;
++		ag = sensor_aet_table[camera_priv_data->sensor_aet_step].ag;
++		vts = sensor_aet_table[camera_priv_data->sensor_aet_step].vts;
++
+ 		
+ 		AR0543_manual_set_aet(exp,ag,vts);
+ 		return true;
+@@ -1505,29 +1538,8 @@ static bool AR0543_set_aet_new_step(unsigned int new_step, bool exp_mode, bool a
+ 
+ static bool AR0543_check_mains_freq(void){// when the fr change,we need to change the aet table
+     int detection; 
+-    struct i2c_adapter *adapter;	
+-	#if 0
+-    if(exp_mode != 2)//if current is not auto mode ,return
+-        return false;
+-
+-    detection = my_i2c_get_byte(adapter,0x36,0x3c0c) & 1;
+-    if(current_fr != detection){
+-        change_cnt++;
+-        if(change_cnt > 5){
+-            aet_index ^= 1;
+-            sensor_aet_info = cf->aet.aet[aet_index].info;
+-            sensor_aet_table = cf->aet.aet[aet_index].aet_table;
+-            sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-            change_cnt = 0;
+-            current_fr = detection;
+-            return true;
+-        }	
+-    }else{
+-        change_cnt = 0;	
+-    }
+-    return false;
+-	#endif
+-	return true;
++    struct i2c_adapter *adapter;
++    return true;
+ }
+ 
+ bool AR0543_set_af_new_step(unsigned int af_step){
+@@ -1560,26 +1572,30 @@ bool AR0543_set_af_new_step(unsigned int af_step){
+ 
+ 
+ 
+-void AR0543_set_new_format(int width,int height,int fr){
++void AR0543_set_new_format(void *priv,int width,int height,int fr){
+     int index = 0;
+     current_fr = fr;
+-    printk("sum:%d,mode:%d,fr:%d\n",cf->aet.sum,ar0543_work_mode,fr);
+-    while(index < cf->aet.sum){
+-        if(width == cf->aet.aet[index].info->fmt_hactive && height == cf->aet.aet[index].info->fmt_vactive \
+-                && fr == cf->aet.aet[index].info->fmt_main_fr && ar0543_work_mode == cf->aet.aet[index].info->fmt_capture){
++    camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++    configure_t *configure = camera_priv_data->configure;
++    if(camera_priv_data == NULL)
++    	return;
++    printk("sum:%d,mode:%d,fr:%d\n",configure->aet.sum,ar0543_work_mode,fr);
++    while(index < configure->aet.sum){
++        if(width == configure->aet.aet[index].info->fmt_hactive && height == configure->aet.aet[index].info->fmt_vactive \
++                && fr == configure->aet.aet[index].info->fmt_main_fr && ar0543_work_mode == configure->aet.aet[index].info->fmt_capture){
+             break;	
+         }
+         index++;	
+     }
+-    if(index >= cf->aet.sum){
++    if(index >= configure->aet.sum){
+         printk("use default value\n");
+         index = 0;	
+     }
+     printk("current aet index :%d\n",index);
+-    sensor_aet_info = cf->aet.aet[index].info;
+-    sensor_aet_table = cf->aet.aet[index].aet_table;
+-    sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-    AR0543_set_aet_new_step(sensor_aet_step,1,1);
++    camera_priv_data->sensor_aet_info = configure->aet.aet[index].info;
++    camera_priv_data->sensor_aet_table = configure->aet.aet[index].aet_table;
++    camera_priv_data->sensor_aet_step = camera_priv_data->sensor_aet_info->tbl_rated_step;
++    return;
+ }
+ 
+ 
+@@ -1853,14 +1869,14 @@ void AR0543_set_param_wb(struct ar0543_device *dev,enum  camera_wb_flip_e para)/
+         printk("not support this wb\n");
+         return;
+     }
+-    if(cf != NULL && cf->wb_valid == 1){
+-        while(index < cf->wb.sum){
+-            if(strcmp(wb_pair[i].name, cf->wb.wb[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->wb_valid == 1){
++        while(index < dev->configure->wb.sum){
++            if(strcmp(wb_pair[i].name, dev->configure->wb.wb[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->wb.sum){
++        if(index == dev->configure->wb.sum){
+             printk("invalid wb value\n");
+             return;	
+         }
+@@ -1869,7 +1885,7 @@ void AR0543_set_param_wb(struct ar0543_device *dev,enum  camera_wb_flip_e para)/
+             dev->cam_para->cam_command = CAM_COMMAND_AWB;
+         }else{
+             dev->cam_para->cam_command = CAM_COMMAND_MWB;
+-            memcpy(dev->cam_para->xml_wb_manual->reg_map,cf->wb.wb[index].export,2*sizeof(int));
++            memcpy(dev->cam_para->xml_wb_manual->reg_map,dev->configure->wb.wb[index].export,WB_MAX * sizeof(int));
+         }
+         printk("set wb :%d\n",index);
+         dev->fe_arg.port = TVIN_PORT_ISP;
+@@ -1966,24 +1982,23 @@ void AR0543_set_param_effect(struct ar0543_device *dev,enum camera_effect_flip_e
+         printk("not support\n");
+         return;
+     }
+-    if(cf != NULL && cf->effect_valid == 1){
+-        while(index < cf->eff.sum){
+-            if(strcmp(effect_pair[i].name, cf->eff.eff[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->effect_valid == 1){
++        while(index < dev->configure->eff.sum){
++            if(strcmp(effect_pair[i].name, dev->configure->eff.eff[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->eff.sum){
++        if(index == dev->configure->eff.sum){
+             printk("invalid effect value\n");
+             return;	
+         }
+         dev->cam_para->cam_command = CAM_COMMAND_EFFECT;
+-        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,cf->eff.eff[index].export,18*sizeof(unsigned int));
++        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,dev->configure->eff.eff[index].export,EFFECT_MAX * sizeof(unsigned int));
+ 
+         dev->fe_arg.port = TVIN_PORT_ISP;
+         dev->fe_arg.index = 0;
+         dev->fe_arg.arg = (void *)(dev->cam_para);
+-        printk("call tvin fe func\n");
+         dev->vops->tvin_fe_func(0,&dev->fe_arg);
+         return;
+     } 
+@@ -2203,6 +2218,8 @@ static void set_resolution_param(struct ar0543_device *dev, resolution_param_t*
+         		printk("fail in setting resolution param. i=%d\n",i);
+         		break;
+         	}
++        if(res_param->reg_script[t][i].addr == 0x0103) //soft reset,need 5ms delay
++        	msleep(5);
+ 		i++;
+ 	}
+ 	#if 0
+@@ -2224,7 +2241,7 @@ static void set_resolution_param(struct ar0543_device *dev, resolution_param_t*
+ 	ar0543_frmintervals_active.denominator = res_param->active_fps;
+ 	ar0543_h_active = res_param->active_frmsize.width;
+ 	ar0543_v_active = res_param->active_frmsize.height;
+-	AR0543_set_new_format(ar0543_h_active,ar0543_v_active,current_fr);// should set new para
++	AR0543_set_new_format((void *)&dev->camera_priv_data,ar0543_h_active,ar0543_v_active,current_fr);// should set new para
+ }    /* AR0543_set_resolution */
+ 
+ static int set_focus_zone(struct ar0543_device *dev, int value)
+@@ -2805,6 +2822,12 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ 	struct videobuf_queue *q = &fh->vb_vidq;
+ 	struct ar0543_device *dev = fh->dev;
+ 	resolution_param_t* res_param = NULL;
++
++    f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
++            (f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
++    	f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++    }
+ 	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+@@ -2990,16 +3013,9 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	current_fmt = 0;
+ 	if(dev->cam_para == NULL)
+ 		return -EINVAL;
+-	if(generate_para(dev->cam_para,dev->pindex) == 0){
+-	    para.reserved = (int)(dev->cam_para);
+-	}else{
+-		free_para(dev->cam_para);
+-		para.reserved = 0;
+-	}
+-	dev->cam_para->cam_function.set_aet_new_step = AR0543_set_aet_new_step;
+-	dev->cam_para->cam_function.check_mains_freq = AR0543_check_mains_freq;
+-	dev->cam_para->cam_function.set_af_new_step = AR0543_set_af_new_step;
+-	dev->cam_para->cam_mode = CAMERA_PREVIEW;	
++   	if(update_fmt_para(ar0543_h_active,ar0543_v_active,dev->cam_para,&dev->pindex,dev->configure) != 0)
++   		return -EINVAL;
++	para.reserved = (int)(dev->cam_para);	
+ 	if (CAM_MIPI == dev->cam_info.interface)
+ 	{
+ 			printk("mipi param init\n");
+@@ -3016,10 +3032,11 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	        para.csi_hw_info.hs_freq = 410; //MHz
+ 	        para.csi_hw_info.clk_channel = dev->cam_info.clk_channel; //clock channel a or b
+ 	}
+-	if(cf->aet_valid == 1){
+-	    dev->cam_para->xml_scenes->ae.aet_fmt_gain = sensor_aet_info->format_transfer_parameter;        	
+-	}else
+-	    dev->cam_para->xml_scenes->ae.aet_fmt_gain = 0;
++    if(dev->configure->aet_valid == 1){
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = (dev->camera_priv_data).sensor_aet_info->format_transfer_parameter;        	
++    }
++    else
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = 100;
+ 	printk("aet_fmt_gain:%d\n",dev->cam_para->xml_scenes->ae.aet_fmt_gain);
+ 
+ 	printk("ar0543,h=%d, v=%d, frame_rate=%d\n", 
+@@ -3029,6 +3046,10 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 		dev->vops->start_tvin_service(0,&para);
+ 		fh->stream_on        = 1;
+ 	}
++	dev->vdin_arg.cmd = VDIN_CMD_SET_CM2;
++	dev->vdin_arg.cm2 = dev->configure->cm.export;
++	dev->vops->tvin_vdin_func(0,&dev->vdin_arg);
++	printk("call set cm2\n");
+ 	AR0543_set_param_wb(fh->dev,ar0543_qctrl[4].default_value);
+ 	AR0543_set_param_exposure(fh->dev,ar0543_qctrl[5].default_value);
+ 	AR0543_set_param_effect(fh->dev,ar0543_qctrl[6].default_value);
+@@ -3305,7 +3326,7 @@ static int ar0543_open(struct file *file)
+     unsigned int mem_size = 0;
+     int retval = 0;
+ #if CONFIG_CMA
+-    retval = vm_init_buf(24*SZ_1M);
++    retval = vm_init_buf(28*SZ_1M);
+     if(retval <0) {
+     	printk("error: no cma memory\n");
+         return -1;
+@@ -3317,8 +3338,8 @@ static int ar0543_open(struct file *file)
+     aml_cam_init(&dev->cam_info);
+     printk("config path:%s\n",(dev->cam_info).config);
+     if((dev->cam_info).config != NULL){
+-        if((cf = kmalloc(sizeof(configure),0)) != NULL){
+-            if(parse_config((dev->cam_info).config) == 0){
++        if((dev->configure = kmalloc(sizeof(configure_t),0)) != NULL){
++            if(parse_config((dev->cam_info).config,dev->configure) == 0){
+                 printk("parse successfully");
+             }else{
+                 printk("parse failed");
+@@ -3333,6 +3354,18 @@ static int ar0543_open(struct file *file)
+         printk("memalloc failed\n");
+         return -ENOMEM;
+     }
++    if(generate_para(dev->cam_para,dev->pindex,dev->configure) != 0){
++        printk("generate para failed\n");
++        free_para(dev->cam_para);
++        kfree(dev->cam_para);
++        return -EINVAL;
++    }
++    dev->cam_para->cam_function.set_aet_new_step = AR0543_set_aet_new_step;
++    dev->cam_para->cam_function.check_mains_freq = AR0543_check_mains_freq;
++    dev->cam_para->cam_function.set_af_new_step = AR0543_set_af_new_step;
++    dev->camera_priv_data.configure = dev->configure;
++    dev->cam_para->cam_function.priv_data = (void *)&dev->camera_priv_data;  
++    dev->ae_on = false;
+     AR0543_init_regs(dev);
+     msleep(40);
+     dw9714_init(1);
+@@ -3394,16 +3427,6 @@ static int ar0543_open(struct file *file)
+     dev->pindex.nr_index = 0;
+     dev->pindex.peaking_index = 0;
+     dev->pindex.lens_index = 0;
+-    if(generate_para(dev->cam_para,dev->pindex) != 0){
+-        printk("generate para failed\n");
+-        free_para(dev->cam_para);
+-        kfree(dev->cam_para);
+-        return -EINVAL;
+-    }
+-    dev->cam_para->cam_function.set_aet_new_step = AR0543_set_aet_new_step;
+-    dev->cam_para->cam_function.check_mains_freq = AR0543_check_mains_freq;
+-    dev->cam_para->cam_function.set_af_new_step = AR0543_set_af_new_step;  
+-    dev->ae_on = false;
+     /**creat class file**/		
+     cam_class = class_create(THIS_MODULE,"camera"); 
+     if(IS_ERR(cam_class)){
+@@ -3416,9 +3439,10 @@ static int ar0543_open(struct file *file)
+     retval = class_create_file(cam_class,&class_attr_resolution_debug);
+     retval = class_create_file(cam_class,&class_attr_light_source_debug);
+     retval = class_create_file(cam_class,&class_attr_version_debug);
+-    printk("open successfully\n");
+     dev->vops = get_vdin_v4l2_ops();
+ 	bDoingAutoFocusMode=false;
++    cf = dev->configure;
++    printk("open successfully\n");
+     return 0;
+ }
+ 
+@@ -3465,20 +3489,26 @@ static int ar0543_close(struct file *file)
+     videobuf_mmap_free(&fh->vb_vidq);
+ 
+     kfree(fh);
+-    if(cf != NULL){
+-        if(cf->aet_valid){
+-            for(i = 0; i < cf->aet.sum; i++){
+-                kfree(cf->aet.aet[i].info);
+-                kfree(cf->aet.aet[i].aet_table);
++    if(dev->configure != NULL){
++        if(dev->configure->aet_valid){
++            for(i = 0; i < dev->configure->aet.sum; i++){
++                kfree(dev->configure->aet.aet[i].info);
++                dev->configure->aet.aet[i].info = NULL;
++                kfree(dev->configure->aet.aet[i].aet_table);
++                dev->configure->aet.aet[i].aet_table = NULL;
+             }
+         }
+-        kfree(cf);
++        kfree(dev->configure);
++        dev->configure = NULL;
+     }
++    cf = NULL;
+     if(dev->cam_para != NULL ){
+         free_para(dev->cam_para);
+         kfree(dev->cam_para);
++        dev->cam_para = NULL;
+     }
+-
++	dev->camera_priv_data.sensor_aet_table = NULL;
++	dev->camera_priv_data.sensor_aet_info = NULL;
+     mutex_lock(&dev->mutex);
+     dev->users--;
+     mutex_unlock(&dev->mutex);
+@@ -3497,6 +3527,7 @@ static int ar0543_close(struct file *file)
+     ar0543_qctrl[6].default_value=0;
+     ar0543_qctrl[10].default_value=100;
+     ar0543_qctrl[11].default_value=0;
++    dev->ae_on = false;
+     //ar0543_frmintervals_active.numerator = 1;
+     //ar0543_frmintervals_active.denominator = 15;
+     power_down_ar0543(dev);
+diff --git a/drivers/amlogic/camera/ar0833.c b/drivers/amlogic/camera/ar0833.c
+index da7ef44e7286..034f6f2d822d 100755
+--- a/drivers/amlogic/camera/ar0833.c
++++ b/drivers/amlogic/camera/ar0833.c
+@@ -97,16 +97,11 @@ static struct v4l2_fract ar0833_frmintervals_active = {
+ 
+ static int ar0833_have_open=0;
+ 
+-extern configure *cf;
+ static camera_mode_t ar0833_work_mode = CAMERA_PREVIEW;
+ static struct class *cam_class;
+ static unsigned int g_ae_manual_exp;
+ static unsigned int g_ae_manual_ag;
+ static unsigned int g_ae_manual_vts;
+-extern sensor_aet_info_t *sensor_aet_info; // point to 1 of up to 16 aet information
+-extern sensor_aet_t *sensor_aet_table;
+-extern unsigned int sensor_aet_step;
+-
+ static unsigned int exp_mode;
+ static unsigned int change_cnt;
+ static unsigned int current_fmt;
+@@ -135,6 +130,7 @@ static int t_index = -1;
+ static int dest_hactive = 640;
+ static int dest_vactive = 480;
+ static bool bDoingAutoFocusMode = false;
++static configure_t *cf;
+ /* supported controls */
+ static struct v4l2_queryctrl ar0833_qctrl[] = {
+ 	{
+@@ -175,7 +171,7 @@ static struct v4l2_queryctrl ar0833_qctrl[] = {
+ 		.flags         = V4L2_CTRL_FLAG_DISABLED,
+ 	},{
+ 		.id            = V4L2_CID_DO_WHITE_BALANCE,
+-		.type          = V4L2_CTRL_TYPE_INTEGER,
++		.type          = V4L2_CTRL_TYPE_MENU,
+ 		.name          = "white balance",
+ 		.minimum       = 0,
+ 		.maximum       = 6,
+@@ -291,6 +287,30 @@ static struct v4l2_frmivalenum ar0833_frmivalenum[]={
+                                 .denominator	= 30,
+                         }
+                 }
++        },{
++                .index 		= 0,
++                .pixel_format	= V4L2_PIX_FMT_NV21,
++                .width		= 1280,
++                .height		= 960,
++                .type		= V4L2_FRMIVAL_TYPE_DISCRETE,
++                {
++                        .discrete	={
++                                .numerator	= 1,
++                                .denominator	= 30,
++                        }
++                }
++        },{
++                .index 		= 0,
++                .pixel_format	= V4L2_PIX_FMT_NV21,
++                .width		= 2048,
++                .height		= 1536,
++                .type		= V4L2_FRMIVAL_TYPE_DISCRETE,
++                {
++                        .discrete	={
++                                .numerator	= 1,
++                                .denominator	= 15,
++                        }
++                }
+         },{
+                 .index 		= 0,
+                 .pixel_format	= V4L2_PIX_FMT_NV21,
+@@ -618,11 +638,16 @@ struct ar0833_device {
+ 	struct vdin_v4l2_ops_s *vops;
+ 	
+ 	fe_arg_t fe_arg;
++	
++	vdin_arg_t vdin_arg;
+ 	/* wake lock */
+ 	struct wake_lock	wake_lock;
+ 	/* ae status */
+ 	bool ae_on;
+ 	
++	camera_priv_data_t camera_priv_data;
++	
++	configure_t *configure;
+ 	/* Control 'registers' */
+ 	int 			   qctl_regs[ARRAY_SIZE(ar0833_qctrl)];
+ };
+@@ -3629,17 +3654,22 @@ static ssize_t aet_manual_show(struct class *cls,struct class_attribute *attr, c
+ static CLASS_ATTR(aet_debug, 0664, aet_manual_show, aet_manual_store);
+ 
+ /* ar0833 uses exp+ag mode */
+-static bool AR0833_set_aet_new_step(unsigned int new_step, bool exp_mode, bool ag_mode){
+-  unsigned int exp = 0, ag = 0, vts = 0;
+-
+-  if ((!exp_mode) || (!ag_mode) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
++static bool AR0833_set_aet_new_step(void *priv, unsigned int new_step, bool exp_mode, bool ag_mode){
++  	unsigned int exp = 0, ag = 0, vts = 0;
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv; 
++	sensor_aet_t *sensor_aet_table = camera_priv_data->sensor_aet_table;
++	sensor_aet_info_t *sensor_aet_info = camera_priv_data->sensor_aet_info;
++	
++	if(camera_priv_data == NULL || sensor_aet_table == NULL || sensor_aet_info == NULL)
++		return false;	
++	if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
+ 		return(false);
+ 	else
+ 	{
+-		sensor_aet_step = new_step;
+-		exp = sensor_aet_table[sensor_aet_step].exp;
+-		ag = sensor_aet_table[sensor_aet_step].ag;
+-		vts = sensor_aet_table[sensor_aet_step].vts;
++		camera_priv_data->sensor_aet_step = new_step;
++		exp = sensor_aet_table[camera_priv_data->sensor_aet_step].exp;
++		ag = sensor_aet_table[camera_priv_data->sensor_aet_step].ag;
++		vts = sensor_aet_table[camera_priv_data->sensor_aet_step].vts;
+ 		
+ 		AR0833_manual_set_aet(exp,ag,vts);
+ 		return true;
+@@ -3650,27 +3680,6 @@ static bool AR0833_set_aet_new_step(unsigned int new_step, bool exp_mode, bool a
+ static bool AR0833_check_mains_freq(void){// when the fr change,we need to change the aet table
+     int detection; 
+     struct i2c_adapter *adapter;
+-#if 0		
+-    if(exp_mode != 2)//if current is not auto mode ,return
+-        return false;
+-
+-    detection = my_i2c_get_byte(adapter,0x36,0x3c0c) & 1;
+-    if(current_fr != detection){
+-        change_cnt++;
+-        if(change_cnt > 5){
+-            aet_index ^= 1;
+-            sensor_aet_info = cf->aet.aet[aet_index].info;
+-            sensor_aet_table = cf->aet.aet[aet_index].aet_table;
+-            sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-            change_cnt = 0;
+-            current_fr = detection;
+-            return true;
+-        }	
+-    }else{
+-        change_cnt = 0;	
+-    }
+-    return false;
+-#endif
+     return true;
+ }
+ 
+@@ -3704,26 +3713,30 @@ bool AR0833_set_af_new_step(unsigned int af_step){
+ 
+ 
+ 
+-void AR0833_set_new_format(int width,int height,int fr){
++void AR0833_set_new_format(void *priv,int width,int height,int fr){
+     int index = 0;
+     current_fr = fr;
+-    printk("sum:%d,mode:%d,fr:%d\n",cf->aet.sum,ar0833_work_mode,fr);
+-    while(index < cf->aet.sum){
+-        if(width == cf->aet.aet[index].info->fmt_hactive && height == cf->aet.aet[index].info->fmt_vactive \
+-                && fr == cf->aet.aet[index].info->fmt_main_fr && ar0833_work_mode == cf->aet.aet[index].info->fmt_capture){
++    camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++    configure_t *configure = camera_priv_data->configure;
++    if(camera_priv_data == NULL)
++    	return;
++    printk("sum:%d,mode:%d,fr:%d\n",configure->aet.sum,ar0833_work_mode,fr);
++    while(index < configure->aet.sum){
++        if(width == configure->aet.aet[index].info->fmt_hactive && height == configure->aet.aet[index].info->fmt_vactive \
++                && fr == configure->aet.aet[index].info->fmt_main_fr && ar0833_work_mode == configure->aet.aet[index].info->fmt_capture){
+             break;	
+         }
+         index++;	
+     }
+-    if(index >= cf->aet.sum){
++    if(index >= configure->aet.sum){
+         printk("use default value\n");
+         index = 0;	
+     }
+     printk("current aet index :%d\n",index);
+-    sensor_aet_info = cf->aet.aet[index].info;
+-    sensor_aet_table = cf->aet.aet[index].aet_table;
+-    sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-    AR0833_set_aet_new_step(sensor_aet_step,1,1);
++    camera_priv_data->sensor_aet_info = configure->aet.aet[index].info;
++    camera_priv_data->sensor_aet_table = configure->aet.aet[index].aet_table;
++    camera_priv_data->sensor_aet_step = camera_priv_data->sensor_aet_info->tbl_rated_step;
++    return;
+ }
+ 
+ 
+@@ -3964,14 +3977,14 @@ void AR0833_set_param_wb(struct ar0833_device *dev,enum  camera_wb_flip_e para)/
+         printk("not support\n");
+         return;
+     }
+-    if(cf != NULL && cf->wb_valid == 1){
+-        while(index < cf->wb.sum){
+-            if(strcmp(wb_pair[i].name, cf->wb.wb[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->wb_valid == 1){
++        while(index < dev->configure->wb.sum){
++            if(strcmp(wb_pair[i].name, dev->configure->wb.wb[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->wb.sum){
++        if(index == dev->configure->wb.sum){
+             printk("invalid wb value\n");
+             return;	
+         }
+@@ -3980,7 +3993,7 @@ void AR0833_set_param_wb(struct ar0833_device *dev,enum  camera_wb_flip_e para)/
+             dev->cam_para->cam_command = CAM_COMMAND_AWB;
+         }else{
+             dev->cam_para->cam_command = CAM_COMMAND_MWB;
+-            memcpy(dev->cam_para->xml_wb_manual->reg_map,cf->wb.wb[index].export,2*sizeof(int));
++            memcpy(dev->cam_para->xml_wb_manual->reg_map,dev->configure->wb.wb[index].export,WB_MAX * sizeof(int));
+         }
+         printk("set wb :%d\n",index);
+         dev->fe_arg.port = TVIN_PORT_ISP;
+@@ -4078,24 +4091,23 @@ void AR0833_set_param_effect(struct ar0833_device *dev,enum camera_effect_flip_e
+         printk("not support\n");
+         return;
+     }
+-    if(cf != NULL && cf->effect_valid == 1){
+-        while(index < cf->eff.sum){
+-            if(strcmp(effect_pair[i].name, cf->eff.eff[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->effect_valid == 1){
++        while(index < dev->configure->eff.sum){
++            if(strcmp(effect_pair[i].name, dev->configure->eff.eff[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->eff.sum){
++        if(index == dev->configure->eff.sum){
+             printk("invalid effect value\n");
+             return;	
+         }
+         dev->cam_para->cam_command = CAM_COMMAND_EFFECT;
+-        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,cf->eff.eff[index].export,18*sizeof(unsigned int));
++        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,dev->configure->eff.eff[index].export,EFFECT_MAX * sizeof(unsigned int));
+ 
+         dev->fe_arg.port = TVIN_PORT_ISP;
+         dev->fe_arg.index = 0;
+         dev->fe_arg.arg = (void *)(dev->cam_para);
+-        printk("call tvin fe func\n");
+         dev->vops->tvin_fe_func(0,&dev->fe_arg);
+         return;
+     } 
+@@ -4316,13 +4328,15 @@ static void set_resolution_param(struct ar0833_device *dev, resolution_param_t*
+             printk("fail in setting resolution param. i=%d\n",i);
+             break;
+         }
++        if(res_param->reg_script[t][i].addr == 0x0103) //soft reset,need 5ms delay
++        	msleep(5);
+         i++;
+     }
+     ar0833_frmintervals_active.numerator = 1;
+     ar0833_frmintervals_active.denominator = res_param->active_fps;
+     ar0833_h_active = res_param->frmsize.width;
+     ar0833_v_active = res_param->frmsize.height;
+-    AR0833_set_new_format(ar0833_h_active,ar0833_v_active,current_fr);// should set new para
++    AR0833_set_new_format((void *)&dev->camera_priv_data,ar0833_h_active,ar0833_v_active,current_fr);// should set new para
+ }    /* AR0833_set_resolution */
+ 
+ static int set_focus_zone(struct ar0833_device *dev, int value)
+@@ -4472,7 +4486,9 @@ static int ar0833_setting(struct ar0833_device *dev,int PROP_ID,int value )
+ 		if(ar0833_qctrl[13].default_value!=value){
+ 			ar0833_qctrl[13].default_value=value;
+ 			printk(" set camera  focus zone =%d. \n ",value);
+-			set_focus_zone(dev, value);
++			if(fh->stream_on) {
++				set_focus_zone(dev, value);
++			}
+ 		}
+ 		break;
+ 	case V4L2_CID_FOCUS_AUTO:
+@@ -4902,6 +4918,12 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ 	struct videobuf_queue *q = &fh->vb_vidq;
+ 	struct ar0833_device *dev = fh->dev;
+ 	resolution_param_t* res_param = NULL;
++
++    f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
++            (f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
++    	f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++    }
+ 	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+@@ -5087,16 +5109,10 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	current_fmt = 0;
+ 	if(dev->cam_para == NULL)
+ 		return -EINVAL;
+-	if(generate_para(dev->cam_para,dev->pindex) == 0){
++   	if(update_fmt_para(ar0833_h_active,ar0833_v_active,dev->cam_para,&dev->pindex,dev->configure) != 0)
++   		return -EINVAL;
+ 	    para.reserved = (int)(dev->cam_para);
+-	}else{
+-		free_para(dev->cam_para);
+-		para.reserved = 0;
+-	}
+-	dev->cam_para->cam_function.set_aet_new_step = AR0833_set_aet_new_step;
+-	dev->cam_para->cam_function.check_mains_freq = AR0833_check_mains_freq;
+-	dev->cam_para->cam_function.set_af_new_step = AR0833_set_af_new_step;
+-	dev->cam_para->cam_mode = CAMERA_PREVIEW;	
++	
+ 	if (CAM_MIPI == dev->cam_info.interface)
+ 	{
+ 	        para.csi_hw_info.lanes = 2;
+@@ -5110,10 +5126,11 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	        para.csi_hw_info.urgent = 1;
+ 	        para.csi_hw_info.clk_channel = dev->cam_info.clk_channel; //clock channel a or b
+ 	}
+-	if(cf->aet_valid == 1){
+-	    dev->cam_para->xml_scenes->ae.aet_fmt_gain = sensor_aet_info->format_transfer_parameter;        	
+-	}else
+-	    dev->cam_para->xml_scenes->ae.aet_fmt_gain = 0;
++    if(dev->configure->aet_valid == 1){
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = (dev->camera_priv_data).sensor_aet_info->format_transfer_parameter;        	
++    }
++    else
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = 100;
+ 	printk("aet_fmt_gain:%d\n",dev->cam_para->xml_scenes->ae.aet_fmt_gain);
+ 
+ 	printk("ar0833,h=%d, v=%d, frame_rate=%d\n", 
+@@ -5123,6 +5140,10 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 		dev->vops->start_tvin_service(0,&para);
+ 		fh->stream_on        = 1;
+ 	}
++    /*** 		set cm2 		***/
++	dev->vdin_arg.cmd = VDIN_CMD_SET_CM2;
++	dev->vdin_arg.cm2 = dev->configure->cm.export;
++	dev->vops->tvin_vdin_func(0,&dev->vdin_arg);
+ 	AR0833_set_param_wb(fh->dev,ar0833_qctrl[4].default_value);
+ 	AR0833_set_param_exposure(fh->dev,ar0833_qctrl[5].default_value);
+ 	AR0833_set_param_effect(fh->dev,ar0833_qctrl[6].default_value);
+@@ -5412,8 +5433,8 @@ static int ar0833_open(struct file *file)
+     aml_cam_init(&dev->cam_info);
+     printk("config path:%s\n",(dev->cam_info).config);
+     if((dev->cam_info).config != NULL){
+-        if((cf = kmalloc(sizeof(configure),0)) != NULL){
+-            if(parse_config((dev->cam_info).config) == 0){
++        if((dev->configure = kmalloc(sizeof(configure_t),0)) != NULL){
++            if(parse_config((dev->cam_info).config,dev->configure) == 0){
+                 printk("parse successfully");
+             }else{
+                 printk("parse failed");
+@@ -5428,6 +5449,18 @@ static int ar0833_open(struct file *file)
+         printk("memalloc failed\n");
+         return -ENOMEM;
+     }
++    if(generate_para(dev->cam_para,dev->pindex,dev->configure) != 0){
++        printk("generate para failed\n");
++        free_para(dev->cam_para);
++        kfree(dev->cam_para);
++        return -EINVAL;
++    }
++    dev->cam_para->cam_function.set_aet_new_step = AR0833_set_aet_new_step;
++    dev->cam_para->cam_function.check_mains_freq = AR0833_check_mains_freq;
++    dev->cam_para->cam_function.set_af_new_step = AR0833_set_af_new_step;
++    dev->camera_priv_data.configure = dev->configure;
++    dev->cam_para->cam_function.priv_data = (void *)&dev->camera_priv_data;  
++    dev->ae_on = false;
+     AR0833_init_regs(dev);
+     msleep(40);
+     mutex_lock(&dev->mutex);
+@@ -5488,16 +5521,6 @@ static int ar0833_open(struct file *file)
+     dev->pindex.nr_index = 0;
+     dev->pindex.peaking_index = 0;
+     dev->pindex.lens_index = 0;
+-    if(generate_para(dev->cam_para,dev->pindex) != 0){
+-        printk("generate para failed\n");
+-        free_para(dev->cam_para);
+-        kfree(dev->cam_para);
+-        return -EINVAL;
+-    }
+-    dev->cam_para->cam_function.set_aet_new_step = AR0833_set_aet_new_step;
+-    dev->cam_para->cam_function.check_mains_freq = AR0833_check_mains_freq;
+-    dev->cam_para->cam_function.set_af_new_step = AR0833_set_af_new_step;  
+-    dev->ae_on = false;
+     /**creat class file**/		
+     cam_class = class_create(THIS_MODULE,"camera"); 
+     if(IS_ERR(cam_class)){
+@@ -5510,9 +5533,11 @@ static int ar0833_open(struct file *file)
+     retval = class_create_file(cam_class,&class_attr_resolution_debug);
+     retval = class_create_file(cam_class,&class_attr_light_source_debug);
+     retval = class_create_file(cam_class,&class_attr_version_debug);
+-    printk("open successfully\n");
++
+     dev->vops = get_vdin_v4l2_ops();
+ 	bDoingAutoFocusMode=false;
++    cf = dev->configure;
++    printk("open successfully\n");
+     return 0;
+ }
+ 
+@@ -5559,11 +5584,13 @@ static int ar0833_close(struct file *file)
+     videobuf_mmap_free(&fh->vb_vidq);
+ 
+     kfree(fh);
+-    if(cf != NULL){
+-        if(cf->aet_valid){
+-            for(i = 0; i < cf->aet.sum; i++){
+-                kfree(cf->aet.aet[i].info);
+-                kfree(cf->aet.aet[i].aet_table);
++    if(dev->configure != NULL){
++        if(dev->configure->aet_valid){
++            for(i = 0; i < dev->configure->aet.sum; i++){
++                kfree(dev->configure->aet.aet[i].info);
++                dev->configure->aet.aet[i].info = NULL;
++                kfree(dev->configure->aet.aet[i].aet_table);
++                dev->configure->aet.aet[i].aet_table = NULL;
+             }
+         }
+         kfree(cf);
+@@ -5591,6 +5618,7 @@ static int ar0833_close(struct file *file)
+     ar0833_qctrl[6].default_value=0;
+     ar0833_qctrl[10].default_value=100;
+     ar0833_qctrl[11].default_value=0;
++    dev->ae_on = false;
+     //ar0833_frmintervals_active.numerator = 1;
+     //ar0833_frmintervals_active.denominator = 15;
+     power_down_ar0833(dev);
+diff --git a/drivers/amlogic/camera/common/config_parser.c b/drivers/amlogic/camera/common/config_parser.c
+index bc28e60896f9..37e8bfbabc1b 100755
+--- a/drivers/amlogic/camera/common/config_parser.c
++++ b/drivers/amlogic/camera/common/config_parser.c
+@@ -6,10 +6,6 @@
+ static struct file  *fp;
+ mm_segment_t fs;
+ 
+-configure *cf;
+-sensor_aet_info_t *sensor_aet_info; // point to 1 of up to 16 aet information
+-sensor_aet_t *sensor_aet_table;
+-unsigned int sensor_aet_step; // current step of the current aet
+ 
+ char *aet_key = "aet_start";
+ char *hw_key = "hw_start";
+@@ -139,8 +135,7 @@ static int  camera_write_buff(struct i2c_adapter *adapter,unsigned short i2c_add
+ 
+ 	};
+ 
+-	if (i2c_transfer(adapter, msg, 1) < 0)
+-	{
++	if(i2c_transfer(adapter, msg, 1) < 0){
+ 		return -1;
+ 	}
+ 	else
+@@ -152,7 +147,7 @@ int my_i2c_put_byte(struct i2c_adapter *adapter,unsigned short i2c_addr,unsigned
+     buff[0] = (unsigned char)((addr >> 8) & 0xff);
+     buff[1] = (unsigned char)(addr & 0xff);
+     buff[2] = data;
+-    if (camera_write_buff(adapter,i2c_addr, buff, 3) <0)
++    if(camera_write_buff(adapter,i2c_addr, buff, 3) <0)
+         return -1;
+     return  0;	
+ }
+@@ -168,7 +163,7 @@ int my_i2c_get_byte(struct i2c_adapter *adapter,unsigned short i2c_addr,unsigned
+     buff[0] = (unsigned char)((addr >> 8) & 0xff);
+     buff[1] = (unsigned char)(addr & 0xff);
+ 
+-    if (camera_read_buff(adapter, i2c_addr,buff, 2, 1) <0)
++    if(camera_read_buff(adapter, i2c_addr,buff, 2, 1) <0)
+         return -1;
+     return buff[0];
+ }
+@@ -176,16 +171,15 @@ int my_i2c_get_byte(struct i2c_adapter *adapter,unsigned short i2c_addr,unsigned
+ int my_i2c_get_word(struct i2c_adapter *adapter,unsigned short i2c_addr){
+ 	unsigned char buff[4];
+ 	unsigned short data;
+-  buff[0] = 0;
++  	buff[0] = 0;
+        
+ 	if(camera_read_buff(adapter,i2c_addr, buff, 1, 2) <0)
+ 		return -1;
+-  else
+-  {
+-      data = buff[0];
+-      data = (data << 8) | buff[1];
+-      return data;
+-  }
++	else{
++		data = buff[0];
++		data = (data << 8) | buff[1];
++		return data;
++	}
+ }
+ 
+ char *search_string(buffer_para_t *buf_para,int *offset,int *remained,char *start,char *end){
+@@ -230,7 +224,7 @@ char *search_string(buffer_para_t *buf_para,int *offset,int *remained,char *star
+     	*(buffer + data_size) = '\0';
+     	iter = buffer;
+     	data_start = 0;
+-    	}
++    }
+     pter = strstr(iter + strlen(start),end);
+     while(pter == NULL){
+         if(pter == NULL && *remained < strlen(end)){
+@@ -245,9 +239,7 @@ char *search_string(buffer_para_t *buf_para,int *offset,int *remained,char *star
+                 camera_read_config(*offset, *remained, buffer + data_size);//check bounds
+                 add = *remained;
+                 *offset += *remained;
+-                *remained = 0;
+-                
+-                
++                *remained = 0;               
+             }else{
+                 camera_read_config(*offset, BUFFER_SIZE, buffer + data_size);//check bounds
+                 add = BUFFER_SIZE;
+@@ -308,25 +300,25 @@ char *search_key(buffer_para_t *buf_para,int *offset,int *remained){
+     data_start = iter - buffer;
+     /*** check **/
+     if(data_start + 20 > data_size){//ensure we have an complete key
+-            if((buffer = (char*)realloc_mem(buffer,data_size + BUFFER_SIZE + 1,&buffer_len)) == NULL){
+-                printk("realloc failed\n");
+-                return NULL;
+-            }
+-            if(*remained < BUFFER_SIZE){
+-                camera_read_config(*offset, *remained, buffer + data_size);//check bounds
+-                add = *remained;
+-                *offset += *remained;
+-                *remained = 0;
+-                
+-                
+-            }else{
+-                camera_read_config(*offset, BUFFER_SIZE, buffer + data_size);//check bounds
+-                add = BUFFER_SIZE;
+-                *remained -= BUFFER_SIZE;
+-                *offset += BUFFER_SIZE;
+-            } 
+-            *(buffer + data_size + add) = '\0';
+-            data_size += add;           
++        if((buffer = (char*)realloc_mem(buffer,data_size + BUFFER_SIZE + 1,&buffer_len)) == NULL){
++            printk("realloc failed\n");
++            return NULL;
++        }
++        if(*remained < BUFFER_SIZE){
++            camera_read_config(*offset, *remained, buffer + data_size);//check bounds
++            add = *remained;
++            *offset += *remained;
++            *remained = 0;
++            
++            
++        }else{
++            camera_read_config(*offset, BUFFER_SIZE, buffer + data_size);//check bounds
++            add = BUFFER_SIZE;
++            *remained -= BUFFER_SIZE;
++            *offset += BUFFER_SIZE;
++        } 
++        *(buffer + data_size + add) = '\0';
++        data_size += add;           
+         }
+ 
+     
+@@ -355,15 +347,13 @@ int parse_body_head(char *buffer,int *no,int check,char *name){
+     char *iter; 
+     iter = strstr(buffer,"no");
+     iter += 3;
++    if(iter == NULL)
++    	return -WRONG_FORMAT; 
+     sscanf(iter,"%d",no);
+-    #if 0
+-    if(*no != check){
+-        printk("wrong :%d\n",check);
+-        return -CHECK_FAILED;
+-    }
+-    #endif
+     iter = strstr(iter,"name");
+     iter += 5;
++    if(iter == NULL)
++    	return -WRONG_FORMAT;
+     sscanf(iter,"%s",name);	
+     return 0;
+ }
+@@ -373,7 +363,6 @@ int parse_aet_element_info(char **iter,sensor_aet_info_t *info){
+ 	sscanf(*iter,"%x",&(info->fmt_main_fr));
+ 	*iter = strstr(*iter,",");
+ 	*iter += 1;
+-
+     sscanf(*iter,"%x",&(info->fmt_capture)),
+     *iter = strstr(*iter,",");
+     *iter += 1;
+@@ -444,7 +433,7 @@ int parse_last_aet_element_tbl(char **iter,sensor_aet_t *tbl){
+     return 0;
+ }
+ 
+-int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_effect(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int ret,sum,check,i;
+     char *iter;
+         
+@@ -460,7 +449,7 @@ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+     cf->eff.sum = sum;
+     /**parser body***/
+     check = 0;
+-    while(check < sum && iter != NULL){
++    while(check < sum){
+         iter = search_string(buf_para,offset,remained,"[effect]","[effect");
+         if(iter == NULL){
+             return -WRONG_FORMAT;
+@@ -471,20 +460,25 @@ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+         }
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<EFFECT_MAX;i++){
++        i = 0;
++        while(i < EFFECT_MAX && iter != NULL){
+             sscanf(iter,"%x",&(cf->eff.eff[check].export[i]));
++            i++;
+             iter = strstr(iter,",");
+             if(iter == NULL)
+             	break;
+             iter += 1;
+         }
++        if(i != EFFECT_MAX)
++        	return -CHECK_LEN_FAILED; 
+         check++;
+-
+     }
++    if(check != sum)
++    	return -CHECK_FAILED;
+     return 0;
+ }
+ 
+-int parse_aet(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_aet(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int sum,ret,check,i;
+     char *iter,*eter;
+ 
+@@ -545,7 +539,7 @@ int parse_aet(buffer_para_t *buf_para,int *remained,int *offset){
+             if(ret != 0){          	
+             	ret = -BODY_ELEMENT_FAILED;
+               	goto clean_table;
+-              }
++            }
+         }      
+         check++;
+     }
+@@ -564,7 +558,7 @@ clean:
+ 
+ 
+ 
+-int parse_hw(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_hw(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int ret,sum,check,i;
+     char *iter = NULL;
+     char *eter = NULL;
+@@ -597,24 +591,26 @@ int parse_hw(buffer_para_t *buf_para,int *remained,int *offset){
+             return -WRONG_FORMAT;
+         }  	
+         i = 0;
+-        while(iter < eter){
++        while(iter != NULL && iter < eter){
+             sscanf(iter,"%x",&(cf->hw.hw[check].export[i]));
++            i++;
+             iter = strstr(iter,",");
+             if(iter == NULL){
+                 break;
+             }
+             iter += 1;
+-            i++;
+         }
+         check++;
+     }
++    if(check != sum)
++    	return -CHECK_FAILED;
+     return 0;
+ }
+ 
+-int parse_wb(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_wb(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+-    char *iter;
+-        
++    char *iter = NULL;
++    char *eter = NULL;    
+     iter = search_string(buf_para,offset,remained,"wb_start]","[wb]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+@@ -638,22 +634,35 @@ int parse_wb(buffer_para_t *buf_para,int *remained,int *offset){
+         }
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<2;i++){
++        eter = strstr(iter,";");
++        if(eter == NULL){
++            return -WRONG_FORMAT;
++        }  	
++        i = 0;
++        while(iter != NULL && iter < eter){
+             sscanf(iter,"%x",&(cf->wb.wb[check].export[i]));
++            i++;            
+             iter = strstr(iter,",");
+-            if(iter == NULL)
+-            	break;
++            if(iter == NULL){
++                break;
++            }
+             iter += 1;
++
+         }
++        if(i != WB_MAX)
++        	return -CHECK_LEN_FAILED;
+         check++;
+-     }
+-     return 0;
++    }
++    if(check != sum)
++    	return -CHECK_FAILED;
++    return 0;
+ 
+ }
+ 
+-int parse_capture(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_capture(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+-    char *iter; 
++    char *iter = NULL;
++    char *eter = NULL;
+     iter = search_string(buf_para,offset,remained,"capture_start]","[capture]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+@@ -670,7 +679,7 @@ int parse_capture(buffer_para_t *buf_para,int *remained,int *offset){
+     while(check < sum){
+         iter = search_string(buf_para,offset,remained,"[capture]","[capture");
+         if(iter == NULL){
+-        		printk("search wrong\n");
++        	printk("search wrong\n");
+             return -WRONG_FORMAT;
+         }
+         ret = parse_body_head(iter,&(cf->capture.capture[check].num),check,cf->capture.capture[check].name);
+@@ -680,46 +689,65 @@ int parse_capture(buffer_para_t *buf_para,int *remained,int *offset){
+         //printk("name:%s\n",cf->capture.capture[check].name);
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<CAPTURE_MAX;i++){
++        eter = strstr(iter,";");
++        if(eter == NULL){
++            return -WRONG_FORMAT;
++        }  	
++        i = 0;
++        while(iter != NULL && iter < eter){
+             sscanf(iter,"%x",&(cf->capture.capture[check].export[i]));
+-           // printk("capture:%x\n",cf->capture.capture[check].export[i]);
++            i++;
+             iter = strstr(iter,",");
+-            if(iter == NULL)
+-            	break;
++            if(iter == NULL){
++                break;
++            }
+             iter += 1;
+-
+         }
++        if(i != CAPTURE_MAX)
++        	return -CHECK_LEN_FAILED;
+         check++;
+-     }
+-     return 0;
+-
++    }
++    if(check != sum)
++    	return -CHECK_FAILED;
++    return 0;
++     
+ }
+ 
+-int parse_wave(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_wave(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int i;
+-    char *iter;
++    char *iter = NULL;
++    char *eter = NULL;
+         
+     iter = search_string(buf_para,offset,remained,"wave_start]","[wave_end]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+-    /***parser head***/
+     iter = strstr(iter,"export");
+     iter += 7;
+-    for(i=0;i<WAVE_MAX;i++){
++    eter = strstr(iter,";");
++    if(eter == NULL){
++        return -WRONG_FORMAT;
++    }  	
++    i = 0;
++    while(iter != NULL && iter < eter){
+         sscanf(iter,"%x",&(cf->wave.export[i]));
+         //printk("wave:%x\n",cf->wave.export[i]);
+         iter = strstr(iter,",");
+-        if(iter == NULL)
+-        	break;
++        i++;
++        if(iter == NULL){
++            break;
++        }
+         iter += 1;
+     }
+-     return 0;
++    if(i != WAVE_MAX)
++    	return -CHECK_LEN_FAILED;
++    return 0;
+ }
+ 
+-int parse_scene(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_scene(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int sum,ret,check,i;
+     char *iter = NULL;
++    char *eter = NULL;
+     
+     iter = search_string(buf_para,offset,remained,"scenes_start]","[scenes]");
+     if(iter == NULL){
+@@ -746,23 +774,34 @@ int parse_scene(buffer_para_t *buf_para,int *remained,int *offset){
+         }
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<SCENE_MAX;i++){
++        eter = strstr(iter,";");
++        if(eter == NULL){
++            return -WRONG_FORMAT;
++        }  	
++        i = 0;
++        while(iter != NULL && iter < eter){
+             sscanf(iter,"%x",&(cf->scene.scene[check].export[i]));
+             //printk("scene:%x\n",(cf->scene.scene[check].export[i]));
++            i++;
+             iter = strstr(iter,",");
+-            if(iter == NULL)
+-            	break;
++            if(iter == NULL){
++                break;
++            }
+             iter += 1;
+-
+-        }        
+-       check++;
++        }
++        if(i != SCENE_MAX)
++        	return -CHECK_LEN_FAILED;
++        check++;
+     }
++	if(check != sum)
++    	return -CHECK_FAILED;
+     return 0;
+ }
+ 
+-int parse_lens(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_lens(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int sum,ret,check,i;
+-    char *iter;
++    char *iter = NULL;
++    char *eter = NULL;
+         
+     iter = search_string(buf_para,offset,remained,"lens_start]","[lens]");
+     if(iter == NULL){
+@@ -789,21 +828,31 @@ int parse_lens(buffer_para_t *buf_para,int *remained,int *offset){
+         }
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<LENS_MAX;i++){
++        eter = strstr(iter,";");
++        if(eter == NULL){
++            return -WRONG_FORMAT;
++        }  	
++        i = 0;
++        while(iter != NULL && iter < eter){
+             sscanf(iter,"%x",&(cf->lens.lens[check].export[i]));
+             //printk("scene:%x\n",(cf->lens.lens[check].export[i]));
++            i++;           
+             iter = strstr(iter,",");
+-            if(iter == NULL)
+-            	break;
++            if(iter == NULL){
++                break;
++            }
+             iter += 1;
+-
+-        }       
+-       check++;
++        }
++        if(i != LENS_MAX)
++        	return -CHECK_LEN_FAILED;
++        check++;
+     }
+-	return 0;
++    if(check != sum)
++    	return -CHECK_FAILED;
++    return 0;
+ }
+ 
+-int parse_gamma(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_gamma(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int i;
+     char *iter;
+ 
+@@ -814,32 +863,41 @@ int parse_gamma(buffer_para_t *buf_para,int *remained,int *offset){
+     /***parser head***/
+     iter = strstr(iter,"export");
+     iter += 7;
+-    for(i=0;i<GAMMA_MAX;i++){
++    for(i = 0; i < GAMMA_MAX && iter != NULL;){
+         sscanf(iter,"%x",&(cf->gamma.gamma_r[i]));
++        i++;
+         iter = strstr(iter,",");
+         if(iter == NULL)
+             break;
+         iter += 1;
+     }
+-    for(i=0;i<GAMMA_MAX;i++){
++    if(i != GAMMA_MAX)
++    	return -CHECK_LEN_FAILED;
++    for(i = 0; i < GAMMA_MAX && iter != NULL;){
+         sscanf(iter,"%x",&(cf->gamma.gamma_g[i]));
++        i++;
+         iter = strstr(iter,",");
+         if(iter == NULL)
+             break;
+         iter += 1;
+     }
+-    for(i=0;i<GAMMA_MAX;i++){
++    if(i != GAMMA_MAX)
++    	return -CHECK_LEN_FAILED;
++    for(i = 0; i < GAMMA_MAX && iter != NULL;){
+         sscanf(iter,"%x",&(cf->gamma.gamma_b[i]));
++        i++;
+         iter = strstr(iter,",");
+         if(iter == NULL)
+             break;
+         iter += 1;
+     }
++    if(i != GAMMA_MAX)
++    	return -CHECK_LEN_FAILED;
+     return 0;
+ }
+ 
+ 
+-int parse_wb_sensor(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_wb_sensor(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int i;
+     char *iter;
+ 
+@@ -850,19 +908,23 @@ int parse_wb_sensor(buffer_para_t *buf_para,int *remained,int *offset){
+     /***parser head***/
+     iter = strstr(iter,"export");
+     iter += 7;
+-    for(i=0;i<WB_SENSOR_MAX;i++){
++    i = 0;
++    while(i < WB_SENSOR_MAX&& iter != NULL){
+         sscanf(iter,"%x",&(cf->wb_sensor_data.export[i]));
+         //printk("wb sensor:%x\n",cf->wb_sensor_data.export[i]);
++        i++;
+         iter = strstr(iter,",");
+         if(iter == NULL)
+             break;
+         iter += 1;
+     }
++    if(i != WB_SENSOR_MAX)
++    	return -CHECK_LEN_FAILED;
+     return 0;
+ }
+ 
+ 
+-int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_version(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+     int i;
+     char *iter,*end;
+     int len = 0;
+@@ -874,18 +936,27 @@ int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
+     iter = strstr(iter,"Date");
+     iter += 5;
+     end = strstr(iter,"Module");
++    if(end == NULL){
++    	return -WRONG_FORMAT;
++    }
+     len = end - iter;
+     memcpy(cf->version.date,iter,len);
+     cf->version.date[len] = '\0';
+     
+     iter = end + 7;
+     end = strstr(iter,"Version");
++    if(end == NULL){
++    	return -WRONG_FORMAT;
++    }
+     len = end - iter;    
+     memcpy(cf->version.module,iter,len);
+     cf->version.module[len] = '\0';    
+ 
+     iter = end + 8;
+     end = strstr(iter,"[version");
++    if(end == NULL){
++    	return -WRONG_FORMAT;
++    }
+     len = end - iter;
+     memcpy(cf->version.version,iter,len);
+     cf->version.version[len] = '\0';  
+@@ -893,7 +964,7 @@ int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
+     return 0;
+ }
+ 
+-int parse_cm(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_cm(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int i;
+     char *iter;
+         
+@@ -904,18 +975,22 @@ int parse_cm(buffer_para_t *buf_para,int *remained,int *offset){
+     /***parser body***/
+     iter = strstr(iter,"export");
+     iter += 7;
+-    for(i=0;i<CM_MAX;i++){
++    i = 0;
++    while(i < CM_MAX && iter != NULL){
+         sscanf(iter,"%x",&(cf->cm.export[i]));
+         //printk("cm:%x\n",cf->cm.export[i]);
++        i++;
+         iter = strstr(iter,",");
+         if(iter == NULL)
+         	break;
+         iter += 1;
+     }
+-     return 0;
++    if(i != CM_MAX)
++    	return -CHECK_LEN_FAILED;
++    return 0;
+ }
+ 
+-int parse_nr(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_nr(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+     char *iter; 
+     iter = search_string(buf_para,offset,remained,"nr_start]","[nr]");
+@@ -941,24 +1016,28 @@ int parse_nr(buffer_para_t *buf_para,int *remained,int *offset){
+         if(ret != 0){
+             return -BODY_HEAD_FAILED;
+         }
+-        //printk("name:%s\n",cf->nr.nr[check].name);
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<NR_MAX;i++){
++        i = 0;
++        while(i < NR_MAX && iter != NULL){
+             sscanf(iter,"%x",&(cf->nr.nr[check].export[i]));
+             //printk("nr:%x\n",cf->nr.nr[check].export[i]);
++            i++;
+             iter = strstr(iter,",");
+             if(iter == NULL)
+             	break;
+             iter += 1;
+-
+         }
++        if(i != NR_MAX)
++    		return -CHECK_LEN_FAILED;
+         check++;
+      }
++     if(check != sum)
++    	return -CHECK_FAILED;
+      return 0;
+ }
+ 
+-int parse_peaking(buffer_para_t *buf_para,int *remained,int *offset){
++int parse_peaking(configure_t *cf,buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+     char *iter; 
+     iter = search_string(buf_para,offset,remained,"peaking_start]","[peaking]");
+@@ -984,24 +1063,28 @@ int parse_peaking(buffer_para_t *buf_para,int *remained,int *offset){
+         if(ret != 0){
+             return -BODY_HEAD_FAILED;
+         }
+-        //printk("name:%s\n",cf->peaking.peaking[check].name);
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<PEAKING_MAX;i++){
++        i = 0;
++        while(i < PEAKING_MAX && iter != NULL){
+             sscanf(iter,"%x",&(cf->peaking.peaking[check].export[i]));
+             //printk("peaking:%x\n",cf->peaking.peaking[check].export[i]);
++            i++;
+             iter = strstr(iter,",");
+             if(iter == NULL)
+             	break;
+             iter += 1;
+-
+         }
++        if(i != PEAKING_MAX)
++        	return -CHECK_LEN_FAILED;
+         check++;
+      }
++     if(check != sum)
++    	return -CHECK_FAILED;
+      return 0;
+ }
+ 
+-int parse_config(char *path){
++int parse_config(char *path,configure_t *cf){
+     char *buffer,*iter;
+     int file_size;
+     int remained_size;
+@@ -1015,7 +1098,7 @@ int parse_config(char *path){
+     }
+     buf_para.buffer = buffer;
+ 
+-    memset(cf,0,sizeof(configure));
++    memset(cf,0,sizeof(configure_t));
+     file_size = camera_open_config(path);
+     if(file_size < 0){
+         printk("open failed :%d\n",file_size);
+@@ -1053,9 +1136,10 @@ int parse_config(char *path){
+             case 'a':
+                 if(memcmp(iter,aet_key,strlen(aet_key)) == 0){
+                     cf->aet_valid = 1;
+-                    if((ret = parse_aet(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_aet(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->aet_valid = 0;	
+-                        printk("aet invalid :%d\n",ret);								
++                        printk("aet invalid :%d\n",ret);
++                        goto clean_all; 								
+                     }
+                 }else{
+                     buf_para.data_start += strlen(aet_key);
+@@ -1064,9 +1148,10 @@ int parse_config(char *path){
+             case 'h':
+                 if(memcmp(iter,hw_key,strlen(hw_key)) == 0){
+                     cf->hw_valid = 1;
+-                    if((ret = parse_hw(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_hw(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->hw_valid = 0;	
+-                        printk("hw invalid :%d\n",ret);								
++                        printk("hw invalid :%d\n",ret);
++                        goto clean_all; 							
+                     }
+                 }else{
+                     buf_para.data_start += strlen(hw_key);
+@@ -1075,9 +1160,10 @@ int parse_config(char *path){
+             case 'e':
+                 if(memcmp(iter,effect_key,strlen(effect_key)) == 0){
+                     cf->effect_valid = 1;
+-                    if((ret = parse_effect(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_effect(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->effect_valid = 0;
+-                        printk("effect invalid :%d\n",ret);												
++                        printk("effect invalid :%d\n",ret);
++                        goto clean_all; 												
+                     }
+                 }else{
+                     buf_para.data_start += strlen(effect_key);
+@@ -1087,9 +1173,10 @@ int parse_config(char *path){
+                 if(*(iter + 1) == 'b'){
+                     if(memcmp(iter,wb_key,strlen(wb_key)) == 0){
+                         cf->wb_valid = 1;
+-                        if((ret = parse_wb(&buf_para,&remained_size,&read_offset)) != 0){
++                        if((ret = parse_wb(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                             cf->wb_valid = 0;
+-                            printk("wb invalid :%d\n",ret);									
++                            printk("wb invalid :%d\n",ret);
++                            goto clean_all; 								
+                         }
+                     }else{
+                         buf_para.data_start += strlen(wb_key);
+@@ -1097,9 +1184,10 @@ int parse_config(char *path){
+                 }else if(*(iter + 1) == 'a'){
+                     if(memcmp(iter,wave_key,strlen(wave_key)) == 0){
+                         cf->wave_valid = 1;
+-                        if((ret = parse_wave(&buf_para,&remained_size,&read_offset)) != 0){
++                        if((ret = parse_wave(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                             cf->wave_valid = 0;
+-                            printk("wave invalid :%d\n",ret);									
++                            printk("wave invalid :%d\n",ret);
++                            goto clean_all; 									
+                         }
+                     }else{
+                         buf_para.data_start += strlen(wave_key);
+@@ -1111,9 +1199,10 @@ int parse_config(char *path){
+             case 's':
+                 if(memcmp(iter,scenes_key,strlen(scenes_key)) == 0){
+                     cf->scene_valid = 1;
+-                    if((ret = parse_scene(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_scene(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->scene_valid = 0;
+-                        printk("scene invalid :%d\n",ret);										
++                        printk("scene invalid :%d\n",ret);
++                        goto clean_all; 										
+                     }
+                 }else{
+                     buf_para.data_start += strlen(scenes_key);
+@@ -1123,9 +1212,10 @@ int parse_config(char *path){
+             	if(*(iter + 1) == 'a'){
+ 		            if(memcmp(iter,capture_key,strlen(capture_key)) == 0){
+ 		                cf->capture_valid = 1;
+-		                if((ret = parse_capture(&buf_para,&remained_size,&read_offset)) != 0){
++		                if((ret = parse_capture(cf,&buf_para,&remained_size,&read_offset)) != 0){
+ 		                    cf->capture_valid = 0;
+-		                    printk("capture invalid :%d\n",ret);									
++		                    printk("capture invalid :%d\n",ret);
++		                    goto clean_all; 									
+ 		                }
+ 		            }else{
+ 		                buf_para.data_start += strlen(capture_key);
+@@ -1133,9 +1223,10 @@ int parse_config(char *path){
+ 		        }else if(*(iter + 1) == 'm'){
+ 		        	if(memcmp(iter,cm_key,strlen(cm_key)) == 0){
+ 		                cf->cm_valid = 1;
+-		                if((ret = parse_cm(&buf_para,&remained_size,&read_offset)) != 0){
++		                if((ret = parse_cm(cf,&buf_para,&remained_size,&read_offset)) != 0){
+ 		                    cf->cm_valid = 0;
+-		                    printk("cm invalid :%d\n",ret);									
++		                    printk("cm invalid :%d\n",ret);
++		                    goto clean_all; 									
+ 		                }
+ 		            }else{
+ 		                buf_para.data_start += strlen(cm_key);
+@@ -1146,9 +1237,10 @@ int parse_config(char *path){
+             case 'l':
+                 if(memcmp(iter,lens_key,strlen(lens_key)) == 0){
+                     cf->lens_valid = 1;
+-                    if((ret = parse_lens(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_lens(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->lens_valid = 0;
+-                        printk("lens invalid :%d\n",ret);									
++                        printk("lens invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(lens_key);
+@@ -1157,9 +1249,10 @@ int parse_config(char *path){
+             case 'g':
+                 if(memcmp(iter,gamma_key,strlen(gamma_key)) == 0){
+                     cf->gamma_valid = 1;
+-                    if((ret = parse_gamma(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_gamma(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->gamma_valid = 0;
+-                        printk("gamma invalid :%d\n",ret);									
++                        printk("gamma invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(gamma_key);
+@@ -1168,9 +1261,10 @@ int parse_config(char *path){
+             case 'm':
+                 if(memcmp(iter,wb_sensor_key,strlen(wb_sensor_key)) == 0){
+                     cf->wb_sensor_data_valid = 1;
+-                    if((ret = parse_wb_sensor(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_wb_sensor(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->wb_sensor_data_valid = 0;
+-                        printk("wb sensor data invalid :%d\n",ret);									
++                        printk("wb sensor data invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(wb_sensor_key);
+@@ -1179,9 +1273,10 @@ int parse_config(char *path){
+             case 'v':
+                 if(memcmp(iter,version_key,strlen(version_key)) == 0){
+                     cf->version_info_valid = 1;
+-                    if((ret = parse_version(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_version(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->version_info_valid = 0;
+-                        printk("version info invalid :%d\n",ret);									
++                        printk("version info invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(version_key);
+@@ -1190,9 +1285,10 @@ int parse_config(char *path){
+             case 'n':
+                 if(memcmp(iter,nr_key,strlen(nr_key)) == 0){
+                     cf->nr_valid = 1;
+-                    if((ret = parse_nr(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_nr(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->nr_valid = 0;
+-                        printk("nr invalid :%d\n",ret);									
++                        printk("nr invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(nr_key);
+@@ -1201,9 +1297,10 @@ int parse_config(char *path){
+              case 'p':
+                 if(memcmp(iter,peaking_key,strlen(peaking_key)) == 0){
+                     cf->peaking_valid = 1;
+-                    if((ret = parse_peaking(&buf_para,&remained_size,&read_offset)) != 0){
++                    if((ret = parse_peaking(cf,&buf_para,&remained_size,&read_offset)) != 0){
+                         cf->peaking_valid = 0;
+-                        printk("peaking invalid :%d\n",ret);									
++                        printk("peaking invalid :%d\n",ret);
++                        goto clean_all; 									
+                     }
+                 }else{
+                     buf_para.data_start += strlen(peaking_key);
+@@ -1273,37 +1370,70 @@ void init_hw_para(xml_default_regs_t *reg){
+ 
+ /* call back functions */
+ 
+-unsigned int get_aet_max_step(void)
+-{
+-    return(sensor_aet_info->tbl_max_step);
++unsigned int get_aet_max_step(void *priv)
++{	
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	if(camera_priv_data == NULL || camera_priv_data->sensor_aet_info == NULL){
++		printk("get_aet_max_step null\n");
++		BUG();
++	}
++    return(camera_priv_data->sensor_aet_info->tbl_max_step);
+ }
+ 
+-unsigned int get_aet_max_gain(void)
++unsigned int get_aet_max_gain(void *priv)
+ {
+-    return(sensor_aet_info->tbl_max_gain);
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	if(camera_priv_data == NULL || camera_priv_data->sensor_aet_info == NULL){
++		printk("get_aet_max_gain null\n");
++		BUG();
++	}
++    return(camera_priv_data->sensor_aet_info->tbl_max_gain);
+ }
+ 
+-unsigned int get_aet_min_gain(void)
++unsigned int get_aet_min_gain(void *priv)
+ {
+-    return(sensor_aet_info->tbl_min_gain);
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	if(camera_priv_data == NULL || camera_priv_data->sensor_aet_info == NULL){
++		printk("get_aet_min_gain null\n");
++		BUG();
++	}
++    return(camera_priv_data->sensor_aet_info->tbl_min_gain);
+ }
+ 
+-unsigned int get_aet_current_step(void)
+-{
+-    return(sensor_aet_step);
++unsigned int get_aet_current_step(void *priv)
++{	
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	if(camera_priv_data == NULL || camera_priv_data->sensor_aet_info == NULL){
++		printk("get_aet_current_step null\n");
++		BUG();
++	}
++    return(camera_priv_data->sensor_aet_step);
+ }
+ 
+-unsigned int get_aet_current_gain(void)
++unsigned int get_aet_current_gain(void *priv)
+ {
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	sensor_aet_t *sensor_aet_table = camera_priv_data->sensor_aet_table;
++	unsigned int sensor_aet_step = camera_priv_data->sensor_aet_step;
++	if(camera_priv_data == NULL || sensor_aet_table == NULL){
++		printk("get_aet_current_gain null\n");
++		BUG();
++	}
+     return(sensor_aet_table[sensor_aet_step].gain);
+ }
+ 
+-unsigned int get_aet_new_gain(unsigned int new_step)
++unsigned int get_aet_new_gain(void *priv,unsigned int new_step)
+ {
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++	sensor_aet_t *sensor_aet_table = camera_priv_data->sensor_aet_table;
++	if(camera_priv_data == NULL || sensor_aet_table == NULL){
++		printk("get_aet_current_gain null\n");
++		BUG();
++	}
+     return(sensor_aet_table[new_step].gain);
+ }
+ 
+-int generate_para(cam_parameter_t *para,para_index_t pindex){
++int generate_para(cam_parameter_t *para,para_index_t pindex,configure_t *cf){
+     int i = 0;
+     int j = 0;
+     xml_scenes_t *scene;
+@@ -1357,18 +1487,6 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+     }else{
+         para->xml_regs_map = NULL;
+     }
+-    /** init lens **/
+-    if(cf->lens_valid == 1){
+-        if(para->xml_regs_map == NULL){
+-            if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
+-                printk("alloc mem failed\n");
+-                return 	-ENOMEM;
+-            }
+-        }
+-        reg = para->xml_regs_map;
+-        memcpy(reg->lnsd.reg_map,cf->lens.lens[pindex.lens_index].export + 2,(LENS_MAX - 2)*sizeof(unsigned int));
+-    }
+-
+     /** init gamma **/
+     if(cf->gamma_valid == 1){
+         if(para->xml_regs_map == NULL){
+@@ -1434,28 +1552,6 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+     }else{
+         para->xml_wave = NULL;
+     }
+-    /** init nr **/
+-    if(cf->nr_valid == 1){
+-		if(para->xml_regs_map == NULL){
+-			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
+-				printk("alloc mem failed\n");
+-				return 	-ENOMEM;
+-			}
+-        }
+-        reg = para->xml_regs_map;
+-        memcpy(reg->nr.reg_map,cf->nr.nr[pindex.nr_index].export + 2,(NR_MAX - 2)*sizeof(unsigned int));
+-    }
+-    /** init sharp **/
+-    if(cf->peaking_valid == 1){
+-		if(para->xml_regs_map == NULL){
+-			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
+-				printk("alloc mem failed\n");
+-				return 	-ENOMEM;
+-			}
+-        }
+-        reg = para->xml_regs_map;
+-        memcpy(reg->sharp.reg_map,cf->peaking.peaking[pindex.peaking_index].export + 2,(PEAKING_MAX - 2)*sizeof(unsigned int));
+-    }
+     return 0;
+ }
+ 
+@@ -1490,8 +1586,9 @@ void free_para(cam_parameter_t *para){
+ 	}
+ }
+ 
+-void update_index(int width,int height,para_index_t *pindex){
++int update_fmt_para(int width,int height,cam_parameter_t *para,para_index_t *pindex,configure_t *cf){
+ 	int i = 0;
++	xml_default_regs_t *reg;
+ 	if(cf->lens_valid == 1){
+ 		while(i < cf->lens.sum){
+ 			if(cf->lens.lens[i].export[0] == width && cf->lens.lens[i].export[1] == height)
+@@ -1503,8 +1600,18 @@ void update_index(int width,int height,para_index_t *pindex){
+ 		else{
+ 			printk("width:%x,height:%x no match lens param\n");
+ 			pindex->lens_index = 0;	
+-		}						
++		}
++		/** init lens **/
++        if(para->xml_regs_map == NULL){
++            if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
++                printk("alloc mem failed\n");
++                return 	-ENOMEM;
++            }
++        }
++        reg = para->xml_regs_map;
++        memcpy(reg->lnsd.reg_map,cf->lens.lens[pindex->lens_index].export + 2,(LENS_MAX - 2)*sizeof(unsigned int));					
+ 	}
++	
+ 	i = 0;
+ 	if(cf->nr_valid == 1){
+ 		while(i < cf->nr.sum){
+@@ -1517,8 +1624,18 @@ void update_index(int width,int height,para_index_t *pindex){
+ 		else{
+ 			printk("width:%x,height:%x no match nr param\n");
+ 			pindex->nr_index = 0;	
+-		}						
++		}
++			/** init nr **/
++		if(para->xml_regs_map == NULL){
++			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
++				printk("alloc mem failed\n");
++				return 	-ENOMEM;
++			}
++        }
++        reg = para->xml_regs_map;
++        memcpy(reg->nr.reg_map,cf->nr.nr[pindex->nr_index].export + 2,(NR_MAX - 2)*sizeof(unsigned int));					
+ 	}
++	
+ 	i = 0;
+ 	if(cf->peaking_valid == 1){
+ 		while(i < cf->peaking.sum){
+@@ -1531,7 +1648,16 @@ void update_index(int width,int height,para_index_t *pindex){
+ 		else{
+ 			printk("width:%x,height:%x no match peaking param\n");
+ 			pindex->peaking_index = 0;	
+-		}						
++		}
++		    /** init sharp **/
++		if(para->xml_regs_map == NULL){
++			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
++				printk("alloc mem failed\n");
++				return 	-ENOMEM;
++			}
++        }
++        reg = para->xml_regs_map;
++        memcpy(reg->sharp.reg_map,cf->peaking.peaking[pindex->peaking_index].export + 2,(PEAKING_MAX - 2)*sizeof(unsigned int));						
+ 	}
+-	return;	
++	return 0;	
+ }
+diff --git a/drivers/amlogic/camera/common/config_parser.h b/drivers/amlogic/camera/common/config_parser.h
+index e8e252bf5a7a..d30dcb5ad428 100755
+--- a/drivers/amlogic/camera/common/config_parser.h
++++ b/drivers/amlogic/camera/common/config_parser.h
+@@ -19,6 +19,7 @@
+ #define SCENE_ITEM_MAX 1
+ #define EFFECT_MAX 18
+ #define HW_MAX 64
++#define WB_MAX 2
+ #define GAMMA_MAX 257
+ #define SCENE_MAX 281
+ #define WB_SENSOR_MAX 4
+@@ -37,6 +38,7 @@ enum error_code {
+ 	NO_MEM = 1,
+ 	READ_ERROR,
+ 	WRONG_FORMAT,
++	CHECK_LEN_FAILED,
+ 	CHECK_FAILED,
+ 	HEAD_FAILED,
+ 	BODY_HEAD_FAILED,
+@@ -220,7 +222,7 @@ typedef struct{
+     int nr_valid;
+     peaking_struct peaking;
+     int peaking_valid;
+-}configure;
++}configure_t;
+ 
+ typedef struct{
+ 	unsigned int effect_index;
+@@ -249,17 +251,24 @@ typedef struct sensor_dg_s {
+     unsigned short dg_default;
+ }sensor_dg_t;
+ 
+-int parse_config(char *path);
+-int generate_para(cam_parameter_t *para,para_index_t pindex);
++typedef struct{
++	sensor_aet_info_t *sensor_aet_info; // point to 1 of up to 16 aet information
++	sensor_aet_t *sensor_aet_table;
++	unsigned int sensor_aet_step; // current step of the current aet
++	configure_t *configure;
++}camera_priv_data_t;
++
++int parse_config(char *path,configure_t *cf);
++int generate_para(cam_parameter_t *para,para_index_t pindex,configure_t *cf);
+ void free_para(cam_parameter_t *para);
+-void update_index(int width,int height,para_index_t *pindex);
+-
+-unsigned int get_aet_current_step(void);
+-unsigned int get_aet_current_gain(void);
+-unsigned int get_aet_min_gain(void);
+-unsigned int get_aet_max_gain(void);
+-unsigned int get_aet_max_step(void);
+-unsigned int get_aet_gain_by_step(unsigned int new_step);
++int update_fmt_para(int width,int height,cam_parameter_t *para,para_index_t *pindex,configure_t *cf);
++
++unsigned int get_aet_current_step(void *priv);
++unsigned int get_aet_current_gain(void *pirv);
++unsigned int get_aet_min_gain(void *priv);
++unsigned int get_aet_max_gain(void *priv);
++unsigned int get_aet_max_step(void *priv);
++unsigned int get_aet_gain_by_step(void *priv,unsigned int new_step);
+ 
+ 
+ int my_i2c_put_byte(struct i2c_adapter *adapter,unsigned short i2c_addr,unsigned short addr,unsigned char data);
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 171f77eec962..bde6a536206f 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -99,17 +99,11 @@ static struct v4l2_fract ov5647_frmintervals_active = {
+ };
+ 
+ static int ov5647_have_open=0;
+-
+-extern configure *cf;
+ static camera_mode_t ov5647_work_mode = CAMERA_PREVIEW;
+ static struct class *cam_class;
+ static unsigned int g_ae_manual_exp;
+ static unsigned int g_ae_manual_ag;
+ static unsigned int g_ae_manual_vts;
+-extern sensor_aet_info_t *sensor_aet_info; // point to 1 of up to 16 aet information
+-extern sensor_aet_t *sensor_aet_table;
+-extern unsigned int sensor_aet_step;
+-
+ static unsigned int exp_mode;
+ static unsigned int change_cnt;
+ static unsigned int current_fmt;
+@@ -121,7 +115,8 @@ static int t_index = -1;
+ static int dest_hactive = 640;
+ static int dest_vactive = 480;
+ static bool bDoingAutoFocusMode = false;
+-unsigned char last_exp_h = 0, last_exp_m = 0, last_exp_l = 0, last_ag_h = 0, last_ag_l = 0, last_vts_h = 0, last_vts_l = 0;
++static unsigned char last_exp_h = 0, last_exp_m = 0, last_exp_l = 0, last_ag_h = 0, last_ag_l = 0, last_vts_h = 0, last_vts_l = 0;
++static configure_t *cf;
+ /* supported controls */
+ static struct v4l2_queryctrl ov5647_qctrl[] = {
+ 	{
+@@ -629,6 +624,9 @@ struct ov5647_device {
+ 	/* ae status */
+ 	bool ae_on;
+ 	
++	camera_priv_data_t camera_priv_data;
++	
++	configure_t *configure;
+ 	/* Control 'registers' */
+ 	int 			   qctl_regs[ARRAY_SIZE(ov5647_qctrl)];
+ };
+@@ -2193,17 +2191,22 @@ static ssize_t aet_manual_show(struct class *cls,struct class_attribute *attr, c
+ static CLASS_ATTR(aet_debug, 0664, aet_manual_show, aet_manual_store);
+ 
+ /* ov5647 uses exp+ag mode */
+-static bool OV5647_set_aet_new_step(unsigned int new_step, bool exp_mode, bool ag_mode){
+-  unsigned int exp = 0, ag = 0, vts = 0;
+-
+-  if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[aet_index].tbl_max_step))
++static bool OV5647_set_aet_new_step(void *priv, unsigned int new_step, bool exp_mode, bool ag_mode){
++  	unsigned int exp = 0, ag = 0, vts = 0;
++	camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv; 
++	sensor_aet_t *sensor_aet_table = camera_priv_data->sensor_aet_table;
++	sensor_aet_info_t *sensor_aet_info = camera_priv_data->sensor_aet_info;
++	
++	if(camera_priv_data == NULL || sensor_aet_table == NULL || sensor_aet_info == NULL)
++		return false;	
++	if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[aet_index].tbl_max_step))
+ 		return(false);
+ 	else
+ 	{
+-		sensor_aet_step = new_step;
+-		exp = sensor_aet_table[sensor_aet_step].exp;
+-		ag = sensor_aet_table[sensor_aet_step].ag;
+-		vts = sensor_aet_table[sensor_aet_step].vts;
++		camera_priv_data->sensor_aet_step = new_step;
++		exp = sensor_aet_table[camera_priv_data->sensor_aet_step].exp;
++		ag = sensor_aet_table[camera_priv_data->sensor_aet_step].ag;
++		vts = sensor_aet_table[camera_priv_data->sensor_aet_step].vts;
+ 		if(exp_mode == 1 && ag_mode == 1){
+ 			OV5647_manual_set_aet(exp,ag,vts);
+ 		}else if(exp_mode == 1 && ag_mode == 0){
+@@ -2216,34 +2219,13 @@ static bool OV5647_set_aet_new_step(unsigned int new_step, bool exp_mode, bool a
+ }
+ 
+ 
+-static bool OV5647_check_mains_freq(void){// when the fr change,we need to change the aet table
++static bool OV5647_check_mains_freq(void *priv){// when the fr change,we need to change the aet table
+     int detection; 
+     struct i2c_adapter *adapter;
+-#if 0		
+-    if(exp_mode != 2)//if current is not auto mode ,return
+-        return false;
+-
+-    detection = my_i2c_get_byte(adapter,0x36,0x3c0c) & 1;
+-    if(current_fr != detection){
+-        change_cnt++;
+-        if(change_cnt > 5){
+-            aet_index ^= 1;
+-            sensor_aet_info = cf->aet.aet[aet_index].info;
+-            sensor_aet_table = cf->aet.aet[aet_index].aet_table;
+-            sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-            change_cnt = 0;
+-            current_fr = detection;
+-            return true;
+-        }	
+-    }else{
+-        change_cnt = 0;	
+-    }
+-    return false;
+-#endif
+     return true;
+ }
+ 
+-bool OV5647_set_af_new_step(unsigned int af_step){
++bool OV5647_set_af_new_step(void *priv, unsigned int af_step){
+     struct i2c_adapter *adapter;
+     char buf[3];
+     if(af_step == last_af_step)
+@@ -2271,28 +2253,30 @@ bool OV5647_set_af_new_step(unsigned int af_step){
+ 
+ }
+ 
+-
+-
+-void OV5647_set_new_format(int width,int height,int fr){
++void OV5647_set_new_format(void *priv,int width,int height,int fr){
+     int index = 0;
+     current_fr = fr;
+-    printk("sum:%d,mode:%d,fr:%d\n",cf->aet.sum,ov5647_work_mode,fr);
+-    while(index < cf->aet.sum){
+-        if(width == cf->aet.aet[index].info->fmt_hactive && height == cf->aet.aet[index].info->fmt_vactive \
+-                && fr == cf->aet.aet[index].info->fmt_main_fr && ov5647_work_mode == cf->aet.aet[index].info->fmt_capture){
++    camera_priv_data_t *camera_priv_data = (camera_priv_data_t *)priv;
++    configure_t *configure = camera_priv_data->configure;
++    if(camera_priv_data == NULL)
++    	return;
++    printk("sum:%d,mode:%d,fr:%d\n",configure->aet.sum,ov5647_work_mode,fr);
++    while(index < configure->aet.sum){
++        if(width == configure->aet.aet[index].info->fmt_hactive && height == configure->aet.aet[index].info->fmt_vactive \
++                && fr == configure->aet.aet[index].info->fmt_main_fr && ov5647_work_mode == configure->aet.aet[index].info->fmt_capture){
+             break;	
+         }
+         index++;	
+     }
+-    if(index >= cf->aet.sum){
++    if(index >= configure->aet.sum){
+         printk("use default value\n");
+         index = 0;	
+     }
+     printk("current aet index :%d\n",index);
+-    sensor_aet_info = cf->aet.aet[index].info;
+-    sensor_aet_table = cf->aet.aet[index].aet_table;
+-    sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-    //OV5647_set_aet_new_step(sensor_aet_step,1,1);
++    camera_priv_data->sensor_aet_info = configure->aet.aet[index].info;
++    camera_priv_data->sensor_aet_table = configure->aet.aet[index].aet_table;
++    camera_priv_data->sensor_aet_step = camera_priv_data->sensor_aet_info->tbl_rated_step;
++    return;
+ }
+ 
+ 
+@@ -2625,14 +2609,14 @@ void OV5647_set_param_wb(struct ov5647_device *dev,enum  camera_wb_flip_e para)/
+         printk("not support\n");
+         return;
+     }
+-    if(cf != NULL && cf->wb_valid == 1){
+-        while(index < cf->wb.sum){
+-            if(strcmp(wb_pair[i].name, cf->wb.wb[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->wb_valid == 1){
++        while(index < dev->configure->wb.sum){
++            if(strcmp(wb_pair[i].name, dev->configure->wb.wb[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->wb.sum){
++        if(index == dev->configure->wb.sum){
+             printk("invalid wb value\n");
+             return;	
+         }
+@@ -2641,7 +2625,7 @@ void OV5647_set_param_wb(struct ov5647_device *dev,enum  camera_wb_flip_e para)/
+             dev->cam_para->cam_command = CAM_COMMAND_AWB;
+         }else{
+             dev->cam_para->cam_command = CAM_COMMAND_MWB;
+-            memcpy(dev->cam_para->xml_wb_manual->reg_map,cf->wb.wb[index].export,2*sizeof(int));
++            memcpy(dev->cam_para->xml_wb_manual->reg_map,dev->configure->wb.wb[index].export,WB_MAX * sizeof(int));
+         }
+         printk("set wb :%d\n",index);
+         dev->fe_arg.port = TVIN_PORT_ISP;
+@@ -2684,7 +2668,6 @@ void OV5647_set_param_exposure(struct ov5647_device *dev,enum camera_exposure_e
+             dev->fe_arg.index = 0;
+             dev->fe_arg.arg = (void *)(dev->cam_para);
+             dev->vops->tvin_fe_func(0,&dev->fe_arg);	
+-            OV5647_set_aet_new_step(sensor_aet_step,1,1);//need to change the new exp and ag mode
+             dev->ae_on = true;
+         }
+         value = para < 8 ? para : 7;
+@@ -2697,9 +2680,7 @@ void OV5647_set_param_exposure(struct ov5647_device *dev,enum camera_exposure_e
+     dev->fe_arg.port = TVIN_PORT_ISP;
+     dev->fe_arg.index = 0;
+     dev->fe_arg.arg = (void *)(dev->cam_para);
+-    dev->vops->tvin_fe_func(0,&dev->fe_arg);	
+-    //OV5647_set_aet_new_step(sensor_aet_step,1,1);//need to change the new exp and ag mode
+-
++    dev->vops->tvin_fe_func(0,&dev->fe_arg);
+ } /* ov5647_set_param_exposure */
+ /*************************************************************************
+  * FUNCTION
+@@ -2741,19 +2722,19 @@ void OV5647_set_param_effect(struct ov5647_device *dev,enum camera_effect_flip_e
+         printk("not support\n");
+         return;
+     }
+-    if(cf != NULL && cf->effect_valid == 1){
+-        while(index < cf->eff.sum){
+-            if(strcmp(effect_pair[i].name, cf->eff.eff[index].name) == 0){
++    if(dev->configure != NULL && dev->configure->effect_valid == 1){
++        while(index < dev->configure->eff.sum){
++            if(strcmp(effect_pair[i].name, dev->configure->eff.eff[index].name) == 0){
+                 break;	
+             }
+             index++;
+         }
+-        if(index == cf->eff.sum){
++        if(index == dev->configure->eff.sum){
+             printk("invalid effect value\n");
+             return;	
+         }
+         dev->cam_para->cam_command = CAM_COMMAND_EFFECT;
+-        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,cf->eff.eff[index].export,18*sizeof(unsigned int));
++        memcpy(dev->cam_para->xml_effect_manual->csc.reg_map,dev->configure->eff.eff[index].export,EFFECT_MAX * sizeof(unsigned int));
+ 
+         dev->fe_arg.port = TVIN_PORT_ISP;
+         dev->fe_arg.index = 0;
+@@ -2991,8 +2972,8 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+     int addr_start = 0x5186;
+     int data = 0;
+     int index = 0;
+-    if(cf->wb_sensor_data_valid == 1){
+-        sensor_data = cf->wb_sensor_data.export;
++    if(dev->configure->wb_sensor_data_valid == 1){
++        sensor_data = dev->configure->wb_sensor_data.export;
+     }else
+         sensor_data = default_sensor_data;
+     for(i = 0;i < (WB_SENSOR_MAX - 1) * 2;){ // current only rgb valid
+@@ -3016,7 +2997,7 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+     ov5647_frmintervals_active.denominator = res_param->active_fps;
+     ov5647_h_active = res_param->active_frmsize.width;
+     ov5647_v_active = res_param->active_frmsize.height;
+-    OV5647_set_new_format(ov5647_h_active,ov5647_v_active,current_fr);// should set new para
++    OV5647_set_new_format((void *)&dev->camera_priv_data,ov5647_h_active,ov5647_v_active,current_fr);// should set new para
+ }    /* OV5647_set_resolution */
+ 
+ static int set_focus_zone(struct ov5647_device *dev, int value)
+@@ -3124,7 +3105,6 @@ static int ov5647_setting(struct ov5647_device *dev,int PROP_ID,int value )
+ 			ov5647_qctrl[5].default_value=value;
+ 			printk(KERN_INFO " set camera  exposure=%d. \n ",value);
+ 			if(fh->stream_on) {
+-				//printk("fh->stream_on is %d\n", fh->stream_on);
+ 				OV5647_set_param_exposure(dev,value);
+ 			}
+ 		}
+@@ -3616,11 +3596,11 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ 	struct ov5647_device *dev = fh->dev;
+ 	resolution_param_t* res_param = NULL;
+ 
+-        f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++    f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
+ 	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
+             (f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
+-                f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
+-        }
++    	f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++    }
+ 	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+@@ -3801,17 +3781,8 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     current_fmt = 0;
+     if(dev->cam_para == NULL)
+     	return -EINVAL;
+-   	update_index(ov5647_h_active,ov5647_v_active,&dev->pindex);
+-   	if(generate_para(dev->cam_para,dev->pindex) != 0){
+-        printk("generate para failed\n");
+-        free_para(dev->cam_para);
+-        kfree(dev->cam_para);
+-        return -EINVAL;
+-    }
+-    dev->cam_para->cam_function.set_aet_new_step = OV5647_set_aet_new_step;
+-    dev->cam_para->cam_function.check_mains_freq = OV5647_check_mains_freq;
+-    dev->cam_para->cam_function.set_af_new_step = OV5647_set_af_new_step;  
+-    dev->ae_on = false;
++   	if(update_fmt_para(ov5647_h_active,ov5647_v_active,dev->cam_para,&dev->pindex,dev->configure) != 0)
++   		return -EINVAL;
+     para.reserved = (int)(dev->cam_para);
+     if (CAM_MIPI == dev->cam_info.interface)
+     {
+@@ -3826,8 +3797,8 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+             para.csi_hw_info.urgent = 1;
+             para.csi_hw_info.clk_channel = dev->cam_info.clk_channel; //clock channel a or b
+     }
+-    if(cf->aet_valid == 1){
+-        dev->cam_para->xml_scenes->ae.aet_fmt_gain = sensor_aet_info->format_transfer_parameter;        	
++    if(dev->configure->aet_valid == 1){
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = (dev->camera_priv_data).sensor_aet_info->format_transfer_parameter;        	
+     }
+     else
+         dev->cam_para->xml_scenes->ae.aet_fmt_gain = 100;
+@@ -3841,9 +3812,9 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     }
+     /*** 		set cm2 		***/
+ 	dev->vdin_arg.cmd = VDIN_CMD_SET_CM2;
+-	dev->vdin_arg.cm2 = cf->cm.export;
++	dev->vdin_arg.cm2 = dev->configure->cm.export;
+ 	dev->vops->tvin_vdin_func(0,&dev->vdin_arg);
+-	printk("call set cm2\n");
++
+     OV5647_set_param_wb(fh->dev,ov5647_qctrl[4].default_value);
+     OV5647_set_param_exposure(fh->dev,ov5647_qctrl[5].default_value);
+     OV5647_set_param_effect(fh->dev,ov5647_qctrl[6].default_value);
+@@ -4160,8 +4131,8 @@ static int ov5647_open(struct file *file)
+     aml_cam_init(&dev->cam_info);
+     printk("config path:%s\n",(dev->cam_info).config);
+     if((dev->cam_info).config != NULL){
+-        if((cf = kmalloc(sizeof(configure),0)) != NULL){
+-            if(parse_config((dev->cam_info).config) == 0){
++        if((dev->configure = kmalloc(sizeof(configure_t),0)) != NULL){
++            if(parse_config((dev->cam_info).config,dev->configure) == 0){
+                 printk("parse successfully");
+             }else{
+                 printk("parse failed");
+@@ -4176,6 +4147,18 @@ static int ov5647_open(struct file *file)
+         printk("memalloc failed\n");
+         return -ENOMEM;
+     }
++    if(generate_para(dev->cam_para,dev->pindex,dev->configure) != 0){
++        printk("generate para failed\n");
++        free_para(dev->cam_para);
++        kfree(dev->cam_para);
++        return -EINVAL;
++    }
++    dev->cam_para->cam_function.set_aet_new_step = OV5647_set_aet_new_step;
++    dev->cam_para->cam_function.check_mains_freq = OV5647_check_mains_freq;
++    dev->cam_para->cam_function.set_af_new_step = OV5647_set_af_new_step;
++    dev->camera_priv_data.configure = dev->configure;
++    dev->cam_para->cam_function.priv_data = (void *)&dev->camera_priv_data;  
++    dev->ae_on = false;
+     OV5647_init_regs(dev);
+     msleep(40);
+     dw9714_init(1);
+@@ -4253,10 +4236,11 @@ static int ov5647_open(struct file *file)
+     retval = class_create_file(cam_class,&class_attr_resolution_debug);
+     retval = class_create_file(cam_class,&class_attr_light_source_debug);
+     retval = class_create_file(cam_class,&class_attr_version_debug);
+-    printk("open successfully\n");
+     dev->vops = get_vdin_v4l2_ops();
+ 	bDoingAutoFocusMode=false;
+     dev->dev = fh;
++    cf = dev->configure;
++    printk("open successfully\n");
+     return 0;
+ }
+ 
+@@ -4304,24 +4288,26 @@ static int ov5647_close(struct file *file)
+     videobuf_mmap_free(&fh->vb_vidq);
+ 
+     kfree(fh);
+-    if(cf != NULL){
+-        if(cf->aet_valid){
+-            for(i = 0; i < cf->aet.sum; i++){
+-                kfree(cf->aet.aet[i].info);
+-                cf->aet.aet[i].info = NULL;
+-                kfree(cf->aet.aet[i].aet_table);
+-                cf->aet.aet[i].aet_table = NULL;
++    if(dev->configure != NULL){
++        if(dev->configure->aet_valid){
++            for(i = 0; i < dev->configure->aet.sum; i++){
++                kfree(dev->configure->aet.aet[i].info);
++                dev->configure->aet.aet[i].info = NULL;
++                kfree(dev->configure->aet.aet[i].aet_table);
++                dev->configure->aet.aet[i].aet_table = NULL;
+             }
+         }
+-        kfree(cf);
+-        cf = NULL;
++        kfree(dev->configure);
++        dev->configure = NULL;
+     }
++    cf = NULL;
+     if(dev->cam_para != NULL ){
+         free_para(dev->cam_para);
+         kfree(dev->cam_para);
+         dev->cam_para = NULL;
+     }
+-
++	dev->camera_priv_data.sensor_aet_table = NULL;
++	dev->camera_priv_data.sensor_aet_info = NULL;
+     mutex_lock(&dev->mutex);
+     dev->users--;
+     mutex_unlock(&dev->mutex);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 045669dcfc97..070742b2badd 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -192,7 +192,7 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 	if(!strcmp(parm[0],"jump")){
+ 		data[0] = simple_strtol(parm[1],NULL,16);
+ 		pr_info("%s to 0x%x.\n",parm[0],data[0]);
+-		devp->cam_param->cam_function.set_af_new_step(data[0]);
++		devp->cam_param->cam_function.set_af_new_step(devp->cam_param->cam_function.priv_data,data[0]);
+ 	//echo start control min max dir delay step >af_debug
+ 	}else if(!strcmp(parm[0],"start")){
+ 		af = kmalloc(sizeof(af_debug_t),GFP_KERNEL);
+@@ -338,7 +338,7 @@ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ {
+ 	if (af->state == 0) {
+ 		if(ops&&ops->set_af_new_step)
+-			ops->set_af_new_step(af->cur_step);
++			ops->set_af_new_step(ops->priv_data,af->cur_step);
+ 		af->state = 1;
+ 		if(af_pr)
+ 			pr_info("set step %u.\n",af->cur_step);
+@@ -357,7 +357,7 @@ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ 				af->cur_step = 0;
+ 				/*stop*/
+ 				af->state = 0xffffffff;
+-				ops->set_af_new_step(0);
++				ops->set_af_new_step(ops->priv_data,0);
+ 				pr_info("%s get statics ok.\n",__func__);
+ 			}
+ 		}else{
+@@ -366,7 +366,7 @@ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ 				af->cur_step = 0;
+ 				/*stop*/
+ 				af->state = 0xffffffff;
+-				ops->set_af_new_step(0);
++				ops->set_af_new_step(ops->priv_data,0);
+ 				pr_info("%s get statics ok.\n",__func__);
+ 			}
+ 		}
+@@ -750,7 +750,7 @@ static int isp_thread(isp_dev_t *devp) {
+ 		ae_flag &= (~0x1);
+ 		printk("set new step %d \n",ae_new_step);
+ 		if(func&&func->set_aet_new_step)
+-		func->set_aet_new_step(ae_new_step,true,true);
++		func->set_aet_new_step(func->priv_data,ae_new_step,true,true);
+ 	}
+ 	if(ae_flag&0x2)
+ 	{
+@@ -758,14 +758,14 @@ static int isp_thread(isp_dev_t *devp) {
+ 		newstep = isp_tune_exposure(devp);
+ 		printk("set new step2 %d \n",newstep);
+ 		if(func&&func->set_aet_new_step)
+-		func->set_aet_new_step(newstep,true,true);
++		func->set_aet_new_step(func->priv_data,newstep,true,true);
+ 	}
+ 	if(atomic_read(&devp->ae_info.writeable)&&func&&func->set_aet_new_step)
+ 	{
+ 		if(isp_debug)
+ 			printk("[isp] set new step:%d \n",ae_sens.new_step);
+ 		if(ae_adjust_enable)
+-			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
++			func->set_aet_new_step(func->priv_data,ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
+ 		atomic_set(&devp->ae_info.writeable,0);
+ 	}
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+@@ -773,7 +773,7 @@ static int isp_thread(isp_dev_t *devp) {
+ 	}
+ 	if(devp->flag & ISP_AF_SM_MASK) {
+ 		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
+-			func->set_af_new_step(devp->af_info.cur_step);
++			func->set_af_new_step(func->priv_data,devp->af_info.cur_step);
+ 			atomic_set(&devp->af_info.writeable,0);
+ 		}
+ 	}
+@@ -874,8 +874,6 @@ static void isp_fe_close(struct tvin_frontend_s *fe)
+ 			kfree(devp->af_info.af_detect);
+ 		if(devp->af_info.v_dc)
+ 			kfree(devp->af_info.v_dc);
+-		if(devp->isp_af_parm)
+-			kfree(devp->isp_af_parm);
+ 	if(devp->isp_fe)
+ 		devp->isp_fe->dec_ops->close(devp->isp_fe);
+         memset(&devp->info,0,sizeof(isp_info_t));
+@@ -1182,7 +1180,7 @@ static void  isp_do_work(struct work_struct *work)
+ 		ae_flag &= (~0x1);
+ 		printk("set new step %d \n",ae_new_step);
+ 		if(func&&func->set_aet_new_step)
+-			func->set_aet_new_step(ae_new_step,true,true);
++			func->set_aet_new_step(func->priv_data,ae_new_step,true,true);
+ 	}
+ 	if(ae_flag&0x2)
+ 	{
+@@ -1190,14 +1188,14 @@ static void  isp_do_work(struct work_struct *work)
+ 		newstep = isp_tune_exposure(devp);
+ 		printk("wq:set new step2 %d \n",newstep);
+ 		if(func&&func->set_aet_new_step)
+-			func->set_aet_new_step(newstep,true,true);
++			func->set_aet_new_step(func->priv_data,newstep,true,true);
+ 	}
+ 	if(atomic_read(&devp->ae_info.writeable)&&func&&func->set_aet_new_step)
+ 	{
+ 		if(isp_debug)
+ 		printk("[isp] wq:set new step:%d \n",ae_sens.new_step);
+ 		if(ae_adjust_enable)
+-			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
++			func->set_aet_new_step(func->priv_data,ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
+ 		atomic_set(&devp->ae_info.writeable,0);
+ 	}
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+@@ -1205,7 +1203,7 @@ static void  isp_do_work(struct work_struct *work)
+ 	}
+ 	if(devp->flag & ISP_AF_SM_MASK) {
+ 		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
+-			func->set_af_new_step(devp->af_info.cur_step);
++			func->set_af_new_step(func->priv_data,devp->af_info.cur_step);
+ 			atomic_set(&devp->af_info.writeable,0);
+ 		}
+ 	}
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 425d175150cd..2a67a03cf1dc 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -92,7 +92,7 @@ static inline int find_step(cam_function_t *func, unsigned int low, unsigned int
+ 	{
+ 		mid = (hign + low)/2;
+ 		if(func&&func->get_aet_gain_by_step)
+-			rate = func->get_aet_gain_by_step(mid);
++			rate = func->get_aet_gain_by_step(func->priv_data,mid);
+ 		if(0)
+ 			printk("mid = %d,rate = %d, gain = %d,%d,%d,%d,%d\n",mid,rate,gain,hign,low,func,func->get_aet_gain_by_step);
+ 		if(gain < rate)
+@@ -120,7 +120,7 @@ static unsigned int isp_ae_cal_new_para(isp_dev_t *devp)
+     struct cam_function_s *func = &devp->cam_param->cam_function;
+     unsigned int aet_gain_new = 0, format_gain_new = 0;
+ 
+-    aepa->max_step = func->get_aet_max_step();
++    aepa->max_step = func->get_aet_max_step(func->priv_data);
+     format_gain_new = devp->isp_ae_parm->aet_fmt_gain;
+     aet_gain_new = ((aet_gain_pre * format_gain_pre) / format_gain_new);
+     if (aet_gain_new == 0) {
+@@ -135,7 +135,7 @@ static unsigned int isp_ae_cal_new_para(isp_dev_t *devp)
+             format_gain_new, aet_gain_new, ae_sens.new_step);
+ 
+     if (func && func->set_aet_new_step) {
+-        func->set_aet_new_step(ae_sens.new_step, ae_sens.shutter, ae_sens.gain);
++        func->set_aet_new_step(func->priv_data,ae_sens.new_step, ae_sens.shutter, ae_sens.gain);
+         pr_info("[isp] %s: write new step to sensor... ...\n", __func__);
+     }
+ 
+@@ -222,7 +222,7 @@ void af_sm_init(isp_dev_t *devp)
+ 	}
+ 	if(devp->flag & ISP_FLAG_CAPTURE){
+ 		af_info->cur_step = af_info->capture_step;
+-		func->set_af_new_step(devp->af_info.cur_step);
++		func->set_af_new_step(func->priv_data,devp->af_info.cur_step);
+ 	}
+ }
+ void isp_ae_low_gain()
+@@ -234,10 +234,10 @@ int isp_ae_save_current_para(isp_dev_t *devp)
+ {
+     struct cam_function_s *func = &devp->cam_param->cam_function;
+     struct isp_ae_sm_s *aepa = &sm_state.isp_ae_parm;
+-    aepa->max_step = func->get_aet_max_step();
++    aepa->max_step = func->get_aet_max_step(func->priv_data);
+ 
+     if (func && func->get_aet_gain_by_step)
+-        aet_gain_pre = func->get_aet_gain_by_step(ae_sens.new_step);
++        aet_gain_pre = func->get_aet_gain_by_step(func->priv_data,ae_sens.new_step);
+     format_gain_pre = devp->isp_ae_parm->aet_fmt_gain;
+     pr_info("[isp] %s format_gain_pre:%d aet_gain_pre:%d ... ...\n",
+                 __func__, format_gain_pre, aet_gain_pre);
+@@ -253,7 +253,7 @@ unsigned int isp_tune_exposure(isp_dev_t *devp)
+ 	unsigned int gain_cur = 0;
+ 	unsigned int gain_target = 0;
+ 	if(func&&func->get_aet_current_gain)
+-	gain_cur = func->get_aet_current_gain();
++	gain_cur = func->get_aet_current_gain(func->priv_data);
+ 	gain_target = (gain_cur*exposure_extra + 512) >> 10;
+ 	new_step = find_step(func, 0, aepa->max_step, gain_target);
+ 	return new_step;
+@@ -313,11 +313,11 @@ void isp_ae_sm(isp_dev_t *devp)
+ 			aepa->alert_b = ((aepa->pixel_sum >> 4) * aep->ratio_b) >> 8;
+ 			aepa->change_step = 0;
+ 			if(func&&func->get_aet_max_gain)
+-				aepa->max_gain = func->get_aet_max_gain();
++				aepa->max_gain = func->get_aet_max_gain(func->priv_data);
+ 			if(func&&func->get_aet_min_gain)
+-				aepa->min_gain = func->get_aet_min_gain();
++				aepa->min_gain = func->get_aet_min_gain(func->priv_data);
+ 			if(func&&func->get_aet_max_step)
+-				aepa->max_step = func->get_aet_max_step();
++				aepa->max_step = func->get_aet_max_step(func->priv_data);
+ 			pr_info("ae,win_l=%d,win_r=%d,win_t=%d,win_b=%d\n",aepa->win_l,aepa->win_r,aepa->win_t,aepa->win_b);
+ 			pr_info("aepa->max_lumasum1=%d,max_lumasum2=%d,=%d,=%d",aepa->max_lumasum1,aepa->max_lumasum2,aepa->max_lumasum3,aepa->max_lumasum4);
+ 			pr_info("aepa->alert_r=%d,g=%d,b=%d\n",aepa->alert_r,aepa->alert_g,aepa->alert_b);
+@@ -366,7 +366,7 @@ void isp_ae_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AE_LOW_GAIN:
+-			aepa->cur_gain = func->get_aet_current_gain;
++			aepa->cur_gain = func->get_aet_current_gain(func->priv_data);
+ 			targrate = (aepa->cur_gain << 10)/aepa->tf_ratio;
+ 			newstep = find_step(func,0,aepa->max_step,targrate);
+ 			if(aep->ae_skip[1] == 0x1){
+@@ -388,10 +388,10 @@ void isp_ae_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_SHUTTER_ADJUST:
+ 			if(func&&func->get_aet_current_gain)
+-				aepa->cur_gain = func->get_aet_current_gain();
++				aepa->cur_gain = func->get_aet_current_gain(func->priv_data);
+ 			aepa->pre_gain = aepa->cur_gain;
+ 			if(func&&func->get_aet_current_gain)
+-				aepa->cur_step = func->get_aet_current_step();
++				aepa->cur_step = func->get_aet_current_step(func->priv_data);
+ 			if(ae_sm_dg&AE_SHUTTER_ADJUST_DG)
+ 				pr_info("cur_gain = %d,cur_step = %d\n",aepa->cur_gain,aepa->cur_step);
+ 			if(aepa->cur_gain == 0)
+@@ -1181,7 +1181,6 @@ void isp_af_fine_tune(isp_dev_t *devp)
+ 
+ 	switch(sm_state.af_state){
+ 		case AF_SCAN_INIT:
+-			devp->cmd_state = CAM_STATE_DOING;
+ 			isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+ 			af_delay = 0;
+ 			af_info->valid_step_cnt = 0;
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index 29d4bfca508a..ba4b59d95762 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -600,15 +600,16 @@ typedef struct xml_effect_manual_s {
+ } cam_format_t;
+ */
+ typedef struct cam_function_s {
+-	bool (*set_af_new_step)(unsigned int af_debug_control);
+-	unsigned int (*get_aet_current_step)(void);
+-	unsigned int (*get_aet_current_gain)(void);
+-	unsigned int (*get_aet_min_gain)(void);
+-	unsigned int (*get_aet_max_gain)(void);
+-	unsigned int (*get_aet_max_step)(void);
+-	unsigned int (*get_aet_gain_by_step)(unsigned int new_step);
+-	bool (*set_aet_new_step)(unsigned int new_step, bool exp_mode, bool ag_mode);
+-	bool (*check_mains_freq)(void);
++	bool (*set_af_new_step)(void *priv, unsigned int af_debug_control);
++	unsigned int (*get_aet_current_step)(void *priv);
++	unsigned int (*get_aet_current_gain)(void *priv);
++	unsigned int (*get_aet_min_gain)(void *priv);
++	unsigned int (*get_aet_max_gain)(void *priv);
++	unsigned int (*get_aet_max_step)(void *priv);
++	unsigned int (*get_aet_gain_by_step)(void *priv, unsigned int new_step);
++	bool (*set_aet_new_step)(void *priv, unsigned int new_step, bool exp_mode, bool ag_mode);
++	bool (*check_mains_freq)(void *priv);
++	void *priv_data;
+ } cam_function_t;
+ 
+ 
+-- 
+2.19.0
+

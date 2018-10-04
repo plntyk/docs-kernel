@@ -1,0 +1,76 @@
+From af09efb4f163c1f418c461d263727569a1d66c11 Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Fri, 25 Apr 2014 14:55:48 +0800
+Subject: [PATCH 3955/5965] XBMC rmvb bug:when init parameter error,the
+ pts_start may failed,then rm not released and esparser_use_count not decrease
+ bug,system will become all-movies not support.....
+
+---
+ drivers/amlogic/amports/amstream.c | 3 ---
+ drivers/amlogic/amports/esparser.c | 7 +++++--
+ drivers/amlogic/amports/vreal.c    | 3 ++-
+ 3 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index dc1dba24db4f..e2ce07042001 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -668,9 +668,6 @@ static  int amstream_port_release(stream_port_t *port)
+         psparser_release();
+     }
+ 
+-    if (port->type & PORT_TYPE_RM) {
+-        rmparser_release();
+-    }
+ 
+     if (port->type & PORT_TYPE_VIDEO) {
+         video_port_release(port, pvbuf, 0);
+diff --git a/drivers/amlogic/amports/esparser.c b/drivers/amlogic/amports/esparser.c
+index a05fd51d2adf..e81e1041ff7c 100755
+--- a/drivers/amlogic/amports/esparser.c
++++ b/drivers/amlogic/amports/esparser.c
+@@ -256,7 +256,8 @@ s32 esparser_init(struct stream_buf_s *buf)
+ 
+         if (fetchbuf == 0) {
+             printk("%s: no fetchbuf\n", __FUNCTION__);
+-            return -ENOMEM;
++            r = -ENOMEM;
++            goto Err_1;
+         }
+ 
+         if (search_pattern == NULL) {
+@@ -264,7 +265,8 @@ s32 esparser_init(struct stream_buf_s *buf)
+ 
+             if (search_pattern == NULL) {
+                 printk("%s: no search_pattern\n", __FUNCTION__);
+-                return -ENOMEM;
++                r = -ENOMEM;
++                goto Err_1;
+             }
+ 
+             /* build a fake start code to get parser interrupt */
+@@ -384,6 +386,7 @@ Err_2:
+     pts_stop(pts_type);
+ 
+ Err_1:
++    atomic_dec(&esparser_use_count);
+     buf->flag &= ~BUF_FLAG_PARSER;
+     return r;
+ }
+diff --git a/drivers/amlogic/amports/vreal.c b/drivers/amlogic/amports/vreal.c
+index 7fbac46f5ca3..58bd6e4074e1 100755
+--- a/drivers/amlogic/amports/vreal.c
++++ b/drivers/amlogic/amports/vreal.c
+@@ -845,7 +845,8 @@ static int amvdec_real_remove(struct platform_device *pdev)
+     if (pic_sz_tbl_map != 0) {
+         dma_unmap_single(NULL, pic_sz_tbl_map, sizeof(pic_sz_tbl), DMA_TO_DEVICE);
+     }
+-
++    rmparser_release();
++	
+     amvdec_disable();
+ 
+     printk("frame duration %d, frames %d\n", frame_dur, frame_count);
+-- 
+2.19.0
+

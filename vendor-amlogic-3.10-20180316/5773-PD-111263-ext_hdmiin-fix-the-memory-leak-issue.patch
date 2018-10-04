@@ -1,0 +1,234 @@
+From 781e0a2c4b3a7ee0fd22bc82e2a1aa2e8fd37e72 Mon Sep 17 00:00:00 2001
+From: Jets Yan <jets.yan@amlogic.com>
+Date: Wed, 19 Aug 2015 19:26:11 +0800
+Subject: [PATCH 5773/5965] PD#111263: ext_hdmiin: fix the memory-leak issue
+
+    1) fix the memory-leak issue;
+    2) use sii9293 as the default ext_hdmiin device;
+
+Change-Id: I1a804e1e336e637772d8776f149204307dbc5915
+---
+ arch/arm/configs/meson8_defconfig             |  2 +-
+ .../ext_hdmiin/sii9233/platform_interface.c   |  2 ++
+ .../amlogic/ext_hdmiin/sii9233/sii9233_drv.c  | 24 ++++++++++---
+ .../application/mhl_linuxdrv_main.c           | 36 +++++++++++++++----
+ 4 files changed, 53 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 2a4e3fe8c28e..19f0dd86fe35 100644
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -263,7 +263,7 @@ CONFIG_AM_LOGO=y
+ CONFIG_AM_HDMI_ONLY=y
+ CONFIG_VIUIN=y
+ CONFIG_TVIN_ISP=y
+-CONFIG_AML_SII9233=y
++CONFIG_AML_SII9293=y
+ CONFIG_POST_PROCESS_MANAGER=y
+ CONFIG_POST_PROCESS_MANAGER_PPSCALER=y
+ CONFIG_VIDEO_AMLOGIC_CAPTURE=y
+diff --git a/drivers/amlogic/ext_hdmiin/sii9233/platform_interface.c b/drivers/amlogic/ext_hdmiin/sii9233/platform_interface.c
+index 524288bac99a..30792ca46564 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9233/platform_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9233/platform_interface.c
+@@ -128,6 +128,8 @@ uint8_t I2C_WriteBlock(uint8_t deviceID, uint8_t offset, uint8_t *buffer, uint16
+ 
+ 	ret = aml_sii9233a_i2c_write(deviceID, tmp, length+1);
+ 
++	kfree(tmp);
++
+ 	return (uint8_t)ret;
+ }
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9233/sii9233_drv.c b/drivers/amlogic/ext_hdmiin/sii9233/sii9233_drv.c
+index f72ec4c22b45..5441096d4630 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9233/sii9233_drv.c
++++ b/drivers/amlogic/ext_hdmiin/sii9233/sii9233_drv.c
+@@ -256,6 +256,9 @@ static ssize_t sii9233a_debug_store(struct class *class, struct class_attribute
+ 	int ret = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
++	if (p == NULL)
++		goto MALLOC_FAILED;
++
+ 	for( argn=0; argn<4; argn++ )
+ 	{
+ 		para = strsep(&p, " ");
+@@ -281,15 +284,14 @@ static ssize_t sii9233a_debug_store(struct class *class, struct class_attribute
+ 	else
+ 	{
+ 		printk("invalid cmd = %s\n", argv[0]);
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	printk(" cmd = %d - \"%s\"\n", cmd, argv[0]);
+ 	if( (argn<1) || ((cmd==0)&&argn!=3) || ((cmd==1)&&(argn!=4)) || ((cmd==2)&&(argn!=4)) )
+ 	{
+ 		printk("invalid command format!\n");
+-		kfree(p);
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	if( cmd < 4 )
+@@ -406,8 +408,13 @@ static ssize_t sii9233a_debug_store(struct class *class, struct class_attribute
+ 		}
+ 	}
+ 
++PROCESS_END:
+ 	kfree(p);
+ 	return count;
++
++MALLOC_FAILED:
++	printk("[%s] kstrdup failed!\n", __FUNCTION__);
++	return count;
+ }
+ #if 0
+ static ssize_t sii9233a_reset_show(struct class *class, struct class_attribute *attr, char *buf)
+@@ -469,6 +476,9 @@ static ssize_t sii9233a_enable_store(struct class *class, struct class_attribute
+ 	int i = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
++	if (p == NULL)
++		goto MALLOC_FAILED;
++
+ 	for( argn=0; argn<4; argn++ )
+ 	{
+ 		para = strsep(&p, " ");
+@@ -505,7 +515,7 @@ static ssize_t sii9233a_enable_store(struct class *class, struct class_attribute
+ 	if( (enable==1) && (argn!=5) && (argn!=1) )
+ 	{
+ 		printk("invalid parameters to enable cmd !\n");
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	if( (enable==0) && (sii9233a_info.vdin_started==1) )
+@@ -551,6 +561,12 @@ static ssize_t sii9233a_enable_store(struct class *class, struct class_attribute
+ 		printk("sii9233a enable(0x%x) dvin !\n", enable);
+ 	}
+ 
++PROCESS_END:
++	kfree(p);
++	return count;
++
++MALLOC_FAILED:
++	printk("[%s] kstrdup failed!\n", __FUNCTION__);
+ 	return count;
+ }
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+index 03876935bbcd..7709b18181cd 100644
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+@@ -2189,6 +2189,9 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 	int i = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
++	if (p == NULL)
++		goto MALLOC_FAILED;
++
+ 	for( argn=0; argn<4; argn++ )
+ 	{
+ 		para = strsep(&p, " ");
+@@ -2226,7 +2229,7 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 	if ( (enable == 1) && (argn != 5) && (argn != 1) )
+ 	{
+ 		printk("invalid parameters to enable cmd !\n");
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	if ( (enable == 0) && (sii9293_tvin_info.vdin_started == 1) )
+@@ -2297,6 +2300,12 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 		printk("sii9293 enable(0x%x) dvin !\n", enable);
+ 	}
+ 
++PROCESS_END:
++	kfree(p);
++	return count;
++
++MALLOC_FAILED:
++	printk("[%s] kstrdup failed!\n", __FUNCTION__);
+ 	return count;
+ }
+ 
+@@ -2336,6 +2345,9 @@ static ssize_t debug_store(struct class *class, struct class_attribute *attr,
+ //	int ret = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
++	if (p == NULL)
++		goto MALLOC_FAILED;
++
+ 	for( argn=0; argn<4; argn++ )
+ 	{
+ 		para = strsep(&p, " ");
+@@ -2361,16 +2373,14 @@ static ssize_t debug_store(struct class *class, struct class_attribute *attr,
+ 	else
+ 	{
+ 		printk("invalid cmd = %s\n", argv[0]);
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+-	
+ 	printk(" cmd = %d - \"%s\"\n", cmd, argv[0]);
+ 	if( (argn<1) || ((cmd==0)&&argn!=2) || ((cmd==1)&&(argn!=3)) || ((cmd==2)&&(argn!=3)) )
+ 	{
+ 		printk("invalid command format!\n");
+-		kfree(p);
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	if( cmd == 0 ) // read
+@@ -2453,8 +2463,13 @@ static ssize_t debug_store(struct class *class, struct class_attribute *attr,
+ 			printk("sii2ctest invalid type!\n");
+ 	}
+ 
++PROCESS_END:
+ 	kfree(p);
+ 	return count;
++
++MALLOC_FAILED:
++	printk("[%s] kstrdup failed!\n", __FUNCTION__);
++	return count;
+ }
+ 
+ static ssize_t sii5293_input_mode_show(struct class *class, struct class_attribute *attr, char *buf)
+@@ -2640,6 +2655,9 @@ static ssize_t sii9293_frame_skip_store(struct class *class, struct class_attrib
+ //	int ret = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
++	if (p == NULL)
++		goto MALLOC_FAILED;
++
+ 	for( argn=0; argn<3; argn++ )
+ 	{
+ 		para = strsep(&p, " ");
+@@ -2651,7 +2669,7 @@ static ssize_t sii9293_frame_skip_store(struct class *class, struct class_attrib
+ 	if( argn != 3 )
+ 	{
+ 		printk("please input 3 skip num!\n");
+-		return count;
++		goto PROCESS_END;
+ 	}
+ 
+ 	skip_normal 	= (unsigned int)simple_strtoul(argv[0],NULL,10);
+@@ -2665,6 +2683,12 @@ static ssize_t sii9293_frame_skip_store(struct class *class, struct class_attrib
+ 	printk("reconfig skip num: normal=%d, standby=%d, cable=%d\n",
+ 		sii9293_skip.skip_num_normal, sii9293_skip.skip_num_standby, sii9293_skip.skip_num_cable);
+ 
++PROCESS_END:
++	kfree(p);
++	return count;
++
++MALLOC_FAILED:
++	printk("[%s] kstrdup failed!\n", __FUNCTION__);
+ 	return count;
+ }
+ #endif
+-- 
+2.19.0
+

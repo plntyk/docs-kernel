@@ -1,0 +1,157 @@
+From 09415c97a64a659406c91632aec445d97a6fb2ea Mon Sep 17 00:00:00 2001
+From: "yan.wang" <yan.wang@amlogic.com>
+Date: Fri, 21 Mar 2014 16:32:01 +0800
+Subject: [PATCH 3905/5965] PD #88997: cpufreq suspend generate sleeping
+ function called from invalid context warning message             enable
+ CONFIG_DEBUG_ATOMIC_SLEEP PD #88997: meson pm suspend generate warning called
+ from invalid context with CONFIG_DEBUG_ATOMIC_SLEEP PD #88997: cpufreq resume
+ generate sleeping function called from invalid context warning message       
+      enable CONFIG_DEBUG_ATOMIC_SLEEP
+
+---
+ arch/arm/mach-meson8/pm.c               | 11 +++++++----
+ drivers/amlogic/cpufreq/meson-cpufreq.c | 18 ++++++++++++------
+ drivers/amlogic/uart/uart/meson_uart.c  | 12 ++++++++----
+ 3 files changed, 27 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/pm.c b/arch/arm/mach-meson8/pm.c
+index 5472f8f4c32f..2a606a67a873 100755
+--- a/arch/arm/mach-meson8/pm.c
++++ b/arch/arm/mach-meson8/pm.c
+@@ -79,6 +79,8 @@ static void wait_uart_empty(void)
+ 		udelay(100);
+ 	}while((aml_read_reg32(P_AO_UART_STATUS) & (1<<22)) == 0);	
+ }
++struct clk* clk81;
++struct clk* clkxtal;
+ 
+ void clk_switch(int flag)
+ {
+@@ -89,8 +91,7 @@ void clk_switch(int flag)
+ 		for (i = clk_count - 1; i >= 0; i--) {
+ 			if (clks[i].clk_flag) {
+ 				if (clks[i].clk_addr == P_HHI_MPEG_CLK_CNTL) {
+-					struct clk* sys_clk = clk_get_sys("clk81", NULL);
+-					uart_rate_clk = clk_get_rate(sys_clk);
++					uart_rate_clk = clk_get_rate(clk81);
+ 					wait_uart_empty();
+ 					aml_set_reg32_mask(clks[i].clk_addr,(1<<7));//gate on pll
+ 					udelay(10);
+@@ -106,8 +107,7 @@ void clk_switch(int flag)
+ 	        for (i = 0; i < clk_count; i++) {
+ 	 		if (clks[i].clk_addr == P_HHI_MPEG_CLK_CNTL) {
+ 				if (aml_read_reg32(clks[i].clk_addr) & (1 << 8)) {
+-					struct clk* sys_clk = clk_get_sys("xtal", NULL);
+-					uart_rate_clk = clk_get_rate(sys_clk);
++					uart_rate_clk = clk_get_rate(clkxtal);
+ 					clks[i].clk_flag  = 1;
+ 					wait_uart_empty();
+ 					aml_clr_reg32_mask(clks[i].clk_addr, (1 << 8)); // gate off from pll
+@@ -387,6 +387,9 @@ static int __init meson_pm_probe(struct platform_device *pdev)
+ 		return -ENOENT;
+ 	}
+ 	suspend_set_ops(&meson_pm_ops);
++	
++	clk81 = clk_get_sys("clk81", NULL);
++	clkxtal = clk_get_sys("xtal", NULL);
+ 	printk(KERN_INFO "meson_pm_probe done !\n");
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/cpufreq/meson-cpufreq.c b/drivers/amlogic/cpufreq/meson-cpufreq.c
+index ac5249b93d42..9805f31fdeff 100755
+--- a/drivers/amlogic/cpufreq/meson-cpufreq.c
++++ b/drivers/amlogic/cpufreq/meson-cpufreq.c
+@@ -298,7 +298,8 @@ static int meson_cpufreq_suspend(struct cpufreq_policy *policy)
+      * we have appropriate voltage and/or bus speed for the wakeup process,
+      */
+ 
+-    mutex_lock(&meson_cpufreq_mutex);
++    //mutex_lock(&meson_cpufreq_mutex);
++    preempt_disable();
+ 
+     sleep_freq = clk_get_rate(cpufreq.armclk) / 1000;
+     printk("cpufreq suspend sleep_freq=%dMhz max=%dMHz\n", sleep_freq/1000, policy->max/1000);
+@@ -310,14 +311,16 @@ static int meson_cpufreq_suspend(struct cpufreq_policy *policy)
+                                        AML_DVFS_FREQ_PRECHANGE);
+         if (ret) {
+             pr_err("failed to set voltage %d\n", ret);
+-            mutex_unlock(&meson_cpufreq_mutex);
++            //mutex_unlock(&meson_cpufreq_mutex);
++            preempt_enable();
+             return 0;
+         }
+         adjust_jiffies(sleep_freq, policy->max);
+     }
+     clk_set_rate(cpufreq.armclk, policy->max * 1000);
+ 
+-    mutex_unlock(&meson_cpufreq_mutex);
++    //mutex_unlock(&meson_cpufreq_mutex);
++    preempt_enable();
+     return 0;
+ }
+ 
+@@ -328,7 +331,8 @@ static int meson_cpufreq_resume(struct cpufreq_policy *policy)
+ 
+     printk("cpufreq resume sleep_freq=%dMhz\n", sleep_freq/1000);
+ 
+-    mutex_lock(&meson_cpufreq_mutex);
++    //mutex_lock(&meson_cpufreq_mutex);
++	preempt_disable();
+ 
+     clk_set_rate(cpufreq.armclk, sleep_freq * 1000);
+     cur = clk_get_rate(cpufreq.armclk) / 1000;
+@@ -340,11 +344,13 @@ static int meson_cpufreq_resume(struct cpufreq_policy *policy)
+                                        AML_DVFS_FREQ_POSTCHANGE);
+         if (ret) {
+             pr_err("failed to set voltage %d\n", ret);
+-            mutex_unlock(&meson_cpufreq_mutex);
++            //mutex_unlock(&meson_cpufreq_mutex);
++            preempt_enable();
+             return 0;
+         }
+     }
+-    mutex_unlock(&meson_cpufreq_mutex);
++    //mutex_unlock(&meson_cpufreq_mutex);
++    preempt_enable();
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/uart/uart/meson_uart.c b/drivers/amlogic/uart/uart/meson_uart.c
+index 2638efe81b69..dbdeb03117c6 100755
+--- a/drivers/amlogic/uart/uart/meson_uart.c
++++ b/drivers/amlogic/uart/uart/meson_uart.c
+@@ -144,11 +144,13 @@ static void am_uart_stop_tx(struct uart_port *port)
+ 	am_uart_t *uart = mup->uart;
+ 
+ 
+-	mutex_lock(&mup->info_mutex);
++	//mutex_lock(&mup->info_mutex);
++	preempt_disable();
+ 	mode = readl(&uart->mode);
+ 	mode &= ~UART_TXENB;
+ 	writel(mode, &uart->mode);
+-	mutex_unlock(&mup->info_mutex);
++	//mutex_unlock(&mup->info_mutex);
++	preempt_enable();
+ }
+ 
+ static void am_uart_start_tx(struct uart_port *port)
+@@ -180,11 +182,13 @@ static void am_uart_stop_rx(struct uart_port *port)
+ 	struct meson_uart_port * mup = &am_ports[port->line];
+ 	am_uart_t *uart = mup->uart;
+ 
+-	mutex_lock(&mup->info_mutex);
++	//mutex_lock(&mup->info_mutex);
++	preempt_disable();
+ 	mode = readl(&uart->mode);
+ 	mode &= ~UART_RXENB;
+ 	writel(mode, &uart->mode);
+-	mutex_unlock(&mup->info_mutex);
++	preempt_enable();
++	//mutex_unlock(&mup->info_mutex);
+ }
+ 
+ static void am_uart_enable_ms(struct uart_port *port)
+-- 
+2.19.0
+

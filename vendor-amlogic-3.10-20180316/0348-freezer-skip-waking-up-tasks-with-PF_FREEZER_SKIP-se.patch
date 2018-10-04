@@ -1,0 +1,53 @@
+From 44e77f70f60bdbea4c2b833ae895d6c0357953f4 Mon Sep 17 00:00:00 2001
+From: Colin Cross <ccross@android.com>
+Date: Mon, 6 May 2013 23:50:11 +0000
+Subject: [PATCH 0348/5965] freezer: skip waking up tasks with PF_FREEZER_SKIP
+ set
+
+Android goes through suspend/resume very often (every few seconds when
+on a busy wifi network with the screen off), and a significant portion
+of the energy used to go in and out of suspend is spent in the
+freezer.  If a task has called freezer_do_not_count(), don't bother
+waking it up.  If it happens to wake up later it will call
+freezer_count() and immediately enter the refrigerator.
+
+Combined with patches to convert freezable helpers to use
+freezer_do_not_count() and convert common sites where idle userspace
+tasks are blocked to use the freezable helpers, this reduces the
+time and energy required to suspend and resume.
+
+Change-Id: I6ba019d24273619849af757a413271da3261d7db
+Acked-by: Tejun Heo <tj@kernel.org>
+Acked-by: Pavel Machek <pavel@ucw.cz>
+Signed-off-by: Colin Cross <ccross@android.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+---
+ kernel/freezer.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/kernel/freezer.c b/kernel/freezer.c
+index c38893b0efba..8b2afc1c9df0 100644
+--- a/kernel/freezer.c
++++ b/kernel/freezer.c
+@@ -110,6 +110,18 @@ bool freeze_task(struct task_struct *p)
+ {
+ 	unsigned long flags;
+ 
++	/*
++	 * This check can race with freezer_do_not_count, but worst case that
++	 * will result in an extra wakeup being sent to the task.  It does not
++	 * race with freezer_count(), the barriers in freezer_count() and
++	 * freezer_should_skip() ensure that either freezer_count() sees
++	 * freezing == true in try_to_freeze() and freezes, or
++	 * freezer_should_skip() sees !PF_FREEZE_SKIP and freezes the task
++	 * normally.
++	 */
++	if (freezer_should_skip(p))
++		return false;
++
+ 	spin_lock_irqsave(&freezer_lock, flags);
+ 	if (!freezing(p) || frozen(p)) {
+ 		spin_unlock_irqrestore(&freezer_lock, flags);
+-- 
+2.19.0
+

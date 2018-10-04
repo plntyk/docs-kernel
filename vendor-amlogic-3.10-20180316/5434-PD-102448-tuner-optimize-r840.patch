@@ -1,0 +1,888 @@
+From 9986969db58640e21c51e619c1f4ed818bf0e42a Mon Sep 17 00:00:00 2001
+From: Dezhi Kong <dezhi.kong@amlogic.com>
+Date: Mon, 2 Mar 2015 14:45:29 +0800
+Subject: [PATCH 5434/5965] PD#102448: tuner: optimize r840
+
+Change-Id: I69d123a3dc3c6f815f5e92c1c4a05afcfd8d5e61
+---
+ drivers/amlogic/dvb_tv/aml_fe.c               |  50 +++-
+ drivers/amlogic/dvb_tv/aml_fe.h               |   8 +
+ .../dvb_tv/amlatvdemod/atvdemod_frontend.c    |  19 +-
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        | 159 +++++++++++--
+ .../dvb_tv/amlatvdemod/atvdemod_func.h        |   1 +
+ drivers/amlogic/dvb_tv/amldemod/aml_demod.c   |  21 ++
+ drivers/amlogic/dvb_tv/amldemod/demod_func.c  | 223 +++++++++++-------
+ drivers/amlogic/dvb_tv/amldemod/demod_func.h  |  42 ++++
+ drivers/media/dvb-core/dvb_frontend.h         |   3 +
+ 9 files changed, 413 insertions(+), 113 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index cf737365948c..7cfafe0da82e 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -176,12 +176,39 @@ struct dvb_frontend * get_si2177_tuner(void)
+ }
+ EXPORT_SYMBOL(get_si2177_tuner);
+ 
++struct dvb_frontend * get_r840_tuner(void)
++{
++	int i;
++	struct aml_fe_dev *dev;
++
++	for(i = 0; i < FE_DEV_COUNT; i++){
++		dev = &fe_man.tuner[i];
++		if (!strcmp(dev->drv->name, "r840_tuner")){
++			return dev->fe->fe;
++		}
++	}
++	pr_error("can not find out tuner drv\n");
++	return NULL;
++}
++EXPORT_SYMBOL(get_r840_tuner);
++
++
+ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+ {
+ 	struct aml_fe *afe = fe->demodulator_priv;
+ 	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
+ 	struct analog_parameters p;
++	fe_status_t tuner_state = FE_TIMEDOUT;
+ 	int ret = -1;
++	struct aml_fe *fee;
++	fee = fe->demodulator_priv;
++
++	if(fee->tuner->drv->id == AM_TUNER_R840){
++		fe->ops.tuner_ops.get_status(fe, &tuner_state);
++		p.tuner_id = AM_TUNER_R840;
++		p.if_freq = fee->demod_param.if_freq;
++		p.if_inv = fee->demod_param.if_inv;
++	}
+ 
+ 	p.frequency  = c->frequency;
+ 	p.soundsys   = c->analog.soundsys;
+@@ -365,6 +392,10 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 		 while( p->frequency<=maxafcfreq)
+ 		{
+ 			pr_dbg("[%s] p->frequency=[%d] is processing\n",__func__,p->frequency);
++			if(fee->tuner->drv->id == AM_TUNER_R840){
++
++			}
++			else{
+ 			do{
+ 				if((fe->ops.tuner_ops.get_pll_status == NULL)||(fe->ops.analog_ops.get_pll_status == NULL)){
+ 					printk("[%s]error:the func of get_pll_status is NULL.\n",__func__);
+@@ -404,8 +435,10 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 					return	DVBFE_ALGO_SEARCH_FAILED;
+ 				}
+ 			}
++			}
+ 			tuner_status_cnt_local = tuner_status_cnt;
+ 			do{
++				mdelay(delay_cnt);
+ 				#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
+ 				fe->ops.tuner_ops.get_pll_status(fe, &tuner_state);
+ 				fe->ops.analog_ops.get_pll_status(fe, &ade_state);
+@@ -414,11 +447,18 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 				fe->ops.analog_ops.get_status(fe, &ade_state);
+ 				#endif
+ 				tuner_status_cnt_local--;
+-				if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state || tuner_status_cnt_local == 0)
++				//if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state || tuner_status_cnt_local == 0)
++				if(((FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state)&&
++				(fee->tuner->drv->id != AM_TUNER_R840))||
++				((FE_HAS_LOCK==ade_state && FE_HAS_LOCK==tuner_state)&&
++				(fee->tuner->drv->id == AM_TUNER_R840))|| (tuner_status_cnt_local == 0))
+ 					break;
+ 			}while(1);
+ 			tuner_status_cnt_local = tuner_status_cnt;
+-			if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state){
++			if(((FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state)&&
++				(fee->tuner->drv->id != AM_TUNER_R840))||
++				((FE_HAS_LOCK==ade_state && FE_HAS_LOCK==tuner_state)&&
++				(fee->tuner->drv->id == AM_TUNER_R840))){
+ 				pr_dbg("[%s][%d] pll lock success \n",__func__,__LINE__);
+ 				if(aml_fe_afc_closer(fe,minafcfreq,maxafcfreq)==0){
+ 					printk("[%s] afc end  :p->frequency=[%d] has lock,search success.\n",__func__,p->frequency);
+@@ -458,13 +498,15 @@ static int aml_fe_afc_closer(struct dvb_frontend *fe,int minafcfreq,int maxafcfq
+ 	int afc = 100;
+ 	__u32 set_freq;
+ 	int count=10;
++	struct aml_fe *fee;
++	fee = fe->demodulator_priv;
+ 
+ 	//do the auto afc make sure the afc<50k or the range from api
+ 	if((fe->ops.analog_ops.get_afc || fe->ops.tuner_ops.get_afc) &&fe->ops.set_frontend){
+ 		set_freq=c->frequency;
+ 
+-		while(afc > AFC_BEST_LOCK){
+-			if(fe->ops.analog_ops.get_afc)
++		while(abs(afc) > AFC_BEST_LOCK){
++			if((fe->ops.analog_ops.get_afc)&&(fee->tuner->drv->id == AM_TUNER_R840))
+ 				fe->ops.analog_ops.get_afc(fe, &afc);
+ 			else if(fe->ops.tuner_ops.get_afc)
+ 				fe->ops.tuner_ops.get_afc(fe, &afc);
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.h b/drivers/amlogic/dvb_tv/aml_fe.h
+index 50517e1279e4..31b4c1755d30 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.h
++++ b/drivers/amlogic/dvb_tv/aml_fe.h
+@@ -137,6 +137,12 @@ struct aml_fe_dev{
+ 	int      mem_start;
+ 	int      mem_end;
+ };
++struct aml_demod_param{
++	/*for tuner video if to amlatvdemod*/
++	unsigned int      if_freq;//HZ
++	/*for tuner output*/
++	unsigned int      if_inv;
++};
+ 
+ struct aml_fe{
+ 	struct dvb_frontend *fe;
+@@ -149,6 +155,7 @@ struct aml_fe{
+ 	int      dev_id;
+ 	int      capability;
+ 	aml_ts_source_t    ts;
++	struct aml_demod_param demod_param;
+ 	struct aml_fe_dev *tuner;
+ 	struct aml_fe_dev *atv_demod;
+ 	struct aml_fe_dev *dtv_demod;
+@@ -171,6 +178,7 @@ extern int aml_register_fe_drv(aml_fe_dev_type_t type, struct aml_fe_drv *drv);
+ extern int aml_unregister_fe_drv(aml_fe_dev_type_t type, struct aml_fe_drv *drv);
+ 
+ extern struct dvb_frontend * get_si2177_tuner(void);
++extern struct dvb_frontend * get_r840_tuner(void);
+ extern const char* soundsys_to_str(unsigned short soundsys);
+ extern const char* audmode_to_str(unsigned short soundsys);
+ extern const char* v4l2_std_to_str(v4l2_std_id std);
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+index 2e29185cd521..8839fe4e365a 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+@@ -213,8 +213,8 @@ static void aml_atvdemod_get_pll_status(struct dvb_frontend *fe, void *stat)
+ 	fe_status_t *status = (fe_status_t*)stat;
+ 	retrieve_vpll_carrier_lock(&vpll_lock);
+ 	if((vpll_lock&0x1)==0){
+-		//*status = FE_HAS_LOCK;
+-		*status = FE_TIMEDOUT;
++		*status = FE_HAS_LOCK;
++		//*status = FE_TIMEDOUT;
+ 		pr_info("visual carrier lock:locked\n");
+ 	}else{
+ 		pr_info("visual carrier lock:unlocked\n");
+@@ -259,16 +259,27 @@ void aml_atvdemod_set_params(struct dvb_frontend *fe,struct analog_parameters *p
+ {
+ 	if(FE_ANALOG == fe->ops.info.type)
+ 	{
+-		if(p->std != amlatvdemod_devp->parm.std)
++		if((p->std != amlatvdemod_devp->parm.std) || (p->tuner_id == AM_TUNER_R840))
+ 		{
+ 			amlatvdemod_devp->parm.std  = p->std;
++			amlatvdemod_devp->parm.if_freq = p->if_freq;
++			amlatvdemod_devp->parm.if_inv = p->if_inv;
++			amlatvdemod_devp->parm.tuner_id = p->tuner_id;
+ 			atv_dmd_set_std();
+ 			pr_info("[amlatvdemod..]%s set std color %s, audio type %s.\n",__func__,\
+ 			v4l2_std_to_str(0xff000000&amlatvdemod_devp->parm.std), v4l2_std_to_str(0xffffff&amlatvdemod_devp->parm.std));
++			pr_info("[amlatvdemod..]%s set if_freq %d, if_inv %d.\n",__func__,\
++			amlatvdemod_devp->parm.if_freq,amlatvdemod_devp->parm.if_inv );
+ 		}
+ 	}
+ 	return;
+ }
++static int aml_atvdemod_get_afc(struct dvb_frontend *fe, s32 *afc)
++{
++	*afc = retrieve_vpll_carrier_afc();
++	pr_info("[amlatvdemod..]%s afc %d.\n",__func__,*afc);
++	return 0;
++}
+ 
+ static int aml_atvdemod_get_ops(struct aml_fe_dev *dev, int mode, void *ops)
+ {
+@@ -279,7 +290,7 @@ static int aml_atvdemod_get_ops(struct aml_fe_dev *dev, int mode, void *ops)
+                 printk("[amlatvdemod..]%s null pointer error.\n",__func__);
+                 return -1;
+         }
+-        //aml_analog_ops->get_afc = aml_atvdemod_get_afc;
++        aml_analog_ops->get_afc = aml_atvdemod_get_afc;
+         aml_analog_ops->get_snr = aml_atvdemod_get_snr;
+         aml_analog_ops->get_status = aml_atvdemod_get_status;
+ 	aml_analog_ops->set_params = aml_atvdemod_set_params;
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index 499f0e9b6b11..1f16b5b1cb5e 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -51,6 +51,21 @@ int atvdemod_debug_en = 0;
+ module_param(atvdemod_debug_en, int, 0644);
+ MODULE_PARM_DESC(atvdemod_debug_en, "\n atvdemod_debug_en\n");
+ 
++/*1:gpio mode output low;2:pwm mode*/
++static unsigned int atvdemod_agc_pinmux = 2;
++module_param(atvdemod_agc_pinmux, int, 0644);
++MODULE_PARM_DESC(atvdemod_agc_pinmux, "\n atvdemod_agc_pinmux\n");
++
++static unsigned int atvdemod_afc_range = 5;
++module_param(atvdemod_afc_range, uint, 0644);
++MODULE_PARM_DESC(atvdemod_afc_range, "\n atvdemod_afc_range\n");
++
++static unsigned int atvdemod_afc_offset = 500;
++module_param( atvdemod_afc_offset, uint, 0644) ; 
++MODULE_PARM_DESC( atvdemod_afc_offset, "\n atvdemod_afc_offset\n");
++
++static unsigned int mix1_freq = 0;
++static unsigned int timer_init_flag = 0;
+ extern struct amlatvdemod_device_s *amlatvdemod_devp;
+ 
+ void atv_dmd_wr_reg(unsigned long addr, unsigned long data)
+@@ -218,8 +233,8 @@ void atv_dmd_misc(void)
+     atv_dmd_wr_long(0x0f,0x44,0x5c8808c1);//zhuangwei
+     atv_dmd_wr_long(0x0f,0x3c,0x88188832);//zhuangwei
+     atv_dmd_wr_long(0x18,0x08,0x46170200);//zhuangwei
+-    atv_dmd_wr_long(0x0c,0x04,0xd0fa0000);//zhuangwei//0xdafa0000
+-    atv_dmd_wr_long(0x0c,0x00,0x584000);//zhuangwei
++    atv_dmd_wr_long(0x0c,0x04,0xc8fa0000);//zhuangwei//0xdafa0000
++    atv_dmd_wr_long(0x0c,0x00,0x554000);//zhuangwei
+     atv_dmd_wr_long(0x19,0x04,0xdafa0000);//zhuangwei
+     atv_dmd_wr_long(0x19,0x00,0x4a4000);//zhuangwei
+     //atv_dmd_wr_byte(0x0c,0x01,0x28);//pwd-out gain
+@@ -735,6 +750,10 @@ else if (Broadcast_Standard==10)
+  		else {
+  			atv_dmd_wr_long(APB_BLOCK_ADDR_ADC_SE,0x0,0x03150e0f);
+  	  	}
++		if(amlatvdemod_devp->parm.tuner_id == AM_TUNER_R840){
++			/*config pwm for tuner r840*/
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_ADC_SE,1,0xf);//Kd = 0xf
++		}
+ 
+ 
+  	//GP Filter
+@@ -982,6 +1001,11 @@ else if (Broadcast_Standard==10)
+  	  atv_dmd_wr_long(APB_BLOCK_ADDR_AGC_PWM,0x00,0x1f40);  //4KHz
+   	  atv_dmd_wr_long(APB_BLOCK_ADDR_AGC_PWM,0x04,0xc8);  //26 dB dynamic range
+   	  atv_dmd_wr_byte(APB_BLOCK_ADDR_AGC_PWM,0x09,0xa);
++	  if(amlatvdemod_devp->parm.tuner_id == AM_TUNER_R840){
++		/*config pwm for tuner r840*/
++		atv_dmd_wr_long(APB_BLOCK_ADDR_AGC_PWM,0,0xc80);//pwm freq = 10khz
++		//atv_dmd_wr_byte(APB_BLOCK_ADDR_ADC_SE,1,0xf);//Kd = 0xf
++	}
+ }
+ struct timer_list atvdemod_timer;
+ #define ATVDEMOD_INTERVAL		(HZ/100)   //10ms, #define HZ 100
+@@ -998,15 +1022,61 @@ void retrieve_vpll_carrier_lock(int *lock)
+ 	data = atv_dmd_rd_byte(APB_BLOCK_ADDR_CARR_RCVY,0x43);
+ 	*lock = data&0x1;
+ }
++int retrieve_vpll_carrier_afc(void)
++{
++	int data_ret,pll_lock,field_lock,line_lock,line_lock_strong;
++	unsigned int data_h,data_l,data_exg = 0;
++	pll_lock = atv_dmd_rd_byte(APB_BLOCK_ADDR_CARR_RCVY,0x43)&0x1;
++	field_lock = atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x4f)&0x4;
++	line_lock = atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x4f)&0x10;
++	line_lock_strong = atv_dmd_rd_byte(APB_BLOCK_ADDR_VDAGC,0x4f)&0x8;
++	//if((atv_dmd_rd_byte(APB_BLOCK_ADDR_CARR_RCVY,0x43)&0x1) == 1){
++	if((pll_lock == 1)||(line_lock == 0x10)){
++		/*if pll unlock, afc is invalid*/
++		data_ret = 200;
++		return data_ret;
++	}
++	data_h = atv_dmd_rd_byte(APB_BLOCK_ADDR_CARR_RCVY,0x40);
++	data_l = atv_dmd_rd_byte(APB_BLOCK_ADDR_CARR_RCVY,0x41);
++	data_exg = ((data_h&0x7) << 8) | data_l;
++	if(data_h&0x8){
++		data_ret = (((~data_exg)&0x7ff) - 1);
++		data_ret = data_ret*488*(-1)/1000;
++	}
++	else{
++		data_ret = data_exg;
++		data_ret = data_ret*488/1000;
++	}
++	if((abs(data_ret) < 50)&&(line_lock_strong == 0x8 || field_lock == 0x4)){
++		data_ret = 100;
++		return data_ret;
++	}
++	return data_ret;
++}
+ void set_pll_lpf(unsigned int lock)
+ {
+ 	atv_dmd_wr_byte(APB_BLOCK_ADDR_CARR_RCVY,0x24,lock);
+ }
+ void retrieve_frequency_offset(int *freq_offset)
+ {
+-	unsigned int data;
++	/*unsigned int data;
+ 	data = atv_dmd_rd_word(APB_BLOCK_ADDR_CARR_RCVY,0x40);
+-	*freq_offset = (int)data;
++	*freq_offset = (int)data;*/
++	unsigned int data_h,data_l,data_exg;
++	int data_ret;
++	data_h = atv_dmd_rd_byte( APB_BLOCK_ADDR_CARR_RCVY,0x40) ;
++	data_l = atv_dmd_rd_byte( APB_BLOCK_ADDR_CARR_RCVY,0x41) ;
++	data_exg = ((data_h&0x7)<<8) | data_l;
++	if(data_h&0x8){ 
++		data_ret = (((~data_exg) &0x7ff)  - 1);
++		data_ret = data_ret*(-1);
++		//data_ret = data_ret*488*(-1) /1000;
++	} 
++	else{ 
++		data_ret = data_exg;
++		//data_ret = data_ret*488/100;
++	}
++	*freq_offset = data_ret;
+ }
+ void retrieve_video_lock(int *lock)
+ {
+@@ -1027,31 +1097,49 @@ void retrieve_fh_frequency(int *fh)
+ }
+ void atvdemod_timer_hander(unsigned long arg)
+ {
+-	int adc_level,lock,freq_offset,fh;
+-	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL;
++	//int adc_level,lock,freq_offset,fh;
++	int freq_offset,lock,mix1_freq_cur,delta_mix1_freq;
++	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*10;//100ms timer
+ 	add_timer(&atvdemod_timer);
+-	retrieve_adc_power(&adc_level);
+-	pr_info("adc_level: 0x%x\n",adc_level);
++	//retrieve_adc_power(&adc_level);
++	//pr_info("adc_level: 0x%x\n",adc_level);
+ 	retrieve_vpll_carrier_lock(&lock);
+-	if((lock&0x1)==0)
++	mix1_freq_cur = atv_dmd_rd_byte(APB_BLOCK_ADDR_MIXER_1,0x0);
++	delta_mix1_freq = abs(mix1_freq_cur - mix1_freq);
++	/*if((lock&0x1)==0)
+ 		pr_info("visual carrier lock:locked\n");
+ 	else
+-		pr_info("visual carrier lock:unlocked\n");
+-	set_pll_lpf(lock);
++		pr_info("visual carrier lock:unlocked\n");*/
++	//set_pll_lpf(lock);
+ 	retrieve_frequency_offset(&freq_offset);
+-	pr_info("visual carrier offset:%d Hz\n",freq_offset*48828125/100000);
+-	retrieve_video_lock(&lock);
+-	if(lock&0x1)
+-		pr_info("video lock:locked\n");
+-	else
+-		pr_info("video lock:unlocked\n");
+-	retrieve_fh_frequency(&fh);
+-	pr_info("horizontal frequency:%d Hz\n",fh*190735/100000);
++	freq_offset = freq_offset*488/1000;
++	//pr_info("visual carrier offset:%d Hz\n",freq_offset*48828125/100000);
++	//retrieve_video_lock(&lock);
++	if((lock&0x1)==1) {
++		if(delta_mix1_freq == atvdemod_afc_range){
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_MIXER_1,0x0,mix1_freq);
++		}
++		else if((freq_offset >= atvdemod_afc_offset)&&(delta_mix1_freq < atvdemod_afc_range)){ 
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_MIXER_1,0x0,mix1_freq_cur-1);
++		} 
++		else if((freq_offset <= (-1)*atvdemod_afc_offset) &&(delta_mix1_freq < atvdemod_afc_range-1)){ 
++			atv_dmd_wr_byte(APB_BLOCK_ADDR_MIXER_1,0x0,mix1_freq_cur+1);
++		}
++		//pr_info("video lock:locked\n");
++	}
++	else{
++		//pr_info("video lock:unlocked\n");
++	} 
++	//retrieve_fh_frequency(&fh);
++	//pr_info("horizontal frequency:%d Hz\n",fh*190735/100000);
+ }
+ int atvdemod_init(void)
+ {
+ 	//unsigned long data32;
+-
++	if(timer_init_flag == 1){
++		del_timer_sync(&atvdemod_timer);
++		timer_init_flag = 0;
++	}
+ 	//clocks_set_hdtv ();
+ 	//1.set system clock
+ 	WRITE_CBUS_REG(HHI_ADC_PLL_CNTL3,0xca2a2110);//0xce7a2110;0x8a2a2110
+@@ -1089,13 +1177,15 @@ int atvdemod_init(void)
+ 		}
+ 		delay_us(400);
+ 	}*/
+-	#if 0//temp mark
++	#if 1//temp mark
+ 	/*atvdemod timer hander*/
+ 	init_timer(&atvdemod_timer);
+ 	//atvdemod_timer.data = (ulong) devp;
+ 	atvdemod_timer.function = atvdemod_timer_hander;
+-	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL;
++	atvdemod_timer.expires = jiffies + ATVDEMOD_INTERVAL*300;//after 3s enable demod auto detect
+ 	add_timer(&atvdemod_timer);
++	mix1_freq = atv_dmd_rd_byte(APB_BLOCK_ADDR_MIXER_1,0x0);
++	timer_init_flag = 1;
+ 	#endif
+ 	pr_info("delay done\n");
+ 	return(0);
+@@ -1140,6 +1230,31 @@ void atv_dmd_set_std(void)
+ 		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_50HZ_VERT;
+ 		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L;
+         }
++	if(amlatvdemod_devp->parm.tuner_id == AM_TUNER_R840){
++		if_freq = amlatvdemod_devp->parm.if_freq;
++		if_inv = amlatvdemod_devp->parm.if_inv;
++		if(atvdemod_agc_pinmux == 1){
++			//Disable ATV_AGC PINMUX
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_8,0,13,1);//DTV_IF_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_8,0,12,1);//DTV_RF_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_11,0,17,1);//ATV_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_7,0,21,1);//PWM_VS
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_9,0,21,1);//PWM_D
++			//GPIOW_3 OUTPUT 0
++			WRITE_CBUS_REG_BITS(PREG_PAD_GPIO0_EN_N,0,3,1);
++			WRITE_CBUS_REG_BITS(PREG_PAD_GPIO0_O,0,3,1);
++		}
++		else if(atvdemod_agc_pinmux == 2){
++			//Disable ATV_AGC PINMUX
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_8,0,13,1);//DTV_IF_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_8,0,12,1);//DTV_RF_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_11,1,17,1);//ATV_AGC
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_7,0,21,1);//PWM_VS
++			WRITE_CBUS_REG_BITS(PERIPHS_PIN_MUX_9,0,21,1);//PWM_D
++			//GPIOW_3 set as INPUT
++			WRITE_CBUS_REG_BITS(PREG_PAD_GPIO0_EN_N,1,3,1);
++		}
++	}
+         pr_info("[atvdemod..]%s: broad_std %d,freq_hz_cvrt:0x%x,fre_offset:%d.\n",
+ 		__func__, broad_std, freq_hz_cvrt,amlatvdemod_devp->fre_offset);
+         if(atvdemod_init())
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+index 40688390176a..cedac960efeb 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+@@ -93,6 +93,7 @@ extern int atvdemod_init(void);
+ extern void atv_dmd_set_std(void);
+ extern void retrieve_vpll_carrier_lock(int *lock);
+ extern void retrieve_video_lock(int *lock);
++extern int retrieve_vpll_carrier_afc(void);
+ 
+ //atv demod block address
+ //address interval is 4, because it's 32bit interface, but the address is in byte
+diff --git a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+index b4c4a3e10024..1c0841d68f91 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
++++ b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+@@ -302,6 +302,12 @@ static long aml_demod_ioctl(struct file *file,
+ 	struct dvb_frontend *dvbfe;
+ #endif
+ 
++#if (defined CONFIG_AM_R840)
++	int strength=0;
++	struct dvb_frontend *dvbfe;
++#endif
++
++
+     switch (cmd) {
+ 	case AML_DEMOD_GET_RSSI :
+ 		printk("Ioctl Demod GET_RSSI. \n");
+@@ -311,6 +317,14 @@ static long aml_demod_ioctl(struct file *file,
+ 			strength=dvbfe->ops.tuner_ops.get_strength(dvbfe);
+ 		 printk("[si2177] strength is %d\n",strength-256);
+ #endif
++
++#if (defined CONFIG_AM_R840)
++		 dvbfe = get_r840_tuner();
++		 if (dvbfe != NULL)
++			 strength=dvbfe->ops.tuner_ops.get_strength(dvbfe);
++		  printk("[r840] strength is %d\n",strength);
++#endif
++
+ 		break;
+ 
+ 	case AML_DEMOD_SET_TUNER :
+@@ -320,6 +334,13 @@ static long aml_demod_ioctl(struct file *file,
+ 		if (dvbfe != NULL)
+ 			dvbfe->ops.tuner_ops.set_tuner(dvbfe, &demod_sta, &demod_i2c, (struct aml_tuner_sys *)arg);
+ #endif
++
++#if (defined CONFIG_AM_R840)
++		printk("CONFIG_AM_R840.\n");
++		dvbfe = get_r840_tuner();
++		if (dvbfe != NULL)
++			dvbfe->ops.tuner_ops.set_tuner(dvbfe, &demod_sta, &demod_i2c, (struct aml_tuner_sys *)arg);
++#endif
+ 		break;
+ 
+     	case AML_DEMOD_SET_SYS :
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.c b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+index 0e98cc4bd98d..99b1863f7ee3 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+@@ -1114,9 +1114,9 @@ static dtmb_cfg_t list_dtmb_v1[99] = {
+ 
+ extern int memstart;
+ 
+-void dtmb_initial(struct aml_demod_sta *demod_sta)
++
++void dtmb_all_reset(void)
+ {
+-//	dtmb_write_reg(0x049, memstart);		//only for init
+ 	dtmb_write_reg(0x010, 0x52);
+ 	dtmb_write_reg(0x047, 0x33202);  //20 bits, 1 - fpga. 0 - m6tvd
+ 	dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
+@@ -1124,7 +1124,14 @@ void dtmb_initial(struct aml_demod_sta *demod_sta)
+     dtmb_write_reg(0x18,0x000a1316); // shorten mobile detect time.
+     dtmb_write_reg(0x15,0x0199999A); // shift -5M.
+ 	dtmb_write_reg(0x2f,0x13064263); // speed up src
+-#if 0
++
++}
++
++void dtmb_initial(struct aml_demod_sta *demod_sta)
++{
++//	dtmb_write_reg(0x049, memstart);		//only for init
++	dtmb_all_reset();
++#if 0	
+ 	int i;
+ 	  for (i=0; list_dtmb_v1[i].adr != 0; i++) {
+ 	        if (list_dtmb_v1[i].rw){
+@@ -1163,16 +1170,76 @@ int dtmb_information(void)
+ 
+ }
+ 
++void dtmb_mobile_mode_set(int mode)
++{	
++	  if(mode==enable_mobile){
++		  dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9) + (1 << 1)); // set mobile mode
++		  #ifdef dtmb_mobile_mode
++		  dtmb_write_reg(0x50, 0x1241);	//180m mobile mode
++		  dtmb_write_reg(0x4f, 0x303f05df);// set belta byhand
++		  #endif
++	  }else if(mode==disable_mobile){
++		  dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9)); // set static mode
++		  #ifdef dtmb_mobile_mode
++		  dtmb_write_reg(0x50, 0x1120); //180m mobile mode
++		  dtmb_write_reg(0x4f, 0x1f0205df);// set belta byhand
++		  #endif
++	}
++	  
++
++}
++
++void dtmb_time_eq_mode_set(int mode)
++{
++	int reg_46,reg_6b;
++	if(CLOSE_TIME_EQ==mode){
++		dtmb_write_reg(0x2e, 0x131a747d);  // cancel timing-loop
++		dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
++		reg_46 = dtmb_read_reg(0x46);
++		reg_46 = reg_46 &~ ((1<<20) + (1<<16));			// bypass fe and set time_eq
++		dtmb_write_reg(0x46, reg_46);
++	}else if (OPEN_TIME_EQ==mode){
++		dtmb_write_reg(0x2e, 0x31a747d);  // start timing-loop
++        dtmb_write_reg(0x0d, 0x14400640);  // delay fec sync time
++        reg_46 = dtmb_read_reg(0x46);
++        reg_46 = reg_46 | ((1<<20) + (1<<16));           // bypass fe and set time_eq
++        dtmb_write_reg(0x46, reg_46);
++        reg_6b = dtmb_read_reg(0x6b);
++        reg_6b = (reg_6b &~(0x3<<16)) | (1<<17);           // set tune auto
++        dtmb_write_reg(0x6b, reg_6b);
++	}
++
++
++}
++
++void dtmb_set_ddc_phase(void)
++{
++	int ddc_phase,icfo_phase,fcfo_phase,ddc_phase_new;
++	ddc_phase  = dtmb_read_reg(0x15) & 0x1ffffff;
++	icfo_phase = dtmb_read_reg(0xe0) & 0xfffff;
++	fcfo_phase = dtmb_read_reg(0xe1) & 0xfffff;
++	if(icfo_phase > (1<<19))
++		icfo_phase -= (1<<20);
++	if(fcfo_phase > (1<<19))
++		fcfo_phase -= (1<<20);
++	ddc_phase_new = ddc_phase + icfo_phase*4 + fcfo_phase;
++	//pr_dbg("before is DDC_phase %x, now is %x \n", ddc_phase, ddc_phase_new);
++	dtmb_write_reg(0x15, ddc_phase_new);
++
++}
+ 
++
++static int mobile_times = 0;
++static int time_eq_cnt = 0;
++static int time_eq_lost_cnt = 0;
+ int dtmb_read_snr(void){
+-	int tmp,che_snr,snr,snr_avg,fec_lock,reg_46;
++	int tmp,che_snr,snr,snr_avg,fec_lock;
+ 	int fsm_state,fec_ldpc_it_avg,local_state,fbe_in_num,SC_mode,time_eq;
+ 	int time_cnt=0,fec_bch_add;
+-	int ddc_phase,icfo_phase,fcfo_phase,ddc_phase_new,reg_6b;
+ 	int mobi_det_power;
+-    int mobile_times,front_cci0_count;
++    int front_cci0_count;
+     int ctrl_che_working_state,pm_change,constell;
+-	mobile_times = 0;
++	
+ 	pm_change = 0;
+ 
+ 	tmp=dtmb_read_reg(0x0e3);
+@@ -1196,43 +1263,36 @@ int dtmb_read_snr(void){
+ 		dtmb_reset();
+ 		return 0;
+ 	}else{
+-		 if(fec_lock && fec_ldpc_it_avg < (4 * 256)){
++		 if(fec_lock && fec_ldpc_it_avg < (4 * 256)){		// 0.4 is 3~4*256, 0.6 is 5~6*256,0.8 is 6~7*256
+ 			 pr_dbg("-----------  lock ! ------------ \n");
+ 			 return 1;
+ 		 }else{
+ 			fsm_state = dtmb_read_reg(0xd7) & 0xf;
+-            local_state = 2;
++            local_state = AMLOGIC_DTMB_STEP2;
+ 			time_cnt=0;
+ 			 while(fsm_state < 8 && time_cnt < 10) {// state change to pm
+                 msleep(50);
+                 fsm_state = dtmb_read_reg(0xd7) & 0xf;
+                 time_cnt++;
+-                local_state = 3;
++                local_state = AMLOGIC_DTMB_STEP3;
+                 pr_dbg("*************** local_state = %d ************ \n", local_state);
+             }
+ 
+-			 if(fsm_state >= 8) { // check whether SC and two path mode
++			 if(fsm_state >= DTMB_PM_INIT_READY) { // check whether SC and two path mode
+ 		     	  fbe_in_num = (dtmb_read_reg(0xe4) >> 16) & 0x3ff;  // two path distance
+ 		     	  SC_mode = (dtmb_read_reg(0xe6) >> 24) & 0x1;
+ 		     	  time_eq = (dtmb_read_reg(0x46) >> 16) & 0x1;
+ 		     	  fec_ldpc_it_avg = dtmb_read_reg(0xdd) & 0xffff;
+-
+ 			  	  mobi_det_power = (dtmb_read_reg(0xf1)>>8) & 0x7ffff;
+ 
+-             	  if(mobi_det_power > 10) {
+-             	      mobile_times = 15;//8;
+-             	      dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9) + (1 << 1)); // set mobile mode
+-             	      #ifdef dtmb_mobile_mode
+-             	      dtmb_write_reg(0x50, 0x1241);	//180m mobile mode
+-             	      #endif
++             	  if(mobi_det_power > 10 && (time_eq == 0)) {
++             	      mobile_times = 8;//8;
++             	      dtmb_mobile_mode_set(enable_mobile);
+              	  }
+              	  else {
+              	      mobile_times -= 1;
+              	      if(mobile_times <= 0) {
+-             	          dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9)); // set static mode
+-             	          #ifdef dtmb_mobile_mode
+-             	          dtmb_write_reg(0x50, 0x1120);	//180m mobile mode
+-             	          #endif
++					  	  dtmb_mobile_mode_set(disable_mobile);
+              	          mobile_times = 0;
+              	      }
+              	  }
+@@ -1249,80 +1309,72 @@ int dtmb_read_snr(void){
+              	  }
+ 
+ 
+-		     	  local_state = 4;
++		     	  local_state = AMLOGIC_DTMB_STEP4;
+ 		     	  pr_dbg("*************** local_state = %d ************ \n", local_state);
+ 		     	  if(mobile_times > 0)
+                          pr_dbg("***************  mobile state ************,mobile_times is %d \n",mobile_times);
+ 		     	  if(time_eq){  // in time_eq mode
+-		     	      local_state = 5;
+-		     	      pr_dbg("*************** local_state = %d ************ \n", local_state);
+-
+-		     	      if(SC_mode == 1 || fbe_in_num < 30){ // MC mode or not two path mode, restore normal mode
+-		     	          dtmb_write_reg(0x2e, 0x131a747d);  // cancel timing-loop
+-		     	          dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
+-		     	          reg_46 = dtmb_read_reg(0x46);
+-		                reg_46 = reg_46 &~ ((1<<20) + (1<<16));           // bypass fe and set time_eq
+-		                dtmb_write_reg(0x46, reg_46);
+-		                pr_dbg(" ------------ normal mode -------------\n");
+-		                local_state = 6;
+-		                pr_dbg("*************** local_state = %d ************ \n", local_state);
+-
+-		     	      }
++		     	      local_state = AMLOGIC_DTMB_STEP5;
++					  mobile_times = 0;
++		     	      pr_dbg("*************** local_state = %d ,time_eq_cnt is %d************ \n", local_state,time_eq_cnt);
++                      if(fec_lock == 1){
++					  	  return 1;
++                      }
++					  else if(SC_mode == 1) {
++					  	  dtmb_time_eq_mode_set(CLOSE_TIME_EQ);
++		                  pr_dbg(" ------------ normal mode MC-------------\n");
++		                  local_state = AMLOGIC_DTMB_STEP10;
++		                  pr_dbg("*************** local_state = %d ************ \n", local_state);					  	
++					  }
++					  else {
++			     	      if(fbe_in_num < 30 || time_eq_lost_cnt > 5){ // MC mode or not two path mode, restore normal mode
++			     	          if(time_eq_cnt <= 0) {
++							  	time_eq_lost_cnt = 0;
++							    dtmb_time_eq_mode_set(CLOSE_TIME_EQ);
++				                pr_dbg(" ------------ normal mode SC-------------\n");
++				                local_state = AMLOGIC_DTMB_STEP6;
++								dtmb_reset();
++				                pr_dbg("*************** local_state = %d ************ \n", local_state);
++			     	        }
++							else{
++								time_eq_cnt--;
++							}
++			     	      }
++						  else{
++						  	time_eq_lost_cnt++;
++						  }
++						 }
+ 		        }
+ 		        else {
+-		            local_state = 7;
++		            local_state = AMLOGIC_DTMB_STEP7;
+ 					front_cci0_count=(dtmb_read_reg(0xe9) >> 22) & 0xff;
+ 		            pr_dbg("*************** local_state = %d ************ ,front_cci0_count is %d\n", local_state,front_cci0_count);
+ 		            constell = (dtmb_read_reg(0xe5) >> 16) & 0x3;
+-		            if((SC_mode == 0)&&(fec_ldpc_it_avg > 640)&& (constell > 1)/*2.5*256*/&& ((fbe_in_num > 30)||(front_cci0_count>0))) { // switch to time_eq mode
+-		                ddc_phase  = dtmb_read_reg(0x15) & 0x1ffffff;
+-		                icfo_phase = dtmb_read_reg(0xe0) & 0xfffff;
+-		                fcfo_phase = dtmb_read_reg(0xe1) & 0xfffff;
+-		                if(icfo_phase > (1<<19))
+-		                    icfo_phase -= (1<<20);
+-		                if(fcfo_phase > (1<<19))
+-		                    fcfo_phase -= (1<<20);
+-		                ddc_phase_new = ddc_phase + icfo_phase*4 + fcfo_phase;
+-		                //printf("before is DDC_phase %x, now is %x \n", ddc_phase, ddc_phase_new);
+-		                dtmb_write_reg(0x15, ddc_phase_new);
+-
+-		                //printf("switch to time_eq configure : 0 -- No, 1 -- yes");
+-		                //scanf("%d", &tmp);
+-		                tmp = 1;
+-		                if(tmp == 1) {
+-		                    dtmb_write_reg(0x2e, 0x31a747d);  // start timing-loop
+-		                    dtmb_write_reg(0x0d, 0x14400640);  // delay fec sync time
+-		                    reg_46 = dtmb_read_reg(0x46);
+-		                    reg_46 = reg_46 | ((1<<20) + (1<<16));           // bypass fe and set time_eq
+-		                    dtmb_write_reg(0x46, reg_46);
+-
+-		                    reg_6b = dtmb_read_reg(0x6b);
+-		                    reg_6b = (reg_6b &~(0x3<<16)) | (1<<17);           // set tune auto
+-		                    dtmb_write_reg(0x6b, reg_6b);
+-		                }
++		            if((SC_mode == 0)&&(fec_ldpc_it_avg > 640)&& (constell > 0)/*2.5*256*/&& ((fbe_in_num > 30)||(front_cci0_count>0))) { // switch to time_eq mode
++		                time_eq_cnt = 5;
++						time_eq_lost_cnt = 0;
++		                dtmb_set_ddc_phase();
++						dtmb_time_eq_mode_set(OPEN_TIME_EQ);
+ 		                pr_dbg(" ------------ time_eq mode -------------\n");
+-		                local_state = 8;
++		                local_state = AMLOGIC_DTMB_STEP8;
+ 		                pr_dbg("*************** local_state = %d ************ \n", local_state);
+ 		                dtmb_reset();
+ 						msleep(300);
+-	                        }
+-	                    }
+-	                }else if(time_cnt >=10) // don't sync, all reset
+-                        {
+-                            local_state = 9;
+-                            pr_dbg("*************** local_state = %d ************ \n", local_state);
+-
+-                            dtmb_register_reset();
+-                        //    dtmb_write_reg(0x49,memstart); //set memory
+-                            dtmb_write_reg(0x10,0x52); //set memory
+-                            dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
+-                            dtmb_write_reg(0xc, 0x41444400); // shorten che waiting time.
+-                            dtmb_write_reg(0x47,0x33202);
+-							dtmb_write_reg(0x18,0x000a1316); // shorten mobile detect time.
+-				            dtmb_write_reg(0x15,0x0199999A); // shift -5M.
+-				            dtmb_write_reg(0x2f,0x13064263); // speed up src
+-				            pm_change = 0;
+-                        }
++	                  }
++	               }
++	           }else if(time_cnt >=10) // don't sync, all reset
++	            {
++	                local_state = AMLOGIC_DTMB_STEP9;
++	                pr_dbg("*************** local_state = %d ************ \n", local_state);
++
++	                dtmb_register_reset();
++	            //    dtmb_write_reg(0x49,memstart); //set memory
++	                dtmb_all_reset();
++		            time_eq_cnt = 0;
++					time_eq_lost_cnt = 0;
++					mobile_times= 0;
++		            pm_change = 0;
++	            }
+ 
+ 		 }
+ 
+@@ -1530,6 +1582,11 @@ int demod_set_sys(struct aml_demod_sta *demod_sta,
+ 		pr_dbg("Cry_mode\n");
+ 	}
+ 	#endif
++	//open dtv adc pinmux
++	demod_set_cbus_reg(0x10000,0x2034);
++	printk("[R840]set adc pinmux\n");
++
++	//
+     demod_set_adc_core_clk(clk_adc, clk_dem,dvb_mode);
+ 	//init for dtmb
+ 	if(dvb_mode==M6_Dtmb){
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.h b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+index 0d3840693743..6c1000826f2b 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.h
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+@@ -99,6 +99,48 @@
+ #define Wr(addr, data) *(volatile unsigned long *)(addr)=(data)
+ #define Rd(addr) *(volatile unsigned long *)(addr)
+ 
++typedef enum{
++	enable_mobile,
++	disable_mobile
++}dtmb_mobile_t;
++
++typedef enum{
++	OPEN_TIME_EQ,
++	CLOSE_TIME_EQ
++}dtmb_time_eq_t;
++
++typedef enum{
++	AMLOGIC_DTMB_STEP0,
++	AMLOGIC_DTMB_STEP1,
++	AMLOGIC_DTMB_STEP2,
++	AMLOGIC_DTMB_STEP3,
++	AMLOGIC_DTMB_STEP4,
++	AMLOGIC_DTMB_STEP5,		//time eq
++	AMLOGIC_DTMB_STEP6,		//set normal mode sc
++	AMLOGIC_DTMB_STEP7,
++	AMLOGIC_DTMB_STEP8,		//set time eq mode
++	AMLOGIC_DTMB_STEP9,		//reset
++	AMLOGIC_DTMB_STEP10,	//set normal mode mc
++	AMLOGIC_DTMB_STEP11,
++}dtmb_step_t;
++
++typedef enum{
++	DTMB_IDLE=0,
++	DTMB_AGC_READY=1,
++	DTMB_TS1_READY=2,
++	DTMB_TS2_READY=3,
++	DTMB_FE_READY=4,
++	DTMB_PNPHASE_READY=5,
++	DTMB_SFO_INIT_READY=6,
++	DTMB_TS3_READY=7,
++	DTMB_PM_INIT_READY=8,
++	DTMB_CHE_INIT_READY=9,
++	DTMB_FEC_READY=10
++	
++}dtmb_fec_status_t;
++
++
++
+ // i2c functions
+ //int aml_i2c_sw_test_bus(struct aml_demod_i2c *adap, char *name);
+ int am_demod_i2c_xfer(struct aml_demod_i2c *adap, struct i2c_msg *msgs, int num);
+diff --git a/drivers/media/dvb-core/dvb_frontend.h b/drivers/media/dvb-core/dvb_frontend.h
+index ecb401147d6a..9692fb71c451 100755
+--- a/drivers/media/dvb-core/dvb_frontend.h
++++ b/drivers/media/dvb-core/dvb_frontend.h
+@@ -77,6 +77,9 @@ struct analog_parameters {
+ 	unsigned int lock_range;
+ 	unsigned int leap_step;
+ 	v4l2_std_id std;
++	unsigned int tuner_id;//for amlatvdemod
++	unsigned int if_freq;//for amlatvdemod
++	unsigned int if_inv;//for tuner r840
+ 	unsigned int reserved;
+ };
+ 
+-- 
+2.19.0
+

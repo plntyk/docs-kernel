@@ -1,0 +1,1896 @@
+From 701aeb0d773fdb4cb38cbf9dd9e2fd035ad754b6 Mon Sep 17 00:00:00 2001
+From: "dezhi.kong" <dezhi.kong@amlogic.com>
+Date: Fri, 15 Nov 2013 21:20:59 +0800
+Subject: [PATCH 1958/5965] isp,optimize for af
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c     | 164 +++++++++++++------------
+ drivers/amlogic/tvin/isp/isp_drv.h     |  15 +--
+ drivers/amlogic/tvin/isp/isp_hw.c      | 112 ++++++++---------
+ drivers/amlogic/tvin/isp/isp_parm.c    |  58 ++++-----
+ drivers/amlogic/tvin/isp/isp_sm.c      | 133 +++++++++++---------
+ include/linux/amlogic/tvin/tvin_v4l2.h |  80 ++++++------
+ 6 files changed, 294 insertions(+), 268 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index cab6c819f9bb..c7b8f25c356b 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -34,8 +34,8 @@
+ #include "../tvin_frontend.h"
+ #include "../tvin_format_table.h"
+ 
+-#include "isp_drv.h" 
+-#include "isp_tool.h" 
++#include "isp_drv.h"
++#include "isp_tool.h"
+ #include "isp_sm.h"
+ #include "isp_regs.h"
+ 
+@@ -56,16 +56,17 @@ static unsigned int isr_debug = 0;
+ static volatile unsigned int ae_flag = 0;
+ static volatile unsigned int ae_new_step = 60;
+ extern struct isp_ae_to_sensor_s ae_sens;
++static unsigned int af_ave_step_en = 1;
+ 
+ static void parse_param(char *buf_orig,char **parm)
+ {
+ 	char *ps, *token;
+ 	unsigned int n=0;
+ 	ps = buf_orig;
+-	
++
+         if(isp_debug)
+ 		pr_info("%s parm:%s",__func__,buf_orig);
+-        
++
+         while(1) {
+                 token = strsep(&ps, " \n");
+                 if (token == NULL)
+@@ -173,7 +174,7 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		af->post_step = data[7];
+ 		af->pre_threshold = data[8];
+ 		af->post_threshold = data[9];
+-		
++
+ 		af->state = 0;
+ 		af->step = af->pre_step;
+ 		if(devp->af_dbg)
+@@ -182,11 +183,11 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		devp->flag |= ISP_FLAG_AF_DBG;
+ 		pr_info("%s:full scan from %u-%u-%u-%u.\n",__func__,af->min_step,
+ 				af->pre_threshold,af->post_threshold,af->max_step);
+-	}else if(!strcmp(parm[0],"print")){	
++	}else if(!strcmp(parm[0],"print")){
+ 		unsigned int i=0,cursor=0;
+ 		af = devp->af_dbg;
+ 		if(IS_ERR_OR_NULL(af))
+-			return len;		
++			return len;
+ 		devp->flag &=(~ISP_FLAG_AF_DBG);
+ 		pr_info("ac[0]   ac[1]    ac[2]   ac[3]   dc[0]   dc[1]   dc[2]   dc[3]\n");
+ 		if(af->dir){
+@@ -199,7 +200,7 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
+ 					af->data[cursor].ac[2],af->data[cursor].ac[3],
+ 					af->data[cursor].dc[0],af->data[cursor].dc[1],
+-					af->data[cursor].dc[2],af->data[cursor].dc[3]);	
++					af->data[cursor].dc[2],af->data[cursor].dc[3]);
+ 				msleep(10);
+ 			}
+ 		}else{
+@@ -212,7 +213,7 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
+ 					af->data[cursor].ac[2],af->data[cursor].ac[3],
+ 					af->data[cursor].dc[0],af->data[cursor].dc[1],
+-					af->data[cursor].dc[2],af->data[cursor].dc[3]);	
++					af->data[cursor].dc[2],af->data[cursor].dc[3]);
+ 				msleep(10);
+ 			}
+ 		}
+@@ -248,7 +249,7 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 				devp->af_test.af_bl[i].ac[3],devp->af_test.af_bl[i].dc[0],
+ 				devp->af_test.af_bl[i].dc[1],devp->af_test.af_bl[i].dc[2],
+ 				devp->af_test.af_bl[i].dc[3]);
+-		}		
++		}
+ 		pr_info("win0 win1 win2 win3 win4 win5 win6 win7 win8 win9 win10 win11 win12 win13 win14 win15\n");
+ 		for(i=0;i<devp->af_test.cnt;i++){
+ 			pr_info("%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+@@ -269,16 +270,16 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		devp->af_test.af_win = NULL;
+ 		devp->af_test.ae_win = NULL;
+ 	}
+-	
++
+ 	kfree(buf_orig);
+-	
++
+ 	return len;
+ }
+ 
+ static ssize_t af_debug_show(struct device *dev,struct device_attribute *attr, char* buf)
+ {
+ 	size_t len = 0;
+-	
++
+ 	isp_dev_t *devp = dev_get_drvdata(dev);
+ 	unsigned int pix_sum = ((devp->info.h_active)*(devp->info.v_active))>>2;
+ 	len += sprintf(buf+len,"0x%x 0x%x 0x%x 0x%x\n",devp->blnr_stat.dc[0],devp->blnr_stat.dc[1],devp->blnr_stat.dc[2],devp->blnr_stat.dc[3]);
+@@ -300,9 +301,9 @@ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ 			af->step = af->post_step;
+ 		else if(af->cur_step >= af->pre_threshold)
+ 			af->step = af->mid_step;
+-		else 
++		else
+ 			af->step = af->post_step;
+-		
++
+ 		if(af->dir){
+ 			af->cur_step += af->step;
+ 			if (af->cur_step > af->max_step){
+@@ -324,20 +325,20 @@ static void af_stat(struct af_debug_s *af,cam_function_t *ops)
+ 		}
+ 	}
+         return;
+-	
++
+ }
+ static DEVICE_ATTR(af_debug, 0664, af_debug_show, af_debug_store);
+ 
+ 
+ static ssize_t ae_param_store(struct device *dev,struct device_attribute *attr, const char* buf, size_t len)
+ {
+-	
++
+         char *parm[18]={NULL};
+ 	isp_dev_t *devp;
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_ae_parm||!buf){		
++	if(!devp->isp_ae_parm||!buf){
+ 		pr_err("[%s..]%s %s error.isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -353,7 +354,7 @@ static ssize_t ae_param_show(struct device *dev,struct device_attribute *attr, c
+ 	char *buff="show";
+ 
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_ae_parm){		
++	if(!devp->isp_ae_parm){
+ 		pr_err("[%s..]%s %s error,isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -369,7 +370,7 @@ static ssize_t awb_param_store(struct device *dev,struct device_attribute *attr,
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_awb_parm||!buf){		
++	if(!devp->isp_awb_parm||!buf){
+ 		pr_err("[%s..]%s %s error.isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -385,7 +386,7 @@ static ssize_t awb_param_show(struct device *dev,struct device_attribute *attr,
+ 	isp_dev_t *devp;
+ 
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_awb_parm){		
++	if(!devp->isp_awb_parm){
+ 		len += sprintf(buf+len,"[%s..]%s isp device has't started.\n",DEVICE_NAME,__func__);
+ 		return len;
+ 	}
+@@ -402,7 +403,7 @@ static ssize_t af_param_store(struct device *dev,struct device_attribute *attr,
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_af_parm||!buf){		
++	if(!devp->isp_af_parm||!buf){
+ 		pr_err("[%s..]%s %s error.isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -418,7 +419,7 @@ static ssize_t af_param_show(struct device *dev,struct device_attribute *attr, c
+ 	isp_dev_t *devp;
+ 
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->isp_af_parm){		
++	if(!devp->isp_af_parm){
+ 		len += sprintf(buf+len,"[%s..]%s isp device has't started.\n",DEVICE_NAME,__func__);
+ 		return len;
+ 	}
+@@ -435,7 +436,7 @@ static ssize_t capture_param_store(struct device *dev,struct device_attribute *a
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->capture_parm||!buf){		
++	if(!devp->capture_parm||!buf){
+ 		pr_err("[%s..]%s %s error.isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -451,7 +452,7 @@ static ssize_t capture_param_show(struct device *dev,struct device_attribute *at
+ 		isp_dev_t *devp;
+ 
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->capture_parm){		
++	if(!devp->capture_parm){
+ 		len += sprintf(buf+len,"[%s..]%s isp device has't started.\n",DEVICE_NAME,__func__);
+ 		return len;
+ 	}
+@@ -468,7 +469,7 @@ static ssize_t wave_param_store(struct device *dev,struct device_attribute *attr
+ 	char *buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	parse_param(buf_orig,(char **)&parm);
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->wave||!buf){		
++	if(!devp->wave||!buf){
+ 		pr_err("[%s..]%s %s error.isp device has't started.\n",DEVICE_NAME,__func__,buf);
+ 		return len;
+ 	}
+@@ -490,7 +491,7 @@ static ssize_t wave_param_show(struct device *dev,struct device_attribute *attr,
+ 		isp_dev_t *devp;
+ 
+ 	devp = dev_get_drvdata(dev);
+-	if(!devp->wave){		
++	if(!devp->wave){
+ 		len += sprintf(buf+len,"[%s..]%s isp device has't started.\n",DEVICE_NAME,__func__);
+ 		return len;
+ 	}
+@@ -627,14 +628,14 @@ static DEVICE_ATTR(gamma, 0664, gamma_show, gamma_store);
+ static ssize_t ls_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+     ssize_t len = 0;
+-    
++
+     len += sprintf(buf+len," command format:\n");
+     len += sprintf(buf+len," echo psize_v2h ocenter_c2l ocenter_c2t gain_0db curvature_gr curvature_r curvature_b curvature_gb force_enable > ... \n");
+ 
+     len += sprintf(buf+len," Example:\n");
+     len += sprintf(buf+len," echo enable 100 50 50 0 120 120 120 120 1 > /sys/class/isp/isp0/lens \n");
+-     
+-    return len;	
++
++    return len;
+ }
+ 
+ static ssize_t ls_store(struct device *dev,struct device_attribute *attr,const char *buf, size_t len)
+@@ -645,10 +646,10 @@ static ssize_t ls_store(struct device *dev,struct device_attribute *attr,const c
+     isp_dev_t *devp;
+ 	devp = dev_get_drvdata(dev);
+ 	isp_info_t *info = &devp->info;
+-    unsigned int psize_v2h,hactive,vactive,ocenter_c2l,ocenter_c2t,gain_0db, curvature_gr,curvature_r; 
+-    unsigned int curvature_b,curvature_gb; 
++    unsigned int psize_v2h,hactive,vactive,ocenter_c2l,ocenter_c2t,gain_0db, curvature_gr,curvature_r;
++    unsigned int curvature_b,curvature_gb;
+     bool force_enable;
+-    
++
+ 	/* to avoid the bellow warning message while compiling:
+ 	 * warning: the frame size of 1576 bytes is larger than 1024 bytes
+ 	 */
+@@ -669,17 +670,17 @@ static ssize_t ls_store(struct device *dev,struct device_attribute *attr,const c
+ 	    psize_v2h = simple_strtoul(     parm[1],NULL,10);
+ 	    ocenter_c2l = simple_strtoul(   parm[2],NULL,10);
+ 	    ocenter_c2t = simple_strtoul(   parm[3],NULL,10);
+-	    gain_0db = simple_strtoul(      parm[4],NULL,10); 
++	    gain_0db = simple_strtoul(      parm[4],NULL,10);
+ 	    curvature_gr = simple_strtoul(  parm[5],NULL,10);
+-	    curvature_r = simple_strtoul(   parm[6],NULL,10); 
++	    curvature_r = simple_strtoul(   parm[6],NULL,10);
+         curvature_b = simple_strtoul(   parm[7],NULL,10);
+-        curvature_gb = simple_strtoul(  parm[8],NULL,10);   
++        curvature_gb = simple_strtoul(  parm[8],NULL,10);
+         force_enable = simple_strtoul(  parm[9],NULL,10);
+-        
++
+         pr_info("psize_v2h:%u hactive:%u vactive:%u ocenter_c2l:%u ocenter_c2t:%u gain_0db:%u curvature_gr:%u curvature_r:%u curvature_b:%u curvature_gb:%u force_enable:%u \n", \
+             psize_v2h,info->h_active,info->v_active,ocenter_c2l,ocenter_c2t,gain_0db, \
+-            curvature_gr,curvature_r, curvature_b,curvature_gb,force_enable);        
+-            
++            curvature_gr,curvature_r, curvature_b,curvature_gb,force_enable);
++
+         isp_ls_curve(psize_v2h,info->h_active,info->v_active,ocenter_c2l,ocenter_c2t,gain_0db, \
+             curvature_gr,curvature_r, curvature_b,curvature_gb,force_enable);
+     }
+@@ -730,14 +731,14 @@ static int isp_thread(isp_dev_t *devp) {
+ 	}
+ }
+ 
+-static int start_isp_thread(isp_dev_t *devp) {	
++static int start_isp_thread(isp_dev_t *devp) {
+ 	if(!devp->kthread) {
+ 		devp->kthread = kthread_run(isp_thread, devp, "isp");
+ 		if(IS_ERR(devp->kthread)) {
+ 			pr_err("[%s..]%s thread creating error.\n",DEVICE_NAME,__func__);
+ 			return -1;
+ 		}
+-		wake_up_process(devp->kthread);    
++		wake_up_process(devp->kthread);
+ 	}
+ 	return 0;
+ }
+@@ -759,25 +760,25 @@ static int isp_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ }
+ 
+ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+-{        
++{
+ 	isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 	vdin_parm_t *parm = (vdin_parm_t*)fe->private_data;
+ 	isp_info_t *info = &devp->info;
+-	
++
+ 	info->fe_port = parm->isp_fe_port;
+ 	info->dfmt = parm->dfmt;
+ 	info->h_active = parm->h_active;
+ 	info->v_active = parm->v_active;
+ 	info->frame_rate = parm->frame_rate;
+ 	info->skip_cnt = 0;
+-	devp->isp_fe = tvin_get_frontend(info->fe_port, 0);		
+-	if(devp->isp_fe && devp->isp_fe->dec_ops) {			
+-		devp->isp_fe->private_data = fe->private_data;			
++	devp->isp_fe = tvin_get_frontend(info->fe_port, 0);
++	if(devp->isp_fe && devp->isp_fe->dec_ops) {
++		devp->isp_fe->private_data = fe->private_data;
+ 		devp->isp_fe->dec_ops->open(devp->isp_fe, info->fe_port);
+ 		pr_info("[%s..]%s: open %s ok.\n",DEVICE_NAME,__func__,tvin_port_str(info->fe_port));
+-	} else {			
+-		pr_info("[%s..]%s:get %s frontend error.\n",DEVICE_NAME,__func__,tvin_port_str(info->fe_port));		
+-	}       
++	} else {
++		pr_info("[%s..]%s:get %s frontend error.\n",DEVICE_NAME,__func__,tvin_port_str(info->fe_port));
++	}
+ 	/*open the isp to vdin path,power on the isp hw module*/
+ 	switch_vpu_mem_pd_vmod(VPU_ISP,VPU_MEM_POWER_ON);
+         devp->cam_param = (cam_parameter_t*)parm->reserved;
+@@ -794,8 +795,10 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_af_t),GFP_KERNEL);
+ 		memset(devp->isp_af_parm,0,sizeof(xml_algorithm_af_t));
+ 		devp->isp_af_parm->valid_step_cnt = 16;
+-		devp->isp_af_parm->af_fail_ratio = 20;
+-		devp->isp_af_parm->af_retry_max = 2;
++		devp->isp_af_parm->af_fail_ratio = 120;
++		devp->isp_af_parm->af_step_mid_thre= 250;
++		devp->isp_af_parm->af_step_max_thre = 550;
++		devp->isp_af_parm->af_retry_max = 3;
+ 		devp->isp_af_parm->step[0] = 100;
+ 		devp->isp_af_parm->step[1] = 150;
+ 		devp->isp_af_parm->step[2] = 200;
+@@ -803,18 +806,23 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->isp_af_parm->step[4] = 290;
+ 		devp->isp_af_parm->step[5] = 330;
+ 		devp->isp_af_parm->step[6] = 370;
+-		devp->isp_af_parm->step[7] = 400;		
+-		devp->isp_af_parm->step[8] = 430;		
++		devp->isp_af_parm->step[7] = 400;
++		devp->isp_af_parm->step[8] = 430;
+ 		devp->isp_af_parm->step[9] = 460;
+-		devp->isp_af_parm->step[10] = 480;		
++		devp->isp_af_parm->step[10] = 480;
+ 		devp->isp_af_parm->step[11] = 500;
+                 devp->isp_af_parm->step[12] = 520;
+                 devp->isp_af_parm->step[13] = 530;
+                 devp->isp_af_parm->step[14] = 540;
+ 		devp->isp_af_parm->step[15] = 550;
++		if(af_ave_step_en){
++			int temp;
++			for(temp=0;temp<16;temp++)
++				devp->isp_af_parm->step[temp] = 100+30*temp;
++		}
+ 		devp->isp_af_parm->jump_offset = 100;
+-		devp->isp_af_parm->field_delay = 1;
+-		
++		devp->isp_af_parm->field_delay = 2;
++
+ 		/*init for auto lose focus tell*/
+ 		devp->isp_af_parm->detect_step_cnt = 16;
+ 		devp->isp_af_parm->enter_move_ratio = 55;
+@@ -843,7 +851,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ }
+ 
+ static void isp_fe_close(struct tvin_frontend_s *fe)
+-{        
++{
+         isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 		if(devp->af_info.af_detect)
+ 			kfree(devp->af_info.af_detect);
+@@ -866,12 +874,12 @@ static void isp_fe_close(struct tvin_frontend_s *fe)
+ static void isp_fe_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt)
+ {
+         isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+-	
++
+ 	pr_info("[%s..]%s:isp start.\n",DEVICE_NAME,__func__);
+-		
++
+ 	if(devp->isp_fe)
+ 	        devp->isp_fe->dec_ops->start(devp->isp_fe,fmt);
+-	
++
+ 	/*configuration the hw,load reg table*/
+ 
+ 	if(!IS_ERR_OR_NULL(devp->cam_param)) {
+@@ -884,20 +892,20 @@ static void isp_fe_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt)
+         }
+ 	tasklet_enable(&devp->isp_task);
+ 	start_isp_thread(devp);
+-	
++
+         devp->flag |= ISP_FLAG_START;
+ 	return;
+ }
+ static void isp_fe_stop(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ {
+-         
++
+         isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 	if(devp->isp_fe)
+ 	        devp->isp_fe->dec_ops->stop(devp->isp_fe,devp->info.fe_port);
+ 	tasklet_disable_nosync(&devp->isp_task);
+ 	stop_isp_thread(devp);
+ 	/*disable hw*/
+-        devp->flag &= (~ISP_FLAG_START);    
++        devp->flag &= (~ISP_FLAG_START);
+ }
+ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ {
+@@ -911,8 +919,8 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+         }
+ 	cmd = param->cam_command;
+ 	devp->cam_param = param;
+-	if(ioctl_debug)	 	
+-	 	pr_info("[%s..]%s:cmd: %s .\n",DEVICE_NAME,__func__,cam_cmd_to_str(cmd));	 
++	if(ioctl_debug)
++	 	pr_info("[%s..]%s:cmd: %s .\n",DEVICE_NAME,__func__,cam_cmd_to_str(cmd));
+ 	switch(cmd) {
+                 case CAM_COMMAND_INIT:
+ 		        break;
+@@ -996,11 +1004,11 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 		        break;
+ 	        default:
+ 		        break;
+-	}	
++	}
+ 	return 0;
+ }
+ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+-{	
++{
+ 	xml_csc_t *csc;
+ 	xml_wb_manual_t *wb;
+ 	af_debug_t *af;
+@@ -1062,7 +1070,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 		ret = isp_capture_sm(devp);
+ 	if(devp->isp_fe)
+ 		ret = devp->isp_fe->dec_ops->decode_isr(devp->isp_fe,0);
+-	
++
+ 	if(devp->flag & ISP_FLAG_SKIP_BUF){
+ 		ret = TVIN_BUF_SKIP;
+ 		if(devp->info.skip_cnt++ > 25){
+@@ -1072,7 +1080,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 			pr_info("%s isp skip cnt %u %s 25.\n",__func__,devp->info.skip_cnt,devp->info.skip_cnt>25?">":"<");
+ 	}
+ 	tasklet_schedule(&devp->isp_task);
+-        return ret;        
++        return ret;
+ }
+ 
+ static void isp_tasklet(unsigned long arg)
+@@ -1179,9 +1187,9 @@ static int isp_probe(struct platform_device *pdev)
+ 	isp_devp[devp->index] = devp;
+ 	/* create cdev and reigser with sysfs */
+ 	ret = isp_add_cdev(&devp->cdev,&isp_fops,devp->index);
+-	
++
+ 	devp->dev = isp_create_device(&pdev->dev,devp->index);
+-	
++
+ 	ret = device_create_file(devp->dev,&dev_attr_debug);
+ 	ret = device_create_file(devp->dev,&dev_attr_ae_param);
+ 	ret = device_create_file(devp->dev,&dev_attr_awb_param);
+@@ -1194,14 +1202,14 @@ static int isp_probe(struct platform_device *pdev)
+ 	ret = device_create_file(devp->dev,&dev_attr_lens);
+ 	if(ret < 0)
+ 		goto err;
+-	
++
+ 	sprintf(devp->frontend.name, "%s%d", DEVICE_NAME, devp->index);
+-	
++
+ 	if(!tvin_frontend_init(&devp->frontend,&isp_dec_ops,&isp_sm_ops,devp->index)) {
+ 		if(tvin_reg_frontend(&devp->frontend))
+ 			pr_err("[%s..]%s register isp frontend error.\n",DEVICE_NAME,__func__);
+ 	}
+-	
++
+ 	tasklet_init(&devp->isp_task,isp_tasklet,(unsigned long)devp);
+ 	tasklet_disable(&devp->isp_task);
+ 	platform_set_drvdata(pdev,(void *)devp);
+@@ -1209,7 +1217,7 @@ static int isp_probe(struct platform_device *pdev)
+ 	pr_info("[%s..]%s isp probe ok.\n",DEVICE_NAME,__func__);
+ 	return 0;
+ err:
+-	isp_delete_device(devp->index); 
++	isp_delete_device(devp->index);
+ 	return 0;
+ 
+ }
+@@ -1224,7 +1232,7 @@ static int isp_remove(struct platform_device *pdev)
+ 	device_remove_file(devp->dev,&dev_attr_cap_param);
+ 	device_remove_file(devp->dev,&dev_attr_wave_param);
+ 	device_remove_file(devp->dev,&dev_attr_lens);
+-	
++
+ 	isp_delete_device(devp->index);
+         tvin_unreg_frontend(&devp->frontend);
+ 	tasklet_kill(&devp->isp_task);
+@@ -1247,7 +1255,7 @@ static struct platform_driver isp_driver = {
+ 	.probe 	 = isp_probe,
+ 	.remove  = isp_remove,
+ 	.suspend = isp_suspend,
+-	.resume  = isp_resume,	
++	.resume  = isp_resume,
+ 	.driver = {
+ 		.name = DEVICE_NAME,
+ 	}
+@@ -1308,6 +1316,8 @@ MODULE_PARM_DESC(ioctl_debug,"\n debug ioctl function.\n");
+ module_param(isr_debug,uint,0664);
+ MODULE_PARM_DESC(isr_debug,"\n debug isr function.\n");
+ 
++module_param(af_ave_step_en,uint,0664);
++MODULE_PARM_DESC(af_ave_step_en,"\n debug flag for af function.\n");
+ 
+ MODULE_VERSION(ISP_VER);
+ module_init(isp_init_module);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 905c0833a5a5..fc30b0addd0e 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.15"
++#define ISP_VER					"2013.11.15a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -45,7 +45,7 @@
+ #define ISP_FLAG_MWB			        0x00000200
+ #define ISP_FLAG_BLNR				0x00000400
+ #define ISP_FLAG_SET_COMB4			0x00000800
+-#define ISP_TEST_FOR_AF_WIN			0x00001000	
++#define ISP_TEST_FOR_AF_WIN			0x00001000
+ #define ISP_FLAG_TOUCH_AF			0x00002000
+ #define ISP_FLAG_SKIP_BUF			0x00004000
+ 
+@@ -63,9 +63,9 @@ typedef struct isp_info_s {
+ typedef struct flash_property_s {
+ 	bool 	 valid;		 //true:have flash,false:havn't flash
+ 	bool     torch_pol_inv;  // false: negative correlation
+-                                 // true: positive correlation                                     
++                                 // true: positive correlation
+         bool 	 pin_mux_inv;	 // false: led1=>pin1 & led2=>pin2, true: led1=>pin2 & led2=>pin1
+-    
++
+         bool 	 led1_pol_inv;	 // false: active high, true: active low
+         bool     mode_pol_inv;   //        TORCH  FLASH
+                                  //false: low      high
+@@ -87,7 +87,7 @@ typedef struct af_debug_s {
+ 	unsigned int	post_step;
+ 	unsigned int	pre_threshold;
+ 	unsigned int	post_threshold;
+-	isp_blnr_stat_t data[1024];	
++	isp_blnr_stat_t data[1024];
+ } af_debug_t;
+ /*for af test debug*/
+ typedef struct af_debug_test_s {
+@@ -109,6 +109,7 @@ typedef struct isp_af_info_s {
+ 	/*for climbing algorithm*/
+ 	unsigned int flag_bk;
+ 	unsigned int great_step;
++	unsigned int last_great_step;
+ 	unsigned int cur_step;
+ 	unsigned int af_retry_cnt;
+ 	unsigned long long fv_aft_af;
+@@ -144,7 +145,7 @@ typedef struct isp_dev_s{
+         /*add for tvin frontend*/
+         tvin_frontend_t frontend;
+ 	tvin_frontend_t *isp_fe;
+-	
++
+ 	struct isp_info_s info;
+ 	struct tasklet_struct isp_task;
+ 	struct task_struct     *kthread;
+@@ -171,7 +172,7 @@ typedef enum data_type_e{
+ 	ISP_U8=0,
+ 	ISP_U16,
+ 	ISP_U32,
+-	ISP_FLOAT,	
++	ISP_FLOAT,
+ }data_type_t;
+ 
+ typedef struct isp_param_s{
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 3aa5006c3129..5267e87c4d2b 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -32,8 +32,7 @@ void isp_top_init(xml_top_t *top,unsigned int w,unsigned int h)
+ 	unsigned short offset[XML_TOP]={
+ 		0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0xaf
+ 	};
+-	int i = 0;	
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
++	int i = 0;
+ 	if(top){
+ 		//for(i=0;i < XML_TOP;i++)
+ //			WR(ISP_VCBUS_BASE+offset[i],top->reg_map[i]);
+@@ -49,12 +48,11 @@ void isp_top_init(xml_top_t *top,unsigned int w,unsigned int h)
+ void isp_set_test_pattern(xml_tp_t *tp)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(tp){
+ 		for(i=0;i<XML_TP;i++)
+ 			WR(ISP_PAT_GEN_CTRL+i,tp->reg_map[i]);
+ 	} else {
+-		
++
+ 	}
+ 	return;
+ }
+@@ -64,7 +62,6 @@ void isp_set_test_pattern(xml_tp_t *tp)
+ void isp_set_clamp_gain(xml_cg_t *cg)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(cg){
+ 		for(i=0;i<XML_CG;i++)
+ 		        WR(ISP_CLAMPGAIN_CTRL+i, cg->reg_map[i]);
+@@ -77,8 +74,7 @@ void isp_set_clamp_gain(xml_cg_t *cg)
+ void isp_set_lens_shading(xml_ls_t *lens)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+-	if(lens){		
++	if(lens){
+ 		for(i=0;i<XML_LS;i++)
+ 		        WR(ISP_LNS_CTRL+i, lens->reg_map[i]);
+ 	}
+@@ -89,8 +85,7 @@ void isp_set_lens_shading(xml_ls_t *lens)
+ void isp_set_gamma_correction(xml_gc_t *gc)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+-	if(gc){		
++	if(gc){
+ 		for(i=0;i<XML_GC;i++)
+ 		        WR(ISP_GMR0_CTRL+i, gc->reg_map[i]);
+ 	}
+@@ -105,7 +100,6 @@ void isp_set_defect_pixel_correction(xml_dp_t *dpc)
+ 	unsigned short offset[XML_DP]={
+ 		0x31,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c
+ 	};
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(dpc){
+ 		for(i=0;i<XML_DP;i++)
+ 		        WR(ISP_VCBUS_BASE+offset[i], dpc->reg_map[i]);
+@@ -117,7 +111,6 @@ void isp_set_defect_pixel_correction(xml_dp_t *dpc)
+ void isp_set_demosaicing(xml_dm_t *dms)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(dms){
+ 		for(i=0;i<XML_DM;i++)
+ 		        WR(ISP_DMS_CTRL0+i, dms->reg_map[i]);
+@@ -139,7 +132,6 @@ void isp_set_matrix(xml_csc_t *csc, unsigned int height)
+ 		//rgb->709
+ 	};
+ 	unsigned int i=0, *start;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(csc){
+ 		start = &(csc->reg_map[0]);
+ 		if(height > 720)
+@@ -153,10 +145,10 @@ void isp_set_matrix(xml_csc_t *csc, unsigned int height)
+ 	}
+ }
+ /*
+-*reg 0x50 
+-*reg 0x52 0x53 0x54 0x55 0x56 0x57 0x58 0x59 0x5a 0x5b 
+-*reg 0x60 0x61 0x62 0x63 0x64 0x65 0x66 
+-*reg 0x72 0x73 0x74 0x75 0x76 0x78 0x79 0x7a 0x7b 
++*reg 0x50
++*reg 0x52 0x53 0x54 0x55 0x56 0x57 0x58 0x59 0x5a 0x5b
++*reg 0x60 0x61 0x62 0x63 0x64 0x65 0x66
++*reg 0x72 0x73 0x74 0x75 0x76 0x78 0x79 0x7a 0x7b
+ *reg 0x80 0x81 0x82 0x83 0x84 0x85(special effect )
+ */
+ void isp_set_sharpness(xml_sharp_t *sharp)
+@@ -167,15 +159,14 @@ void isp_set_sharpness(xml_sharp_t *sharp)
+ 		0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x72,0x73,0x74,0x75,
+ 		0x76,0x78,0x79,0x7a,0x7b,0x80,0x81,0x82,0x83,0x84,0x85
+ 	};
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(sharp){
+ 		for(i=0;i<XML_SH;i++)
+-			WR(ISP_VCBUS_BASE+offset[i], sharp->reg_map[i]);		
++			WR(ISP_VCBUS_BASE+offset[i], sharp->reg_map[i]);
+ 	}
+ }
+ /*
+ *reg 0x50~0x51
+-*reg 0x68~0x71 
++*reg 0x68~0x71
+ *reg 0x85
+ */
+ void isp_set_nr(xml_nr_t *nr)
+@@ -185,7 +176,6 @@ void isp_set_nr(xml_nr_t *nr)
+ 		0x50,0x51,0x68,0x69,0x6a,0x6b,0x6c,
+ 		0x6d,0x6e,0x6f,0x70,0x71,0x85
+ 	};
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(nr){
+ 		for(i=0;i<XML_NR;i++)
+ 			WR(ISP_VCBUS_BASE+offset[i], nr->reg_map[i]);
+@@ -197,7 +187,6 @@ void isp_set_nr(xml_nr_t *nr)
+ void isp_set_awb_stat(xml_awb_t *awbs,unsigned int w,unsigned int h)
+ {
+ 	int i = 0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(awbs){
+ 		for(i=0;i<XML_AWB;i++)
+ 			WR(ISP_AWB_WIND_LR+i, awbs->reg_map[i]);
+@@ -216,7 +205,6 @@ void isp_set_ae_stat(xml_ae_t *aes,unsigned int w,unsigned int h)
+ 	unsigned short offset[XML_AE]={
+ 		0x8c,0x90,0x91,0x92,0x93,0x94
+ 	};
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(aes){
+ 		for(i=0;i<XML_AE;i++)
+ 			WR(ISP_VCBUS_BASE+offset[i],aes->reg_map[i]);
+@@ -236,7 +224,6 @@ void isp_set_ae_stat(xml_ae_t *aes,unsigned int w,unsigned int h)
+ void isp_set_af_stat(xml_af_t *afs,unsigned int w,unsigned int h)
+ {
+ 	unsigned int i=0,tmp_w=0,tmp_h=0;
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
+ 	if(afs){
+ 		for(i=0;i<XML_AF;i++)
+ 			WR(ISP_AFC_FILTER_SEL+i, afs->reg_map[i]);
+@@ -259,7 +246,7 @@ void isp_set_af_stat(xml_af_t *afs,unsigned int w,unsigned int h)
+ 	WR(ISP_AFC_WIND3_TB,(tmp_h<<3)<<16|tmp_h*11);
+ 	/*wind4 h:8-11 v:8-11*/
+ 	WR(ISP_AFC_WIND4_LR,(tmp_w<<3)<<16|tmp_w*11);
+-	WR(ISP_AFC_WIND4_TB,(tmp_h<<3)<<16|tmp_h*11);	
++	WR(ISP_AFC_WIND4_TB,(tmp_h<<3)<<16|tmp_h*11);
+ }
+ /*
+ *reg 0xac~0xae
+@@ -285,7 +272,12 @@ void isp_set_blenr_stat(unsigned int x0,unsigned int y0,unsigned int x1,unsigned
+ 	WR(ISP_BLNR_WIND_LR, x1|x0<<16);
+ 	WR(ISP_BLNR_WIND_TB, y1|y0<<16);
+ 	WR_BITS(ISP_BLNR_CTRL,1,BLNR_STATISTICS_EN_BIT,BLNR_STATISTICS_EN_WID);
+-	
++
++
++	WR(ISP_AFC_WIND0_LR,x1|x0<<16);
++	WR(ISP_AFC_WIND0_TB,y1|y0<<16);
++	WR(ISP_AFC_FILTER_SEL,0x000170f0);
++
+ }
+ /*
+ *reg 0xb0~0xb1
+@@ -329,16 +321,16 @@ static void isp_set_gamma_table(struct xml_lut_gc_s *gt)
+ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned int w,unsigned int h)
+ {
+ 	unsigned int mux = 0;
+-	switch(fe_port){			
+-		case TVIN_PORT_CAMERA:				
+-			mux = 1;				
+-			break;			
+-		case TVIN_PORT_MIPI:	
+-			mux = 2;				
+-			break;			
+-		default:				
+-			mux = 0;				
+-			break;		
++	switch(fe_port){
++		case TVIN_PORT_CAMERA:
++			mux = 1;
++			break;
++		case TVIN_PORT_MIPI:
++			mux = 2;
++			break;
++		default:
++			mux = 0;
++			break;
+ 	}
+ 	WR_BITS(VPU_MISC_CTRL,mux,ISP_IN_SEL_BIT,ISP_IN_SEL_WID);
+ 	isp_top_init(&regs->top,w,h);
+@@ -358,7 +350,7 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ 	//isp_set_dbg(&regs->dbg);
+ 	isp_set_lnsd(&regs->lnsd);
+ 	isp_set_gamma_table(&regs->lut_gc);
+-	pr_info("[%s..]%s: init ok.\n",DEVICE_NAME,__func__);
++	pr_info("[%s..]%s: init ok(w:%d,h:%d).\n",DEVICE_NAME,__func__,w,h);
+ }
+ /*
+ *just enable test pattern
+@@ -407,7 +399,7 @@ void isp_set_init(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsi
+         WRITE_VCBUS_REG(ISP_MATRIX_COEF22,    0x000003eb);
+         WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST0_1, 0x00000200);
+         WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST2,   0x00000200);
+-		
++
+         WRITE_VCBUS_REG(ISP_RST_DLY_NUM,htotal*6);
+         WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,1,28,1);
+ }
+@@ -453,7 +445,7 @@ void flash_init(bool mode_pol_inv,bool led1_pol_inv,bool pin_mux_inv,wave_t *wav
+ void torch_init(bool mode_pol_inv,bool led1_pol_inv,bool pin_mux_inv,bool torch_pol_inv,wave_t *wave_param,unsigned int level)
+ {
+         unsigned int pulse_qty = 0;
+-	
++
+ 	wave_init(wave_param);
+ 	// MODE pin
+ 	//if (mode_pol_inv)
+@@ -528,7 +520,7 @@ void isp_wr(unsigned int addr,unsigned int data)
+ unsigned int isp_rd(unsigned int addr)
+ {
+ 	WR(ISP_RO_ADDR_PORT,addr);
+-        return(RD(ISP_RO_DATA_PORT));	
++        return(RD(ISP_RO_DATA_PORT));
+ }
+ /*
+ *reg 0x00~0x1b
+@@ -615,7 +607,7 @@ void isp_get_ae_stat(isp_ae_stat_t *ae_stat)
+ 	ae_stat->bayer_over_info[1] = RD(ISP_RO_DATA_PORT);
+ 	WR(ISP_RO_ADDR_PORT, ISP_RO_AECRAW_NUM_BLUE);
+ 	ae_stat->bayer_over_info[2] = RD(ISP_RO_DATA_PORT);
+-	
++
+ 	return;
+ }
+ 
+@@ -625,7 +617,7 @@ void isp_set_ae_win(unsigned int left, unsigned int right, unsigned int top, uns
+ 	WR_BITS(ISP_AECRAW_WIND_LR, right, AECRAW_WIND_RIGHT_BIT, AECRAW_WIND_RIGHT_WID);
+ 	WR_BITS(ISP_AECRAW_WIND_TB, top, AECRAW_WIND_TOP_BIT, AECRAW_WIND_TOP_WID);
+ 	WR_BITS(ISP_AECRAW_WIND_TB, bottom, AECRAW_WIND_BOT_BIT, AECRAW_WIND_BOT_WID);
+-	
++
+ 	WR_BITS(ISP_AEC_WIND_XYSTART, left, AEC_WIND_XSTART_BIT, AEC_WIND_XSTART_WID);
+ 	WR_BITS(ISP_AEC_WIND_XYSTART, top, AEC_WIND_YSTART_BIT, AEC_WIND_YSTART_WID);
+ 	WR_BITS(ISP_AEC_WIND_XYSTEP, (right-left+1)>>2, AEC_WIND_XSTEP_BIT, AEC_WIND_XSTEP_WID);
+@@ -653,14 +645,14 @@ void isp_set_awb_yuv_thr(unsigned char yh, unsigned char yl, unsigned char u, un
+ 	WR_BITS(ISP_AWB_UVTH_YPIECE, yh, AWB_YPIECE_HIG_BIT, AWB_YPIECE_HIG_WID);
+ 	WR_BITS(ISP_AWB_UVTH_YPIECE, yl, AWB_YPIECE_LOW_BIT, AWB_YPIECE_LOW_WID);
+ 	WR_BITS(ISP_AWB_UVTH_YPIECE, u, AWB_U_THRD_BIT, AWB_U_THRD_WID);
+-	WR_BITS(ISP_AWB_UVTH_YPIECE, v, AWB_V_THRD_BIT, AWB_V_THRD_WID);	
++	WR_BITS(ISP_AWB_UVTH_YPIECE, v, AWB_V_THRD_BIT, AWB_V_THRD_WID);
+ }
+ 
+ void isp_set_awb_rgb_thr(unsigned char gb, unsigned char gr, unsigned br)
+ {
+ 	WR_BITS(ISP_AWB_GBGRBR_THRD, gb, AWB_GB_THRD_BIT, AWB_GB_THRD_WID);
+ 	WR_BITS(ISP_AWB_GBGRBR_THRD, gr, AWB_GR_THRD_BIT, AWB_GR_THRD_WID);
+-	WR_BITS(ISP_AWB_GBGRBR_THRD, br, AWB_BR_THRD_BIT, AWB_BR_THRD_WID);	
++	WR_BITS(ISP_AWB_GBGRBR_THRD, br, AWB_BR_THRD_BIT, AWB_BR_THRD_WID);
+ }
+ 
+ void isp_get_af_stat(isp_af_stat_t * af_stat)
+@@ -678,22 +670,24 @@ void isp_get_af_stat(isp_af_stat_t * af_stat)
+ 
+ void isp_get_blnr_stat(isp_blnr_stat_t *blnr_stat)
+ {
+-	int i = 0;
++	int i = 0, af = isp_rd(ISP_RO_AFC_WIND0_F0);
++
+ 	for(i=0;i<4;i++){
+ 		blnr_stat->dc[i] = isp_rd(ISP_RO_BLNR_GRBG_DCSUM0+i);
+ 		blnr_stat->ac[i] = isp_rd(ISP_RO_BLNR_GRBG_ACSUM0+i);
++		blnr_stat->ac[i] = af;
+ 	}
+-	
++
+ 	return;
+ }
+ 
+ void isp_hw_reset()
+ {
+-	WR_BITS(ISP_TIMING_MODE,1,5,1);			
+-	WR_BITS(ISP_FRM_SOFT_RST,1,0,1);			
+-	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);			
+-	WR_BITS(ISP_FRM_SOFT_RST,1,0,1);			
+-	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);			
++	WR_BITS(ISP_TIMING_MODE,1,5,1);
++	WR_BITS(ISP_FRM_SOFT_RST,1,0,1);
++	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);
++	WR_BITS(ISP_FRM_SOFT_RST,1,0,1);
++	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);
+ 	WR_BITS(ISP_TIMING_MODE,0,5,1);
+ }
+ 
+@@ -701,7 +695,7 @@ void isp_awb_set_gain(unsigned int r,unsigned int g,unsigned int b)
+ {
+ 	WR_BITS(ISP_GAIN_GRBG01, g, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
+ 	WR_BITS(ISP_GAIN_GRBG01, r, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
+-	WR_BITS(ISP_GAIN_GRBG23, b, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);	
++	WR_BITS(ISP_GAIN_GRBG23, b, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);
+ 	WR_BITS(ISP_GAIN_GRBG23, g, GAIN_GRBG3_BIT, GAIN_GRBG3_WID);
+ }
+ 
+@@ -714,7 +708,7 @@ void isp_awb_get_gain(isp_awb_gain_t *awb_gain)
+ 
+ void set_isp_gamma_table(unsigned short *gamma,unsigned int type)
+ {
+-	unsigned int flag = 0,i = 0; 
++	unsigned int flag = 0,i = 0;
+ 
+         // store gamma table enable/disable status
+         flag = (RD_BITS(ISP_GMR0_CTRL,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID))|gamma_enable;
+@@ -732,11 +726,11 @@ void set_isp_gamma_table(unsigned short *gamma,unsigned int type)
+         // retrieve gamma table enable/disable status, gamma table hardware mode
+         WR_BITS(ISP_GMR0_CTRL, flag,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
+ 	WR_BITS(ISP_GMR0_CTRL,0,GCLUT_ACCMODE_BIT,GCLUT_ACCMODE_WID);
+-	
++
+ }
+ void get_isp_gamma_table(unsigned short *gamma,unsigned int type)
+ {
+-	unsigned int flag = 0,i = 0; 
++	unsigned int flag = 0,i = 0;
+ 
+         // store gamma table enable/disable status
+         flag = RD_BITS(ISP_GMR0_CTRL,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
+@@ -830,7 +824,7 @@ static unsigned int phase_curve_grid(unsigned int curvature, unsigned int gain_0
+         else
+         {
+             data = gain_0db - data;
+-        }                
++        }
+     }
+     else
+     {
+@@ -875,7 +869,7 @@ void isp_ls_curve(unsigned int psize_v2h,    // pixel_size_percentage_vertical_t
+     unsigned int haxis[32], vaxis[32], curve[32][32];
+     unsigned int hmax = 0, vmax = 0, vcenter = 0, hcenter = 0, rradium = 0, xscale = 0, yscale = 0;
+     unsigned int i = 0, j = 0, dx = 0, dy = 0, data = 0, control = READ_VCBUS_REG(0x2d28);
+-  
++
+     // validation
+     if ((psize_v2h < 50) || (psize_v2h > 200))
+     {
+@@ -887,7 +881,7 @@ void isp_ls_curve(unsigned int psize_v2h,    // pixel_size_percentage_vertical_t
+     {
+         hactive = 1920;
+         vactive = 1080;
+-    }  
++    }
+ #endif
+     if ((!ocenter_c2l) || (ocenter_c2l > 100))
+     {
+@@ -941,7 +935,7 @@ void isp_ls_curve(unsigned int psize_v2h,    // pixel_size_percentage_vertical_t
+         yscale = 0x00000fff;
+     }
+ #if 0
+-    pr_info("hmax:%u vmax:%u hcenter:%u vcenter:%u rradium:%u xscale:%u yscale:%u \n", 
++    pr_info("hmax:%u vmax:%u hcenter:%u vcenter:%u rradium:%u xscale:%u yscale:%u \n",
+              hmax,vmax,hcenter,vcenter,rradium,xscale,yscale);
+ #endif
+     for (i = 0; i < 32; i++)
+@@ -1032,5 +1026,5 @@ void isp_ls_curve(unsigned int psize_v2h,    // pixel_size_percentage_vertical_t
+         (curve[i][30]>>24)&0xff,(curve[i][31]>>24)&0xff);
+     }
+     pr_info(" -------end------\n");
+-    
++
+ }
+diff --git a/drivers/amlogic/tvin/isp/isp_parm.c b/drivers/amlogic/tvin/isp/isp_parm.c
+index 218de3bfe687..42f586b903a4 100755
+--- a/drivers/amlogic/tvin/isp/isp_parm.c
++++ b/drivers/amlogic/tvin/isp/isp_parm.c
+@@ -24,7 +24,7 @@
+ /* Amlogic Headers */
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+ 
+-#include "isp_drv.h"  
++#include "isp_drv.h"
+ 
+ #define DEVICE_NAME "isp"
+ 
+@@ -73,7 +73,7 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ {
+ 	int len = AE_PARM_NUM;
+ 	isp_param_t ae[AE_PARM_NUM]={
+-		{"ae_algorithm",      &ae_sw->ae_algorithm,      1,  ISP_U32},	
++		{"ae_algorithm",      &ae_sw->ae_algorithm,      1,  ISP_U32},
+ 		{"ae_statistics",     &ae_sw->ae_statistics[0],  3,  ISP_U32},
+ 		{"ae_exp",            &ae_sw->ae_exp[0],         3,  ISP_U32},
+ 		{"ae_ag",             &ae_sw->ae_ag[0],          3,  ISP_U32},
+@@ -106,10 +106,10 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ 		{"thr_g_mid",         &ae_sw->thr_g_mid,         1,  ISP_U32},
+ 		{"thr_g_low",         &ae_sw->thr_g_low,         1,  ISP_U32},
+ 		{"thr_b_high",        &ae_sw->thr_b_high,        1,  ISP_U32},
+-		{"thr_b_mid",         &ae_sw->thr_b_mid,         1,  ISP_U32},		
++		{"thr_b_mid",         &ae_sw->thr_b_mid,         1,  ISP_U32},
+ 		{"thr_b_low",         &ae_sw->thr_b_low,         1,  ISP_U32},
+ 		{"lpftype_high",      &ae_sw->lpftype_high,      1,  ISP_U32},
+-		{"lpftype_mid",       &ae_sw->lpftype_mid,       1,  ISP_U32},		
++		{"lpftype_mid",       &ae_sw->lpftype_mid,       1,  ISP_U32},
+ 		{"lpftype_low",       &ae_sw->lpftype_low,       1,  ISP_U32},
+ 		{"targethigh",        &ae_sw->targethigh,        1,  ISP_U32},
+ 		{"targetmid",         &ae_sw->targetmid,         1,  ISP_U32},
+@@ -119,20 +119,20 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ 		{"radium_inner_m",    &ae_sw->radium_inner_m,    1,  ISP_U32},
+ 		{"radium_outer_m",    &ae_sw->radium_outer_m,    1,  ISP_U32},
+ 		{"radium_inner_l",    &ae_sw->radium_inner_l,    1,  ISP_U32},
+-		{"radium_outer_l",    &ae_sw->radium_outer_l,    1,  ISP_U32},		
++		{"radium_outer_l",    &ae_sw->radium_outer_l,    1,  ISP_U32},
+ 		{"flash_thr",	      &ae_sw->flash_thr,         1,  ISP_U32},
+ 		{"ratio_histr",	      &ae_sw->ratio_histr,       1,  ISP_U32},
+-		{"ratio_histg",	      &ae_sw->ratio_histg,       1,  ISP_U32},		
++		{"ratio_histg",	      &ae_sw->ratio_histg,       1,  ISP_U32},
+ 		{"ratio_histb",	      &ae_sw->ratio_histb,       1,  ISP_U32},
+ 		{"target_r",	      &ae_sw->target_r,          1,  ISP_U32},
+ 		{"target_g",	      &ae_sw->target_g,          1,  ISP_U32},
+ 		{"target_b",	      &ae_sw->target_b,          1,  ISP_U32},
+-		{"maxrate_inner",     &ae_sw->maxrate_inner,     1,  ISP_U32},		
++		{"maxrate_inner",     &ae_sw->maxrate_inner,     1,  ISP_U32},
+ 		{"maxrate_outer",     &ae_sw->maxrate_outer,     1,  ISP_U32},
+ 		{"slow_lpfcoef_enh",  &ae_sw->slow_lpfcoef_enh,  1,  ISP_U32},
+ 		{"fast_lpfcoef_enh",  &ae_sw->fast_lpfcoef_enh,  1,  ISP_U32},
+ 		{"flash_thr_enh",     &ae_sw->flash_thr_enh,     1,  ISP_U32},
+-		
++
+ 	};
+ 
+ 	if(!strcmp(parm[0],"show")){
+@@ -146,7 +146,7 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ {
+ 	int len = AWB_PARM_NUM;
+-	isp_param_t awb[AWB_PARM_NUM]={		
++	isp_param_t awb[AWB_PARM_NUM]={
+ 		{"awb_algorithm",  &awb_sw->awb_algorithm,   1,  ISP_U32},
+ 		{"ratio_winl",	   &awb_sw->ratio_winl,		 1,  ISP_U32},
+ 		{"ratio_winr",	   &awb_sw->ratio_winr,		 1,  ISP_U32},
+@@ -159,14 +159,14 @@ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ 		{"yyh",            &awb_sw->yyh,             1,  ISP_U32},
+ 		{"yym",            &awb_sw->yym,             1,  ISP_U32},
+ 		{"yyl",            &awb_sw->yyl,             1,  ISP_U32},
+-		{"coef_r",         &awb_sw->coef_r[0],       4,  ISP_U32},		
+-		{"coef_g",         &awb_sw->coef_g[0],       4,  ISP_U32},		
+-		{"coef_b",         &awb_sw->coef_b[0],       4,  ISP_U32},		
++		{"coef_r",         &awb_sw->coef_r[0],       4,  ISP_U32},
++		{"coef_g",         &awb_sw->coef_g[0],       4,  ISP_U32},
++		{"coef_b",         &awb_sw->coef_b[0],       4,  ISP_U32},
+ 		{"inner_rg",       &awb_sw->inner_rg,        1,  ISP_U32},
+ 		{"outer_rg",       &awb_sw->outer_rg,        1,  ISP_U32},
+ 		{"inner_bg",       &awb_sw->inner_bg,        1,  ISP_U32},
+ 		{"outer_bg",       &awb_sw->outer_bg,        1,  ISP_U32},
+-		{"r_max",          &awb_sw->r_max,           1,  ISP_U32},		
++		{"r_max",          &awb_sw->r_max,           1,  ISP_U32},
+ 		{"r_min",          &awb_sw->r_min,           1,  ISP_U32},
+ 		{"b_max",          &awb_sw->b_max,           1,  ISP_U32},
+ 		{"b_min",          &awb_sw->b_min,           1,  ISP_U32},
+@@ -205,7 +205,7 @@ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ 		{"thr_u",          &awb_sw->thr_u[0],        20, ISP_U32},
+ 		{"thr_v",          &awb_sw->thr_v[0],        20, ISP_U32},
+ 	};
+-	
++
+ 	if(!strcmp(parm[0],"show")){
+ 		isp_param_show((isp_param_t*)&awb,len);
+ 	} else {
+@@ -215,7 +215,7 @@ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ 
+ void set_af_parm(xml_algorithm_af_t *af_sw,char **parm)
+ {
+-	int len = AF_PARM_NUM;		
++	int len = AF_PARM_NUM;
+ 	isp_param_t af[AF_PARM_NUM]={
+ 		{"enter_move_ratio",      &af_sw->enter_move_ratio,        1, ISP_U32},
+ 		{"enter_static_ratio",    &af_sw->enter_static_ratio,      1, ISP_U32},
+@@ -227,15 +227,17 @@ void set_af_parm(xml_algorithm_af_t *af_sw,char **parm)
+ 		{"win_ratio", 	  	  &af_sw->win_ratio,		   1, ISP_U32},
+ 		{"step",      		  &af_sw->step,           FOCUS_GRIDS, ISP_U32},
+ 		{"valid_step_cnt",        &af_sw->valid_step_cnt,          1, ISP_U32},
+-		{"af_retry_max",          &af_sw->af_retry_max,            1, ISP_U32},		
++		{"af_retry_max",          &af_sw->af_retry_max,            1, ISP_U32},
+ 		{"jump_offset",           &af_sw->jump_offset,             1, ISP_U32},
+ 		{"field_delay",           &af_sw->field_delay,             1, ISP_U32},
+ 		{"af_fail_ratio",         &af_sw->af_fail_ratio,           1, ISP_U32},
+ 		{"x",                     &af_sw->x,      			       1, ISP_U32},
+ 		{"y",                     &af_sw->y,      			       1, ISP_U32},
+ 		{"radius_ratio",          &af_sw->radius_ratio,     		       1, ISP_U32},
++		{"af_step_mid_thre",          &af_sw->af_step_mid_thre,     	1, ISP_U32},
++		{"af_step_max_thre",          &af_sw->af_step_max_thre,     	1, ISP_U32},
+ 	};
+-	
++
+ 	if(!strcmp(parm[0],"show")){
+ 		isp_param_show((isp_param_t*)&af,len);
+ 	} else {
+@@ -245,7 +247,7 @@ void set_af_parm(xml_algorithm_af_t *af_sw,char **parm)
+ 
+ void set_cap_parm(struct xml_capture_s *cap_sw,char **parm)
+ {
+-	int len = CAP_PARM_NUM;	
++	int len = CAP_PARM_NUM;
+ 	isp_param_t cap[CAP_PARM_NUM]={
+ 		{"ae_en",      	     &cap_sw->ae_en,      	   1, ISP_U32},
+ 		{"awb_en",           &cap_sw->awb_en,      	   1, ISP_U32},
+@@ -253,22 +255,22 @@ void set_cap_parm(struct xml_capture_s *cap_sw,char **parm)
+ 		{"sigle_count",      &cap_sw->sigle_count,         1, ISP_U32},
+ 		{"skip_step",        &cap_sw->skip_step,      	   1, ISP_U32},
+ 		{"multi_capture_num",&cap_sw->multi_capture_num,   1, ISP_U32},
+-		{"eyetime",          &cap_sw->eyetime,      	   1, ISP_U32},		
++		{"eyetime",          &cap_sw->eyetime,      	   1, ISP_U32},
+ 		{"pretime",          &cap_sw->pretime,      	   1, ISP_U32},
+ 		{"postime",          &cap_sw->postime,      	   1, ISP_U32},
+ 	};
+-	
++
+ 	if(!strcmp(parm[0],"show")){
+ 		isp_param_show((isp_param_t*)&cap,len);
+ 	} else {
+ 		isp_set_param((isp_param_t*)&cap,len,parm);
+ 	}
+-	
++
+ }
+ 
+ void set_wave_parm(struct wave_s *wave,char **parm)
+ {
+-	int len = WAVE_PARM_NUM;	
++	int len = WAVE_PARM_NUM;
+ 	isp_param_t wav[WAVE_PARM_NUM]={
+ 		{"torch_rising_time",      	&wave->torch_rising_time,      	1, ISP_U32},
+ 		{"flash_rising_time",           &wave->flash_rising_time,      	1, ISP_U32},
+@@ -277,19 +279,19 @@ void set_wave_parm(struct wave_s *wave,char **parm)
+ 		{"pulse_init_time",             &wave->pulse_init_time,         1, ISP_U32},
+ 		{"pulse_high_time",             &wave->pulse_high_time,      	1, ISP_U32},
+ 		{"pulse_low_time",              &wave->pulse_low_time,          1, ISP_U32},
+-		{"time_to_latch",               &wave->time_to_latch,      	1, ISP_U32},		
++		{"time_to_latch",               &wave->time_to_latch,      	1, ISP_U32},
+ 		{"latch_time",                  &wave->latch_time,      	1, ISP_U32},
+ 		{"latch_time_timeout",          &wave->latch_time_timeout,      1, ISP_U32},
+ 		{"time_to_off",                 &wave->time_to_off,      	1, ISP_U32},
+ 		{"pulse_qty_max",               &wave->pulse_qty_max,      	1, ISP_U32},
+ 	};
+-	
++
+ 	if(!strcmp(parm[0],"show")){
+ 		isp_param_show((isp_param_t*)&wav,len);
+ 	} else {
+ 		isp_set_param((isp_param_t*)&wav,len,parm);
+ 	}
+-	
++
+ }
+ static unsigned int gamma[10][257] =
+ 	{
+@@ -2900,11 +2902,11 @@ static unsigned int gamma[10][257] =
+ 
+ bool set_gamma_table_with_curve_ratio(unsigned int r,unsigned int g,unsigned int b)
+ {
+-	
+ 
+-    bool flag = false; 
++
++    bool flag = false;
+ 	unsigned int i = 0;
+-    
++
+     // parameter validation check
+     if ((r>9) || (g>9) || (b>9))
+     {
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 8ad062febe65..3c2527a29c04 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -141,7 +141,7 @@ static inline int find_step(cam_function_t *func, unsigned int low, unsigned int
+ 
+ void isp_sm_init(isp_dev_t *devp)
+ {
+-	sm_state.isp_ae_parm.tf_ratio = devp->wave->torch_flash_ratio; 
++	sm_state.isp_ae_parm.tf_ratio = devp->wave->torch_flash_ratio;
+ 	sm_state.status = ISP_AE_STATUS_NULL;
+ 	sm_state.flash = ISP_FLASH_STATUS_NULL;
+ 	sm_state.isp_ae_parm.isp_ae_state = AE_INIT;
+@@ -270,7 +270,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			{
+ 				//if(func&&func->set_aet_new_step)
+ 				//func->set_aet_new_step(newstep,true,true);
+-				sm_state.isp_ae_parm.isp_ae_state = AE_REST;							
++				sm_state.isp_ae_parm.isp_ae_state = AE_REST;
+ 			}
+ 			else
+ 			{
+@@ -298,7 +298,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 						{
+ 						if(ae_debug4)
+ 						{
+-							printk("[%d]bayer_over_info[0]=%d,%d,%d\n",aepa->change_step,ae->bayer_over_info[0],ae->bayer_over_info[1],ae->bayer_over_info[2]);	
++							printk("[%d]bayer_over_info[0]=%d,%d,%d\n",aepa->change_step,ae->bayer_over_info[0],ae->bayer_over_info[1],ae->bayer_over_info[2]);
+ 						}
+ 							if(aepa->change_step == 1)
+ 								step = AE_EXPOSURE_MAX_CHECK2;
+@@ -307,7 +307,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 						}
+ 						else
+ 						{
+-						step = AE_CALCULATE_LUMA_AVG;	
++						step = AE_CALCULATE_LUMA_AVG;
+ 						}
+ 						break;
+ 
+@@ -316,12 +316,12 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							(ae->bayer_over_info[1] > aepa->alert_g)||
+ 							(ae->bayer_over_info[2] > aepa->alert_b)
+ 							)
+-							step = AE_EXPOSURE_DECREASE;					
++							step = AE_EXPOSURE_DECREASE;
+ 						else
+ 						{
+ 							isp_set_ae_thrlpf(aep->thr_r_low, aep->thr_g_low, aep->thr_b_low, aep->lpftype_mid);
+ 							aepa->change_step = 1;
+-							step = AE_SUCCESS;//AE_CALCULATE_LUMA_AVG;	
++							step = AE_SUCCESS;//AE_CALCULATE_LUMA_AVG;
+ 						}
+ 						break;
+ 					case AE_EXPOSURE_MAX_CHECK2:
+@@ -330,9 +330,9 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							(ae->bayer_over_info[2] > aepa->alert_b)
+ 							)
+ 						{
+-							isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);	
++							isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);
+ 							aepa->change_step = 0;
+-							step = AE_SUCCESS;	
++							step = AE_SUCCESS;
+ 						}
+ 						else
+ 						{
+@@ -443,7 +443,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 								//sm_state.isp_ae_parm.isp_ae_state = AE_ORI_SET;
+ 							//else
+ 								sm_state.isp_ae_parm.isp_ae_state = AE_SHUTTER_ADJUST;
+-						}				
++						}
+ 						break;
+ 					case AE_EXPOSURE_ADJUST:
+ 						if(avg == 0)
+@@ -451,7 +451,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							step = AE_SUCCESS;
+ 							break;
+ 						}
+-						targrate = (targ * aepa->cur_gain)/avg;	
++						targrate = (targ * aepa->cur_gain)/avg;
+ 						if(ae_debug1)
+ 							printk("targrate = %d\n",targrate);
+ 						if(targrate > aepa->max_gain)
+@@ -608,7 +608,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 	u16 target_r;
+ 	u16 target_b;
+ 	//printk("sm_state.isp_awb_parm.isp_awb_state=%d\n",sm_state.isp_awb_parm.isp_awb_state);
+-	
++
+ 	switch(sm_state.isp_awb_parm.isp_awb_state){
+ 		case AWB_IDLE:
+ 			break;
+@@ -616,7 +616,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 			awba->win_l = (parm->h_active * awbp->ratio_winl) >> 10;
+ 			awba->win_r = ((parm->h_active * awbp->ratio_winr) >> 10) - 1;
+ 			awba->win_t = (parm->v_active * awbp->ratio_wint) >> 10;
+-			awba->win_b = ((parm->v_active * awbp->ratio_winb) >> 10) - 1;	
++			awba->win_b = ((parm->v_active * awbp->ratio_winb) >> 10) - 1;
+ 			printk("awb,win_l=%d,win_r=%d,win_t=%d,win_b=%d\n",awba->win_l,awba->win_r,awba->win_t,awba->win_b);
+ 			isp_set_awb_win(awba->win_l, awba->win_r, awba->win_t, awba->win_b);
+ 			awba->pixel_sum = parm->h_active * parm->v_active;
+@@ -636,7 +636,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 						step = AWB_RGB_COUNT_CHECK;
+ 						//printk("step1 = %d\n",step);
+ 						break;
+-					case AWB_RGB_COUNT_CHECK:	
++					case AWB_RGB_COUNT_CHECK:
+ 						if(awb_debug4)
+ 							printk("awb->rgb.rgb_count=%d\n",awb->rgb.rgb_count);
+ 						if(awb->rgb.rgb_count >= awba->countlimitrgb)
+@@ -681,7 +681,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 						}
+ 						u[0] = (awb->yuv_mid[1].sum - awb->yuv_mid[0].sum)/count[0];
+ 						v[0] = (awb->yuv_mid[3].sum - awb->yuv_mid[2].sum)/count[0];
+-						
++
+ 						if(parm->v_active >= 720)
+ 						{
+ 							r[1] = matrix_yuv709_rgb_r(awbp->yym,u[0]+128,v[0]+128);
+@@ -707,7 +707,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 							b[2] = 0;
+ 							step = AWB_YUVL_COUNT_CHECK;
+ 						}
+-						break;		
++						break;
+ 					case AWB_CALCULATE_YUVH:
+ 						if(count[1] <= 0)
+ 						{
+@@ -716,7 +716,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 						}
+ 						u[1] = (awb->yuv_high[1].sum - awb->yuv_high[0].sum)/count[1];
+ 						v[1] = (awb->yuv_high[3].sum - awb->yuv_high[2].sum)/count[1];
+-						
++
+ 						if(parm->v_active >= 720)
+ 						{
+ 							r[2] = matrix_yuv709_rgb_r(awbp->yyh,u[1]+128,v[1]+128);
+@@ -730,7 +730,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 							b[2] = matrix_yuv601_rgb_b(awbp->yyh,u[1]+128,v[1]+128);
+ 						}
+ 						step = AWB_YUVL_COUNT_CHECK;
+-						break;	
++						break;
+ 					case AWB_YUVL_COUNT_CHECK:
+ 						count[2] = awb->yuv_low[0].count + awb->yuv_low[1].count;
+ 						if(count[2] >= awba->countlimityl)
+@@ -742,7 +742,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 							b[3] = 0;
+ 							step = AWB_RGB_BLEND;
+ 						}
+-						break;		
++						break;
+ 					case AWB_CALCULATE_YUVL:
+ 						if(count[2] <= 0)
+ 						{
+@@ -751,7 +751,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 						}
+ 						u[2] = (awb->yuv_low[1].sum - awb->yuv_low[0].sum)/count[2];
+ 						v[2] = (awb->yuv_low[3].sum - awb->yuv_low[2].sum)/count[2];
+-						
++
+ 						if(parm->v_active >= 720)
+ 						{
+ 							r[3] = matrix_yuv709_rgb_r(awbp->yyl,u[2]+128,v[2]+128);
+@@ -824,7 +824,7 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 						//awbp->r_min = 200;
+ 						//awbp->g_min = 128;
+ 						//awbp->b_min = 200;
+-							
++
+ 						if(awb_debug2)
+ 							printk("target_r=%d,target_b=%d\n",target_r,target_b);
+ 						if(target_r > awbp->r_max)
+@@ -908,16 +908,16 @@ static unsigned long long get_fv_base_blnr(isp_blnr_stat_t *blnr)
+ 	sum_ac += (unsigned long long)blnr->ac[1];
+ 	sum_ac += (unsigned long long)blnr->ac[2];
+ 	sum_ac += (unsigned long long)blnr->ac[3];
+-	
++
+ 	sum_dc  = (unsigned long long)blnr->dc[0];
+ 	sum_dc += (unsigned long long)blnr->dc[1];
+ 	sum_dc += (unsigned long long)blnr->dc[2];
+ 	sum_dc += (unsigned long long)blnr->dc[3];
+-	
++
+ 	mul_ac = (sum_ac > 0x00000000ffffffff) ? 0xffffffffffffffff : sum_ac*sum_ac;
++	return sum_ac;
++	//return div64(mul_ac,sum_dc);
+ 
+-	return div64(mul_ac,sum_dc);
+-	
+ }
+ static unsigned int max_vibrate = 2000;
+ module_param(max_vibrate,uint,0664);
+@@ -928,7 +928,7 @@ static unsigned int get_best_step(isp_af_info_t *af_info,xml_algorithm_af_t *af_
+         unsigned int i = 0, j = 0,cur_grid = 0, max_grid = 0, best_step = 0;
+         unsigned long long sum_ac = 0, sum_pixel=0,sum_dc = 0, ave_dc = 0,mul_ac = 0, fv[FOCUS_GRIDS], max_fv = 0, min_fv = 0xffffffffffffffff, sum_fv = 0,moment = 0;
+ 		unsigned long long fv_diff_sum=0,fv_ave=0,fv_sum=0,diff_fv_parm;
+-		if(best_step_debug&0x2)				
++		if(best_step_debug&0x2)
+ 			pr_info("%s ac[0] ac[1] ac[2] ac[3] dc[0] dc[1] dc[2] dc[3]\n", __func__);
+         for (i = 0; i < af_alg->valid_step_cnt; i++){
+                 if (i && (af_alg->step[i]==0)){
+@@ -937,7 +937,7 @@ static unsigned int get_best_step(isp_af_info_t *af_info,xml_algorithm_af_t *af_
+                 max_grid = i;
+                 fv[i] = get_fv_base_blnr(&af_info->af_data[i]);
+ 	        if(best_step_debug&0x2)
+-                        pr_info("%s %u %u %u %u %u %u %u %u\n", __func__, af_info->af_data[i].ac[0], af_info->af_data[i].ac[1], af_info->af_data[i].ac[2], 
++                        pr_info("%s %u %u %u %u %u %u %u %u\n", __func__, af_info->af_data[i].ac[0], af_info->af_data[i].ac[1], af_info->af_data[i].ac[2],
+                         af_info->af_data[i].ac[3], af_info->af_data[i].dc[0], af_info->af_data[i].dc[1], af_info->af_data[i].dc[2], af_info->af_data[i].dc[3]);
+                 if (max_fv < fv[i]){
+ 		        max_fv = fv[i];
+@@ -955,10 +955,12 @@ static unsigned int get_best_step(isp_af_info_t *af_info,xml_algorithm_af_t *af_
+ 		diff_fv_parm = div64((fv_diff_sum*1024),(max_fv-min_fv));
+ 		if(best_step_debug)
+ 			pr_info("%s ave_dc=%llu,sum_pixel=%u,sum_dc=%llu.\n",__func__,ave_dc,sum_pixel,sum_dc);
++		#if 0
+ 		if(diff_fv_parm > max_vibrate){
+ 			pr_info("%s diff_fv_parm %llu>%u, return 0.\n",__func__,diff_fv_parm,max_vibrate);
+ 			return 0;
+ 		}
++		#endif
+ 	// too less stroke, for power saving
+         if (!cur_grid) {
+ 	        best_step = 0;
+@@ -1030,7 +1032,7 @@ static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+ 			pr_info("v_dc[%u]=%llu.\n",i,v_dc[i]);
+ 	}
+ 	ave_vdc = div64(sum_vdc,af_alg->detect_step_cnt);
+-	
++
+ 	static_cnt = 0;
+ 	for(i=0;i<af_alg->detect_step_cnt;i++){
+ 		delta_dc = isp_abs64(v_dc[i],ave_vdc);
+@@ -1096,7 +1098,7 @@ static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+ 
+ 
+ 	return ret;
+-	
++
+ }
+ void isp_af_detect(isp_dev_t *devp)
+ {
+@@ -1110,7 +1112,7 @@ void isp_af_detect(isp_dev_t *devp)
+ 			af_info->cur_index = 0;
+ 			sm_state.af_state = AF_GET_STEPS_INFO;
+ 			break;
+-		case AF_GET_STEPS_INFO:	
++		case AF_GET_STEPS_INFO:
+ 			if(++af_info->adj_duration_cnt >= af_alg->af_duration_cnt){
+ 				af_info->adj_duration_cnt = af_alg->af_duration_cnt;
+ 				memcpy(&af_info->af_detect[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+@@ -1146,9 +1148,10 @@ void isp_af_sm(isp_dev_t *devp)
+ 	struct isp_af_sm_s *sm = &sm_state.af_sm;
+ 	unsigned long long fv_delta;
+ 	af_delay++;
+-	
++
+ 	switch(sm_state.af_state){
+ 		case AF_INIT:
++			af_info->last_great_step = af_alg->af_step_max_thre;
+ 			if((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down)){
+ 			/*awb brake,ae brake*/
+ 			af_info->flag_bk = (devp->flag&ISP_FLAG_AWB)|(devp->flag&ISP_FLAG_AE);
+@@ -1166,6 +1169,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 		}
+ 			break;
+ 		case AF_GET_OLD_FV:
++			memcpy(&af_info->af_data[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+ 			af_info->fv_bf_af = get_fv_base_blnr(&af_info->af_data[af_info->cur_index]);
+ 			if(af_sm_dg&0x1){
+ 				pr_info("[af_sm..]:fv_bf_af %llu.\n",af_info->fv_bf_af);
+@@ -1182,16 +1186,18 @@ void isp_af_sm(isp_dev_t *devp)
+ 				if(++af_info->cur_index >= af_alg->valid_step_cnt){
+ 				        sm_state.af_state = AF_CALC_GREAT;
+ 				        af_info->cur_index = 0;
+-				}else{	
++				}else{
+ 					af_info->cur_step = af_alg->step[af_info->cur_index];
+ 				        atomic_set(&af_info->writeable,1);
+ 				        af_delay = 0;
+ 				}
+-			} 
++			}
+ 			break;
+ 		case AF_CALC_GREAT:
+ 			af_info->great_step = get_best_step(af_info,af_alg);
+-			af_info->cur_step = af_info->great_step - af_alg->jump_offset;
++			af_info->cur_step = (af_info->great_step > af_alg->jump_offset) ? (af_info->great_step - af_alg->jump_offset) : 0;
++			if(af_sm_dg&1)
++				pr_info("[af_sm..]:af_info->cur_step:%d,af_info->great_step:%d.\n",af_info->cur_step,af_info->great_step);
+ 			atomic_set(&af_info->writeable,1);
+ 			af_delay = 0;
+ 			sm_state.af_state = AF_GET_FINE_INFO;
+@@ -1199,6 +1205,8 @@ void isp_af_sm(isp_dev_t *devp)
+ 		case AF_GET_FINE_INFO:
+ 			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+ 				af_info->cur_step = af_info->great_step;
++				if(af_sm_dg&1)
++					pr_info("[af_sm..]:af_info->cur_step:%d.\n",af_info->cur_step);
+ 				atomic_set(&af_info->writeable,1);
+ 				af_delay = 0;
+ 				sm_state.af_state = AF_SUCCESS;
+@@ -1217,24 +1225,29 @@ void isp_af_sm(isp_dev_t *devp)
+ 					        af_info->af_data[af_info->cur_index].dc[0],af_info->af_data[af_info->cur_index].dc[1],
+ 					        af_info->af_data[af_info->cur_index].dc[2],af_info->af_data[af_info->cur_index].dc[3],af_info->fv_aft_af);
+ 				}
+-				fv_delta = af_info->fv_bf_af*100;
++				fv_delta = af_info->fv_aft_af*100;
+ 				fv_delta = div64(fv_delta,af_alg->af_fail_ratio);
+ 				/*af failed return to af init,retry*/
+ 				if(af_sm_dg&0x1){
+-					pr_info("[af_sm..]:fv_delta %llu,fv_aft_af %llu.\n",fv_delta,af_info->fv_aft_af);
++					pr_info("[af_sm..]:fv_delta:%llu,af_info->fv_bf_af %llu,fv_aft_af %llu.\n",
++						fv_delta,af_info->fv_bf_af,af_info->fv_aft_af);
++				}
++				if(af_info->great_step < af_info->last_great_step)
++				{
++					af_info->last_great_step = af_info->great_step;
+ 				}
+-				if((fv_delta > af_info->fv_bf_af)&&(++af_info->af_retry_cnt < af_alg->af_retry_max)){
++				if((fv_delta < af_info->fv_bf_af)&&(++af_info->af_retry_cnt < af_alg->af_retry_max)&&(af_info->cur_step > af_alg->af_step_mid_thre)){
+ 					sm_state.af_state = AF_GET_OLD_FV;
+ 					if(af_sm_dg&0x1)
+ 						pr_info("[af_sm..]:fail ratio %u,%u times,return to af init retry.\n",af_alg->af_fail_ratio,af_info->af_retry_cnt);
+-				} else if((fv_delta > af_info->fv_bf_af)&&(af_info->af_retry_cnt > af_alg->af_retry_max)){
++				} else if((fv_delta < af_info->fv_bf_af)&&(af_info->af_retry_cnt > af_alg->af_retry_max)){
+ 		        	/*af failed over max times,force to step 0*/
+ 		                        /*enable awb,enable af*/
+ 				        devp->flag |= af_info->flag_bk;
+-					af_info->cur_step = 0;
++					af_info->cur_step = af_info->last_great_step;
+ 					atomic_set(&af_info->writeable,1);
+ 					if(af_sm_dg&0x1)
+-						pr_info("[af_sm..]:fail ratio %u over,force to step 0.\n",af_alg->af_fail_ratio);
++						pr_info("[af_sm..]:fail ratio %u over,af_info->cur_step:%d.\n",af_alg->af_fail_ratio,af_info->cur_step);
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
+@@ -1249,6 +1262,10 @@ void isp_af_sm(isp_dev_t *devp)
+ 					af_info->af_retry_cnt = 0;
+ 					af_info->adj_duration_cnt = 0;
+ 					af_info->last_move = false;
++					af_info->cur_step= af_info->last_great_step;
++					if(af_sm_dg&0x1)
++						pr_info("[af_sm..]:af_info->final_step:%d.\n",af_info->cur_step);
++					atomic_set(&af_info->writeable,1);
+ 					if(devp->flag & ISP_FLAG_AF)
+ 						sm_state.af_state = AF_DETECT_INIT;
+ 					else
+@@ -1266,7 +1283,7 @@ void isp_af_sm(isp_dev_t *devp)
+ #define FLASH_TORCH       2
+ static void isp_set_flash(isp_dev_t *devp,unsigned flash_mode,unsigned level)
+ {
+-	if(!flash_mode)		
++	if(!flash_mode)
+ 	torch_level(devp->flash.mode_pol_inv,devp->flash.led1_pol_inv,devp->flash.pin_mux_inv,devp->flash.torch_pol_inv,devp->wave,0);
+ 	else if(flash_mode == FLASH_ON)
+ 		flash_on(devp->flash.mode_pol_inv,devp->flash.led1_pol_inv,devp->flash.pin_mux_inv,devp->wave);
+@@ -1291,7 +1308,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 	struct isp_capture_sm_s *cap_sm = &sm_state.cap_sm;
+ 
+ 	cap_sm->adj_cnt++;
+-	
++
+ 	switch(cap_sm->capture_state){
+ 		case CAPTURE_INIT:
+ 			isp_set_blenr_stat(0,0,devp->info.h_active,devp->info.v_active);
+@@ -1312,12 +1329,12 @@ int isp_capture_sm(isp_dev_t *devp)
+ 				start_jf = 0;
+ 				if(sm_debug)
+ 					pr_info("%s:pre_wait->flash_on.\n",__func__);
+-			}	
++			}
+ 			break;
+ 		case CAPTURE_FLASH_ON:
+ 			if((sm_state.flash==ISP_FLASH_STATUS_NULL)&&(cap_sm->flash_mode==FLASH_MODE_AUTO)){
+ 				return ret;
+-			} 
++			}
+ 			if(((cap_sm->flash_mode == FLASH_MODE_AUTO)&&(sm_state.flash == ISP_FLASH_STATUS_ON))||
+ 				(cap_sm->flash_mode == FLASH_MODE_ON))
+ 			{
+@@ -1413,7 +1430,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 						pr_info("[%s..]%s changed ae->single.\n",DEVICE_NAME,__func__);
+ 				}
+ 			}
+-			
++
+ 			break;
+ 		case CAPTURE_TUNE_AWB:
+ 			if(cap_sm->adj_cnt > 0)
+@@ -1430,7 +1447,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 					if(sm_debug)
+ 						pr_info("[%s..]%s changed awb->low gain.\n",DEVICE_NAME,__func__);
+ 				}else{
+-					cap_sm->capture_state = CAPTURE_SINGLE;	
++					cap_sm->capture_state = CAPTURE_SINGLE;
+ 					cap_sm->adj_cnt = 0;
+ 					if(sm_debug)
+ 					        pr_info("[%s..]%s changed awb->single.\n",DEVICE_NAME,__func__);
+@@ -1457,7 +1474,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 		case CAPTURE_LOW_GAIN:
+ 			if(sm_state.ae_down==true){
+ 				devp->flag &=(~ISP_FLAG_AE);
+-				cap_sm->capture_state = CAPTURE_EYE_WAIT;	
++				cap_sm->capture_state = CAPTURE_EYE_WAIT;
+ 				if(sm_debug)
+ 					pr_info("[%s..]%s changed low gain->eye wait.\n",DEVICE_NAME,__func__);
+ 			}
+@@ -1466,7 +1483,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			if(time_after(jiffies,start_jf+parm->eyetime)){
+ 				isp_set_flash(devp,FLASH_TORCH,0);
+ 				start_jf = 0;
+-				cap_sm->capture_state = CAPTURE_POS_WAIT;	
++				cap_sm->capture_state = CAPTURE_POS_WAIT;
+ 				if(sm_debug)
+ 				        pr_info("[%s..]%s changed eye wait->post wait:%u.\n",DEVICE_NAME,__func__,start_jf);
+ 			}
+@@ -1528,7 +1545,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 		default:
+ 			break;
+ 		}
+-	
++
+ 	return ret;
+ }
+ 
+@@ -1561,7 +1578,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 			aepa->min_gain = func->get_aet_min_gain;
+ 			aepa->max_step = func->get_aet_max_step;
+ 			aepa->cur_gain = func->get_aet_current_gain;
+-			//aepa->cur_step = func->get_aet_current_step;		
++			//aepa->cur_step = func->get_aet_current_step;
+ 			sm_state.isp_ae_parm.isp_ae_enh_state = AE_ENH_ORI_SET;
+ 			break;
+ 		case AE_ENH_ORI_SET:
+@@ -1571,7 +1588,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 			if(aep->ae_skip[1] == 0x1)
+ 			{
+ 				func->set_aet_new_step(newstep,true,true);
+-				sm_state.isp_ae_parm.isp_ae_state = AE_ENH_REST;							
++				sm_state.isp_ae_parm.isp_ae_state = AE_ENH_REST;
+ 			}
+ 			else
+ 			{
+@@ -1587,7 +1604,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 			if(aep->ae_skip[1] == 0x1)
+ 			{
+ 				func->set_aet_new_step(newstep,true,true);
+-				sm_state.isp_ae_parm.isp_ae_state = AE_ENH_REST;							
++				sm_state.isp_ae_parm.isp_ae_state = AE_ENH_REST;
+ 			}
+ 			else
+ 			{
+@@ -1600,7 +1617,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_ENH_RGB_WAIT:
+ 			sm_state.isp_ae_parm.isp_ae_enh_state = AE_ENH_SET_GBR;
+-			break;	
++			break;
+ 	    case AE_ENH_SET_GBR:
+ 			if(devp->flag & ISP_FLAG_CAPTURE)
+ 			{
+@@ -1652,7 +1669,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 					sm_state.flash = ISP_FLASH_STATUS_ON;
+ 				else
+ 					sm_state.flash = ISP_FLASH_STATUS_OFF;
+-			}			
++			}
+ 			for(i = 63;i >= 0;i--)
+ 			{
+ 				if( ph->hist.gamma[i] >= aepa->countlimit_b)
+@@ -1679,7 +1696,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 				if(aep->ae_skip[1] == 0x1)
+ 				{
+ 					func->set_aet_new_step(newstep,true,true);
+-					sm_state.isp_ae_parm.isp_ae_enh_state = AE_ENH_REST;							
++					sm_state.isp_ae_parm.isp_ae_enh_state = AE_ENH_REST;
+ 				}
+ 				else
+ 				{
+@@ -1698,7 +1715,7 @@ void isp_ae_enh_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_ENH_GAIN_ADJUST:
+ 			func->set_aet_new_step(newstep,false,true);
+-			sm_state.isp_ae_parm.isp_ae_state = AE_REST;							
++			sm_state.isp_ae_parm.isp_ae_state = AE_REST;
+ 			break;
+ 		case AE_ENH_REST:
+ 			sm_state.ae_down = true;
+@@ -1721,7 +1738,7 @@ void isp_awb_enh_sm(isp_dev_t *devp)
+ 	unsigned char r, g, b, lpfcoef;
+ 	unsigned short rw, gw, bw, rgbw;
+ 	unsigned short targ_r, targ_g, targ_b, new_r, new_g, new_b;
+-	
++
+ 	switch(sm_state.isp_awb_parm.isp_awb_state){
+ 		case AWB_IDLE:
+ 			break;
+@@ -1729,7 +1746,7 @@ void isp_awb_enh_sm(isp_dev_t *devp)
+ 			awba->win_l = (parm->h_active * awbp->ratio_winl) >> 10;
+ 			awba->win_r = (parm->h_active * awbp->ratio_winr) >> 10 - 1;
+ 			awba->win_t = (parm->v_active * awbp->ratio_wint) >> 10;
+-			awba->win_b = (parm->v_active * awbp->ratio_winb) >> 10 - 1;			
++			awba->win_b = (parm->v_active * awbp->ratio_winb) >> 10 - 1;
+ 			isp_set_awb_win(awba->win_l, awba->win_r, awba->win_t, awba->win_b);
+ 			awba->pixel_sum = parm->h_active * parm->v_active;
+ 			awba->countlimityuv = ((awba->pixel_sum >> 4) * awbp->ratio_yuv) >> 6;
+@@ -1742,7 +1759,7 @@ void isp_awb_enh_sm(isp_dev_t *devp)
+ 			break;
+ 		case AWB_CHECK:
+ 			count = awb->yuv_mid[0].count + awb->yuv_mid[1].count;
+-			if(count < awba->countlimityuv)				
++			if(count < awba->countlimityuv)
+ 				break;
+ 			u = (awb->yuv_mid[1].sum - awb->yuv_mid[0].sum)/count;
+ 			v = (awb->yuv_mid[3].sum - awb->yuv_mid[2].sum)/count;
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index b6422c8b99c9..07789da3b25a 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -2,7 +2,7 @@
+  * TVIN Modules Exported Header File
+  *
+  * Author: kele bai <kele.bai@amlogic.com>
+- *       
++ *
+  *
+  * Copyright (C) 2010 Amlogic Inc.
+  *
+@@ -239,7 +239,7 @@ typedef enum cam_command_e {
+         CAM_COMMAND_CONTINUOUS_FOCUS_ON,
+         CAM_COMMAND_CONTINUOUS_FOCUS_OFF,
+         CAM_COMMAND_BACKGROUND_FOCUS_ON,
+-        CAM_COMMAND_BACKGROUND_FOCUS_OFF,  
++        CAM_COMMAND_BACKGROUND_FOCUS_OFF,
+         // flash related
+         CAM_COMMAND_SET_FLASH_MODE,
+         // torch related
+@@ -267,9 +267,9 @@ typedef enum flash_mode_s {
+ 
+ #define WAVE_PARM_NUM		12
+ typedef struct wave_s {
+-	unsigned int torch_rising_time; 
+-	unsigned int flash_rising_time; 
+-	unsigned int torch_flash_ratio; 
++	unsigned int torch_rising_time;
++	unsigned int flash_rising_time;
++	unsigned int torch_flash_ratio;
+         unsigned int wave_clock_div;     // u16
+         unsigned int pulse_init_time;    // u11
+         unsigned int pulse_high_time;    // u11
+@@ -338,21 +338,21 @@ typedef struct xml_algorithm_ae_s {
+         unsigned int  radium_outer_h;  // 0 ~ 255
+         unsigned int  radium_outer_m;  // 0 ~ 255
+         unsigned int  radium_outer_l;  // 0 ~ 255
+-        unsigned int  flash_thr;       // 0 ~ 255 
++        unsigned int  flash_thr;       // 0 ~ 255
+ 
+     /***********************AE_ENH********************************/
+-	                
+-        unsigned int           ratio_histr;          // 0 ~1023 
+-        unsigned int           ratio_histg;          // 0 ~1023 
+-        unsigned int           ratio_histb;          // 0 ~1023 
+-        unsigned int           target_r;             // 0 ~ 255 
+-        unsigned int           target_g;             // 0 ~ 255 
+-        unsigned int           target_b;             // 0 ~ 255 
+-        unsigned int           maxrate_inner;        // 0 ~1023 
+-        unsigned int           maxrate_outer;        // 0 ~1023 
+-        unsigned int           slow_lpfcoef_enh;     // 0 ~ 255 
+-        unsigned int           fast_lpfcoef_enh;     // 0 ~ 255 
+-        unsigned int           flash_thr_enh;	     // 0 ~ 255                 
++
++        unsigned int           ratio_histr;          // 0 ~1023
++        unsigned int           ratio_histg;          // 0 ~1023
++        unsigned int           ratio_histb;          // 0 ~1023
++        unsigned int           target_r;             // 0 ~ 255
++        unsigned int           target_g;             // 0 ~ 255
++        unsigned int           target_b;             // 0 ~ 255
++        unsigned int           maxrate_inner;        // 0 ~1023
++        unsigned int           maxrate_outer;        // 0 ~1023
++        unsigned int           slow_lpfcoef_enh;     // 0 ~ 255
++        unsigned int           fast_lpfcoef_enh;     // 0 ~ 255
++        unsigned int           flash_thr_enh;	     // 0 ~ 255
+ } xml_algorithm_ae_t;
+ 
+ #define AWB_PARM_NUM			57
+@@ -362,23 +362,23 @@ typedef struct xml_algorithm_awb_s {
+         unsigned int           ratio_winr;            //0 ~ 1024
+         unsigned int           ratio_wint;            //0 ~ 1024
+         unsigned int           ratio_winb;            //0 ~ 1024
+-        unsigned int  	       ratio_rgb;             // 0 ~ 255 
+-        unsigned int           ratio_yh;              // 0 ~ 255 
+-        unsigned int 	       ratio_ym;              // 0 ~ 255 
+-        unsigned int 	       ratio_yl;              // 0 ~ 255 
+-        unsigned int 	       yyh;                   // 0 ~ 255 
+-        unsigned int 	       yym;                   // 0 ~ 255 
+-        unsigned int 	       yyl;                   // 0 ~ 255 
+-        unsigned int 	       coef_r[4];             // 0 ~ 255 
+-        unsigned int 	       coef_g[4];             // 0 ~ 255 
+-        unsigned int 	       coef_b[4];             // 0 ~ 255 
+-        unsigned int 	       inner_rg;          // 0 ~ 1023 
++        unsigned int  	       ratio_rgb;             // 0 ~ 255
++        unsigned int           ratio_yh;              // 0 ~ 255
++        unsigned int 	       ratio_ym;              // 0 ~ 255
++        unsigned int 	       ratio_yl;              // 0 ~ 255
++        unsigned int 	       yyh;                   // 0 ~ 255
++        unsigned int 	       yym;                   // 0 ~ 255
++        unsigned int 	       yyl;                   // 0 ~ 255
++        unsigned int 	       coef_r[4];             // 0 ~ 255
++        unsigned int 	       coef_g[4];             // 0 ~ 255
++        unsigned int 	       coef_b[4];             // 0 ~ 255
++        unsigned int 	       inner_rg;          // 0 ~ 1023
+         unsigned int 	       inner_bg;          // 0 ~ 1023
+         unsigned int 	       outer_rg;          // 0 ~ 1023
+         unsigned int 	       outer_bg;          // 0 ~ 1023
+-        unsigned int           r_max;             // 0 ~ 4095    
++        unsigned int           r_max;             // 0 ~ 4095
+         unsigned int           r_min;             // 0 ~ 4095
+-        unsigned int           b_max;             // 0 ~ 4095    
++        unsigned int           b_max;             // 0 ~ 4095
+         unsigned int           b_min;             // 0 ~ 4095
+         unsigned int           thr_gb_h;          // 0 ~ 255
+         unsigned int           thr_gb_m;          // 0 ~ 255
+@@ -402,7 +402,7 @@ typedef struct xml_algorithm_awb_s {
+         unsigned int           thr_yl_m;          // 0 ~ 255
+         unsigned int           thr_yl_l;          // 0 ~ 255
+ 	/*********************awb_enh****************/
+-    	unsigned int           ratio_yuv;    
++    	unsigned int           ratio_yuv;
+         unsigned int           slow_lpfcoef;    // 0 ~ 255
+         unsigned int           fast_lpfcoef;    // 0 ~ 255
+         unsigned int           outer;           // 0 ~ 1023
+@@ -443,6 +443,8 @@ typedef struct xml_algorithm_af_s {
+ 	unsigned int	       x;//x coord of touch focus win
+ 	unsigned int	       y;//y coord of touch focus win
+ 	unsigned int           radius_ratio;//radius of touch focus win
++	unsigned int           af_step_mid_thre;
++	unsigned int           af_step_max_thre;
+ } xml_algorithm_af_t;
+ 
+ #define XML_LUT_LS 1024 // 32*32 32-bit
+@@ -545,7 +547,7 @@ typedef struct xml_peripheral_s {
+ } xml_peripheral_t;
+ 
+ typedef struct xml_default_regs_s {
+-        struct xml_top_s          top;    
++        struct xml_top_s          top;
+         struct xml_tp_s           tp;     // disable
+         struct xml_cg_s           cg;     // straight
+         struct xml_ls_s           ls;
+@@ -561,7 +563,7 @@ typedef struct xml_default_regs_s {
+         struct xml_awb_s          awb_reg;
+         struct xml_af_s           af_reg;
+ 	struct xml_lut_ls_s	  lnsd;
+-	struct xml_lut_gc_s	  lut_gc;				  
++	struct xml_lut_gc_s	  lut_gc;
+ } xml_default_regs_t;
+ 
+ typedef struct xml_scenes_s {
+@@ -570,7 +572,7 @@ typedef struct xml_scenes_s {
+         struct xml_algorithm_af_s  af;
+ } xml_scenes_t;
+ /*only G0 R1 B2 G3*/
+-typedef struct xml_wb_manual_s {        
++typedef struct xml_wb_manual_s {
+         unsigned int reg_map[2];
+ } xml_wb_manual_t;
+ 
+@@ -587,7 +589,7 @@ typedef struct xml_effect_manual_s {
+ } cam_format_t;
+ */
+ typedef struct cam_function_s {
+-	bool (*set_af_new_step)(unsigned int af_debug_control);    
++	bool (*set_af_new_step)(unsigned int af_debug_control);
+ 	unsigned int (*get_aet_current_step)(void);
+ 	short (*get_aet_current_gain)(void);
+ 	short (*get_aet_min_gain)(void);
+@@ -645,7 +647,7 @@ typedef struct cam_parameter_s {
+         struct xml_wb_manual_s     *xml_wb_manual;
+ 	struct xml_capture_s	   *xml_capture;
+ 	struct wave_s		   *xml_wave;
+-	unsigned int 		    level;//the torch light level 
++	unsigned int 		    level;//the torch light level
+ 	flash_mode_t                flash_mode;//the flash mode
+ 	camera_mode_t		    cam_mode;//set the isp work mode
+ } cam_parameter_t;
+@@ -670,7 +672,7 @@ typedef enum vdin_format_convert_e {
+ 	VDIN_FORMAT_CONVERT_YUV_NV12,
+ 	VDIN_FORMAT_CONVERT_YUV_NV21,
+ 	VDIN_FORMAT_CONVERT_RGB_NV12,
+-	VDIN_FORMAT_CONVERT_RGB_NV21,	
++	VDIN_FORMAT_CONVERT_RGB_NV21,
+ } vdin_format_convert_t;
+ 
+ typedef enum vdin_cmd_e {
+@@ -742,7 +744,7 @@ typedef struct vdin_parm_s {
+         unsigned short  v_active;
+         unsigned short  frame_rate;
+         /*for bt656*/
+-        enum bt_path_e  bt_path;//0:from gpio,1:from csi2 
++        enum bt_path_e  bt_path;//0:from gpio,1:from csi2
+         unsigned char   hsync_phase;//1: inverted 0: original
+         unsigned char   vsync_phase;//1: inverted 0: origianl
+         unsigned short  hs_bp;//the horizontal start postion of bt656 window
+-- 
+2.19.0
+

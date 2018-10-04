@@ -1,0 +1,658 @@
+From f36dfd9eaa23a18abea0094ec2ac6facbf684ff0 Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Thu, 19 Dec 2013 17:20:17 +0800
+Subject: [PATCH 2559/5965] PD #81427: fix scrren jitter by rdma.
+
+commit 09c76e083f9b1895c46438c809bfb24299cd3ec6
+Author: kele.bai <kele.bai@amlogic.com>
+Date:   Thu Dec 19 16:58:57 2013 +0800
+
+    move check function to vdin ctl.
+
+commit be80af2bdd105def487975aba1a30032ee699cf9
+Author: kele.bai <kele.bai@amlogic.com>
+Date:   Thu Dec 19 16:32:49 2013 +0800
+
+    fix compile error.
+
+commit 0985a31e684f3734835a9eb828aec2b7a99c64d0
+Author: timyao <tim.yao@amlogic.com>
+Date:   Fri Dec 13 19:04:15 2013 -0800
+
+    RDMA max read line debug,enable vdin rdma only for viu loop.
+---
+ drivers/amlogic/amports/rdma.c         | 100 +++++++++++++++++++-
+ drivers/amlogic/amports/video.c        |  55 ++++++++++-
+ drivers/amlogic/tvin/vdin/vdin_ctl.c   |  16 +++-
+ drivers/amlogic/tvin/vdin/vdin_ctl.h   |   2 +-
+ drivers/amlogic/tvin/vdin/vdin_drv.c   | 122 +++++++++++++++++++++----
+ drivers/amlogic/tvin/vdin/vdin_drv.h   |   3 +-
+ drivers/amlogic/tvin_v4l2/vdin_v4l2.c  |   2 +-
+ include/linux/amlogic/amports/vframe.h |   2 +
+ include/linux/amlogic/tvin/tvin_v4l2.h |   1 +
+ 9 files changed, 276 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/amlogic/amports/rdma.c b/drivers/amlogic/amports/rdma.c
+index 69000bf44aad..287ac570a019 100755
+--- a/drivers/amlogic/amports/rdma.c
++++ b/drivers/amlogic/amports/rdma.c
+@@ -56,6 +56,16 @@
+ #endif
+ 
+ //#define RDMA_CHECK_PRE
++#define READ_BACK_SUPPORT
++
++#ifdef READ_BACK_SUPPORT
++static ulong* rmda_rd_table = NULL;
++static ulong rmda_rd_table_phy_addr = 0, * rmda_rd_table_addr_remap = NULL;
++static int rmda_rd_item_count = 0;
++static int rmda_rd_item_count_pre = 0;
++#endif
++
++
+ 
+ #define RDMA_TABLE_SIZE                     (PAGE_SIZE)
+ 
+@@ -144,6 +154,20 @@ void rdma_table_prepare_write(unsigned long reg_adr, unsigned long val)
+     }
+ }
+ 
++#ifdef READ_BACK_SUPPORT
++void rdma_table_prepare_read(unsigned long reg_adr)
++{
++    if(((rmda_rd_item_count<<1)+1)<(RDMA_TABLE_SIZE/4)){
++        rmda_rd_table[rmda_rd_item_count] = reg_adr; //CBUS_REG_ADDR(reg_adr);
++        //printk("%s %d: %x %x\n",__func__, rmda_item_count, rmda_table[rmda_item_count<<1], rmda_table[(rmda_item_count<<1)+1]);
++        rmda_rd_item_count++;
++    }
++    else{
++        printk("%s fail: %d, %x %x\n",__func__, rmda_rd_item_count, reg_adr);
++    }
++}
++#endif
++
+ EXPORT_SYMBOL(rdma_table_prepare_write);
+ static int rdma_config(unsigned char type)
+ {
+@@ -164,7 +188,7 @@ static int rdma_config(unsigned char type)
+     rmda_item_count_pre = rmda_item_count;
+ #endif
+     data32  = 0;
+-    data32 |= 0                         << 6;   // [31: 6] Rsrv.
++    data32 |= 1                         << 6;   // [31: 6] Rsrv.
+     data32 |= ctrl_ahb_wr_burst_size    << 4;   // [ 5: 4] ctrl_ahb_wr_burst_size. 0=16; 1=24; 2=32; 3=48.
+     data32 |= ctrl_ahb_rd_burst_size    << 2;   // [ 3: 2] ctrl_ahb_rd_burst_size. 0=16; 1=24; 2=32; 3=48.
+     data32 |= 0                         << 1;   // [    1] ctrl_sw_reset.
+@@ -209,6 +233,25 @@ static int rdma_config(unsigned char type)
+ 		data32 &= 0xffffedd;
+ 		Wr(RDMA_ACCESS_AUTO, data32);
+ 	}
++#ifdef READ_BACK_SUPPORT
++        if(rmda_rd_item_count > 0){
++            memset(rmda_rd_table_addr_remap, 0xff, rmda_rd_item_count*8);
++            memcpy(rmda_rd_table_addr_remap, rmda_rd_table, rmda_rd_item_count*4);
++            
++            Wr(RDMA_AHB_START_ADDR_2, rmda_rd_table_phy_addr);
++            Wr(RDMA_AHB_END_ADDR_2,   rmda_rd_table_phy_addr + rmda_rd_item_count*8 - 1);
++    
++            data32 |= 0x1                       << 16;   // [23: 16] interrupt inputs enable mask for auto-start 2: vsync int bit 0
++            data32 |= 0                         << 6;   // [    6] ctrl_cbus_write_2. 1=Register write; 0=Register read.
++            data32 |= 0                         << 2;   // [    2] ctrl_cbus_addr_incr_2. 1=Incremental register access; 0=Non-incremental.
++            Wr(RDMA_ACCESS_AUTO, data32);
++        }
++        else{
++            data32 &= (~(1<<16));    
++        }
++        rmda_rd_item_count_pre = rmda_rd_item_count;
++        rmda_rd_item_count = 0;
++#endif        
+     }
+     else if(type == 2){
+         int i,j;
+@@ -333,7 +376,9 @@ static irqreturn_t rdma_isr(int irq, void *dev_id)
+ static int __init rmda_early_init(void)
+ {
+     ulong rmda_table_addr;
+-    
++#ifdef READ_BACK_SUPPORT
++    ulong rmda_rd_table_addr;
++#endif    
+     rmda_table_addr = __get_free_pages(GFP_KERNEL, get_order(RDMA_TABLE_SIZE));
+     if (!rmda_table_addr) {
+         printk("%s: failed to alloc rmda_table_addr\n", __func__);
+@@ -352,6 +397,23 @@ static int __init rmda_early_init(void)
+ #ifdef RDMA_CHECK_PRE    
+     rmda_table_pre = kmalloc(RDMA_TABLE_SIZE, GFP_KERNEL);
+ #endif    
++#ifdef READ_BACK_SUPPORT
++    rmda_rd_table_addr = __get_free_pages(GFP_KERNEL, get_order(RDMA_TABLE_SIZE));
++    if (!rmda_rd_table_addr) {
++        printk("%s: failed to alloc rmda_rd_table_addr\n", __func__);
++        return -1;
++    }
++
++    rmda_rd_table_phy_addr = virt_to_phys((u8 *)rmda_rd_table_addr);
++    
++    rmda_rd_table_addr_remap = ioremap_nocache(rmda_rd_table_phy_addr, RDMA_TABLE_SIZE);
++    if (!rmda_rd_table_addr_remap) {
++            printk("%s: failed to remap rmda_rd_table_addr\n", __func__);
++            return -1;
++    }
++    
++    rmda_rd_table = kmalloc(RDMA_TABLE_SIZE, GFP_KERNEL);
++#endif
+ 
+ #if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON8
+     request_irq(INT_RDMA, &rdma_isr,
+@@ -477,6 +539,40 @@ int VSYNC_WR_MPEG_REG_BITS(unsigned long adr, unsigned long val, unsigned long s
+ }
+ EXPORT_SYMBOL(VSYNC_WR_MPEG_REG_BITS);
+ 
++unsigned long RDMA_READ_REG(unsigned long adr)
++{
++    unsigned long read_val = 0xffffffff;
++#ifdef READ_BACK_SUPPORT
++    int i;
++    int enable_ = ((enable&enable_mask)|(enable_mask>>8))&0xff;
++    if((enable_!=0)&&rdma_start){
++        for(i=(rmda_rd_item_count_pre-1); i>=0; i--){
++            if(rmda_rd_table_addr_remap[i]==adr){
++                read_val = rmda_rd_table_addr_remap[rmda_rd_item_count_pre + i];
++                break;
++            }
++        }   
++    }
++#endif
++    return read_val;    
++}    
++EXPORT_SYMBOL(RDMA_READ_REG);
++
++int RDMA_SET_READ(unsigned long adr)
++{ 
++#ifdef READ_BACK_SUPPORT
++    int enable_ = ((enable&enable_mask)|(enable_mask>>8))&0xff;
++    if((enable_!=0)&&rdma_start){
++        if(debug_flag&1)
++            printk("RDMA_SET_READ %d(%x)\n", rmda_rd_item_count, adr);
++
++        rdma_table_prepare_read(adr);
++    }
++#endif
++    return 0;
++}
++EXPORT_SYMBOL(RDMA_SET_READ);
++
+ bool is_vsync_rdma_enable(void)
+ {
+     int enable_ = ((enable&enable_mask)|(enable_mask>>8))&0xff;
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index fc48f7b2bcc9..25bc7784012d 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -80,7 +80,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_DEFAULT_LEVEL_DESC, LOG_MASK_DESC);
+ 
+ #include "linux/amlogic/amports/ve.h"
+ #include "linux/amlogic/amports/cm.h"
+-
++#include "linux/amlogic/tvin/tvin_v4l2.h"
+ #include "ve_regs.h"
+ #include "amve.h"
+ #include "cm_regs.h"
+@@ -310,6 +310,7 @@ static int vpts_chase_pts_diff;
+ #define DEBUG_FLAG_BLACKOUT     0x1
+ #define DEBUG_FLAG_PRINT_TOGGLE_FRAME 0x2
+ #define DEBUG_FLAG_PRINT_RDMA                0x4
++#define DEBUG_FLAG_LOG_RDMA_LINE_MAX         0x100
+ #define DEBUG_FLAG_TOGGLE_SKIP_KEEP_CURRENT  0x10000
+ #define DEBUG_FLAG_TOGGLE_FRAME_PER_VSYNC    0x20000
+ #define DEBUG_FLAG_RDMA_WAIT_1		     0x40000
+@@ -318,6 +319,9 @@ static int debug_flag = 0x0;//DEBUG_FLAG_BLACKOUT;
+ static int vsync_enter_line_max = 0;
+ static int vsync_exit_line_max = 0;
+ 
++#ifdef CONFIG_VSYNC_RDMA
++static int vsync_rdma_line_max = 0;
++#endif
+ static int video_3d_format = 0;
+ 
+ const char video_dev_id[] = "amvideo-dev";
+@@ -1682,6 +1686,39 @@ int get_vsync_pts_inc_mode(void)
+ }
+ EXPORT_SYMBOL(get_vsync_pts_inc_mode);
+ 
++#ifdef CONFIG_VSYNC_RDMA
++void vsync_rdma_process(void)
++{
++    unsigned long enc_line_adr = 0;
++    int enc_line;
++    switch(READ_VCBUS_REG(VPU_VIU_VENC_MUX_CTRL)&0x3){
++        case 0:
++            enc_line_adr = ENCL_INFO_READ;
++            break;
++        case 1:
++            enc_line_adr = ENCI_INFO_READ;
++            break;
++        case 2:
++            enc_line_adr = ENCP_INFO_READ;
++            break;
++        case 3:
++            enc_line_adr = ENCT_INFO_READ;
++            break;
++    }
++    enc_line_adr = ENCL_INFO_READ;
++    if((debug_flag&DEBUG_FLAG_LOG_RDMA_LINE_MAX)&&(enc_line_adr>0)){
++        RDMA_SET_READ(enc_line_adr);
++        enc_line = RDMA_READ_REG(enc_line_adr);
++        if(enc_line != 0xffffffff){
++            enc_line = (enc_line>>16)&0x1fff;
++            if(enc_line > vsync_rdma_line_max)
++                vsync_rdma_line_max = enc_line;
++        }
++    }
++    vsync_rdma_config();
++}
++#endif
++
+ #ifdef FIQ_VSYNC
+ void vsync_fisr(void)
+ #else
+@@ -1694,6 +1731,9 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+     s32 i, vout_type;
+     vframe_t *vf;
+     unsigned long flags;
++    vdin_v4l2_ops_t *vdin_ops = NULL;
++    vdin_arg_t arg;
++	
+ #ifdef CONFIG_AM_VIDEO_LOG
+     int toggle_cnt;
+ #endif
+@@ -1776,6 +1816,11 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 	/* amvecm video latch function */
+ 	amvecm_video_latch();
+ #endif
++    vdin_ops=get_vdin_v4l2_ops();
++    if(vdin_ops){
++	arg.cmd = VDIN_CMD_ISR;
++	vdin_ops->tvin_vdin_func(1,&arg);
++    }
+     vout_type = detect_vout_type();
+     hold_line = calc_hold_line();
+ 
+@@ -2250,7 +2295,8 @@ exit:
+ 
+ #ifdef CONFIG_VSYNC_RDMA
+     cur_rdma_buf = cur_dispbuf;
+-    vsync_rdma_config();
++    //vsync_rdma_config();
++    vsync_rdma_process();
+     if(frame_par_di_set){
+         start_rdma(); //work around, need set one frame without RDMA???
+     }
+@@ -4745,6 +4791,11 @@ module_param(vsync_enter_line_max, uint, 0664);
+ MODULE_PARM_DESC(vsync_exit_line_max, "\n vsync_exit_line_max\n");
+ module_param(vsync_exit_line_max, uint, 0664);
+ 
++#ifdef CONFIG_VSYNC_RDMA
++MODULE_PARM_DESC(vsync_rdma_line_max, "\n vsync_rdma_line_max\n");
++module_param(vsync_rdma_line_max, uint, 0664);
++#endif
++
+ module_param(underflow, uint, 0664);
+ MODULE_PARM_DESC(underflow, "\n Underflow count \n");
+ 
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index b0dd5bc94413..1e2bdf002f14 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -1655,7 +1655,7 @@ void vdin_enable_module(unsigned int offset, bool enable)
+ 	}
+ }
+ #if 0
+-inline void vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp)
++inline bool vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp)
+ {
+ 
+ 	if (RD_BITS(VDIN_COM_STATUS0, DIRECT_DONE_STATUS_BIT, DIRECT_DONE_STATUS_WID))
+@@ -1685,6 +1685,20 @@ inline void vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp)
+ 		devp->flags |= VDIN_FLAG_FORCE_UNSTABLE;
+ 	}
+ }
++#else
++inline bool vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp)
++{
++
++	if (RD_BITS(VDIN_COM_STATUS0, DIRECT_DONE_STATUS_BIT, DIRECT_DONE_STATUS_WID))
++	{
++		WR_BITS(VDIN_WR_CTRL, 1, DIRECT_DONE_CLR_BIT, DIRECT_DONE_CLR_WID);
++		WR_BITS(VDIN_WR_CTRL, 0, DIRECT_DONE_CLR_BIT, DIRECT_DONE_CLR_WID);
++		return true;
++	}
++	devp->abnormal_cnt++;
++	return false;
++}
++
+ #endif
+ /* check invalid vs to avoid screen flicker */
+ inline bool vdin_check_vs(struct vdin_dev_s *devp)
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.h b/drivers/amlogic/tvin/vdin/vdin_ctl.h
+index 085fbbd835ae..6b65a77eb43c 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.h
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.h
+@@ -161,7 +161,7 @@ extern void vdin_set_matrix_blank(struct vdin_dev_s *devp);
+ extern void vdin_delay_line(unsigned short num,unsigned int offset);
+ extern void set_wr_ctrl(int h_pos,int v_pos,struct vdin_dev_s *devp);
+ extern bool vdin_check_cycle(struct vdin_dev_s *devp);
+-extern void vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp);
++extern bool vdin_write_done_check(unsigned int offset, struct vdin_dev_s *devp);
+ extern bool vdin_check_vs(struct vdin_dev_s *devp);
+ extern void vdin_calculate_duration(struct vdin_dev_s *devp);
+ extern void vdin_output_ctl(unsigned int offset, unsigned int output_flag);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 74682599bb9d..71ef41901404 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -564,7 +564,7 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	vdin_vf_init(devp);
+ 
+ 	devp->abnormal_cnt = 0;
+-
++	devp->last_wr_vfe = NULL;
+ 	irq_max_count = 0;
+ 	//devp->stamp_valid = false;
+ 	devp->stamp = 0;
+@@ -608,9 +608,10 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	udelay(start_provider_delay);
+ 	vf_reg_provider(&devp->vprov);
+ 	vf_notify_receiver(devp->name,VFRAME_EVENT_PROVIDER_START,NULL);
+-
++if(devp->parm.port != TVIN_PORT_VIU){
+         /*enable irq */
+         enable_irq(devp->irq);
++}
+         /*disable audio&video sync used for libplayer*/
+         tsync_set_enable(0);
+ 	/* enable system_time */
+@@ -664,9 +665,11 @@ int start_tvin_service(int no ,vdin_parm_t *para)
+ 		pr_err("%s: port 0x%x, decode started already.\n",__func__,para->port);
+ 		ret = -EBUSY;
+ 	}
++	if(para->port != TVIN_PORT_VIU){
+ 	ret = request_irq(devp->irq, vdin_v4l2_isr, IRQF_SHARED, devp->irq_name, (void *)devp);
+         /*disable vsync irq until vdin configured completely*/
+         disable_irq_nosync(devp->irq);
++	}
+         /*config the vdin use default value*/
+         vdin_set_default_regmap(devp->addr_offset);
+ 
+@@ -712,9 +715,9 @@ int start_tvin_service(int no ,vdin_parm_t *para)
+ 		return -1;
+ 	}
+ 	//disable cut window?
+-	devp->parm.cutwin.ve = v_cut_offset;
+-	devp->parm.cutwin.vs = v_cut_offset;
+-		
++	if(para->port == TVIN_PORT_VIU) {
++		devp->parm.cutwin.vs = v_cut_offset;
++	} 
+         /*add for scaler down*/
+ 	if(!(devp->flags & VDIN_FLAG_MANUAL_CONVERTION)) {
+ 		devp->scaler4w = para->dest_hactive;
+@@ -726,6 +729,7 @@ int start_tvin_service(int no ,vdin_parm_t *para)
+ 	vdin_start_dec(devp);
+ 	devp->flags |= VDIN_FLAG_DEC_OPENED;
+ 	devp->flags |= VDIN_FLAG_DEC_STARTED;
++	irq_cnt = 0;
+ 	return 0;
+ }
+ 
+@@ -756,8 +760,10 @@ int stop_tvin_service(int no)
+ #endif
+ 	devp->flags &= (~VDIN_FLAG_DEC_OPENED);
+ 	devp->flags &= (~VDIN_FLAG_DEC_STARTED);
++	if(devp->parm.port!= TVIN_PORT_VIU){
+ 	/* free irq */
+ 	free_irq(devp->irq,(void *)devp);
++	}
+ 	end_time = jiffies_to_msecs(jiffies);
+ 	pr_info("[vdin]:vdin start time:%ums,stop time:%ums,run time:%u.\n",devp->start_time,end_time,end_time-devp->start_time);
+ 	return 0;
+@@ -788,14 +794,19 @@ static int vdin_ioctl_fe(int no, fe_arg_t *parm)
+ 	}
+ 	return ret;
+ }
+-
++static void vdin_rdma_isr(struct vdin_dev_s *devp)
++{
++	if(devp->parm.port==TVIN_PORT_VIU)
++		vdin_v4l2_isr(devp->irq,devp);
++}
+ static int vdin_func(int no, vdin_arg_t *arg)
+ {
+ 	struct vdin_dev_s *devp = vdin_devp[no];
+ 	int ret = 0;
+ 	struct vdin_arg_s *parm = NULL;
+-        if(IS_ERR(devp)){
+-                pr_err("[vdin..]%s vdin%d has't registered,please register.\n",__func__,no);
++        if(IS_ERR(devp)||!(devp->flags&VDIN_FLAG_DEC_STARTED)){
++		if(vdin_dbg_en)
++			pr_err("[vdin..]%s vdin%d has't registered,please register.\n",__func__,no);
+                 return -1;
+         }
+ 	parm = arg;
+@@ -806,6 +817,10 @@ static int vdin_func(int no, vdin_arg_t *arg)
+ 			break;
+ 		case VDIN_CMD_SET_CM2:
+ 			vdin_set_cm2(devp->addr_offset,devp->h_active,devp->v_active,parm->cm2);
++			break;
++		case VDIN_CMD_ISR:
++			vdin_rdma_isr(devp);
++			break;
+ 		default:
+ 			break;
+ 	}
+@@ -1286,6 +1301,23 @@ irq_handled:
+ * there are too much logic in vdin_isr which is useless in camera&viu
+ *so vdin_v4l2_isr use to the sample v4l2 application such as camera,viu
+ */
++static unsigned char skip_ratio = 1;
++module_param(skip_ratio,uint,0664);
++MODULE_PARM_DESC(skip_ratio,"\n vdin skip frame ratio 1/ratio will reserved.\n");
++static unsigned int vsync_enter_line_max = 0;
++module_param(vsync_enter_line_max,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_max,"\n vdin skip frame ratio 1/ratio will reserved.\n");
++static unsigned int vsync_exit_line_max = 0;
++module_param(vsync_exit_line_max,uint,0664);
++MODULE_PARM_DESC(vsync_exit_line_max,"\n vdin skip frame ratio 1/ratio will reserved.\n");
++
++static unsigned int vsync_enter_line_curr = 0;
++module_param(vsync_enter_line_curr,uint,0664);
++MODULE_PARM_DESC(vsync_enter_line_curr,"\n vdin skip frame ratio 1/ratio will reserved.\n");
++static unsigned int vsync_exit_line_curr = 0;
++module_param(vsync_exit_line_curr,uint,0664);
++MODULE_PARM_DESC(vsync_exit_line_curr,"\n vdin skip frame ratio 1/ratio will reserved.\n");
++
+ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ {
+ 	ulong flags;
+@@ -1299,17 +1331,46 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 	int ret = 0;
+ 	if (!devp)
+                 return IRQ_HANDLED;
++	switch(READ_VCBUS_REG(VPU_VIU_VENC_MUX_CTRL)&0x3){
++                case 0:
++                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCL_INFO_READ)>>16)&0x1fff;
++                        break;
++                case 1:
++                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCI_INFO_READ)>>16)&0x1fff;
++                        break;
++                case 2:
++                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
++                        break;
++                case 3:
++                        vsync_enter_line_curr = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
++                        break;
++        }
++        if(vsync_enter_line_curr > vsync_enter_line_max)
++                vsync_enter_line_max = vsync_enter_line_curr;
++
++	isr_log(devp->vfp);
+                 irq_cnt++;
+ 	spin_lock_irqsave(&devp->isr_lock, flags);
+-                if(devp)
+-	/* avoid null pointer oops */
+-	stamp  = vdin_get_meas_vstamp(devp->addr_offset);
++        if(devp)
++	        /* avoid null pointer oops */
++	        stamp  = vdin_get_meas_vstamp(devp->addr_offset);
+ 	if (!devp->curr_wr_vfe) {
+ 		devp->curr_wr_vfe = provider_vf_get(devp->vfp);
+ 		/*save the first field stamp*/
+ 		devp->stamp = stamp;
+ 		goto irq_handled;
+ 	}
++	
++        if(!vdin_write_done_check(devp->addr_offset, devp)){
++                goto irq_handled;
++        }   
++
++
++	if(devp->last_wr_vfe){
++		provider_vf_put(devp->last_wr_vfe, devp->vfp);
++	        devp->last_wr_vfe = NULL;
++		vf_notify_receiver(devp->name,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
++	}
+ 	/*check vs is valid base on the time during continuous vs*/
+         vdin_check_cycle(devp);
+         
+@@ -1361,7 +1422,6 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+             	        goto irq_handled;
+                 }
+         }
+-
+         next_wr_vfe = provider_vf_peek(devp->vfp);
+ 
+ 	if (!next_wr_vfe) {
+@@ -1379,22 +1439,46 @@ static irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
+ 	}
+ 	if(curr_wr_vfe){
+ 		curr_wr_vfe->flag |= VF_FLAG_NORMAL_FRAME;
+-		provider_vf_put(curr_wr_vfe, devp->vfp);
++		//provider_vf_put(curr_wr_vfe, devp->vfp);
++		devp->last_wr_vfe = curr_wr_vfe;
+ 	}
+ 
+ 	/* prepare for next input data */
+ 	next_wr_vfe = provider_vf_get(devp->vfp);
+-	vdin_set_canvas_id(devp->addr_offset, (next_wr_vfe->vf.canvas0Addr&0xff));
+-        /* prepare for chroma canvas*/
+-        if((devp->prop.dest_cfmt == TVIN_NV12)||(devp->prop.dest_cfmt == TVIN_NV21))
+-                vdin_set_chma_canvas_id(devp->addr_offset, (next_wr_vfe->vf.canvas0Addr>>8)&0xff);
+-
++	if(devp->parm.port == TVIN_PORT_VIU){
++	        VSYNC_WR_MPEG_REG_BITS(VDIN_WR_CTRL+devp->addr_offset, (next_wr_vfe->vf.canvas0Addr&0xff), WR_CANVAS_BIT, WR_CANVAS_WID);
++                /* prepare for chroma canvas*/
++                if((devp->prop.dest_cfmt == TVIN_NV12)||(devp->prop.dest_cfmt == TVIN_NV21))
++			VSYNC_WR_MPEG_REG_BITS(VDIN_WR_CTRL2+devp->addr_offset, (next_wr_vfe->vf.canvas0Addr>>8)&0xff, WRITE_CHROMA_CANVAS_ADDR_BIT,WRITE_CHROMA_CANVAS_ADDR_WID);
++	}else{	
++		vdin_set_canvas_id(devp->addr_offset, (next_wr_vfe->vf.canvas0Addr&0xff));
++                if((devp->prop.dest_cfmt == TVIN_NV12)||(devp->prop.dest_cfmt == TVIN_NV21))
++                        vdin_set_chma_canvas_id(devp->addr_offset, (next_wr_vfe->vf.canvas0Addr>>8)&0xff);
++	}
+         devp->curr_wr_vfe = next_wr_vfe;
+ 	vf_notify_receiver(devp->name,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
+ 
+ 
+ irq_handled:
++	switch(READ_VCBUS_REG(VPU_VIU_VENC_MUX_CTRL)&0x3){
++		case 0:
++			vsync_exit_line_curr = (READ_VCBUS_REG(ENCL_INFO_READ)>>16)&0x1fff;
++			break;
++		case 1:
++			vsync_exit_line_curr = (READ_VCBUS_REG(ENCI_INFO_READ)>>16)&0x1fff;
++			break;
++		case 2:
++			vsync_exit_line_curr = (READ_VCBUS_REG(ENCP_INFO_READ)>>16)&0x1fff;
++			break;
++		case 3:
++			vsync_exit_line_curr = (READ_VCBUS_REG(ENCT_INFO_READ)>>16)&0x1fff;
++			break;
++	}
++	if(vsync_exit_line_curr > vsync_exit_line_max)
++		vsync_exit_line_max = vsync_exit_line_curr;
++
+ 	spin_unlock_irqrestore(&devp->isr_lock, flags);
++	isr_log(devp->vfp);
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -1452,7 +1536,7 @@ static int vdin_release(struct inode *inode, struct file *file)
+ 	file->private_data = NULL;
+ 
+ 	/* reset the hardware limit to vertical [0-1079]  */
+-    WRITE_VCBUS_REG(VPP_PREBLEND_VD1_V_START_END, 0x00000437);
++        WRITE_VCBUS_REG(VPP_PREBLEND_VD1_V_START_END, 0x00000437);
+ 	pr_info("close device %s ok\n", dev_name(devp->dev));
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.h b/drivers/amlogic/tvin/vdin/vdin_drv.h
+index 1682021686c5..24edfeb3a907 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.h
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.h
+@@ -34,7 +34,7 @@
+ #include "../tvin_frontend.h"
+ #include "vdin_vf.h"
+ 
+-#define VDIN_VER "Ref.2013/12/17a"
++#define VDIN_VER "Ref.2013/12/19a"
+ 
+ /*the counter of vdin*/
+ #define VDIN_MAX_DEVS			2
+@@ -143,6 +143,7 @@ typedef struct vdin_dev_s {
+ 	unsigned int			canvas_max_size;
+ 	unsigned int			canvas_max_num;
+ 	struct vf_entry			*curr_wr_vfe;
++	struct vf_entry         *last_wr_vfe;
+ 	unsigned int			curr_field_type;
+ 
+ 	unsigned int			irq;
+diff --git a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+index da37978a2ea8..5ebd8026b685 100755
+--- a/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
++++ b/drivers/amlogic/tvin_v4l2/vdin_v4l2.c
+@@ -37,7 +37,7 @@ vdin_v4l2_ops_t *get_vdin_v4l2_ops()
+         if((ops.start_tvin_service != NULL) && (ops.stop_tvin_service != NULL))
+                 return &ops;
+         else{
+-                pr_err("[vdin..]%s: vdin v4l2 operation haven't registered.",__func__);
++                //pr_err("[vdin..]%s: vdin v4l2 operation haven't registered.",__func__);
+                 return NULL;
+         }
+ }
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+index a29caa4ae648..032fd5d2b76e 100755
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -200,6 +200,8 @@ int get_curren_frame_para(int* top ,int* left , int* bottom, int* right);
+ int VSYNC_WR_MPEG_REG(unsigned long adr, unsigned long val);
+ int VSYNC_WR_MPEG_REG_BITS(unsigned long adr, unsigned long val, unsigned long start, unsigned long len);
+ unsigned long VSYNC_RD_MPEG_REG(unsigned long adr);
++unsigned long RDMA_READ_REG(unsigned long adr);
++int RDMA_SET_READ(unsigned long adr);
+ #elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ #define VSYNC_WR_MPEG_REG(adr,val) WRITE_VCBUS_REG(adr, val)
+ #define VSYNC_WR_MPEG_REG_BITS(adr, val, start, len)  WRITE_VCBUS_REG_BITS(adr, val, start, len)
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index ba4b59d95762..f01a10747aea 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -691,6 +691,7 @@ typedef enum vdin_cmd_e {
+ 	VDIN_CMD_NULL = 0,
+ 	VDIN_CMD_SET_CSC,
+ 	VDIN_CMD_SET_CM2,
++	VDIN_CMD_ISR,
+ } vdin_cmd_t;
+ 
+ typedef struct vdin_arg_s {
+-- 
+2.19.0
+

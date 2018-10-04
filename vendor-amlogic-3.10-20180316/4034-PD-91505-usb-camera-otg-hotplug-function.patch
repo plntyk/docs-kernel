@@ -1,0 +1,104 @@
+From 900675aa585ce8efaf775b640e7ad2344e292293 Mon Sep 17 00:00:00 2001
+From: "litao.wang" <litao.wang@amlogic.com>
+Date: Thu, 8 May 2014 19:40:08 +0800
+Subject: [PATCH 4034/5965] PD #91505 usb camera otg hotplug function
+
+---
+ drivers/media/usb/uvc/uvc_driver.c |  2 +-
+ drivers/media/usb/uvc/uvc_v4l2.c   | 15 +++++++++------
+ drivers/usb/core/driver.c          |  4 +++-
+ include/linux/usb.h                |  1 +
+ 4 files changed, 14 insertions(+), 8 deletions(-)
+ mode change 100644 => 100755 drivers/media/usb/uvc/uvc_driver.c
+ mode change 100644 => 100755 drivers/media/usb/uvc/uvc_v4l2.c
+ mode change 100644 => 100755 drivers/usb/core/driver.c
+ mode change 100644 => 100755 include/linux/usb.h
+
+diff --git a/drivers/media/usb/uvc/uvc_driver.c b/drivers/media/usb/uvc/uvc_driver.c
+old mode 100644
+new mode 100755
+index 5dbefa68b1d2..1ead061581b1
+--- a/drivers/media/usb/uvc/uvc_driver.c
++++ b/drivers/media/usb/uvc/uvc_driver.c
+@@ -2436,7 +2436,7 @@ struct uvc_driver uvc_driver = {
+ 		.resume		= uvc_resume,
+ 		.reset_resume	= uvc_reset_resume,
+ 		.id_table	= uvc_ids,
+-		.supports_autosuspend = 1,
++		.supports_autosuspend = 0,
+ 	},
+ };
+ 
+diff --git a/drivers/media/usb/uvc/uvc_v4l2.c b/drivers/media/usb/uvc/uvc_v4l2.c
+old mode 100644
+new mode 100755
+index b2dc32623a71..c0f41ac65f61
+--- a/drivers/media/usb/uvc/uvc_v4l2.c
++++ b/drivers/media/usb/uvc/uvc_v4l2.c
+@@ -486,15 +486,17 @@ static int uvc_v4l2_open(struct file *file)
+ 
+ 	if (stream->dev->state & UVC_DEV_DISCONNECTED)
+ 		return -ENODEV;
+-
+-	ret = usb_autopm_get_interface(stream->dev->intf);
+-	if (ret < 0)
+-		return ret;
++	if(stream->dev->intf->auto_suspend){
++		ret = usb_autopm_get_interface(stream->dev->intf);
++		if (ret < 0)
++			return ret;
++	}
+ 
+ 	/* Create the device handle. */
+ 	handle = kzalloc(sizeof *handle, GFP_KERNEL);
+ 	if (handle == NULL) {
+-		usb_autopm_put_interface(stream->dev->intf);
++		if(stream->dev->intf->auto_suspend)
++			usb_autopm_put_interface(stream->dev->intf);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -502,7 +504,8 @@ static int uvc_v4l2_open(struct file *file)
+ 		ret = uvc_status_start(stream->dev);
+ 		if (ret < 0) {
+ 			atomic_dec(&stream->dev->users);
+-			usb_autopm_put_interface(stream->dev->intf);
++			if(stream->dev->intf->auto_suspend)
++				usb_autopm_put_interface(stream->dev->intf);
+ 			kfree(handle);
+ 			return ret;
+ 		}
+diff --git a/drivers/usb/core/driver.c b/drivers/usb/core/driver.c
+old mode 100644
+new mode 100755
+index 6eab440e1542..bd6c88b79701
+--- a/drivers/usb/core/driver.c
++++ b/drivers/usb/core/driver.c
+@@ -272,7 +272,9 @@ static int usb_probe_interface(struct device *dev)
+ 	dev_dbg(dev, "%s\n", __func__);
+ 
+ 	intf->needs_binding = 0;
+-
++	
++	intf->auto_suspend = driver->supports_autosuspend;
++	
+ 	if (usb_device_is_owned(udev))
+ 		return error;
+ 
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+old mode 100644
+new mode 100755
+index a0bee5a28d1a..696e34de5a08
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -186,6 +186,7 @@ struct usb_interface {
+ 	struct device *usb_dev;
+ 	atomic_t pm_usage_cnt;		/* usage counter for autosuspend */
+ 	struct work_struct reset_ws;	/* for resets in atomic context */
++	int auto_suspend;
+ };
+ #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
+ 
+-- 
+2.19.0
+

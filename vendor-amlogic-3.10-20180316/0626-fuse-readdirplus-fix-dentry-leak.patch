@@ -1,0 +1,60 @@
+From 05ac7b3a7db7823aecde55df6a5f8d6bb45693f4 Mon Sep 17 00:00:00 2001
+From: Niels de Vos <ndevos@redhat.com>
+Date: Wed, 17 Jul 2013 14:53:53 +0200
+Subject: [PATCH 0626/5965] fuse: readdirplus: fix dentry leak
+
+commit 53ce9a3364de0723b27d861de93bfc882f7db050 upstream.
+
+In case d_lookup() returns a dentry with d_inode == NULL, the dentry is not
+returned with dput(). This results in triggering a BUG() in
+shrink_dcache_for_umount_subtree():
+
+  BUG: Dentry ...{i=0,n=...} still in use (1) [unmount of fuse fuse]
+
+[SzM: need to d_drop() as well]
+
+Reported-by: Justin Clift <jclift@redhat.com>
+Signed-off-by: Niels de Vos <ndevos@redhat.com>
+Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+Tested-by: Brian Foster <bfoster@redhat.com>
+Tested-by: Niels de Vos <ndevos@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/fuse/dir.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/fs/fuse/dir.c b/fs/fuse/dir.c
+index f3f783dc4f75..5532bf416f9b 100644
+--- a/fs/fuse/dir.c
++++ b/fs/fuse/dir.c
+@@ -1229,9 +1229,15 @@ static int fuse_direntplus_link(struct file *file,
+ 
+ 	name.hash = full_name_hash(name.name, name.len);
+ 	dentry = d_lookup(parent, &name);
+-	if (dentry && dentry->d_inode) {
++	if (dentry) {
+ 		inode = dentry->d_inode;
+-		if (get_node_id(inode) == o->nodeid) {
++		if (!inode) {
++			d_drop(dentry);
++		} else if (get_node_id(inode) != o->nodeid) {
++			err = d_invalidate(dentry);
++			if (err)
++				goto out;
++		} else {
+ 			struct fuse_inode *fi;
+ 			fi = get_fuse_inode(inode);
+ 			spin_lock(&fc->lock);
+@@ -1244,9 +1250,6 @@ static int fuse_direntplus_link(struct file *file,
+ 			 */
+ 			goto found;
+ 		}
+-		err = d_invalidate(dentry);
+-		if (err)
+-			goto out;
+ 		dput(dentry);
+ 		dentry = NULL;
+ 	}
+-- 
+2.19.0
+

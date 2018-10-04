@@ -1,0 +1,99 @@
+From cb79d3f3d5fbc5f4a5cab0bfc24cb867cb2f6345 Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Tue, 3 Dec 2013 13:22:54 +0800
+Subject: [PATCH 2185/5965] PD #83634 : cpufreq : Modify dead lock
+
+---
+ drivers/cpufreq/cpufreq_governor.c | 13 ++++++++++++-
+ drivers/cpufreq/cpufreq_governor.h |  1 +
+ drivers/cpufreq/cpufreq_hotplug.c  | 10 +++++++---
+ 3 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/cpufreq/cpufreq_governor.c b/drivers/cpufreq/cpufreq_governor.c
+index dfe43113f742..ad78ff05e66e 100755
+--- a/drivers/cpufreq/cpufreq_governor.c
++++ b/drivers/cpufreq/cpufreq_governor.c
+@@ -331,6 +331,12 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 		if (!have_governor_per_policy()){
+ 			cdata->gdbs_data = dbs_data;
+ 		}
++
++		if(dbs_data->cdata->governor == GOV_HOTPLUG){
++			hg_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(policy->cpu);
++			mutex_init(&hg_dbs_info->hotplug_thread_mutex);
++		}
++
+ 		return 0;
+ 	case CPUFREQ_GOV_POLICY_EXIT:
+ 		if (!--dbs_data->usage_count) {
+@@ -345,6 +351,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 						CPUFREQ_TRANSITION_NOTIFIER);
+ 			}
+ 
++			if(dbs_data->cdata->governor == GOV_HOTPLUG){
++				hg_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(policy->cpu);
++				mutex_destroy(&hg_dbs_info->hotplug_thread_mutex);
++			}
++
+ 			cdata->exit(dbs_data);
+ 			kfree(dbs_data);
+ 			cdata->gdbs_data = NULL;
+@@ -457,11 +468,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 		if (dbs_data->cdata->governor == GOV_CONSERVATIVE)
+ 			cs_dbs_info->enable = 0;
+ 		if(dbs_data->cdata->governor == GOV_HOTPLUG){
++			mutex_lock(&dbs_data->mutex);
+ 			for_each_cpu(j, policy->cpus) {
+ 				hg_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(j);
+ 				hg_dbs_info->enable = 0;
+ 			}
+-			mutex_lock(&dbs_data->mutex);
+ 			hg_ops = dbs_data->cdata->gov_ops;
+ 			idle_notifier_unregister(hg_ops->notifier_block);
+ 			mutex_unlock(&dbs_data->mutex);
+diff --git a/drivers/cpufreq/cpufreq_governor.h b/drivers/cpufreq/cpufreq_governor.h
+index 6a223ef7c518..62884e5cbf20 100755
+--- a/drivers/cpufreq/cpufreq_governor.h
++++ b/drivers/cpufreq/cpufreq_governor.h
+@@ -155,6 +155,7 @@ struct hg_cpu_dbs_info_s {
+ 	struct cpufreq_frequency_table *freq_table;
+ 	unsigned int requested_freq;
+ 	unsigned int enable:1;
++	struct mutex hotplug_thread_mutex;
+ };
+ struct od_cpu_dbs_info_s {
+ 	struct cpu_dbs_common_info cdbs;
+diff --git a/drivers/cpufreq/cpufreq_hotplug.c b/drivers/cpufreq/cpufreq_hotplug.c
+index 966f58138dfc..fa118c1f7023 100755
+--- a/drivers/cpufreq/cpufreq_hotplug.c
++++ b/drivers/cpufreq/cpufreq_hotplug.c
+@@ -521,10 +521,14 @@ static void cpu_hotplug_thread(int *hotplug_flag)
+ 	struct dbs_data *dbs_data = policy->governor_data;
+ 	struct hg_dbs_tuners *hg_tuners = dbs_data->tuners;
+ 
++	dbs_info = &per_cpu(hg_cpu_dbs_info, policy->cpu);
++
+ 	while(1){
+ 		if (kthread_should_stop())
+ 			break;
+-		mutex_lock(&dbs_info->cdbs.timer_mutex);
++		mutex_lock(&dbs_info->hotplug_thread_mutex);
++		if(!dbs_info->enable)
++			goto wait_next_hotplug;
+ 		if(*hotplug_flag == CPU_HOTPLUG_PLUG){
+ 			*hotplug_flag = CPU_HOTPLUG_NONE;
+ 			j = 0;
+@@ -560,8 +564,8 @@ clear_cpu:
+ 				}
+ 			}
+ 		}
+-		mutex_unlock(&dbs_info->cdbs.timer_mutex);
+-
++wait_next_hotplug:
++		mutex_unlock(&dbs_info->hotplug_thread_mutex);
+ 		set_current_state(TASK_INTERRUPTIBLE);
+ 		schedule();
+ 		set_current_state(TASK_RUNNING);
+-- 
+2.19.0
+

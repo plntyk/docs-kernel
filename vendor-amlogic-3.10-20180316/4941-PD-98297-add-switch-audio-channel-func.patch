@@ -1,0 +1,198 @@
+From d4ea79d187434cc2b049de6305a77d5460481a87 Mon Sep 17 00:00:00 2001
+From: "xy.ding" <xy.ding@amlogic.com>
+Date: Tue, 29 Jul 2014 17:14:45 +0800
+Subject: [PATCH 4941/5965] PD#98297: add switch audio channel func
+
+Change-Id: I964baf30160d007eddc43cc41d622124830d1ae7
+---
+ drivers/amlogic/amaudio/amaudio.c       | 88 ++++++++++++++++++++++++-
+ include/linux/amlogic/amports/amaudio.h |  4 +-
+ sound/soc/aml/m8/aml_audio_hw.c         | 10 +++
+ sound/soc/aml/m8/aml_audio_hw.h         |  1 +
+ 4 files changed, 99 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/amaudio/amaudio.c b/drivers/amlogic/amaudio/amaudio.c
+index 9361d1eface6..4ada7df64280 100755
+--- a/drivers/amlogic/amaudio/amaudio.c
++++ b/drivers/amlogic/amaudio/amaudio.c
+@@ -68,6 +68,9 @@ extern unsigned int read_i2s_mute_swap_reg(void);
+ extern void audio_i2s_swap_left_right(unsigned int flag);
+ extern void audio_in_i2s_set_buf(u32 addr, u32 size);
+ extern void audio_in_i2s_enable(int flag);
++extern void audio_mute_left_right(unsigned flag);
++extern void audio_i2s_unmute(void);
++extern void audio_i2s_mute(void);
+ extern int audio_out_buf_ready ;
+ extern int audio_in_buf_ready;
+ 
+@@ -108,7 +111,8 @@ extern unsigned int timestamp_resample_type_flag;
+ static unsigned short* dump_buf = 0;
+ static unsigned int dump_size = 512*1024;
+ static unsigned int dump_off = 0;
+-
++static unsigned int mute_left_right = 0;
++static unsigned int mute_unmute = 0;
+ 
+ extern int aml_i2s_playback_enable;
+ extern unsigned int dac_mute_const;
+@@ -1500,6 +1504,17 @@ static long amaudio_ioctl(struct file *file,
+         case AMAUDIO_IOC_DIRECT_RIGHT_GAIN:
+             direct_audio_right_gain(arg);
+             break;
++        case AMAUDIO_IOC_MUTE_LEFT_RIGHT_CHANNEL:
++            audio_mute_left_right(arg);
++            break;
++        case AMAUDIO_IOC_MUTE_UNMUTE:
++            if (arg == 1) {
++                audio_i2s_mute();
++            } else if (arg == 0) {
++                audio_i2s_unmute();
++            }
++            break;
++
+ 		default:
+ 			break;
+ 		
+@@ -1600,6 +1615,17 @@ static long amaudio_utils_ioctl(struct file *file,
+             put_user(resample_delta,(__s32 __user *)arg);
+             printk("set resample_delta=%d\n ",resample_delta);
+             break;
++        case AMAUDIO_IOC_MUTE_LEFT_RIGHT_CHANNEL:
++            audio_mute_left_right(arg);
++            break;
++        case AMAUDIO_IOC_MUTE_UNMUTE:
++            if (arg == 1) {
++                audio_i2s_mute();
++            } else if (arg == 0) {
++                audio_i2s_unmute();
++            }
++            break;
++
+         default:
+         	break;
+     };
+@@ -1977,6 +2003,62 @@ static ssize_t show_debug(struct class* class, struct class_attribute* attr,  ch
+       return 0;
+ }
+ 
++static ssize_t show_mute_left_right(struct class* class, struct class_attribute* attr, char* buf)
++{
++    ssize_t ret = 0;
++
++    ret = sprintf(buf, "echo l/r/s/c to /sys/class/amaudio/mute_left_right file to mute left or right channel\n"
++                         " 1: mute left channel \n"
++                         " 0: mute right channel \n"
++                         " mute_left_right:%d \n", mute_left_right);
++
++    return ret;
++}
++
++static ssize_t store_mute_left_right(struct class* class, struct class_attribute* attr, const char* buf, size_t count)
++{
++    switch(buf[0]) {
++        case '1':
++            audio_mute_left_right(1);
++            break;
++
++        case '0':
++            audio_mute_left_right(0);
++            break;
++
++        default:
++            printk("unknow command!\n");
++    }
++
++    return count;
++}
++
++static ssize_t show_mute_unmute(struct class* class, struct class_attribute* attr, char* buf)
++{
++    ssize_t ret = 0;
++
++    ret = sprintf(buf, " 1: mute, 0:unmute: mute_unmute:%d,\n", mute_unmute);
++
++    return ret;
++}
++
++static ssize_t store_mute_unmute(struct class* class, struct class_attribute* attr, const char* buf, size_t count)
++{
++    switch(buf[0]) {
++        case '1':
++            audio_i2s_mute();
++            break;
++
++        case '0':
++            audio_i2s_unmute();
++            break;
++
++        default:
++            printk("unknow command!\n");
++    }
++
++    return count;
++}
+ 
+ static struct class_attribute amaudio_attrs[]={
+   __ATTR(enable_direct_audio,  S_IRUGO | S_IWUSR, show_direct_flag, store_direct_flag),
+@@ -1993,7 +2075,9 @@ static struct class_attribute amaudio_attrs[]={
+   __ATTR(dac_mute_const, S_IRUGO | S_IWUSR, dac_mute_const_show, dac_mute_const_store),
+   __ATTR_RO(output_enable),
+   __ATTR(record_type, S_IRUGO | S_IWUSR, record_type_show, record_type_store),  
+-   __ATTR(debug, S_IRUGO | S_IWUSR | S_IWGRP, show_debug, store_debug),
++  __ATTR(debug, S_IRUGO | S_IWUSR | S_IWGRP, show_debug, store_debug),
++  __ATTR(mute_left_right, S_IRUGO | S_IWUSR, show_mute_left_right, store_mute_left_right),  
++  __ATTR(mute_unmute, S_IRUGO | S_IWUSR, show_mute_unmute, store_mute_unmute),  
+   __ATTR_NULL
+ };
+ 
+diff --git a/include/linux/amlogic/amports/amaudio.h b/include/linux/amlogic/amports/amaudio.h
+index 742eb12e1b20..23b339911b74 100755
+--- a/include/linux/amlogic/amports/amaudio.h
++++ b/include/linux/amlogic/amports/amaudio.h
+@@ -76,8 +76,8 @@
+ #define AMAUDIO_IOC_GET_RESAMPLE_TYPE       _IOR(AMAUDIO_IOC_MAGIC, 0x1c, unsigned long)
+ #define AMAUDIO_IOC_SET_RESAMPLE_DELTA      _IOW(AMAUDIO_IOC_MAGIC, 0x1d, unsigned long)
+ #define AMAUDIO_IOC_GET_RESAMPLE_DELTA      _IOW(AMAUDIO_IOC_MAGIC, 0x1e, unsigned long)
+-
+-
++#define AMAUDIO_IOC_MUTE_LEFT_RIGHT_CHANNEL _IOW(AMAUDIO_IOC_MAGIC, 0x1f, unsigned long)
++#define AMAUDIO_IOC_MUTE_UNMUTE             _IOW(AMAUDIO_IOC_MAGIC, 0x20, unsigned long)
+ 
+ #define DIRECT_AUDIO_OFF	0
+ #define DIRECT_AUDIO_ON	    1
+diff --git a/sound/soc/aml/m8/aml_audio_hw.c b/sound/soc/aml/m8/aml_audio_hw.c
+index e6ce958fc245..89696464d534 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.c
++++ b/sound/soc/aml/m8/aml_audio_hw.c
+@@ -883,6 +883,16 @@ void audio_i2s_mute(void)
+     WRITE_MPEG_REG_BITS(AIU_958_CTRL, 3, 3, 2);
+ }
+ 
++void audio_mute_left_right(unsigned flag)
++{
++    if (flag == 0) //right
++    {
++        WRITE_MPEG_REG_BITS(AIU_958_CTRL, 1, 3, 2);
++    } else if (flag == 1) //left
++    {
++        WRITE_MPEG_REG_BITS(AIU_958_CTRL, 2, 3, 2);
++    }
++}
+ void audio_hw_958_reset(unsigned slow_domain, unsigned fast_domain)
+ {
+ 	WRITE_MPEG_REG(AIU_958_DCU_FF_CTRL,0);
+diff --git a/sound/soc/aml/m8/aml_audio_hw.h b/sound/soc/aml/m8/aml_audio_hw.h
+index 957f04664fe1..cdbc751770bc 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.h
++++ b/sound/soc/aml/m8/aml_audio_hw.h
+@@ -140,6 +140,7 @@ unsigned int read_iec958_rd_ptr(void);
+ void audio_in_spdif_enable(int flag);
+ unsigned audio_spdifout_pg_enable(unsigned char enable);
+ unsigned audio_aiu_pg_enable(unsigned char enable);
++void audio_mute_left_right(unsigned flag);
+ 
+ #include "mach/cpu.h"
+ 
+-- 
+2.19.0
+

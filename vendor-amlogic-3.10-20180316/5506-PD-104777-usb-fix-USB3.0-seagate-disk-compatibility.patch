@@ -1,0 +1,179 @@
+From 1f6dfc4f933bb829fc7507bed971ac477648459b Mon Sep 17 00:00:00 2001
+From: Yue Wang <yue.wang@amlogic.com>
+Date: Fri, 27 Mar 2015 15:03:18 +0800
+Subject: [PATCH 5506/5965] PD#104777: usb: fix USB3.0 seagate disk
+ compatibility
+
+Change-Id: Icf9a728c746b141aaa53575d613a6e6e9789eac1
+---
+ drivers/usb/core/hub.c         | 21 +++++++++++++++++
+ drivers/usb/dwc3/core.c        | 43 ++++++++++++++++++++++++++++++++++
+ drivers/usb/phy/phy-aml-usb3.c |  3 +--
+ include/linux/usb.h            |  3 +++
+ 4 files changed, 68 insertions(+), 2 deletions(-)
+ mode change 100755 => 100644 drivers/usb/phy/phy-aml-usb3.c
+ mode change 100755 => 100644 include/linux/usb.h
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 37937bec815e..f6e768f12adf 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -40,6 +40,11 @@
+ #endif
+ #endif
+ 
++#ifdef  CONFIG_AMLOGIC_USB_3
++extern void aml_enable_scrambling(void);
++extern void aml_disable_scrambling(void);
++#endif
++
+ #define USB_VENDOR_GENESYS_LOGIC		0x05e3
+ #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
+ 
+@@ -2039,6 +2044,7 @@ void usb_disconnect(struct usb_device **pdev)
+ 	 * this device (and any of its children) will fail immediately.
+ 	 * this quiesces everything except pending urbs.
+ 	 */
++
+ 	usb_set_device_state(udev, USB_STATE_NOTATTACHED);
+ 	dev_info(&udev->dev, "USB disconnect, device number %d\n",
+ 			udev->devnum);
+@@ -4126,6 +4132,14 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
+ 				if (retval != -ENODEV)
+ 					dev_err(&udev->dev, "device not accepting address %d, error %d\n",
+ 							devnum, retval);
++#ifdef  CONFIG_AMLOGIC_USB_3
++				if (j >= SET_ADDRESS_TRIES) {
++					if (udev->speed == USB_SPEED_HIGH) {
++						aml_enable_scrambling();
++						udev->aml_flag++;
++					}
++				}
++#endif
+ 				goto fail;
+ 			}
+ 			if (udev->speed == USB_SPEED_SUPER) {
+@@ -4158,6 +4172,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
+ 			break;
+ 		}
+ 	}
++
+ 	if (retval)
+ 		goto fail;
+ 
+@@ -4372,6 +4387,12 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
+ 				!(portstatus & USB_PORT_STAT_CONNECTION))
+ 			usb_phy_notify_disconnect(hcd->phy, udev->speed);
+ 		usb_disconnect(&hub->ports[port1 - 1]->child);
++#ifdef  CONFIG_AMLOGIC_USB_3
++		if (udev->aml_flag) {
++			aml_disable_scrambling();
++			udev->aml_flag = 0;
++		}
++#endif
+ 	}
+ 	clear_bit(port1, hub->change_bits);
+ 
+diff --git a/drivers/usb/dwc3/core.c b/drivers/usb/dwc3/core.c
+index 64aa8fd17e1e..e5500674cf41 100644
+--- a/drivers/usb/dwc3/core.c
++++ b/drivers/usb/dwc3/core.c
+@@ -321,6 +321,44 @@ static void dwc3_cache_hwparams(struct dwc3 *dwc)
+ 	parms->hwparams8 = dwc3_readl(dwc->regs, DWC3_GHWPARAMS8);
+ }
+ 
++#ifdef  CONFIG_AMLOGIC_USB_3
++struct dwc3 *g_dwc;
++
++void aml_enable_scrambling(void)
++{
++	u32			reg;
++
++	reg = dwc3_readl(g_dwc->regs, DWC3_GCTL);
++	reg &= ~DWC3_GCTL_DISSCRAMBLE;
++	dwc3_writel(g_dwc->regs, DWC3_GCTL, reg);
++
++	udelay(500);
++
++	usb_phy_init(g_dwc->usb3_phy);
++
++	return;
++}
++EXPORT_SYMBOL_GPL(aml_enable_scrambling);
++
++void aml_disable_scrambling(void)
++{
++	u32			reg;
++
++	reg = dwc3_readl(g_dwc->regs, DWC3_GCTL);
++	if (!(reg & DWC3_GCTL_DISSCRAMBLE)) {
++		reg |= DWC3_GCTL_DISSCRAMBLE;
++		dwc3_writel(g_dwc->regs, DWC3_GCTL, reg);
++
++		udelay(500);
++
++		usb_phy_init(g_dwc->usb3_phy);
++	}
++
++	return;
++}
++EXPORT_SYMBOL_GPL(aml_disable_scrambling);
++#endif
++
+ /**
+  * dwc3_core_init - Low-level initialization of DWC3 Core
+  * @dwc: Pointer to our controller context structure
+@@ -403,6 +441,7 @@ static void dwc3_core_exit(struct dwc3 *dwc)
+ #ifdef CONFIG_AMLOGIC_USB_3
+ static u64 dwc3_dmamask = DMA_BIT_MASK(32);
+ #endif
++
+ static int dwc3_probe(struct platform_device *pdev)
+ {
+ 	struct device_node	*node = pdev->dev.of_node;
+@@ -515,6 +554,10 @@ static int dwc3_probe(struct platform_device *pdev)
+ 	dwc->regs_size	= resource_size(res);
+ 	dwc->dev	= dev;
+ 
++#ifdef  CONFIG_AMLOGIC_USB_3
++	g_dwc = dwc;
++#endif
++
+ #ifdef CONFIG_AMLOGIC_USB_3
+ 	dev->dma_mask	= &dwc3_dmamask;
+ #else
+diff --git a/drivers/usb/phy/phy-aml-usb3.c b/drivers/usb/phy/phy-aml-usb3.c
+old mode 100755
+new mode 100644
+index f0cc9f37fb3f..fdaa2819ee56
+--- a/drivers/usb/phy/phy-aml-usb3.c
++++ b/drivers/usb/phy/phy-aml-usb3.c
+@@ -245,8 +245,7 @@ static int amlogic_usb3_init(struct usb_phy *x)
+ 		* MPLL_LOOP_CTL.PROP_CNTRL
+ 		*/
+ 		data = cr_bus_read(0x30);
+-		data |= (1 << 4);
+-		data &= ~(0x7 << 5);
++		data &= ~(0xf << 4);
+ 		cr_bus_write(0x30, data);
+ 
+ 		/*
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+old mode 100755
+new mode 100644
+index 696e34de5a08..db541e334682
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -570,6 +570,9 @@ struct usb_device {
+ 	struct usb3_lpm_parameters u1_params;
+ 	struct usb3_lpm_parameters u2_params;
+ 	unsigned lpm_disable_count;
++#ifdef  CONFIG_AMLOGIC_USB_3
++	unsigned aml_flag;
++#endif
+ };
+ #define	to_usb_device(d) container_of(d, struct usb_device, dev)
+ 
+-- 
+2.19.0
+

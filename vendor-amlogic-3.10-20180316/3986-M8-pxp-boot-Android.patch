@@ -1,0 +1,804 @@
+From fd64dba1baa588aa9fc1868c4c17d9b011f89f0d Mon Sep 17 00:00:00 2001
+From: "yun.cai" <yun.cai@amlogic.com>
+Date: Sun, 4 May 2014 14:25:26 +0800
+Subject: [PATCH 3986/5965] M8 pxp boot Android
+
+---
+ arch/arm/boot/dts/amlogic/meson8_pxp.dtd | 155 ++++++++++-------------
+ arch/arm/configs/meson8_vlsi_defconfig   | 117 ++++++++++++-----
+ drivers/amlogic/mmc/amlsd.c              |  88 +++++++------
+ sound/soc/aml/m8/Kconfig                 |   3 +
+ sound/soc/aml/m8/Makefile                |   3 +
+ 5 files changed, 203 insertions(+), 163 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_pxp.dtd b/arch/arm/boot/dts/amlogic/meson8_pxp.dtd
+index 6ddcddbb8607..e6104d5302d3 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_pxp.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_pxp.dtd
+@@ -76,9 +76,19 @@ void root_func(){
+ //$$ L2 PROP_U32 6 = "linux,usable-memory"
+ 	memory{
+ 		device_type = "memory";
+-		aml_reserved_start = <0x05000000>; /**reserved memory start */
+-		aml_reserved_end = <0x1a5fffff>;/**reserved memory end */
+-		linux,usable-memory = <0x00000000 0x04000000 0x1a600000 0x65a00000>;
++		aml_reserved_start = <0x06000000>; /**reserved memory start */
++		aml_reserved_end = <0x05000000>;/**reserved memory end : dtb start for uboot*/
++		phys_offset = <0x00000000>;
++		linux,total-memory = <0x80000000>;
++		
++		#address-cells = <1>;
++    #size-cells = <1>;
++
++    cma_0:region@0 {
++           region_name = "cma_0";
++           reg = <0 0x02700000>;
++           linux,contiguous-region;
++    };
+ 	};
+ /// ***************************************************************************************
+ ///	-	GIC
+@@ -103,23 +113,12 @@ void root_func(){
+ 		compatible = "amlogic,vpu";
+ 		dev_name = "vpu";	
+ 		status = "ok";
+-		clk_level = <4>;
++		clk_level = <7>;
+ 		/**    	0: 106.25M		1: 127.5M		2: 159.375M
+ 				3: 182.15M		4: 212.5M		5: 255M
+ 		    	6: 318.75M		7: 364.3M					 */
+ 	};
+ 	
+-/// ***************************************************************************************
+-///	-	ION
+-//$$ MODULE="ION"
+-//$$ DEVICE="ion_dev"
+-//$$ L2 PROP_STR = "status"
+-    ion_dev{
+-        compatible = "amlogic,ion_dev";
+-        dev_name = "ion_dev";
+-        status = "ok";
+-        reg = <0x14500000 0x03000000>;
+-    };
+ /// **************************************************************************************	
+ /// -   DISP&MM-FB
+ //$$ MODULE = "DISP&MM-FB"	
+@@ -132,8 +131,8 @@ void root_func(){
+ 		compatible = "amlogic,mesonfb";
+ 		dev_name = "mesonfb";
+ 		status = "okay";
+-		reg = <0x05100000 0x01000000
+-	   	 		0x06100000 0x00100000>;
++	   	reserve-memory = <0x01000000  0x00100000>;
++	   	reserve-iomap = "true";
+         vmode = <3>; /**0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P 3:VMODE_1080P*/
+  		display_size_default = <1920 1080 1920 2160 32>;
+ 	};
+@@ -145,7 +144,8 @@ void root_func(){
+ 		compatible = "amlogic,deinterlace";
+ 		dev_name = "deinterlace";
+ 		status = "ok";
+-		reg = <0x12200000 0x02300000>;
++		reserve-memory = <0x02300000>; 	 
++
+ 	};
+ 
+ /// ***************************************************************************************
+@@ -158,8 +158,8 @@ void root_func(){
+ 		compatible = "amlogic,mesonstream";
+ 		dev_name = "mesonstream.0";
+ 		status = "okay";
+-		reg = <0x06200000 0x04000000
+-			   0x18400000 0x00a00000>;
++		reserve-memory = <0x02000000>;
++		reserve-iomap = "true";
+ 	};
+ 
+ 
+@@ -173,7 +173,7 @@ void root_func(){
+ 		compatible = "amlogic,ppmgr";
+ 		dev_name = "ppmgr";
+ 		status = "okay";
+-		reg = <0x14500000 0x03000000>;		
++		reserve-memory = <0x03000000>;
+ 	};
+ 
+ /// ***************************************************************************************
+@@ -186,7 +186,8 @@ void root_func(){
+ 		compatible = "amlogic,amvenc_avc";
+ 		dev_name = "amvenc_avc.0";
+ 		status = "okay";
+-		reg = <0x17500000 0x00f00000>;
++
++        linux,contiguous-region = <&cma_0>;
+ 	};
+ 
+ /// ***************************************************************************************
+@@ -201,7 +202,7 @@ void root_func(){
+         compatible = "amlogic,vdin";
+         dev_name = "vdin0";
+         status = "ok";
+-        reg = <0x0a200000 0x04000000>;
++	 reserve-memory = <0x04000000>;
+         irq = <115>;
+         vdin_id = <0>;
+ 	};
+@@ -215,7 +216,7 @@ void root_func(){
+         compatible = "amlogic,vdin";
+         dev_name = "vdin1";
+         status = "ok";
+-        reg = <0x0e200000 0x04000000>;
++	 reserve-memory = <0x04000000>;
+         irq = <117>;
+         vdin_id = <1>;
+ 	};
+@@ -230,20 +231,24 @@ void root_func(){
+ 		compatible = "amlogic,amlvideo2";
+ 		dev_name = "amlvideo2.0";
+ 		status = "okay";
+-		reg = <0x18e00000 0x01800000>;
++		reserve-memory = <0x01800000>;
++		reserve-iomap = "true";
+ 	};
+ 
++
+ /// ***************************************************************************************
+-///	-	DISP&MM-Video Input Manager
+-//$$ MODULE = "DISP&MM-Video Input Manager"
+-//$$ DEVICE="vm"
++///	-	ION
++//$$ MODULE="ION"
++//$$ DEVICE="ion_dev"
+ //$$ L2 PROP_STR = "status"
+-    vm{
+-		compatible = "amlogic,vm";
+-		dev_name = "vm.0";
+-		status = "okay";
+-	};
+-
++    ion_dev{
++        compatible = "amlogic,ion_dev";
++        dev_name = "ion_dev";
++        status = "ok";
++        share-memory-name = "ppmgr0";
++        share-memory-offset = <0>;
++        share-memory-size = <0x03000000>;
++    };
+ /// ***************************************************************************************
+ ///	-	DISP&MM-Vout
+ //$$ MODULE = "DISP&MM-Vout"
+@@ -333,7 +338,7 @@ void root_func(){
+ //$$ L2 PROP_CHOICE "sdio_pin_4_match" = "pinctrl-4"
+ //$$ L2 PROP_CHOICE "sdio_pin_5_match" = "pinctrl-5"
+ //$$ L2 PROP_CHOICE "sdio_pin_6_match" = "pinctrl-6"
+-    sdio{
++   sdio{
+         compatible = "amlogic,aml_sdio";
+         dev_name = "aml_sdio.0";
+         status = "okay";
+@@ -347,7 +352,7 @@ void root_func(){
+         pinctrl-5 = <&sdio_all_pins>;
+         pinctrl-6 = <&sd_1bit_pins>;
+ 
+-//$$ DEVICE="sd"
++//$$ DEVICE="sdio"
+ //$$ L2 PROP_STR = "status"
+ //$$ L3 PROP_U32 = "port"
+ //$$ L2 PROP_STR = "pinname"
+@@ -355,58 +360,21 @@ void root_func(){
+ //$$ L2 PROP_STR 3 = "caps"
+ //$$ L3 PROP_U32 = "f_min"
+ //$$ L3 PROP_U32 = "f_max"
+-//$$ L3 PROP_U32 = "f_max_w"
+-//$$ L3 PROP_U32 = "max_req_size"
+-//$$ L2 PROP_STR = "gpio_dat3"
+-//$$ L2 PROP_STR = "jtag_pin"
+-//$$ L2 PROP_STR = "gpio_cd"
+-//$$ L2 PROP_U32 = "irq_in"
+-//$$ L2 PROP_U32 = "irq_out"
+-//$$ L2 PROP_U32 = "card_type"
+-        sd{
+-            status = "okay";
+-            port = <0>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+-            pinname = "sd";
+-            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED";
+-            f_min = <300000>;
+-            f_max = <50000000>;
+-            f_max_w = <50000000>;
+-            max_req_size = <0x20000>;          /**128KB*/
+-            //gpio_dat3 = "CARD_4";
+-            //jtag_pin = "CARD_0";
+-            gpio_cd = "CARD_6";
+-            irq_in = <3>;
+-            irq_out = <5>;
+-            card_type = <2>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+-        };
+-
+-//$$ DEVICE="emmc"
+-//$$ L2 PROP_STR = "status"
+-//$$ L3 PROP_U32 = "port"
+-//$$ L2 PROP_STR = "pinname"
+-//$$ L3 PROP_U32 = "ocr_avail"
+-//$$ L2 PROP_STR 4 = "caps"
+-//$$ L3 PROP_U32 = "f_min"
+-//$$ L3 PROP_U32 = "f_max"
+-//$$ L3 PROP_U32 = "f_max_w"
+-//$$ L3 PROP_U32 = "max_req_size"
+-//$$ L2 PROP_STR = "gpio_dat3"
+-//$$ L2 PROP_U32 = "card_type"
+-        emmc{
+-            status = "ok";
+-            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+-            pinname = "emmc";
+-            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
+-            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
+-            f_min = <300000>;
+-            f_max = <50000000>;
+-            f_max_w = <50000000>;
+-            max_req_size = <0x20000>;          /**128KB*/
+-            gpio_dat3 = "BOOT_3";
+-            card_type = <5>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++//$$ L3 PROP_U32 = "max_req_size"    
++//$$ L2 PROP_U32 = "card_type"    
++        sdio{
++          status = "okay";
++          port = <0>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++          pinname = "sdio";
++          ocr_avail = <0x200000>;
++          caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED", "MMC_CAP_NONREMOVABLE";
++          f_min = <300000>;
++          f_max = <50000000>;
++          max_req_size = <0x20000>;          /**128KB*/
++          card_type = <5>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+         };
+     };
++    
+ 
+ /// ***************************************************************************************
+ ///	-	I2C
+@@ -847,7 +815,7 @@ void root_func(){
+             id_reg = <0x00>;
+             id_val = <0x21>;
+             capless = <0>;
+-            status = "okay";
++            status = "disable";
+         };
+         rt5631:rt5631{
+             codec_name = "rt5631";
+@@ -901,9 +869,20 @@ void root_func(){
+         hp_paraments = <800 300 0 5 1>;
+         pinctrl-names = "aml_snd_m8";
+         pinctrl-0 = <&audio_pins>;
+-        status = "okay";
++        status = "disabled";
+         
+     };
++	dummy_codec_audio{
++        status = "okay";
++        compatible = "amlogic,aml_dummy_codec_audio";
++        dev_name = "aml_dummy_codec_audio.0";
++    };
++    
++    dummy_codec{
++        status = "okay";
++        compatible = "amlogic,aml_dummy_codec";
++        dev_name = "dummy_codec.0";
++    };
+ 
+ /// ***************************************************************************************
+ ///	-	Camera
+diff --git a/arch/arm/configs/meson8_vlsi_defconfig b/arch/arm/configs/meson8_vlsi_defconfig
+index 84e76351a654..6e8bad69bf2c 100644
+--- a/arch/arm/configs/meson8_vlsi_defconfig
++++ b/arch/arm/configs/meson8_vlsi_defconfig
+@@ -15,22 +15,28 @@ CONFIG_KALLSYMS_ALL=y
+ CONFIG_EMBEDDED=y
+ CONFIG_MODULES=y
+ CONFIG_MODULE_UNLOAD=y
++CONFIG_MESON_SUSPEND=y
+ CONFIG_ARCH_MESON8=y
+ CONFIG_MESON_LEGACY_REGISTER_API=y
+ CONFIG_MESON_CPU_EMULATOR=y
+ CONFIG_ARM_ERRATA_751472=y
+ CONFIG_ARM_ERRATA_754322=y
+-CONFIG_ARM_ERRATA_764369=y
+ CONFIG_SMP=y
+ CONFIG_HOTPLUG_CPU=y
+ CONFIG_PREEMPT=y
+ CONFIG_AEABI=y
+ CONFIG_HIGHMEM=y
+ # CONFIG_COMPACTION is not set
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_GOV_ONDEMAND=y
++CONFIG_CPU_FREQ_GOV_INTERACTIVE=y
++CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
++CONFIG_AMLOGIC_MESON_CPUFREQ=y
+ CONFIG_VFP=y
+ CONFIG_NEON=y
+ CONFIG_BINFMT_MISC=y
+-# CONFIG_SUSPEND is not set
++CONFIG_WAKELOCK=y
++CONFIG_PM_RUNTIME=y
+ CONFIG_NET=y
+ CONFIG_PACKET=y
+ CONFIG_PACKET_DIAG=y
+@@ -138,48 +144,100 @@ CONFIG_NET_CLS_ACT=y
+ CONFIG_NET_ACT_POLICE=y
+ CONFIG_NET_ACT_GACT=y
+ CONFIG_NET_ACT_MIRRED=y
+-# CONFIG_WIRELESS is not set
+ # CONFIG_OF_LM is not set
+-# CONFIG_AML_RTC is not set
++CONFIG_I2C_AML=y
++CONFIG_SARADC_AM=y
+ # CONFIG_MESON_INPUT_REMOTE is not set
+ # CONFIG_MESON_NEW_INPUT_REMOTE is not set
+ # CONFIG_MESON_INPUT_KEYBOARD is not set
++CONFIG_AML_GPIO_KEY=y
+ # CONFIG_AMLOGIC_BOARD_HAS_PMU is not set
+-CONFIG_PINCTRL_AMLOGIC=y
+-CONFIG_GPIO_AMLOGIC=y
+-CONFIG_AML_NEXT_GEN_NAND=y
+-CONFIG_AML_NAND_KEY=y 
++# CONFIG_AML_DVFS is not set
++CONFIG_MMC_AML=y
++# CONFIG_AML_NFTL_NEW is not set
+ # CONFIG_AM_NAND is not set
++# CONFIG_AML_NEXT_NAND is not set
+ # CONFIG_AMAUDIO is not set
+-# CONFIG_AM_CANVAS is not set
+-# CONFIG_AM_DISPLAY_MODULE is not set
+-# CONFIG_AML_HDMI_TX is not set
+-# CONFIG_UMP is not set
+-# CONFIG_MALI400 is not set
+-# CONFIG_AMLOGIC_ION is not set
++CONFIG_VSYNC_RDMA=y
++CONFIG_AM_VIDEO=y
++# CONFIG_AM_VDEC_H264_4K2K is not set
++CONFIG_AM_TV_OUTPUT2=y
++CONFIG_FB_AM=y
++CONFIG_FB_OSD2_CURSOR=y
++CONFIG_AM_FB_EXT=y
++CONFIG_AMLOGIC_BACKLIGHT=y
++CONFIG_AM_GE2D=y
++CONFIG_AM_LOGO=y
++CONFIG_AM_HDMI_ONLY=y
++# CONFIG_AML_EXT_HDMIIN is not set
++CONFIG_POST_PROCESS_MANAGER=y
++CONFIG_POST_PROCESS_MANAGER_PPSCALER=y
++# CONFIG_VIDEOBUF2_ION is not set
+ # CONFIG_CRYPTO_AML_HW_CRYPRO is not set
+ # CONFIG_CRYPTO_DEVICE_DRIVER is not set
+ CONFIG_UEVENT_HELPER_PATH="/sbin/hotplug"
+ CONFIG_DEVTMPFS=y
+ CONFIG_DEVTMPFS_MOUNT=y
+-CONFIG_SYNC=y
++CONFIG_MTD=y
++CONFIG_MTD_BLOCK=y
++CONFIG_MTD_NAND=y
+ CONFIG_PROC_DEVICETREE=y
+ CONFIG_OF_SELFTEST=y
+ CONFIG_BLK_DEV_LOOP=y
+-# CONFIG_INPUT_MOUSEDEV is not set
+-# CONFIG_INPUT_KEYBOARD is not set
+-# CONFIG_INPUT_MOUSE is not set
+-# CONFIG_SERIO is not set
++CONFIG_SCSI=y
++CONFIG_BLK_DEV_SD=y
++CONFIG_BLK_DEV_SR=y
++CONFIG_SCSI_MULTI_LUN=y
++CONFIG_NETDEVICES=y
++CONFIG_TUN=y
++CONFIG_PHYLIB=y
++CONFIG_PPP=y
++CONFIG_PPP_BSDCOMP=y
++CONFIG_PPP_DEFLATE=y
++CONFIG_PPP_FILTER=y
++CONFIG_PPP_MPPE=y
++CONFIG_PPP_MULTILINK=y
++CONFIG_PPPOLAC=y
++CONFIG_PPPOPNS=y
++CONFIG_PPP_ASYNC=y
++CONFIG_PPP_SYNC_TTY=y
++CONFIG_INPUT_POLLDEV=y
++CONFIG_INPUT_EVDEV=y
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_UINPUT=y
+ CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+ # CONFIG_HWMON is not set
+-CONFIG_ION=y
+-CONFIG_FB=y
++CONFIG_MEDIA_SUPPORT=y
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_SOC=y
++CONFIG_SND_AML_M8_SOC=y
++CONFIG_SND_AML_M8=y
++CONFIG_SND_AML_M_DUMMY_CODEC=y
+ CONFIG_UHID=y
+ # CONFIG_USB_SUPPORT is not set
+-# CONFIG_IOMMU_SUPPORT is not set
+-# CONFIG_FILE_LOCKING is not set
+-# CONFIG_DNOTIFY is not set
+-# CONFIG_INOTIFY_USER is not set
++CONFIG_UIO=y
++CONFIG_UIO_PDRV=y
++CONFIG_UIO_PDRV_GENIRQ=y
++CONFIG_STAGING=y
++CONFIG_ANDROID=y
++CONFIG_ANDROID_BINDER_IPC=y
++CONFIG_ASHMEM=y
++CONFIG_ANDROID_LOGGER=y
++CONFIG_ANDROID_LOW_MEMORY_KILLER=y
++CONFIG_ANDROID_INTF_ALARM_DEV=y
++CONFIG_SYNC=y
++CONFIG_EXT2_FS=y
++CONFIG_EXT3_FS=y
++CONFIG_EXT3_FS_POSIX_ACL=y
++CONFIG_EXT3_FS_SECURITY=y
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_POSIX_ACL=y
++CONFIG_EXT4_FS_SECURITY=y
++CONFIG_EXT4_DEBUG=y
++CONFIG_QUOTA=y
++CONFIG_QFMT_V2=y
++CONFIG_FUSE_FS=y
+ CONFIG_ISO9660_FS=y
+ CONFIG_JOLIET=y
+ CONFIG_ZISOFS=y
+@@ -187,24 +245,17 @@ CONFIG_UDF_FS=y
+ CONFIG_MSDOS_FS=y
+ CONFIG_VFAT_FS=y
+ CONFIG_TMPFS=y
+-# CONFIG_MISC_FILESYSTEMS is not set
+-# CONFIG_NETWORK_FILESYSTEMS is not set
++CONFIG_CRAMFS=y
+ CONFIG_NLS_CODEPAGE_437=y
+ CONFIG_NLS_ISO8859_1=y
+ CONFIG_PRINTK_TIME=y
+ CONFIG_MAGIC_SYSRQ=y
+ CONFIG_READABLE_ASM=y
+-CONFIG_DEBUG_FS=y
+ CONFIG_DEBUG_SECTION_MISMATCH=y
+ CONFIG_SCHEDSTATS=y
+ CONFIG_TIMER_STATS=y
+ CONFIG_DEBUG_INFO=y
+-CONFIG_RCU_CPU_STALL_TIMEOUT=60
+-CONFIG_CRYPTO_ECB=y
+ CONFIG_CRYPTO_SHA256=y
+-CONFIG_CRYPTO_ARC4=y
+-CONFIG_CRC_CCITT=y
+-CONFIG_CRC16=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
+ CONFIG_AVERAGE=y
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index 34a39f87e78f..425ba1e281a0 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -109,7 +109,7 @@ static const struct file_operations card_proc_fops = {
+ };
+ 
+ /**
+- * add_card_partition : add card partition , refer to 
++ * add_card_partition : add card partition , refer to
+  * board-****.c  inand_partition_info[]
+  * @disk: add partitions in which disk
+  * @part: partition table
+@@ -120,7 +120,7 @@ int add_part_table(struct mtd_partition * part, unsigned int nr_part)
+ 	unsigned int i;
+ 	uint64_t cur_offset=0;
+ 	uint64_t offset, size;
+-	
++
+ 	if(!part)
+ 		return 0;
+ 
+@@ -130,7 +130,7 @@ int add_part_table(struct mtd_partition * part, unsigned int nr_part)
+ 		if (part[i].offset== MTDPART_OFS_APPEND)
+ 			offset = cur_offset;
+ 		cur_offset = offset + size;
+-		
++
+ 		card_table[i] = &part[i];
+ 		card_table[i]->offset = offset<<9;
+ 		card_table[i]->size = size<<9;
+@@ -233,7 +233,7 @@ out_put:
+ }
+ 
+ /**
+- * add_emmc_partition : add emmc partition , refer to 
++ * add_emmc_partition : add emmc partition , refer to
+  * board-****.c  inand_partition_info[]
+  * @disk: add partitions in which disk
+  * @part: partition table
+@@ -244,7 +244,7 @@ int add_emmc_partition(struct gendisk * disk)
+ 	unsigned int i;
+ 	struct hd_struct * ret=NULL;
+ 	uint64_t offset, size;
+-	
++
+ 	printk("add_emmc_partition\n");
+ 	if(!proc_card){
+ 		printk("proc_nand NULL\n");
+@@ -261,10 +261,10 @@ int add_emmc_partition(struct gendisk * disk)
+ 		}
+ 		else
+ 			size = card_table[i]->size>>9;
+-		
++
+ 		ret = add_emmc_each_part(disk, 1+i, offset, size, 0, card_table[i]->name);
+ 		printk("[%sp%d] %20s  offset 0x%012llx, len 0x%012llx %s\n",
+-				disk->disk_name, 1+i, card_table[i]->name, offset<<9, 
++				disk->disk_name, 1+i, card_table[i]->name, offset<<9,
+ 				size<<9, IS_ERR(ret) ? "add fail":"");
+ 	}
+ 	return 0;
+@@ -594,7 +594,7 @@ void aml_sdhc_init_debugfs(struct mmc_host *mmc)
+                 &aml_sdhc_regs_fops);
+ 	if (IS_ERR(node))
+ 		return;
+-    
++
+ 	node = debugfs_create_file("params", S_IRWXUGO, root, mmc,
+                 &amlsd_param_fops);
+ 	if (IS_ERR(node))
+@@ -633,7 +633,7 @@ void aml_sdio_init_debugfs(struct mmc_host *mmc)
+                 &aml_sdio_regs_fops);
+ 	if (IS_ERR(node))
+ 		return;
+-    
++
+ 	node = debugfs_create_file("params", S_IRWXUGO, root, mmc,
+                 &amlsd_param_fops);
+ 	if (IS_ERR(node))
+@@ -703,7 +703,7 @@ int of_amlsd_init(struct amlsd_platform* pdata)
+ 	if(pdata->gpio_ro) {
+ 		ret = amlogic_gpio_request_one(pdata->gpio_ro, GPIOF_IN, MODULE_NAME);
+         if (!ret) { // ok
+-            ret = amlogic_set_pull_up_down(pdata->gpio_ro, 1, MODULE_NAME); // 0:pull down, 1:pull up 
++            ret = amlogic_set_pull_up_down(pdata->gpio_ro, 1, MODULE_NAME); // 0:pull down, 1:pull up
+             CHECK_RET(ret);
+         } else {
+             sdio_err("request gpio_ro pin fail!\n");
+@@ -752,21 +752,21 @@ static struct pinctrl * __must_check aml_devm_pinctrl_get_select (
+         host->pinctrl = p;
+         // sdio_err("switch %s\n", name);
+     }
+-	
++
+ 	s = pinctrl_lookup_state(p, name);
+ 	if (IS_ERR(s)) {
+         sdio_err("lookup %s fail\n", name);
+ 		devm_pinctrl_put(p);
+ 		return ERR_CAST(s);
+ 	}
+-	
++
+ 	ret = pinctrl_select_state(p, s);
+ 	if (ret < 0) {
+         sdio_err("select %s fail\n", name);
+ 		devm_pinctrl_put(p);
+ 		return ERR_PTR(ret);
+ 	}
+-	
++
+ 	return p;
+ }
+ 
+@@ -795,10 +795,10 @@ void of_amlsd_xfer_pre(struct amlsd_platform* pdata)
+     } else { // MMC_CS_HIGH
+         aml_snprint(&p, &size, "%s_clk_cmd_pins", pdata->pinname);
+     }
+-    
++
+     // if pinmux setting is changed (pinctrl_name is different)
+     if (strncmp(pdata->host->pinctrl_name, pinctrl, sizeof(pdata->host->pinctrl_name))) {
+-        if (strlcpy(pdata->host->pinctrl_name, pinctrl, sizeof(pdata->host->pinctrl_name)) 
++        if (strlcpy(pdata->host->pinctrl_name, pinctrl, sizeof(pdata->host->pinctrl_name))
+                 >= sizeof(pdata->host->pinctrl_name)) {
+             sdio_err("Pinctrl name is too long!\n");
+ 			return;
+@@ -843,7 +843,7 @@ int of_amlsd_ro (struct amlsd_platform* pdata)
+     if (pdata->gpio_ro)
+         ret = amlogic_get_value(pdata->gpio_ro, MODULE_NAME);
+     // sdio_err("read-only?--%s\n", ret?"YES":"NO");
+-    return ret; 
++    return ret;
+ }
+ 
+ // void of_init_pins (struct amlsd_platform* pdata)
+@@ -878,7 +878,7 @@ void aml_cs_high (struct amlsd_platform * pdata) // chip select high
+ 	 * GO_IDLE; that would put chips into SPI mode.  Remind them of
+ 	 * that in case of hardware that won't pull up DAT3/nCS otherwise.
+      *
+-     * Now the way to accomplish this is: 
++     * Now the way to accomplish this is:
+      * 1) set DAT3-pin as a GPIO pin(by pinmux), and pulls up;
+      * 2) send CMD0;
+      * 3) set DAT3-pin as a card-dat3-pin(by pinmux);
+@@ -950,7 +950,10 @@ static int aml_is_sdjtag(struct amlsd_platform * pdata)
+ 
+ static int aml_is_sduart(struct amlsd_platform * pdata)
+ {
+-    int dat3;
++#ifdef CONFIG_MESON_CPU_EMULATOR
++	return 0;
++#else
++	int dat3;
+ 
+     if(pdata->is_sduart)
+         return 1;
+@@ -975,6 +978,7 @@ static int aml_is_sduart(struct amlsd_platform * pdata)
+         // }
+     // }
+     return 0;
++#endif
+ }
+ 
+ // int n=0;
+@@ -1038,7 +1042,7 @@ static int aml_uart_switch(struct amlsd_platform* pdata, bool on)
+             mdelay(100);
+         }
+     }
+-    printk("CARD %x, AO %x\n", pdata->uart_card_pinctrl, 
++    printk("CARD %x, AO %x\n", pdata->uart_card_pinctrl,
+     pdata->uart_ao_pinctrl);
+ #endif
+ }
+@@ -1136,7 +1140,7 @@ irqreturn_t aml_irq_cd_thread(int irq, void *data)
+ 
+     mdelay(500);
+     aml_sd_uart_detect(pdata);
+-    
++
+     mmc_detect_change(pdata->mmc, msecs_to_jiffies(500));
+ 
+ 	return IRQ_HANDLED;
+@@ -1185,7 +1189,7 @@ int aml_check_unsupport_cmd(struct mmc_host* mmc, struct mmc_request* mrq)
+     // mrq->cmd->error = -EINVAL;
+     // mmc_request_done(mmc, mrq);
+     // return -EINVAL;
+-    // } 
++    // }
+ 
+     if (mrq->cmd->opcode == 3) { // CMD3 means the first time initialized flow is running
+         pdata->is_fir_init = false;
+@@ -1232,11 +1236,11 @@ int aml_check_unsupport_cmd(struct mmc_host* mmc, struct mmc_request* mrq)
+ int aml_sd_voltage_switch (struct amlsd_platform* pdata, char signal_voltage)
+ {
+ #ifdef CONFIG_ARCH_MESON8
+-#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU 
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+     int vol = LDO4DAC_REG_3_3_V;
+     int delay_ms = 0;
+     char *str;
+-    struct aml_pmu_driver *pmu_driver; 
++    struct aml_pmu_driver *pmu_driver;
+ 
+     if ((pdata->port != PORT_SDHC_B) // only SDHC_B support voltage switch
+             || (pdata->signal_voltage == signal_voltage)) {
+@@ -1244,12 +1248,12 @@ int aml_sd_voltage_switch (struct amlsd_platform* pdata, char signal_voltage)
+         return 0; // voltage is the same, return directly
+     }
+ 
+-    pmu_driver = aml_pmu_get_driver(); 
+-    if (pmu_driver == NULL) { 
+-        sdhc_err("no pmu driver\n"); 
++    pmu_driver = aml_pmu_get_driver();
++    if (pmu_driver == NULL) {
++        sdhc_err("no pmu driver\n");
+         return -EINVAL;
+-    } 
+-    else if (pmu_driver->pmu_reg_write) { 
++    }
++    else if (pmu_driver->pmu_reg_write) {
+         switch (signal_voltage) {
+             case MMC_SIGNAL_VOLTAGE_180:
+                 vol = LDO4DAC_REG_1_8_V;
+@@ -1257,7 +1261,7 @@ int aml_sd_voltage_switch (struct amlsd_platform* pdata, char signal_voltage)
+                 str = "1.80 V";
+ 
+                 if (!mmc_host_uhs(pdata->mmc)) {
+-                    sdhc_err("switch to 1.8V for a non-uhs device.\n"); 
++                    sdhc_err("switch to 1.8V for a non-uhs device.\n");
+                 }
+ 
+                 break;
+@@ -1273,14 +1277,14 @@ int aml_sd_voltage_switch (struct amlsd_platform* pdata, char signal_voltage)
+                 str = "invalid";
+                 break;
+         }
+- 
++
+         pmu_driver->pmu_reg_write(LDO4DAC_REG_ADDR, vol); // set voltage
+         pdata->signal_voltage = signal_voltage;
+         mdelay(delay_ms); // wait for voltage to be stable
+         sdhc_dbg(AMLSD_DBG_COMMON, "voltage: %s\n", str);
+-        // sdhc_err("delay %dms.\n", delay_ms); 
++        // sdhc_err("delay %dms.\n", delay_ms);
+     }
+-#endif 
++#endif
+ #endif
+ 
+     return 0;
+@@ -1298,7 +1302,7 @@ static int __init sdhc_debug_setup(char *str)
+ __setup("sdhc_debug=", sdhc_debug_setup);
+ 
+ 
+-unsigned int sdio_debug=0x000000; // 0xffffff; // 
++unsigned int sdio_debug=0x000000; // 0xffffff; //
+ 
+ static int __init sdio_debug_setup(char *str)
+ {
+@@ -1309,12 +1313,12 @@ __setup("sdio_debug=", sdio_debug_setup);
+ 
+ void aml_dbg_print_pinmux (void)
+ {
+-    printk("Pinmux: REG2=0x%08x, REG3=0x%08x, REG4=0x%08x, REG5=0x%08x, REG6=0x%08x, REG8=0x%08x\n", 
+-            READ_CBUS_REG(PERIPHS_PIN_MUX_2), 
+-            READ_CBUS_REG(PERIPHS_PIN_MUX_3), 
+-            READ_CBUS_REG(PERIPHS_PIN_MUX_4), 
+-            READ_CBUS_REG(PERIPHS_PIN_MUX_5), 
+-            READ_CBUS_REG(PERIPHS_PIN_MUX_6), 
++    printk("Pinmux: REG2=0x%08x, REG3=0x%08x, REG4=0x%08x, REG5=0x%08x, REG6=0x%08x, REG8=0x%08x\n",
++            READ_CBUS_REG(PERIPHS_PIN_MUX_2),
++            READ_CBUS_REG(PERIPHS_PIN_MUX_3),
++            READ_CBUS_REG(PERIPHS_PIN_MUX_4),
++            READ_CBUS_REG(PERIPHS_PIN_MUX_5),
++            READ_CBUS_REG(PERIPHS_PIN_MUX_6),
+             READ_CBUS_REG(PERIPHS_PIN_MUX_8));
+ }
+ 
+@@ -1371,11 +1375,11 @@ void aml_dbg_verify_pull_up (struct amlsd_platform * pdata)
+     }
+ 
+     if ((reg&reg_mask) != reg_mask) {
+-        sdio_err(" %s pull-up error: CMD%d, reg=%#08x, reg_mask=%#x\n", 
++        sdio_err(" %s pull-up error: CMD%d, reg=%#08x, reg_mask=%#x\n",
+                 mmc_hostname(pdata->mmc), pdata->host->opcode, reg, reg_mask);
+     }
+     if ((reg_en&reg_mask) != reg_mask) {
+-        sdio_err(" %s pull-up error: CMD%d, reg_en=%#08x, reg_mask=%#x\n", 
++        sdio_err(" %s pull-up error: CMD%d, reg_en=%#08x, reg_mask=%#x\n",
+                 mmc_hostname(pdata->mmc), pdata->host->opcode, reg_en, reg_mask);
+     }
+ }
+@@ -1417,7 +1421,7 @@ int aml_dbg_verify_pinmux (struct amlsd_platform * pdata)
+ 
+     reg = READ_CBUS_REG(reg);
+     if ((reg&reg_mask) != reg_mask) {
+-        sdio_err(" %s pinmux error: CMD%d, reg=%#08x, reg_mask=%#x\n", 
++        sdio_err(" %s pinmux error: CMD%d, reg=%#08x, reg_mask=%#x\n",
+                 mmc_hostname(pdata->mmc), pdata->host->opcode, reg, reg_mask);
+     }
+ 
+diff --git a/sound/soc/aml/m8/Kconfig b/sound/soc/aml/m8/Kconfig
+index 9cf8fbe489c8..29216b48f4ad 100755
+--- a/sound/soc/aml/m8/Kconfig
++++ b/sound/soc/aml/m8/Kconfig
+@@ -16,3 +16,6 @@ config SND_AML_M8_PCM
+ 	depends on SND_AML_M8_SOC
+ 	select SND_SOC_PCM2BT if SND_AML_M8_PCM
+ 	
++config SND_AML_M_DUMMY_CODEC
++    tristate "AML M series board with DUMMY_CODEC"
++    select SND_SOC_DUMMY_CODEC
+\ No newline at end of file
+diff --git a/sound/soc/aml/m8/Makefile b/sound/soc/aml/m8/Makefile
+index b9544d711138..a48b980bb908 100755
+--- a/sound/soc/aml/m8/Makefile
++++ b/sound/soc/aml/m8/Makefile
+@@ -28,3 +28,6 @@ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-spdif-codec.o
+ snd-soc-aml-m8-objs := aml_m8.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-m8.o
+ 
++#AML M series with dummy codec support
++snd-soc-aml-m-dummy-objs := aml_m_dummy.o
++obj-$(CONFIG_SND_AML_M_DUMMY_CODEC) += snd-soc-aml-m-dummy.o
+\ No newline at end of file
+-- 
+2.19.0
+

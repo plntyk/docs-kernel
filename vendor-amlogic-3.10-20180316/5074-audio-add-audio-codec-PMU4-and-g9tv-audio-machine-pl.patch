@@ -1,0 +1,3492 @@
+From f3c15c45c5f4d296c7b1483ee30b8b4de36438ff Mon Sep 17 00:00:00 2001
+From: "zhe.wang" <zhe.wang@amlogic.com>
+Date: Tue, 18 Nov 2014 17:57:00 +0800
+Subject: [PATCH 5074/5965] audio: add audio codec PMU4 and g9tv audio machine
+ platform
+
+Change-Id: I2bde960c07f3f14d6ace9eddcb8b3454534a4070
+---
+ arch/arm/configs/mesong9tv_defconfig         |    8 +-
+ arch/arm/mach-meson8/power_gate.c            |    3 +-
+ arch/arm/mach-meson8b/power_gate.c           |    2 +
+ drivers/amlogic/amaudio2/Kconfig             |    9 +-
+ drivers/amlogic/amaudio2/amaudio2.c          |   34 +-
+ drivers/amlogic/power/aml_pmu/Kconfig        |    5 +
+ drivers/amlogic/power/aml_pmu/Makefile       |    2 +-
+ drivers/amlogic/power/aml_pmu/aml1220_pmu4.c |  375 +++++++
+ include/linux/amlogic/aml_pmu.h              |   14 +
+ sound/soc/aml/m8/Kconfig                     |   12 +-
+ sound/soc/aml/m8/Makefile                    |   13 +-
+ sound/soc/aml/m8/aml_audio_codec_probe.c     |   11 +-
+ sound/soc/aml/m8/aml_audio_hw.c              | 1052 ++++++++----------
+ sound/soc/aml/m8/aml_g9tv.c                  |  559 ++++++++++
+ sound/soc/aml/m8/aml_g9tv.h                  |   14 +
+ sound/soc/aml/m8/aml_m_dummy.c               |    9 +-
+ sound/soc/codecs/Kconfig                     |    5 +-
+ sound/soc/codecs/Makefile                    |    2 +
+ sound/soc/codecs/aml_pmu4_codec.c            |  601 ++++++++++
+ sound/soc/codecs/aml_pmu4_codec.h            |  103 ++
+ 20 files changed, 2212 insertions(+), 621 deletions(-)
+ create mode 100755 drivers/amlogic/power/aml_pmu/aml1220_pmu4.c
+ create mode 100755 sound/soc/aml/m8/aml_g9tv.c
+ create mode 100755 sound/soc/aml/m8/aml_g9tv.h
+ mode change 100644 => 100755 sound/soc/aml/m8/aml_m_dummy.c
+ create mode 100755 sound/soc/codecs/aml_pmu4_codec.c
+ create mode 100755 sound/soc/codecs/aml_pmu4_codec.h
+
+diff --git a/arch/arm/configs/mesong9tv_defconfig b/arch/arm/configs/mesong9tv_defconfig
+index 3e3201e0ad83..4a6c309fab75 100755
+--- a/arch/arm/configs/mesong9tv_defconfig
++++ b/arch/arm/configs/mesong9tv_defconfig
+@@ -153,8 +153,9 @@ CONFIG_SARADC_AM=y
+ CONFIG_NEW_AM_REMOTE=y
+ CONFIG_NEW_AM_IR_TX=y
+ CONFIG_ADC_KEYPADS_AM=y
+-# CONFIG_AMLOGIC_BOARD_HAS_PMU is not set
+ CONFIG_MESON_CS_DCDC_REGULATOR=y
++CONFIG_AML_PMU=y
++CONFIG_AML1220=y
+ CONFIG_EFUSE=y
+ CONFIG_AMLOGIC_THERMAL=y
+ CONFIG_MMC_AML=y
+@@ -167,7 +168,7 @@ CONFIG_AML_PHY=y
+ CONFIG_AML_LAN8720=y
+ CONFIG_AML_IP101_PHY=y
+ CONFIG_AML_KSZ8091=y
+-# CONFIG_AMAUDIO is not set
++CONFIG_AMAUDIO2=y
+ CONFIG_VSYNC_RDMA=y
+ CONFIG_AM_VIDEO=y
+ CONFIG_AM_ENCODER=y
+@@ -205,9 +206,10 @@ CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+ CONFIG_MEDIA_SUPPORT=y
+ CONFIG_MEDIA_CAMERA_SUPPORT=y
+ CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_SND_AML_M8_SOC=y
++CONFIG_SND_AML_G9TV=y
+ CONFIG_UHID=y
+ # CONFIG_USB_SUPPORT is not set
+-CONFIG_SWITCH=y
+ CONFIG_RTC_CLASS=y
+ CONFIG_UIO=y
+ CONFIG_UIO_PDRV=y
+diff --git a/arch/arm/mach-meson8/power_gate.c b/arch/arm/mach-meson8/power_gate.c
+index 19f3cf8ce26e..39bbd1605147 100755
+--- a/arch/arm/mach-meson8/power_gate.c
++++ b/arch/arm/mach-meson8/power_gate.c
+@@ -231,6 +231,7 @@ static int _switch_gate(mod_type_t type, int flag)
+ 			__CLK_GATE_ON(AIU_PCLK);
+ 			__CLK_GATE_ON(AIU_AOCLK);
+ 			__CLK_GATE_ON(AIU_ICE958_AMCLK);
++			__CLK_GATE_ON(AUD_IN);
+ 		} else { 
+ 			__CLK_GATE_OFF(AIU_AI_TOP_GLUE);
+ 			__CLK_GATE_OFF(AIU_IEC958);
+@@ -244,7 +245,7 @@ static int _switch_gate(mod_type_t type, int flag)
+ 			__CLK_GATE_OFF(AIU_PCLK);
+ 			__CLK_GATE_OFF(AIU_AOCLK);
+ 			__CLK_GATE_OFF(AIU_ICE958_AMCLK);
+-	  
++			__CLK_GATE_OFF(AUD_IN);
+ 		}
+ 		break;
+ 	#if 0
+diff --git a/arch/arm/mach-meson8b/power_gate.c b/arch/arm/mach-meson8b/power_gate.c
+index 045651540661..04b0bac8c8d9 100755
+--- a/arch/arm/mach-meson8b/power_gate.c
++++ b/arch/arm/mach-meson8b/power_gate.c
+@@ -231,6 +231,7 @@ static int _switch_gate(mod_type_t type, int flag)
+ 			//__CLK_GATE_ON(AIU_PCLK);
+ 			__CLK_GATE_ON(AIU_AOCLK);
+ 			__CLK_GATE_ON(AIU_ICE958_AMCLK);
++			__CLK_GATE_ON(AUD_IN);
+ 		} else { 
+ 			__CLK_GATE_OFF(AIU_AI_TOP_GLUE);
+ 			__CLK_GATE_OFF(AIU_IEC958);
+@@ -244,6 +245,7 @@ static int _switch_gate(mod_type_t type, int flag)
+ 			//__CLK_GATE_OFF(AIU_PCLK);
+ 			__CLK_GATE_OFF(AIU_AOCLK);
+ 			__CLK_GATE_OFF(AIU_ICE958_AMCLK);
++			__CLK_GATE_OFF(AUD_IN);
+ 	  
+ 		}
+ 		break;
+diff --git a/drivers/amlogic/amaudio2/Kconfig b/drivers/amlogic/amaudio2/Kconfig
+index 90b86740132d..4f9c174b2d38 100755
+--- a/drivers/amlogic/amaudio2/Kconfig
++++ b/drivers/amlogic/amaudio2/Kconfig
+@@ -4,13 +4,8 @@ menu "Amlogic Audio Interface V2"
+ 
+ config	AMAUDIO2
+ 	bool "Amlogic Audio Interface V2"
+-    default n
+-    select SOUND
+-    select SND_SOC
+-    select SND
+-    select AML_AUDIO_DSP
+-    select SND_AML_SOC
+-    select SWITCH
++    	default n
++    	depends on PLAT_MESON
+ 	help
+ 		"Amlogic Audio Interface V2, The interface different from amaudio"
+ 	
+diff --git a/drivers/amlogic/amaudio2/amaudio2.c b/drivers/amlogic/amaudio2/amaudio2.c
+index 31781b25dd10..8feaa54796bc 100755
+--- a/drivers/amlogic/amaudio2/amaudio2.c
++++ b/drivers/amlogic/amaudio2/amaudio2.c
+@@ -30,6 +30,12 @@ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("kevin.wang@amlogic.com");
+ MODULE_VERSION("2.0.0");
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#define IRQ_OUT INT_I2S_DDR
++#else
++#define IRQ_OUT INT_AMRISC_DC_PCMLAST
++#endif
++
+ static const struct file_operations amaudio_fops = {
+   .owner    =   THIS_MODULE,
+   .open     =   amaudio_open,
+@@ -154,7 +160,7 @@ static int amaudio_open(struct inode *inode, struct file *file)
+   	spin_lock_init(&amaudio->hw.lock);
+ 	spin_lock_init(&amaudio->sw_read.lock);
+ 	
+-  	if(request_irq(INT_AMRISC_DC_PCMLAST, i2s_out_callback, IRQF_SHARED, "i2s_out",amaudio)){
++  	if(request_irq(IRQ_OUT, i2s_out_callback, IRQF_SHARED, "i2s_out",amaudio)){
+   		res = -EINVAL;
+   		goto error;
+   	}
+@@ -188,15 +194,9 @@ error:
+ 
+ static int amaudio_release(struct inode *inode, struct file *file)
+ {
+-	//unsigned long irqflags;
+-	
+ 	amaudio_t * amaudio = (amaudio_t *)file->private_data;
+-	
+-	//spin_lock_irqsave(&amaudio->hw.lock,irqflags);
+-
+-	free_irq(INT_AMRISC_DC_PCMLAST, amaudio);
+ 
+-	//spin_unlock_irqrestore(&amaudio->hw.lock,irqflags);
++	free_irq(IRQ_OUT, amaudio);
+ 	
+ 	if(amaudio->sw.addr){
+ 		dma_free_coherent(amaudio->dev, amaudio->sw.size, (void*)amaudio->sw.addr, amaudio->sw.paddr);
+@@ -399,10 +399,6 @@ static void i2s_copy(amaudio_t* amaudio)
+ 	if(audio_out_mode != 3){
+ 		valid_data = sw->level&~0x3f;
+ 		if(valid_data < INT_BLOCK) {
+-			sw->wr = ((sw->rd+INT_BLOCK)%sw->size);
+-			sw->wr /= INT_BLOCK;
+-			sw->wr *= INT_BLOCK;
+-			sw->level = INT_BLOCK;
+ 			goto EXIT;
+ 		}
+ 	}
+@@ -410,10 +406,6 @@ static void i2s_copy(amaudio_t* amaudio)
+ 	if(audio_out_read_enable == 1){
+ 		valid_data = sw_read->level&~0x3f;
+ 		if(valid_data < INT_BLOCK) {
+-			sw_read->wr = ((sw_read->rd+INT_BLOCK)%sw_read->size);
+-			sw_read->wr /= INT_BLOCK;
+-			sw_read->wr *= INT_BLOCK;
+-			sw_read->level = INT_BLOCK;
+ 			goto EXIT;
+ 		}
+ 	}
+@@ -771,7 +763,7 @@ static int __init amaudio2_init(void)
+ 
+   ret = alloc_chrdev_region(&amaudio_devno, 0, AMAUDIO_DEVICE_COUNT, AMAUDIO_DEVICE_NAME);
+   if(ret < 0){
+-    printk(KERN_ERR "amaudio: faild to alloc major number\n");
++    printk(KERN_ERR "amaudio2: faild to alloc major number\n");
+     ret = - ENODEV;
+     goto err;
+   }
+@@ -785,7 +777,7 @@ static int __init amaudio2_init(void)
+   
+   amaudio_cdevp = kmalloc(sizeof(struct cdev), GFP_KERNEL);
+   if(!amaudio_cdevp){
+-    printk(KERN_ERR "amaudio: failed to allocate memory\n");
++    printk(KERN_ERR "amaudio2: failed to allocate memory\n");
+     ret = -ENOMEM;
+     goto err2;
+   }
+@@ -795,18 +787,18 @@ static int __init amaudio2_init(void)
+   // connect the major/minor number to cdev
+   ret = cdev_add(amaudio_cdevp, amaudio_devno, AMAUDIO_DEVICE_COUNT);
+   if(ret){
+-    printk(KERN_ERR "amaudio:failed to add cdev\n");
++    printk(KERN_ERR "amaudio2:failed to add cdev\n");
+     goto err3;
+   } 
+   for(ap = &amaudio_ports[0], i=0; i< AMAUDIO_DEVICE_COUNT; ap++,  i++){    
+     ap->dev = device_create(amaudio_clsp, NULL, MKDEV(MAJOR(amaudio_devno),i), NULL,amaudio_ports[i].name);
+     if(IS_ERR(ap->dev)){
+-      printk(KERN_ERR "amaudio: failed to create amaudio device node\n");
++      printk(KERN_ERR "amaudio2: failed to create amaudio device node\n");
+       goto err4;
+     }
+   }
+ 
+-  printk(KERN_INFO "amaudio: device %s created\n", AMAUDIO_DEVICE_NAME);
++  printk(KERN_INFO "amaudio2: device %s created\n", AMAUDIO_DEVICE_NAME);
+   return 0;
+ 
+ err4:
+diff --git a/drivers/amlogic/power/aml_pmu/Kconfig b/drivers/amlogic/power/aml_pmu/Kconfig
+index f652e79900f0..8694429257d3 100755
+--- a/drivers/amlogic/power/aml_pmu/Kconfig
++++ b/drivers/amlogic/power/aml_pmu/Kconfig
+@@ -23,4 +23,9 @@ config AML1218
+     ---help---
+         drivers for amlogic pmu AML1218 
+ 
++config AML1220
++    bool "AML1220 driver"
++    ---help---
++        drivers for amlogic pmu AML1220
++        
+ endif #AML_PMU
+diff --git a/drivers/amlogic/power/aml_pmu/Makefile b/drivers/amlogic/power/aml_pmu/Makefile
+index fd1d7f51af2d..3b82e87ec263 100755
+--- a/drivers/amlogic/power/aml_pmu/Makefile
++++ b/drivers/amlogic/power/aml_pmu/Makefile
+@@ -2,4 +2,4 @@ obj-y += aml_pmu.o
+ obj-$(CONFIG_AML1212) += aml1212-sply.o
+ obj-$(CONFIG_AML1216) += aml1216-sply.o aml1216-rw.o
+ obj-$(CONFIG_AML1218) += aml1218-sply.o aml1218-rw.o
+-
++obj-$(CONFIG_AML1220) += aml1220_pmu4.o
+diff --git a/drivers/amlogic/power/aml_pmu/aml1220_pmu4.c b/drivers/amlogic/power/aml_pmu/aml1220_pmu4.c
+new file mode 100755
+index 000000000000..d928990cc281
+--- /dev/null
++++ b/drivers/amlogic/power/aml_pmu/aml1220_pmu4.c
+@@ -0,0 +1,375 @@
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/i2c.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include <mach/am_regs.h>
++#include <mach/gpio.h>
++#include <linux/amlogic/aml_pmu.h>
++#include <linux/debugfs.h>
++#include <linux/uaccess.h>
++
++
++
++
++#define AML1220_ADDR    0x35
++#define AML1220_ANALOG_ADDR  0x20
++
++struct i2c_client *g_aml1220_client = NULL;
++
++
++#define CHECK_DRIVER()      \
++    if (!g_aml1220_client) {        \
++        printk("driver is not ready right now, wait...\n");   \
++        dump_stack();       \
++        return -ENODEV;     \
++    }
++
++unsigned int pmu4_analog_reg[15] = {0x00, 0x00, 0x00, 0x00, 0x00, //Reg   0x20 - 0x24
++	                                0x00, 0x00, 0x00, 0x00, 0x51, // Reg  0x25 - 0x29
++                                    0x42, 0x00, 0x42, 0x41, 0x02  //Reg   0x2a - 0x2e             
++                                   };
++
++#define PMU4_ANALOG_REG_LEN ARRAY_SIZE(pmu4_analog_reg)
++
++
++
++int aml1220_write(int32_t add, uint8_t val)
++{
++    int ret;
++    uint8_t buf[3] = {};
++    struct i2c_client *pdev;
++    struct i2c_msg msg[] = {
++        {
++            .addr  = AML1220_ADDR,
++            .flags = 0,
++            .len   = sizeof(buf),
++            .buf   = buf,
++        }
++    };
++
++    CHECK_DRIVER();
++    pdev = g_aml1220_client;
++
++    buf[0] = add & 0xff;
++    buf[1] = (add >> 8) & 0x0f;
++    buf[2] = val & 0xff;
++    ret = i2c_transfer(pdev->adapter, msg, 1);
++    if (ret < 0) {
++        printk("%s: i2c transfer failed, ret:%d\n", __FUNCTION__, ret);
++        return ret;
++    }
++    return 0;
++}
++EXPORT_SYMBOL_GPL(aml1220_write);
++
++int aml1220_write16(int32_t add, uint16_t val)
++{
++    int ret;
++    uint8_t buf[4] = {};
++    struct i2c_client *pdev;
++    struct i2c_msg msg[] = {
++        {
++            .addr  = AML1220_ADDR,
++            .flags = 0,
++            .len   = sizeof(buf),
++            .buf   = buf,
++        }
++    };
++
++    CHECK_DRIVER();
++    pdev = g_aml1220_client;
++
++    buf[0] = add & 0xff;
++    buf[1] = (add >> 8) & 0x0f;
++    buf[2] = val & 0xff;
++    buf[3] = (val >> 8) & 0xff;
++    ret = i2c_transfer(pdev->adapter, msg, 1);
++    if (ret < 0) {
++        printk("%s: i2c transfer failed, ret:%d\n", __FUNCTION__, ret);
++        return ret;
++    }
++    return 0;
++}
++EXPORT_SYMBOL_GPL(aml1220_write16);
++
++int aml1220_read(int add, uint8_t *val)
++{
++    int ret;
++    uint8_t buf[2] = {};
++    struct i2c_client *pdev;
++    struct i2c_msg msg[] = {
++        {
++            .addr  = AML1220_ADDR,
++            .flags = 0,
++            .len   = sizeof(buf),
++            .buf   = buf,
++        },
++        {
++            .addr  = AML1220_ADDR,
++            .flags = I2C_M_RD,
++            .len   = 1,
++            .buf   = val,
++        }
++    };
++
++    CHECK_DRIVER();
++    pdev = g_aml1220_client;
++
++    buf[0] = add & 0xff;
++    buf[1] = (add >> 8) & 0x0f;
++    ret = i2c_transfer(pdev->adapter, msg, 2);
++    if (ret < 0) {
++        printk("%s: i2c transfer failed, ret:%d\n", __FUNCTION__, ret);
++        return ret;
++    }
++    return 0;
++}
++EXPORT_SYMBOL_GPL(aml1220_read);
++
++int aml1220_read16(int add, uint16_t *val)
++{
++    int ret;
++    uint8_t buf[2] = {};
++    struct i2c_client *pdev;
++    struct i2c_msg msg[] = {
++        {
++            .addr  = AML1220_ADDR,
++            .flags = 0,
++            .len   = sizeof(buf),
++            .buf   = buf,
++        },
++        {
++            .addr  = AML1220_ADDR,
++            .flags = I2C_M_RD,
++            .len   = 2, 
++            .buf   = (uint8_t *)val,
++        }
++    };
++
++    CHECK_DRIVER();
++    pdev = g_aml1220_client; 
++
++    buf[0] = add & 0xff;
++    buf[1] = (add >> 8) & 0x0f;
++    ret = i2c_transfer(pdev->adapter, msg, 2);
++    if (ret < 0) {
++        printk("%s: i2c transfer failed, ret:%d\n", __FUNCTION__, ret);
++        return ret;
++    }
++    return 0;
++}
++
++EXPORT_SYMBOL_GPL(aml1220_read16);
++
++#ifdef CONFIG_DEBUG_FS
++
++static struct dentry *debugfs_root;
++static struct dentry *debugfs_regs;
++
++
++static ssize_t aml1220_pmu4_reg_read_file(struct file *file, char __user *user_buf,
++			       size_t count, loff_t *ppos)
++{
++	ssize_t ret;
++	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	ret = sprintf(buf, "Usage: \n"
++										 "	echo reg val >pmu4_reg\t(set the register)\n"
++										 "	echo reg >pmu4_reg\t(show the register)\n"
++										 "	echo a >pmu4_reg\t(show all register)\n"
++									);
++
++	if (ret >= 0)
++		ret = simple_read_from_buffer(user_buf, count, ppos, buf, ret);
++	kfree(buf);
++
++	return ret;
++}
++
++static int read_regs(int reg)
++{
++	uint8_t val = 0;
++	aml1220_read(reg,&val);
++	printk("\tReg %x = %x\n", reg, val);
++	return val;
++}
++
++static void write_regs(int reg, int val)
++{
++	aml1220_write(reg,val);
++	printk("Write reg:%x = %x\n", reg, val);
++}
++
++static void dump_all_register(void)
++{
++	int i = 0;
++	uint8_t val = 0;
++
++	printk(" dump aml1220 pmu4 all register:\n");
++
++	for(i = 0; i< 0xb0; i++){
++		aml1220_read(i,&val);
++		msleep(5);
++		printk("0x%02x: 0x%02x \n",i, val);
++	}
++
++	return;
++}
++static ssize_t aml1220_pmu4_reg_write_file(struct file *file,
++		const char __user *user_buf, size_t count, loff_t *ppos)
++{
++	char buf[32];
++	int buf_size = 0;
++	char *start = buf;
++	unsigned long reg, value;
++	char all_reg;
++
++	buf_size = min(count, (sizeof(buf)-1));
++
++	if (copy_from_user(buf, user_buf, buf_size))
++		return -EFAULT;
++	buf[buf_size] = 0;
++	
++	while (*start == ' ')
++		start++;
++
++	all_reg = *start;
++	start ++;
++	if(all_reg =='a'){
++
++		dump_all_register();
++		return buf_size;
++	}else{
++		start --;
++	}
++
++	while (*start == ' ')
++		start++;
++
++	reg = simple_strtoul(start, &start, 16);
++
++	while (*start == ' ')
++		start++;
++
++	if (strict_strtoul(start, 16, &value))
++	{
++			read_regs(reg);
++			return -EINVAL;
++	}
++
++	write_regs(reg, value);
++
++	return buf_size;
++}
++
++
++static const struct file_operations aml1220_pmu4_reg_fops = {
++	.open = simple_open,
++	.read = aml1220_pmu4_reg_read_file,
++	.write = aml1220_pmu4_reg_write_file,
++};
++#endif
++
++
++static void aml_pmu4_reg_init(unsigned int reg_base, unsigned int *val, 
++	            unsigned int reg_len)
++{
++	unsigned int i = 0;
++	
++	for(i=0; i< reg_len; i++){
++		aml1220_write(reg_base + i, val[i]);
++	}
++
++}
++
++static int aml_pmu4_power_init(void)
++{
++	printk("enter %s\n",__func__);
++
++	//pmu4 analog register init
++	aml_pmu4_reg_init(AML1220_ANALOG_ADDR, &pmu4_analog_reg[0], 
++		   PMU4_ANALOG_REG_LEN);
++	
++	return 0;
++
++}
++static int aml_pmu4_i2c_probe(struct i2c_client *client,
++				  const struct i2c_device_id *id)
++{
++    printk("enter %s\n",__func__);
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
++		printk(KERN_INFO "i2c check error, dev_id=%s--\n",id->name);
++        return -ENODEV;
++    }
++    i2c_set_clientdata(client, NULL);
++	g_aml1220_client = client;
++
++	//aml1220 power init
++	aml_pmu4_power_init();
++
++#ifdef CONFIG_DEBUG_FS
++	//add debug interface
++	debugfs_regs = debugfs_create_file("pmu4_reg", 0644,
++						 debugfs_root,
++						 NULL, &aml1220_pmu4_reg_fops);
++#endif
++
++	return 0;
++}
++
++static int aml_pmu4_i2c_remove(struct i2c_client *client)
++{
++	printk("enter %s\n",__func__);
++	kfree(i2c_get_clientdata(client));
++	
++	return 0;
++}
++
++#ifdef CONFIG_OF
++static const struct of_device_id aml_pmu4_match_id = {
++        .compatible = "amlogic,aml_pmu4",
++};
++#endif
++
++static const struct i2c_device_id aml_pmu4_id_table[] = {
++    { "aml_pmu4", 0 },
++    { }
++};
++
++
++static struct i2c_driver aml_pmu4_i2c_driver = {
++	.driver	= {
++		.name	= "aml_pmu4",
++		.owner	= THIS_MODULE,
++    #ifdef CONFIG_OF
++        .of_match_table = &aml_pmu4_match_id,
++    #endif
++	},
++	.probe		= aml_pmu4_i2c_probe,
++	.remove		= aml_pmu4_i2c_remove,
++	.id_table	= aml_pmu4_id_table,
++};
++
++static int __init aml_pmu4_modinit(void)
++{
++    printk("%s, %d\n", __func__, __LINE__);
++	return i2c_add_driver(&aml_pmu4_i2c_driver);
++}
++arch_initcall(aml_pmu4_modinit);
++
++static void __exit aml_pmu4_modexit(void)
++{
++	i2c_del_driver(&aml_pmu4_i2c_driver);
++}
++module_exit(aml_pmu4_modexit);
++
++MODULE_DESCRIPTION("Amlogic PMU4 device driver");
++MODULE_AUTHOR("Chengshun Wang <chengshun.wang@amlogic.com>");
++MODULE_LICENSE("GPL");
++
+diff --git a/include/linux/amlogic/aml_pmu.h b/include/linux/amlogic/aml_pmu.h
+index 8edc67923b81..ddd73095863d 100755
+--- a/include/linux/amlogic/aml_pmu.h
++++ b/include/linux/amlogic/aml_pmu.h
+@@ -427,5 +427,19 @@ extern int aml1218_otg_change(struct notifier_block *nb, unsigned long value, vo
+ extern int aml1218_usb_charger(struct notifier_block *nb, unsigned long value, void *pdata);
+ #endif      /* CONFIG_AML1218 */
+ 
++#ifdef CONFIG_AML1220
++
++//add aml1220 pmu4 power register
++
++#define AML1220_PMU_CTR_04    0x05
++
++extern int  aml1220_write(int32_t add, uint8_t val);
++extern int  aml1220_write16(int32_t add, uint16_t val);
++extern int  aml1220_read    (int add, uint8_t *val);
++extern int  aml1220_read16(int add, uint16_t *val);
++
++//#define AML1220
++#endif
++
+ #endif /* __AML_PMU_H__ */
+ 
+diff --git a/sound/soc/aml/m8/Kconfig b/sound/soc/aml/m8/Kconfig
+index 94ce3494bb8f..e0ab40329403 100755
+--- a/sound/soc/aml/m8/Kconfig
++++ b/sound/soc/aml/m8/Kconfig
+@@ -1,7 +1,3 @@
+-#config  SND_AML_SPDIF
+-#	tristate "Amlogic S/PDIF codec support"
+-#	depends on SND_AML_M8_SOC
+-#	select SND_SOC_AML_SPDIF_CODEC if SND_AML_SPDIF
+ config SND_AML_M8
+ 	tristate "AML-SND-M8 Board"
+ 	depends on SND_AML_M8_SOC && SWITCH
+@@ -11,7 +7,15 @@ config SND_AML_M8
+ 	select SND_SOC_WM8960
+ 	select SND_SOC_RT5631
+ 	select SND_SOC_AMLPMU3 if AML1218
++	select SND_SOC_AMLPMU4 if AML1220
+ 	select SND_SOC_ES8323
++
++config SND_AML_G9TV
++	tristate "AML-SND-G9TV Board"
++	depends on SND_AML_M8_SOC && SWITCH
++	select SND_SOC_DUMMY_CODEC
++	select SND_SOC_AMLPMU4 if AML1220
++	
+ config SND_AML_M8_PCM
+ 	tristate "M8 evaluation board with PCM2BT"
+ 	depends on SND_AML_M8_SOC
+diff --git a/sound/soc/aml/m8/Makefile b/sound/soc/aml/m8/Makefile
+index a48b980bb908..5d630bc75578 100755
+--- a/sound/soc/aml/m8/Makefile
++++ b/sound/soc/aml/m8/Makefile
+@@ -1,32 +1,33 @@
+ # AML Platform Support
+ snd-soc-aml-pcm-objs := aml_pcm.o
+ snd-soc-aml-i2s-objs := aml_i2s.o
+-#snd-soc-aml-platform-pcm2bt-objs := aml_platform_pcm2bt.o
+ snd-soc-aml-i2s-dai-objs := aml_i2s_dai.o
+ snd-soc-aml-pcm-dai-objs := aml_pcm_dai.o
+ snd-soc-aml-spdif-dai-objs  := aml_spdif_dai.o
+ snd-soc-aml-hw-objs  := aml_audio_hw.o
+ snd-soc-aml-hw-pcm2bt-objs  := aml_audio_hw_pcm2bt.o
+-#snd-soc-aml-platform-objs := aml_platform.o
++
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-pcm.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-i2s.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-i2s-dai.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-pcm-dai.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-hw.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += aml_notify.o
+-#obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-platform.o
+-#obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-platform-pcm2bt.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-hw-pcm2bt.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-spdif-dai.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += aml_audio_codec_probe.o
+ 
+ #AML spdif codec support
+ snd-soc-aml-spdif-codec-objs := aml_spdif_codec.o
+-#obj-$(CONFIG_SND_SOC_AML_SPDIF_CODEC) += snd-soc-aml-spdif-codec.o
+ obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-spdif-codec.o
++
+ #AML M8 Machine support
+ snd-soc-aml-m8-objs := aml_m8.o
+-obj-$(CONFIG_SND_AML_M8_SOC) += snd-soc-aml-m8.o
++obj-$(CONFIG_SND_AML_M8) += snd-soc-aml-m8.o
++
++#AML G9TV Machine support
++snd-soc-aml-g9tv-objs := aml_g9tv.o
++obj-$(CONFIG_SND_AML_G9TV) += snd-soc-aml-g9tv.o
+ 
+ #AML M series with dummy codec support
+ snd-soc-aml-m-dummy-objs := aml_m_dummy.o
+diff --git a/sound/soc/aml/m8/aml_audio_codec_probe.c b/sound/soc/aml/m8/aml_audio_codec_probe.c
+index 2e58a886c34b..9971ba838c52 100755
+--- a/sound/soc/aml/m8/aml_audio_codec_probe.c
++++ b/sound/soc/aml/m8/aml_audio_codec_probe.c
+@@ -89,6 +89,8 @@ static int test_codec_of_node(struct device_node* p_node, aml_audio_codec_info_t
+ 	/* if aml pmu codec, do not test i2c for it was done in power domain */
+ 	if (!strcmp(audio_codec_dev->name, "amlpmu3"))
+ 		goto exit;
++	if (!strcmp(audio_codec_dev->name, "amlpmu4"))
++		goto exit;
+ 	if (!strcmp(audio_codec_dev->name, "dummy_codec"))
+ 		goto exit;
+ 
+@@ -228,7 +230,14 @@ static int aml_audio_codec_probe(struct platform_device *pdev)
+ 		strlcpy(codec_info.name, "amlpmu3", NAME_SIZE);
+ 		goto exit;
+ 	}
+-    
++
++	if (ext_codec &&(!strcmp(audio_codec_dev->name, "amlpmu4"))){
++		printk("using aml pmu4 codec\n");
++		strlcpy(codec_info.name_bus, "aml_pmu4_codec.0", NAME_SIZE);
++		strlcpy(codec_info.name, "amlpmu4", NAME_SIZE);
++		goto exit;
++	}	
++
+ 	if (ext_codec &&(!strcmp(audio_codec_dev->name, "dummy_codec"))){
+ 		printk("using external dummy codec\n");
+ 		strlcpy(codec_info.name_bus, "dummy_codec.0", NAME_SIZE);
+diff --git a/sound/soc/aml/m8/aml_audio_hw.c b/sound/soc/aml/m8/aml_audio_hw.c
+index 89696464d534..8b7d8d3a1e0e 100755
+--- a/sound/soc/aml/m8/aml_audio_hw.c
++++ b/sound/soc/aml/m8/aml_audio_hw.c
+@@ -5,18 +5,16 @@
+ #include <mach/am_regs.h>
+ #include <linux/clk.h>
+ #include <linux/module.h>
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+-//#include <mach/utils.h>
+-#endif
++#include <mach/mod_gate.h>
+ 
+ #include "aml_audio_hw.h"
+ 
+ #ifndef MREG_AIU_958_chstat0
+-#define AIU_958_chstat0	AIU_958_CHSTAT_L0
++#define AIU_958_chstat0 AIU_958_CHSTAT_L0
+ #endif
+ 
+ #ifndef MREG_AIU_958_chstat1
+-#define AIU_958_chstat1	AIU_958_CHSTAT_L1
++#define AIU_958_chstat1 AIU_958_CHSTAT_L1
+ #endif
+ 
+ 
+@@ -85,117 +83,61 @@ unsigned int dac_mute_const = 0x800000;
+ /*
+                                 fIn * (M)
+             Fout   =  -----------------------------
+-                      		(N) * (OD+1) * (XD)
++                            (N) * (OD+1) * (XD)
+ */
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ int audio_clock_config_table[][13][2]=
+ {
+-	/*{HIU Reg , XD - 1)
+-	   //7.875k, 8K, 11.025k, 12k, 16k, 22.05k, 24k, 32k, 44.1k, 48k, 88.2k, 96k, 192k
+-	*/
+-	{
+-	//256
++    /*{HIU Reg , XD - 1)
++       //7.875k, 8K, 11.025k, 12k, 16k, 22.05k, 24k, 32k, 44.1k, 48k, 88.2k, 96k, 192k
++        */
++    {
++    //256
+ #if OVERCLOCK == 0
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8	
+-		{0x0005cc08, (60-1)},  // 32	
+-		{0x0005e965, (40-1)}, //44.1	
+-		{0x0004c9a0,	(50-1)},	//48K
+-#else		
+-		{0x0005cc08, (30-1)},  // 32		
+-		{0x0004cdf3, (42-1)},  // 44.1
+-		{0x0007c4e6, (23-1)},  // 48
+-#endif	
+-		//{0x0006d0a4, (13-1)},  // 96
+-        {0x0005cc08,  (20-1)},// 96k ,24.576M
+-		//{0x0004e15a, (9 -1)},   // 192
+-        {0x0005cc08,    (10-1)},   // 192k, 49.152M
+-		{0x0007f400, (125-1)}, // 8k
+-		{0x0006c6f6, (116-1)}, // 11.025
+-		{0x0007e47f, (86-1)},  // 12
+-		{0x0004f880, (100-1)}, // 16
+-		{0x0004c4a4, (87-1)},  // 22.05
+-		{0x0007e47f, (43-1)},  // 24
+-		{0x0007f3f0, (127-1)}, // 7875
++        {0x0005cc08, (60-1)},  // 32    
++        {0x0005e965, (40-1)}, //44.1    
++        {0x0004c9a0, (50-1)}, //48K 
++        {0x0005cc08, (20-1)}, // 96k ,24.576M
++        {0x0005cc08, (10-1)}, // 192k, 49.152M
++        {0x0007f400, (125-1)}, // 8k
++        {0x0006c6f6, (116-1)}, // 11.025
++        {0x0007e47f, (86-1)},  // 12
++        {0x0004f880, (100-1)}, // 16
++        {0x0004c4a4, (87-1)},  // 22.05
++        {0x0007e47f, (43-1)},  // 24
++        {0x0007f3f0, (127-1)}, // 7875
+         {0x0005c88b, (22-1)}, // 88.2k ,22.579M
+ #else
+-	//512FS
+-		{0x0004f880, (25-1)},  // 32
+-		{0x0004cdf3, (21-1)},  // 44.1
+-		{0x0006d0a4, (13-1)},  // 48
+-		{0x0004e15a, (9 -1)},  // 96
+-		{0x0006f207, (3 -1)},   // 192
+-		{0x0004f880, (100-1)}, // 8k
+-		{0x0004c4a4, (87-1)}, // 11.025
+-		{0x0007e47f, (43-1)},  // 12
+-		{0x0004f880, (50-1)}, // 16
+-		{0x0004cdf3, (42-1)},  // 22.05
+-		{0x0007c4e6, (23-1)},  // 24
+-		{0x0006e1b6, (76-1)}, // 7875
+-#endif
+-	},
+-	{
+-	//384
+-		{0x0007c4e6, (23-1)},  // 32
+-		{0x0004c4a4, (29-1)},  // 44.1
+-		{0x0004cb18, (26-1)},  // 48
+-		{0x0004cb18, (13-1)},  // 96
+-		{0x0004e15a, (6 -1)},   // 192
+-		{0x0007e47f, (86-1)},  // 8k
+-		{0x0007efa5, (61-1)},  // 11.025
+-		{0x0006de98, (67-1)},  // 12
+-		{0x0007e47f, (43-1)},  // 16
+-		{0x0004c4a4, (58-1)},  // 22.05
+-		{0x0004c60e, (53-1)},  // 24
+-		{0x0007fdfa, (83-1)},  // 7875
+-	}
+-};
+-#else
+-int audio_clock_config_table[][11][2]=
+-{
+-  // 128*Fs
+-  //
+-	/*{M, N, OD, XD-1*/
+-	{
+-	//24M
+-        {(64<<0) | (3<<9) | (0<<14) , (125-1)}, // 32K, 4.096M
+-#if OVERCLOCK==0
+-        {(147<<0) | (5<<9) | (0<<14) , (125-1)}, // 44.1K, 5.6448M
+-        {(32<<0) | (1<<9) | (0<<14) , (125-1)}, // 48K, 6.144M
+-#else
+-        {(143<<0) | (8<<9) | (0<<14) , (19-1)}, // 44.1K, 5.6448M*4=22.5792M
+-        {(128<<0) | (5<<9) | (0<<14) , (25-1)}, // 48K, 6.144M*4=24.576M
+-#endif
+-        {(128<<0) | (5<<9) | (1<<14) , (25-1)}, // 96K, 12.288M
+-        {(128<<0) | (5<<9) | (0<<14) , (25-1)}, //192K, 24.576M
+-        {(64<<0) | (3<<9) | (1<<14) , (250-1)}, // 8K, 1.024M
+-        {(147<<0) | (5<<9) | (1<<14) , (250-1)}, //11.025K,1.4112M
+-        {(32<<0) | (1<<9) | (1<<14) , (250-1)}, // 12K, 1.536M
+-        {(64<<0) | (3<<9) | (1<<14) , (125-1)}, // 16K, 2.048M
+-        {(147<<0) | (5<<9) | (1<<14) , (125-1)}, //22.050K, 2.8224M
+-        {(32<<0) | (1<<9) | (1<<14) , (125-1)}, // 24K, 3.072M
+-	},
+-	{
+-	//25M
+-        {(29<<0) | (1<<9) | (0<<14) , (177-1)}, // 32K, 4.096M
+-#if OVERCLOCK==0
+-        {(21<<0) | (1<<9) | (0<<14) , (93-1)}, // 44.1K, 5.6448M
+-        {(29<<0) | (1<<9) | (1<<14) , (59-1)}, // 48K, 6.144M
+-#else
+-        {(28<<0) | (1<<9) | (0<<14) , (31-1)}, // 44.1K, 5.6448M*4=22.5792M
+-        {(173<<0) | (8<<9) | (1<<14) , (11-1)}, // 48K, 6.144M*4=24.576M
++    //512FS
++        {0x0004f880, (25-1)},  // 32
++        {0x0004cdf3, (21-1)},  // 44.1
++        {0x0006d0a4, (13-1)},  // 48
++        {0x0004e15a, (9 -1)},  // 96
++        {0x0006f207, (3 -1)},   // 192
++        {0x0004f880, (100-1)}, // 8k
++        {0x0004c4a4, (87-1)}, // 11.025
++        {0x0007e47f, (43-1)},  // 12
++        {0x0004f880, (50-1)}, // 16
++        {0x0004cdf3, (42-1)},  // 22.05
++        {0x0007c4e6, (23-1)},  // 24
++        {0x0006e1b6, (76-1)}, // 7875
+ #endif
+-        {(29<<0) | (1<<9) | (0<<14) , (59-1)}, // 96K, 12.288M
+-        {(173<<0) | (8<<9) | (1<<14) , (11-1)}, //192K, 24.576M
+-        {(58<<0) | (3<<9) | (1<<14) , (236-1)}, // 8K, 1.024M
+-        {(162<<0) | (7<<9) | (1<<14) , (205-1)}, //11.025K,1.4112M
+-        {(29<<0) | (1<<9) | (1<<14) , (236-1)}, // 12K, 1.536M
+-        {(29<<0) | (1<<9) | (1<<14) , (177-1)}, // 16K, 2.048M
+-        {(162<<0) | (7<<9) | (0<<14) , (205-1)}, //22.050K, 2.8224M
+-        {(29<<0) | (1<<9) | (1<<14) , (118-1)}, // 24K, 3.072M
+-	}
++    },
++    {
++    //384
++        {0x0007c4e6, (23-1)},  // 32
++        {0x0004c4a4, (29-1)},  // 44.1
++        {0x0004cb18, (26-1)},  // 48
++        {0x0004cb18, (13-1)},  // 96
++        {0x0004e15a, (6 -1)},   // 192
++        {0x0007e47f, (86-1)},  // 8k
++        {0x0007efa5, (61-1)},  // 11.025
++        {0x0006de98, (67-1)},  // 12
++        {0x0007e47f, (43-1)},  // 16
++        {0x0004c4a4, (58-1)},  // 22.05
++        {0x0004c60e, (53-1)},  // 24
++        {0x0007fdfa, (83-1)},  // 7875
++    }
+ };
+-#endif
+-
+ 
+ void audio_set_aiubuf(u32 addr, u32 size, unsigned int channel)
+ {
+@@ -209,30 +151,30 @@ void audio_set_aiubuf(u32 addr, u32 size, unsigned int channel)
+         WRITE_MPEG_REG(AIU_MEM_I2S_END_PTR, (addr & 0xffffffc0) + (size & 0xffffffc0) - 64);   //this is for 16bit 2 channel
+     }
+ 
+-    WRITE_MPEG_REG(AIU_I2S_MISC,		0x0004);	// Hold I2S
+-	WRITE_MPEG_REG(AIU_I2S_MUTE_SWAP,	0x0000);	// No mute, no swap
+-	// As the default amclk is 24.576MHz, set i2s and iec958 divisor appropriately so as not to exceed the maximum sample rate.
+-	WRITE_MPEG_REG(AIU_I2S_MISC,		0x0010 );	// Release hold and force audio data to left or right
+-
+-	if(channel == 8){
+-		printk(" %s channel == 8\n",__FUNCTION__);
+-	WRITE_MPEG_REG(AIU_MEM_I2S_MASKS,		(24 << 16) |	// [31:16] IRQ block.
+-								(0xff << 8) |	// [15: 8] chan_mem_mask. Each bit indicates which channels exist in memory
+-								(0xff << 0));	// [ 7: 0] chan_rd_mask.  Each bit indicates which channels are READ from memory
+-		}
+-	else 
+-	WRITE_MPEG_REG(AIU_MEM_I2S_MASKS,		(24 << 16) |	// [31:16] IRQ block.
+-								(0x3 << 8) |	// [15: 8] chan_mem_mask. Each bit indicates which channels exist in memory
+-								(0x3 << 0));	// [ 7: 0] chan_rd_mask.  Each bit indicates which channels are READ from memory
++    WRITE_MPEG_REG(AIU_I2S_MISC,        0x0004);    // Hold I2S
++    WRITE_MPEG_REG(AIU_I2S_MUTE_SWAP,   0x0000);    // No mute, no swap
++    // As the default amclk is 24.576MHz, set i2s and iec958 divisor appropriately so as not to exceed the maximum sample rate.
++    WRITE_MPEG_REG(AIU_I2S_MISC,        0x0010 );   // Release hold and force audio data to left or right
++
++    if(channel == 8){
++        printk(" %s channel == 8\n",__FUNCTION__);
++        WRITE_MPEG_REG(AIU_MEM_I2S_MASKS,       (24 << 16) |    // [31:16] IRQ block.
++                                (0xff << 8) |   // [15: 8] chan_mem_mask. Each bit indicates which channels exist in memory
++                                (0xff << 0));   // [ 7: 0] chan_rd_mask.  Each bit indicates which channels are READ from memory
++        }
++    else 
++        WRITE_MPEG_REG(AIU_MEM_I2S_MASKS,       (24 << 16) |    // [31:16] IRQ block.
++                                (0x3 << 8) |    // [15: 8] chan_mem_mask. Each bit indicates which channels exist in memory
++                                (0x3 << 0));    // [ 7: 0] chan_rd_mask.  Each bit indicates which channels are READ from memory
+ 
+     // 16 bit PCM mode
+     //  WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 1, 6, 1);
+-	// Set init high then low to initilize the I2S memory logic
+-	WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 1, 0, 1 );
+-	WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 0, 0, 1 );
++    // Set init high then low to initilize the I2S memory logic
++    WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 1, 0, 1 );
++    WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 0, 0, 1 );
+ 
+-	WRITE_MPEG_REG(AIU_MEM_I2S_BUF_CNTL, 1 | (0 << 1));
+-	WRITE_MPEG_REG(AIU_MEM_I2S_BUF_CNTL, 0 | (0 << 1));
++    WRITE_MPEG_REG(AIU_MEM_I2S_BUF_CNTL, 1 | (0 << 1));
++    WRITE_MPEG_REG(AIU_MEM_I2S_BUF_CNTL, 0 | (0 << 1));
+ 
+     audio_out_buf_ready = 1;
+ }
+@@ -241,15 +183,15 @@ void audio_set_958outbuf(u32 addr, u32 size,int flag)
+ {
+     if (ENABLE_IEC958) {
+         WRITE_MPEG_REG(AIU_MEM_IEC958_START_PTR, addr & 0xffffffc0);
+-	  	if(READ_MPEG_REG(AIU_MEM_IEC958_START_PTR) == READ_MPEG_REG(AIU_MEM_I2S_START_PTR)){
+-			WRITE_MPEG_REG(AIU_MEM_IEC958_RD_PTR, READ_MPEG_REG(AIU_MEM_I2S_RD_PTR));
+-		}
+-		else
+-        WRITE_MPEG_REG(AIU_MEM_IEC958_RD_PTR, addr & 0xffffffc0);
++        if(READ_MPEG_REG(AIU_MEM_IEC958_START_PTR) == READ_MPEG_REG(AIU_MEM_I2S_START_PTR)){
++            WRITE_MPEG_REG(AIU_MEM_IEC958_RD_PTR, READ_MPEG_REG(AIU_MEM_I2S_RD_PTR));
++        }
++        else
++            WRITE_MPEG_REG(AIU_MEM_IEC958_RD_PTR, addr & 0xffffffc0);
+         if(flag == 0){
+-          WRITE_MPEG_REG(AIU_MEM_IEC958_END_PTR, (addr & 0xffffffc0) + (size & 0xffffffc0) - 64);    // this is for 16bit 2 channel
++            WRITE_MPEG_REG(AIU_MEM_IEC958_END_PTR, (addr & 0xffffffc0) + (size & 0xffffffc0) - 64);    // this is for 16bit 2 channel
+         }else{
+-          WRITE_MPEG_REG(AIU_MEM_IEC958_END_PTR, (addr & 0xffffffc0) + (size & 0xffffffc0) - 1);    // this is for RAW mode
++            WRITE_MPEG_REG(AIU_MEM_IEC958_END_PTR, (addr & 0xffffffc0) + (size & 0xffffffc0) - 1);    // this is for RAW mode
+         }
+         WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_MASKS, 0x303, 0, 16);
+ 
+@@ -265,133 +207,127 @@ i2s mode 0: master 1: slave
+ */
+ static void i2sin_fifo0_set_buf(u32 addr, u32 size,u32 i2s_mode,u32 i2s_sync)
+ {
+-	unsigned char  mode = 0;
++    unsigned char  mode = 0;
+     unsigned int sync_mode = 0;
+     if(i2s_sync)
+         sync_mode = i2s_sync;
+-	if(i2s_mode &I2SIN_SLAVE_MODE)
+-		mode = 1;
+-	WRITE_MPEG_REG(AUDIN_FIFO0_START, addr & 0xffffffc0);
+-	WRITE_MPEG_REG(AUDIN_FIFO0_PTR, (addr&0xffffffc0));
+-	WRITE_MPEG_REG(AUDIN_FIFO0_END, (addr&0xffffffc0) + (size&0xffffffc0)-8);
+-
+-	WRITE_MPEG_REG(AUDIN_FIFO0_CTRL, (1<<AUDIN_FIFO0_EN)	// FIFO0_EN
+-    								|(1<<AUDIN_FIFO0_LOAD)	// load start address./* AUDIN_FIFO0_LOAD */
+-								|(1<<AUDIN_FIFO0_DIN_SEL)	// DIN from i2sin./* AUDIN_FIFO0_DIN_SEL */
+-	    							//|(1<<6)	// 32 bits data in./*AUDIN_FIFO0_D32b */
+-									//|(0<<7)	// put the 24bits data to  low 24 bits./* AUDIN_FIFO0_h24b */16bit
+-								|(4<<AUDIN_FIFO0_ENDIAN)	// /*AUDIN_FIFO0_ENDIAN */
+-								|(2<<AUDIN_FIFO0_CHAN)//2 channel./* AUDIN_FIFO0_CHAN*/
+-		    						|(0<<16)	//to DDR
+-                                                       |(1<<AUDIN_FIFO0_UG)    // Urgent request.  DDR SDRAM urgent request enable.
+-                                                       |(0<<17)    // Overflow Interrupt mask
+-                                                       |(0<<18)    // Audio in INT
+-			                                	//|(1<<19)	//hold 0 enable
+-								|(0<<AUDIN_FIFO0_UG)	// hold0 to aififo
+-				  );
+-
+-    WRITE_MPEG_REG(AUDIN_FIFO0_CTRL1,    0 << 4                       // fifo0_dest_sel
+-                                       | 2 << 2                       // fifo0_din_byte_num
+-                                       | 0 << 0);                      // fifo0_din_pos
+-
+-
+-	WRITE_MPEG_REG(AUDIN_I2SIN_CTRL, //(0<<I2SIN_SIZE)			///*bit8*/  16bit
+-									 (3<<I2SIN_SIZE)
+-									|(1<<I2SIN_CHAN_EN)		/*bit10~13*/ //2 channel
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TV
+-									|(sync_mode<<I2SIN_POS_SYNC)
+-#else
+-									|(1<<I2SIN_POS_SYNC)
+-#endif
+-									|(1<<I2SIN_LRCLK_SKEW)
+-                                    				|(1<<I2SIN_LRCLK_INVT)
+-									|(!mode<<I2SIN_CLK_SEL)
+-									|(!mode<<I2SIN_LRCLK_SEL)
+-				    				|(!mode<<I2SIN_DIR)
+-				  );
++    if(i2s_mode &I2SIN_SLAVE_MODE)
++        mode = 1;
++    WRITE_MPEG_REG(AUDIN_FIFO0_START, addr & 0xffffffc0);
++    WRITE_MPEG_REG(AUDIN_FIFO0_PTR, (addr&0xffffffc0));
++    WRITE_MPEG_REG(AUDIN_FIFO0_END, (addr&0xffffffc0) + (size&0xffffffc0)-8);
++
++    WRITE_MPEG_REG(AUDIN_FIFO0_CTRL, (1<<AUDIN_FIFO0_EN)      // FIFO0_EN
++                                    |(1<<AUDIN_FIFO0_LOAD)    // load start address
++                                    |(1<<AUDIN_FIFO0_DIN_SEL) // DIN from i2sin
++                                    //|(1<<6)                              // 32 bits data in.
++                                    //|(0<<7)                             // put the 24bits data to  low 24 bits
++                                    |(4<<AUDIN_FIFO0_ENDIAN)  // AUDIN_FIFO0_ENDIAN 
++                                    |(2<<AUDIN_FIFO0_CHAN)    // two channel
++                                    |(0<<16)                  // to DDR
++                                    |(1<<AUDIN_FIFO0_UG)      // Urgent request.  DDR SDRAM urgent request enable.
++                                    |(0<<17)                  // Overflow Interrupt mask
++                                    |(0<<18)                  // Audio in INT
++                                    //|(1<<19)                            // hold 0 enable
++                                    |(0<<AUDIN_FIFO0_UG)      // hold0 to aififo
++                  );
++
++    WRITE_MPEG_REG(AUDIN_FIFO0_CTRL1,    0 << 4               // fifo0_dest_sel
++                                       | 2 << 2               // fifo0_din_byte_num
++                                       | 0 << 0);             // fifo0_din_pos
++
++
++    WRITE_MPEG_REG(AUDIN_I2SIN_CTRL, (3<<I2SIN_SIZE)
++                                    |(1<<I2SIN_CHAN_EN)        //  2 channel
++                                    |(sync_mode<<I2SIN_POS_SYNC)
++                                    |(1<<I2SIN_LRCLK_SKEW)
++                                    |(1<<I2SIN_LRCLK_INVT)
++                                    |(!mode<<I2SIN_CLK_SEL)
++                                    |(!mode<<I2SIN_LRCLK_SEL)
++                                    |(!mode<<I2SIN_DIR)
++                  );
+ 
+ }
+ 
+ static void spdifin_reg_set(void)
+ {
+-	struct clk* clk_src = clk_get_sys("clk81", NULL);  // get clk81 clk_rate
+-	u32 clk_rate = clk_get_rate(clk_src);
+-	u32 spdif_clk_time = 54;   // 54us
+-	u32 spdif_mode_14bit = ((clk_rate /500000 +1 )>>1)* spdif_clk_time; // the reg spdif_mode(0x2800)last 14 bit
+-	u32 period_data = (clk_rate/64000 + 1 ) >> 1 ;   // sysclk/32(bit)/2(ch)/2(bmc)
+-	u32 period_32k = (period_data + (1<<4)) >> 5;     // 32k min period
+-	u32 period_44k = (period_data / 22 + 1) >> 1;   // 44k min period
+-	u32 period_48k = (period_data / 24 + 1) >> 1;   // 48k min period
+-	u32 period_96k = (period_data / 48 + 1) >> 1;   // 96k min period
+-	u32 period_192k = (period_data / 96 + 1) >> 1;  // 192k min period
+-	
+-	printk(KERN_INFO"spdifin_reg_set: clk_rate=%d\n", clk_rate);
+-		
+-	WRITE_MPEG_REG(AUDIN_SPDIF_MODE, (READ_MPEG_REG(AUDIN_SPDIF_MODE)&0x7fffc000)|(spdif_mode_14bit<<0));
+-	WRITE_MPEG_REG(AUDIN_SPDIF_FS_CLK_RLTN, (period_32k<<0)|(period_44k<<6)|(period_48k<<12) 
+-											|(period_96k<<18)|(period_192k<<24));  //Spdif_fs_clk_rltn
+-	
++    struct clk* clk_src = clk_get_sys("clk81", NULL);  // get clk81 clk_rate
++    u32 clk_rate = clk_get_rate(clk_src);
++    u32 spdif_clk_time = 54;   // 54us
++    u32 spdif_mode_14bit = ((clk_rate /500000 +1 )>>1)* spdif_clk_time; // the reg spdif_mode(0x2800)last 14 bit
++    u32 period_data = (clk_rate/64000 + 1 ) >> 1 ;   // sysclk/32(bit)/2(ch)/2(bmc)
++    u32 period_32k = (period_data + (1<<4)) >> 5;    // 32k min period
++    u32 period_44k = (period_data / 22 + 1) >> 1;    // 44k min period
++    u32 period_48k = (period_data / 24 + 1) >> 1;    // 48k min period
++    u32 period_96k = (period_data / 48 + 1) >> 1;    // 96k min period
++    u32 period_192k = (period_data / 96 + 1) >> 1;   // 192k min period
++    
++    printk(KERN_INFO"spdifin_reg_set: clk_rate=%d\n", clk_rate);
++        
++    WRITE_MPEG_REG(AUDIN_SPDIF_MODE, (READ_MPEG_REG(AUDIN_SPDIF_MODE)&0x7fffc000)|(spdif_mode_14bit<<0));
++    WRITE_MPEG_REG(AUDIN_SPDIF_FS_CLK_RLTN, (period_32k<<0)|(period_44k<<6)|(period_48k<<12) 
++                                            |(period_96k<<18)|(period_192k<<24));  //Spdif_fs_clk_rltn
++    
+ }
+ 
+ static void spdifin_fifo1_set_buf(u32 addr, u32 size)
+ {
+-	WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)&0x7fffffff);
+-	WRITE_MPEG_REG(AUDIN_FIFO1_START, addr & 0xffffffc0);
+-	WRITE_MPEG_REG(AUDIN_FIFO1_PTR, (addr&0xffffffc0));
+-	WRITE_MPEG_REG(AUDIN_FIFO1_END, (addr&0xffffffc0) + (size&0xffffffc0)-8);
+-	WRITE_MPEG_REG(AUDIN_FIFO1_CTRL, (1<<AUDIN_FIFO1_EN)	// FIFO0_EN
+-    								|(1<<AUDIN_FIFO1_LOAD)	// load start address./* AUDIN_FIFO0_LOAD */
+-								|(0<<AUDIN_FIFO1_DIN_SEL)	// DIN from i2sin./* AUDIN_FIFO0_DIN_SEL */
+-	    							//|(1<<6)	// 32 bits data in./*AUDIN_FIFO0_D32b */
+-									//|(0<<7)	// put the 24bits data to  low 24 bits./* AUDIN_FIFO0_h24b */16bit
+-								|(4<<AUDIN_FIFO1_ENDIAN)	// /*AUDIN_FIFO0_ENDIAN */
+-								|(2<<AUDIN_FIFO1_CHAN)//2 channel./* AUDIN_FIFO0_CHAN*/
+-		    						|(0<<16)	//to DDR
+-                                                       |(1<<AUDIN_FIFO1_UG)    // Urgent request.  DDR SDRAM urgent request enable.
+-                                                       |(0<<17)    // Overflow Interrupt mask
+-                                                       |(0<<18)    // Audio in INT
+-			                                	//|(1<<19)	//hold 0 enable
+-								|(0<<AUDIN_FIFO1_UG)	// hold0 to aififo
+-				  );
+-
+-	// according clk81 to set reg spdif_mode(0x2800) the last 14 bit and reg Spdif_fs_clk_rltn(0x2801)
+-	spdifin_reg_set();
+-
+-	WRITE_MPEG_REG(AUDIN_FIFO1_CTRL1,0xc);
++    WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)&0x7fffffff);
++    WRITE_MPEG_REG(AUDIN_FIFO1_START, addr & 0xffffffc0);
++    WRITE_MPEG_REG(AUDIN_FIFO1_PTR, (addr&0xffffffc0));
++    WRITE_MPEG_REG(AUDIN_FIFO1_END, (addr&0xffffffc0) + (size&0xffffffc0)-8);
++    WRITE_MPEG_REG(AUDIN_FIFO1_CTRL, (1<<AUDIN_FIFO1_EN)        // FIFO0_EN
++                                    |(1<<AUDIN_FIFO1_LOAD)      // load start address.
++                                    |(0<<AUDIN_FIFO1_DIN_SEL)   // DIN from i2sin.
++                                    //|(1<<6)                                 // 32 bits data in.
++                                    //|(0<<7)                                 // put the 24bits data to  low 24 bits
++                                    |(4<<AUDIN_FIFO1_ENDIAN)    // AUDIN_FIFO0_ENDIAN 
++                                    |(2<<AUDIN_FIFO1_CHAN)      // 2 channel
++                                    |(0<<16)                    //to DDR
++                                    |(1<<AUDIN_FIFO1_UG)        // Urgent request.  DDR SDRAM urgent request enable.
++                                    |(0<<17)    // Overflow Interrupt mask
++                                    |(0<<18)    // Audio in INT
++                                    //|(1<<19)   //hold 0 enable
++                                    |(0<<AUDIN_FIFO1_UG)    // hold0 to aififo
++                  );
++
++    // according clk81 to set reg spdif_mode(0x2800) the last 14 bit and reg Spdif_fs_clk_rltn(0x2801)
++    spdifin_reg_set();
++
++    WRITE_MPEG_REG(AUDIN_FIFO1_CTRL1,0xc);
+ }
+ void audio_in_i2s_set_buf(u32 addr, u32 size,u32 i2s_mode, u32 i2s_sync)
+ {
+-	printk("i2sin_fifo0_set_buf \n");		
+-	i2sin_fifo0_set_buf(addr,size,i2s_mode,i2s_sync);
+-	audio_in_buf_ready = 1;
++    printk("i2sin_fifo0_set_buf \n");       
++    i2sin_fifo0_set_buf(addr,size,i2s_mode,i2s_sync);
++    audio_in_buf_ready = 1;
+ }
+ void audio_in_spdif_set_buf(u32 addr, u32 size)
+ {
+-	printk("spdifin_fifo1_set_buf \n");			
+-	spdifin_fifo1_set_buf(addr,size);
+-	
++    printk("spdifin_fifo1_set_buf \n");         
++    spdifin_fifo1_set_buf(addr,size);
++    
+ }
+ //extern void audio_in_enabled(int flag);
+ 
+ void audio_in_i2s_enable(int flag)
+ {
+-  	int rd = 0, start=0;
+-	if(flag){
++    int rd = 0, start=0;
++    if(flag){
+           /* reset only when start i2s input */
+ reset_again:
+-	     WRITE_MPEG_REG_BITS(AUDIN_FIFO0_CTRL, 1, 1, 1); // reset FIFO 0
+-            WRITE_MPEG_REG(AUDIN_FIFO0_PTR, 0);
+-            rd = READ_MPEG_REG(AUDIN_FIFO0_PTR);
+-            start = READ_MPEG_REG(AUDIN_FIFO0_START);
+-            if(rd != start){
+-              printk("error %08x, %08x !!!!!!!!!!!!!!!!!!!!!!!!\n", rd, start);
+-              goto reset_again;
+-            }
+-			WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
+-
+-	}else{
+-			WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 0, I2SIN_EN, 1);
+-	}
++        WRITE_MPEG_REG_BITS(AUDIN_FIFO0_CTRL, 1, 1, 1); // reset FIFO 0
++        WRITE_MPEG_REG(AUDIN_FIFO0_PTR, 0);
++        rd = READ_MPEG_REG(AUDIN_FIFO0_PTR);
++        start = READ_MPEG_REG(AUDIN_FIFO0_START);
++        if(rd != start){
++            printk("error %08x, %08x !!!!!!!!!!!!!!!!!!!!!!!!\n", rd, start);
++            goto reset_again;
++        }
++        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++    }else{
++        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 0, I2SIN_EN, 1);
++    }
+ }
+ 
+ 
+@@ -399,72 +335,72 @@ void audio_in_spdif_enable(int flag)
+ {
+   int rd = 0, start=0;
+ 
+-	if(flag){
++    if(flag){
+ reset_again:
+-	     WRITE_MPEG_REG_BITS(AUDIN_FIFO1_CTRL, 1, 1, 1); // reset FIFO 0
+-            WRITE_MPEG_REG(AUDIN_FIFO1_PTR, 0);
+-            rd = READ_MPEG_REG(AUDIN_FIFO1_PTR);
+-            start = READ_MPEG_REG(AUDIN_FIFO1_START);
+-            if(rd != start){
+-              printk("error %08x, %08x !!!!!!!!!!!!!!!!!!!!!!!!\n", rd, start);
+-              goto reset_again;
+-            }
+-		WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)| (1<<31));		
+-	}else{
+-		WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)& ~(1<<31));				
+-	}
++        WRITE_MPEG_REG_BITS(AUDIN_FIFO1_CTRL, 1, 1, 1); // reset FIFO 0
++        WRITE_MPEG_REG(AUDIN_FIFO1_PTR, 0);
++        rd = READ_MPEG_REG(AUDIN_FIFO1_PTR);
++        start = READ_MPEG_REG(AUDIN_FIFO1_START);
++        if(rd != start){
++            printk("error %08x, %08x !!!!!!!!!!!!!!!!!!!!!!!!\n", rd, start);
++            goto reset_again;
++        }
++        WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)| (1<<31));     
++    }else{
++        WRITE_MPEG_REG(AUDIN_SPDIF_MODE, READ_MPEG_REG(AUDIN_SPDIF_MODE)& ~(1<<31));                
++    }
+ }
+ int if_audio_in_i2s_enable()
+ {
+-	return READ_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, I2SIN_EN, 1);
++    return READ_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, I2SIN_EN, 1);
+ }
+ int if_audio_in_spdif_enable()
+ {
+-	return READ_MPEG_REG_BITS(AUDIN_SPDIF_MODE, 31, 1);
++    return READ_MPEG_REG_BITS(AUDIN_SPDIF_MODE, 31, 1);
+ }
+ unsigned int audio_in_i2s_rd_ptr(void)
+ {
+-	unsigned int val;
+-	val = READ_MPEG_REG(AUDIN_FIFO0_RDPTR);
+-	printk("audio in i2s rd ptr: %x\n", val);
+-	return val;
++    unsigned int val;
++    val = READ_MPEG_REG(AUDIN_FIFO0_RDPTR);
++    printk("audio in i2s rd ptr: %x\n", val);
++    return val;
+ }
+ unsigned int audio_in_spdif_rd_ptr(void)
+ {
+-	unsigned int val;
+-	val = READ_MPEG_REG(AUDIN_FIFO1_RDPTR);
+-	printk("audio in spdif rd ptr: %x\n", val);
+-	return val;
++    unsigned int val;
++    val = READ_MPEG_REG(AUDIN_FIFO1_RDPTR);
++    printk("audio in spdif rd ptr: %x\n", val);
++    return val;
+ }
+ unsigned int audio_in_i2s_wr_ptr(void)
+ {
+-	unsigned int val;
+-      WRITE_MPEG_REG(AUDIN_FIFO0_PTR, 1);
+-	val = READ_MPEG_REG(AUDIN_FIFO0_PTR);
+-	return (val)&(~0x3F);
+-	//return val&(~0x7);
++    unsigned int val;
++    WRITE_MPEG_REG(AUDIN_FIFO0_PTR, 1);
++    val = READ_MPEG_REG(AUDIN_FIFO0_PTR);
++    return (val)&(~0x3F);
++    //return val&(~0x7);
+ }
+ unsigned int audio_in_spdif_wr_ptr(void)
+ {
+-	unsigned int val;
+-      WRITE_MPEG_REG(AUDIN_FIFO1_PTR, 1);
+-	val = READ_MPEG_REG(AUDIN_FIFO1_PTR);
+-	return (val)&(~0x3F);
++    unsigned int val;
++    WRITE_MPEG_REG(AUDIN_FIFO1_PTR, 1);
++    val = READ_MPEG_REG(AUDIN_FIFO1_PTR);
++    return (val)&(~0x3F);
+ }
+ void audio_in_i2s_set_wrptr(unsigned int val)
+ {
+-	WRITE_MPEG_REG(AUDIN_FIFO0_RDPTR, val);
++    WRITE_MPEG_REG(AUDIN_FIFO0_RDPTR, val);
+ }
+ void audio_in_spdif_set_wrptr(unsigned int val)
+ {
+-	WRITE_MPEG_REG(AUDIN_FIFO1_RDPTR, val);
++    WRITE_MPEG_REG(AUDIN_FIFO1_RDPTR, val);
+ }
+ void audio_set_i2s_mode(u32 mode)
+ {
+     const unsigned short mask[4] = {
+         0x303,                  /* 2x16 */
+         0x303,                  /* 2x24 */
+-        0x303,                 /* 8x24 */
++        0x303,                  /* 8x24 */
+         0x303,                  /* 2x32 */
+     };
+ 
+@@ -489,8 +425,7 @@ void audio_set_i2s_mode(u32 mode)
+         //WRITE_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 0, 0, 1);
+ 
+         if (ENABLE_IEC958) {
+-       //     WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_MASKS, mask[mode], 0,
+-             //                   16);
++            //WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_MASKS, mask[mode], 0,16);
+             //WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 1, 0, 1);
+             //WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 0, 0, 1);
+         }
+@@ -505,189 +440,192 @@ void audio_set_i2s_mode(u32 mode)
+ 
+ void audio_util_set_dac_format(unsigned format)
+ {
+-  	WRITE_MPEG_REG(AIU_CLK_CTRL,		 (0 << 12) | // 958 divisor more, if true, divided by 2, 4, 6, 8.
+-							(1 <<  8) | // alrclk skew: 1=alrclk transitions on the cycle before msb is sent
+-							(1 <<  6) | // invert aoclk
+-							(1 <<  7) | // invert lrclk
++    WRITE_MPEG_REG(AIU_CLK_CTRL,         (0 << 12) | // 958 divisor more, if true, divided by 2, 4, 6, 8.
++                            (1 <<  8) | // alrclk skew: 1=alrclk transitions on the cycle before msb is sent
++                            (1 <<  6) | // invert aoclk
++                            (1 <<  7) | // invert lrclk
+ #if OVERCLOCK == 1
+-							(3 <<  4) | // 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
+-							(3 <<  2) | // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
++                            (3 <<  4) | // 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
++                            (3 <<  2) | // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
+ #else
+-							(1 <<  4) | // 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
+-							(2 <<  2) | // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
++                            (1 <<  4) | // 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
++                            (2 <<  2) | // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
+ #endif
+-							(1 <<  1) | // enable 958 clock
+-							(1 <<  0)); // enable I2S clock
++                            (1 <<  1) | // enable 958 clock
++                            (1 <<  0)); // enable I2S clock
+     if (format == AUDIO_ALGOUT_DAC_FORMAT_DSP) {
+         WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 1, 8, 2);
+     } else if (format == AUDIO_ALGOUT_DAC_FORMAT_LEFT_JUSTIFY) {
+         WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 0, 8, 2);
+     }
+- 	if(dac_mute_const == 0x800000)
+-    	WRITE_MPEG_REG(AIU_I2S_DAC_CFG, 	0x000f);	// Payload 24-bit, Msb first, alrclk = aoclk/64.mute const 0x800000
++    if(dac_mute_const == 0x800000)
++        WRITE_MPEG_REG(AIU_I2S_DAC_CFG,     0x000f);    // Payload 24-bit, Msb first, alrclk = aoclk/64.mute const 0x800000
+     else
+-    	WRITE_MPEG_REG(AIU_I2S_DAC_CFG, 	0x0007);	// Payload 24-bit, Msb first, alrclk = aoclk/64
+-	WRITE_MPEG_REG(AIU_I2S_SOURCE_DESC, 0x0001);	// four 2-channel
++        WRITE_MPEG_REG(AIU_I2S_DAC_CFG,     0x0007);    // Payload 24-bit, Msb first, alrclk = aoclk/64
++    WRITE_MPEG_REG(AIU_I2S_SOURCE_DESC, 0x0001);    // four 2-channel
+ }
+ 
+ // iec958 and i2s clock are separated after M6TV.
+ void audio_util_set_dac_958_format(unsigned format)
+ {
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,0,12,1);// 958 divisor more, if true, divided by 2, 4, 6, 8
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,0,12,1);// 958 divisor more, if true, divided by 2, 4, 6, 8
+ #if IEC958_OVERCLOCK == 1
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,3,4,2);// 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,3,4,2);// 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
+ #else
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,4,2);// 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,4,2);// 958 divisor: 0=no div; 1=div by 2; 2=div by 3; 3=div by 4.
+ #endif
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,1,1);// enable 958 clock
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,1,1);// enable 958 clock
+ }
+ 
+ void audio_util_set_dac_i2s_format(unsigned format)
+-{	
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,6,1);//invert aoclk
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,7,1);//invert lrclk
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,8,2);// alrclk skew: 1=alrclk transitions on the cycle before msb is sent
++{   
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,6,1);//invert aoclk
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,7,1);//invert lrclk
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,8,2);// alrclk skew: 1=alrclk transitions on the cycle before msb is sent
+ #if OVERCLOCK == 1
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,3,2,2);// i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,3,2,2);// i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
+ #else
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,2,2,2); // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,2,2,2); // i2s divisor: 0=no div; 1=div by 2; 2=div by 4; 3=div by 8.
+ #endif
+-	WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,0,1);// enable I2S clock
+-	
++    WRITE_MPEG_REG_BITS(AIU_CLK_CTRL,1,0,1);// enable I2S clock
++    
+     if (format == AUDIO_ALGOUT_DAC_FORMAT_DSP) {
+         WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 1, 8, 2);
+     } else if (format == AUDIO_ALGOUT_DAC_FORMAT_LEFT_JUSTIFY) {
+         WRITE_MPEG_REG_BITS(AIU_CLK_CTRL, 0, 8, 2);
+     }
+- 	if(dac_mute_const == 0x800000)
+-    	WRITE_MPEG_REG(AIU_I2S_DAC_CFG, 	0x000f);	// Payload 24-bit, Msb first, alrclk = aoclk/64.mute const 0x800000
++    if(dac_mute_const == 0x800000)
++        WRITE_MPEG_REG(AIU_I2S_DAC_CFG,     0x000f);    // Payload 24-bit, Msb first, alrclk = aoclk/64.mute const 0x800000
+     else
+-    	WRITE_MPEG_REG(AIU_I2S_DAC_CFG, 	0x0007);	// Payload 24-bit, Msb first, alrclk = aoclk/64
+-	WRITE_MPEG_REG(AIU_I2S_SOURCE_DESC, 0x0001);	// four 2-channel	
++        WRITE_MPEG_REG(AIU_I2S_DAC_CFG,     0x0007);    // Payload 24-bit, Msb first, alrclk = aoclk/64
++    WRITE_MPEG_REG(AIU_I2S_SOURCE_DESC, 0x0001);    // four 2-channel   
+ }
+ 
+ enum clk_enum
+ {
+-	CLK_NONE = 0,
+-	CLK_MPLL0,
+-	CLK_MPLL1,
+-	CLK_MPLL2
++    CLK_NONE = 0,
++    CLK_MPLL0,
++    CLK_MPLL1,
++    CLK_MPLL2
+ };
+ 
+ // iec958 and i2s clock are separated after M6TV. 
+ void audio_set_i2s_clk(unsigned freq, unsigned fs_config, unsigned mpll)
+ {
+     int i, index = 0, xtal = 0;
+-	int mpll_reg, clk_src;
++    int mpll_reg, clk_src;
+     int (*audio_clock_config)[2];
+-	switch (mpll){
+-	case 0:
+-		mpll_reg = HHI_MPLL_CNTL7;
+-		clk_src = CLK_MPLL0;
+-		break;
+-	case 1:
+-		mpll_reg = HHI_MPLL_CNTL8;
+-		clk_src = CLK_MPLL1;
+-		break;
+-	case 2:
+-		mpll_reg = HHI_MPLL_CNTL9;
+-		clk_src = CLK_MPLL2;
+-		break;
+-	default:
+-		BUG();
+-	}
+-
+-	switch(freq)
+-	{
+-		case AUDIO_CLK_FREQ_192:
+-			index=4;
+-			break;
+-		case AUDIO_CLK_FREQ_96:
+-			index=3;
+-			break;
+-		case AUDIO_CLK_FREQ_48:
+-			index=2;
+-			break;
+-		case AUDIO_CLK_FREQ_441:
+-			index=1;
+-			break;
+-		case AUDIO_CLK_FREQ_32:
+-			index=0;
+-			break;
+-		case AUDIO_CLK_FREQ_8:
+-			index = 5;
+-			break;
+-		case AUDIO_CLK_FREQ_11:
+-			index = 6;
+-			break;
+-		case AUDIO_CLK_FREQ_12:
+-			index = 7;
+-			break;
+-		case AUDIO_CLK_FREQ_16:
+-			index = 8;
+-			break;
+-		case AUDIO_CLK_FREQ_22:
+-			index = 9;
+-			break;
+-		case AUDIO_CLK_FREQ_24:
+-			index = 10;
+-			break;
++    switch (mpll){
++    case 0:
++        mpll_reg = HHI_MPLL_CNTL7;
++        clk_src = CLK_MPLL0;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV
++        WRITE_MPEG_REG(HHI_MPLL_CNTL, READ_MPEG_REG(HHI_MPLL_CNTL)|(1<<25));
++#endif
++        break;
++    case 1:
++        mpll_reg = HHI_MPLL_CNTL8;
++        clk_src = CLK_MPLL1;
++        break;
++    case 2:
++        mpll_reg = HHI_MPLL_CNTL9;
++        clk_src = CLK_MPLL2;
++        break;
++    default:
++        BUG();
++    }
++
++    switch(freq)
++    {
++        case AUDIO_CLK_FREQ_192:
++            index=4;
++            break;
++        case AUDIO_CLK_FREQ_96:
++            index=3;
++            break;
++        case AUDIO_CLK_FREQ_48:
++            index=2;
++            break;
++        case AUDIO_CLK_FREQ_441:
++            index=1;
++            break;
++        case AUDIO_CLK_FREQ_32:
++            index=0;
++            break;
++        case AUDIO_CLK_FREQ_8:
++            index = 5;
++            break;
++        case AUDIO_CLK_FREQ_11:
++            index = 6;
++            break;
++        case AUDIO_CLK_FREQ_12:
++            index = 7;
++            break;
++        case AUDIO_CLK_FREQ_16:
++            index = 8;
++            break;
++        case AUDIO_CLK_FREQ_22:
++            index = 9;
++            break;
++        case AUDIO_CLK_FREQ_24:
++            index = 10;
++            break;
+         case AUDIO_CLK_FREQ_882:
+-			index = 12;
+-			break;
+-		default:
+-			index=0;
+-			break;
+-	};
+-
+-	if (fs_config == AUDIO_CLK_256FS) {
+-		// divide 256
+-		xtal = 0;
+-	}
+-	else if (fs_config == AUDIO_CLK_384FS) {
+-	    // divide 384
+-		xtal = 1;
+-	}
+-	audio_clock_config = audio_clock_config_table[xtal];
++            index = 12;
++            break;
++        default:
++            index=0;
++            break;
++    };
++
++    if (fs_config == AUDIO_CLK_256FS) {
++        // divide 256
++        xtal = 0;
++    }
++    else if (fs_config == AUDIO_CLK_384FS) {
++        // divide 384
++        xtal = 1;
++    }
++    audio_clock_config = audio_clock_config_table[xtal];
+ 
+     // gate the clock off
+     WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) & ~(1 << 8));
+-	WRITE_MPEG_REG(AIU_CLK_CTRL_MORE, 0);
+-	
+-	//Set filter register
+-	//WRITE_MPEG_REG(HHI_MPLL_CNTL3, 0x26e1250);
++    WRITE_MPEG_REG(AIU_CLK_CTRL_MORE, 0);
++    
++    //Set filter register
++    //WRITE_MPEG_REG(HHI_MPLL_CNTL3, 0x26e1250);
+ 
+-	/*--- DAC clock  configuration--- */
+-	// Disable mclk
++    /*--- DAC clock  configuration--- */
++    // Disable mclk
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, 0, 8, 1);
++    // Select clk source, 0=none; 1=Multi-Phase PLL0; 2=Multi-Phase PLL1; 3=Multi-Phase PLL2.
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, clk_src, 9, 2);
++
++    // Configure Multi-Phase PLLX
++    WRITE_MPEG_REG(mpll_reg, audio_clock_config[index][0]);
++    // Set the XD value
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
++
++    WRITE_MPEG_REG_BITS(AIU_CODEC_DAC_LRCLK_CTRL, 64-1, 0, 12);//set codec dac ratio---lrclk--64fs
++    
++    // delay 5uS
++    //udelay(5);
++    for (i = 0; i < 500000; i++) ;
++    // gate the clock on
++    WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) | (1 << 8));
++
++    //Audio DAC Clock enable
++    WRITE_MPEG_REG(HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) |(1<<23));
++    
++    /* ---ADC clock  configuration--- */
++    // Disable mclk
+     WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, 0, 8, 1);
+-	// Select clk source, 0=none; 1=Multi-Phase PLL0; 2=Multi-Phase PLL1; 3=Multi-Phase PLL2.
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, clk_src, 9, 2);
+-
+-	// Configure Multi-Phase PLLX
+-	WRITE_MPEG_REG(mpll_reg, audio_clock_config[index][0]);
+-	// Set the XD value
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
+-
+-	WRITE_MPEG_REG_BITS(AIU_CODEC_DAC_LRCLK_CTRL, 64-1, 0, 12);//set codec dac ratio---lrclk--64fs
+-	
+-	// delay 5uS
+-	//udelay(5);
+-	for (i = 0; i < 500000; i++) ;
+-	// gate the clock on
+-	WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) | (1 << 8));
+-
+-	//Audio DAC Clock enable
+-	WRITE_MPEG_REG(HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) |(1<<23));
+-	
+-	/* ---ADC clock  configuration--- */
+-	// Disable mclk
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, 0, 8, 1);
+     // Set pll over mclk ratio
+     //we want 256fs ADC MLCK,so for over clock mode,divide more 2 than I2S  DAC CLOCK
+ #if OVERCLOCK == 0
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, audio_clock_config[index][1], 0, 8);
+ #else
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, (audio_clock_config[index][1]+1)*2-1, 0, 8);
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, (audio_clock_config[index][1]+1)*2-1, 0, 8);
+ #endif
+ 
+     // Set mclk over sclk ratio
+@@ -702,8 +640,8 @@ void audio_set_i2s_clk(unsigned freq, unsigned fs_config, unsigned mpll)
+     WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL, 1, 8, 1);
+ 
+     // delay 2uS
+-	//udelay(2);
+-	for (i = 0; i < 200000; i++) ;
++    //udelay(2);
++    for (i = 0; i < 200000; i++) ;
+ }
+ 
+ // iec958 and i2s clock are separated after M6TV. Use PLL1 for iec958 clock
+@@ -714,91 +652,91 @@ void audio_set_958_clk(unsigned freq, unsigned fs_config)
+ 
+     int (*audio_clock_config)[2];
+ 
+-	int index=0;
++    int index=0;
+     printk("audio_set_958_clk, freq=%d,\n",freq);
+-	switch(freq)
+-	{
+-		case AUDIO_CLK_FREQ_192:
+-			index=4;
+-			break;
+-		case AUDIO_CLK_FREQ_96:
+-			index=3;
+-			break;
+-		case AUDIO_CLK_FREQ_48:
+-			index=2;
+-			break;
+-		case AUDIO_CLK_FREQ_441:
+-			index=1;
+-			break;
+-		case AUDIO_CLK_FREQ_32:
+-			index=0;
+-			break;
+-		case AUDIO_CLK_FREQ_8:
+-			index = 5;
+-			break;
+-		case AUDIO_CLK_FREQ_11:
+-			index = 6;
+-			break;
+-		case AUDIO_CLK_FREQ_12:
+-			index = 7;
+-			break;
+-		case AUDIO_CLK_FREQ_16:
+-			index = 8;
+-			break;
+-		case AUDIO_CLK_FREQ_22:
+-			index = 9;
+-			break;
+-		case AUDIO_CLK_FREQ_24:
+-			index = 10;
+-			break;
++    switch(freq)
++    {
++        case AUDIO_CLK_FREQ_192:
++            index=4;
++            break;
++        case AUDIO_CLK_FREQ_96:
++            index=3;
++            break;
++        case AUDIO_CLK_FREQ_48:
++            index=2;
++            break;
++        case AUDIO_CLK_FREQ_441:
++            index=1;
++            break;
++        case AUDIO_CLK_FREQ_32:
++            index=0;
++            break;
++        case AUDIO_CLK_FREQ_8:
++            index = 5;
++            break;
++        case AUDIO_CLK_FREQ_11:
++            index = 6;
++            break;
++        case AUDIO_CLK_FREQ_12:
++            index = 7;
++            break;
++        case AUDIO_CLK_FREQ_16:
++            index = 8;
++            break;
++        case AUDIO_CLK_FREQ_22:
++            index = 9;
++            break;
++        case AUDIO_CLK_FREQ_24:
++            index = 10;
++            break;
+         case AUDIO_CLK_FREQ_882:
+-			index = 12;
+-			break;
+-		default:
+-			index=0;
+-			break;
+-	};
+-
+-	if (fs_config == AUDIO_CLK_256FS) {
+-		// divide 256
+-		xtal = 0;
+-	}
+-	else if (fs_config == AUDIO_CLK_384FS) {
+-	    // divide 384
+-		xtal = 1;
+-	}
+-	audio_clock_config = audio_clock_config_table[xtal];
++            index = 12;
++            break;
++        default:
++            index=0;
++            break;
++    };
++
++    if (fs_config == AUDIO_CLK_256FS) {
++        // divide 256
++        xtal = 0;
++    }
++    else if (fs_config == AUDIO_CLK_384FS) {
++        // divide 384
++        xtal = 1;
++    }
++    audio_clock_config = audio_clock_config_table[xtal];
+ 
+     // gate the clock off
+     WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) & ~(1 << 8));
+-	//WRITE_MPEG_REG(AIU_CLK_CTRL_MORE, 0);
+-	
+-	//Set filter register
+-	//WRITE_MPEG_REG(HHI_MPLL_CNTL3, 0x26e1250);
++    //WRITE_MPEG_REG(AIU_CLK_CTRL_MORE, 0);
++    
++    //Set filter register
++    //WRITE_MPEG_REG(HHI_MPLL_CNTL3, 0x26e1250);
+ 
+-	/*--- IEC958 clock  configuration, use MPLL1--- */
+-	// Disable mclk
++    /*--- IEC958 clock  configuration, use MPLL1--- */
++    // Disable mclk
+     WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, 0, 24, 1);
+-	//IEC958_USE_CNTL
+-	WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL2, 1, 27, 1);
+-	// Select clk source, 0=ddr_pll; 1=Multi-Phase PLL0; 2=Multi-Phase PLL1; 3=Multi-Phase PLL2.
+-	WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL2, I958_PLL_SRC, 25, 2);
+-
+-	// Configure Multi-Phase PLL1
+-	WRITE_MPEG_REG(MPLL_958_CNTL, audio_clock_config[index][0]);
+-	// Set the XD value
+-#if IEC958_OVERCLOCK	==1
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, (audio_clock_config[index][1]+1)/2 -1, 16, 8);
++    //IEC958_USE_CNTL
++    WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL2, 1, 27, 1);
++    // Select clk source, 0=ddr_pll; 1=Multi-Phase PLL0; 2=Multi-Phase PLL1; 3=Multi-Phase PLL2.
++    WRITE_MPEG_REG_BITS( HHI_AUD_CLK_CNTL2, I958_PLL_SRC, 25, 2);
++
++    // Configure Multi-Phase PLL1
++    WRITE_MPEG_REG(MPLL_958_CNTL, audio_clock_config[index][0]);
++    // Set the XD value
++#if IEC958_OVERCLOCK==1
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, (audio_clock_config[index][1]+1)/2 -1, 16, 8);
+ #else
+-	WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, audio_clock_config[index][1], 16, 8);
++    WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, audio_clock_config[index][1], 16, 8);
+ #endif
+ 
+-	// delay 5uS
+-	//udelay(5);
+-	for (i = 0; i < 500000; i++) ;
+-	// gate the clock on
+-	WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) | (1 << 8));
+-	// Enable mclk
++    // delay 5uS
++    //udelay(5);
++    for (i = 0; i < 500000; i++) ;
++    // gate the clock on
++    WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) | (1 << 8));
++    // Enable mclk
+     WRITE_MPEG_REG_BITS(HHI_AUD_CLK_CNTL2, 1, 24, 1);
+ }
+ 
+@@ -843,11 +781,11 @@ void audio_enable_ouput(int flag)
+ 
+ int if_audio_out_enable(void)
+ {
+-	return READ_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 1, 2);
++    return READ_MPEG_REG_BITS(AIU_MEM_I2S_CONTROL, 1, 2);
+ }
+ int if_958_audio_out_enable(void)
+ {
+-	return READ_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL,1,2);
++    return READ_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL,1,2);
+ }
+ 
+ unsigned int read_i2s_rd_ptr(void)
+@@ -895,18 +833,17 @@ void audio_mute_left_right(unsigned flag)
+ }
+ void audio_hw_958_reset(unsigned slow_domain, unsigned fast_domain)
+ {
+-	WRITE_MPEG_REG(AIU_958_DCU_FF_CTRL,0);
+-    WRITE_MPEG_REG(AIU_RST_SOFT,
+-                   (slow_domain << 3) | (fast_domain << 2));
++    WRITE_MPEG_REG(AIU_958_DCU_FF_CTRL,0);
++    WRITE_MPEG_REG(AIU_RST_SOFT, (slow_domain << 3) | (fast_domain << 2));
+ }
+ 
+ void audio_hw_958_raw(void)
+ {
+     if (ENABLE_IEC958) {
+-         WRITE_MPEG_REG(AIU_958_MISC, 1);
+-         WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 1, 8, 1);  // raw
+-         WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 0, 7, 1);  // 8bit
+-         WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 1, 3, 3); // endian
++        WRITE_MPEG_REG(AIU_958_MISC, 1);
++        WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 1, 8, 1);  // raw
++        WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 0, 7, 1);  // 8bit
++        WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 1, 3, 3); // endian
+     }
+ 
+     WRITE_MPEG_REG(AIU_958_BPF, IEC958_bpf);
+@@ -916,11 +853,11 @@ void audio_hw_958_raw(void)
+     WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 0, 2, 2);// disable int
+ 
+     if(IEC958_mode == 1){ // search in byte
+-      WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 7, 4, 3);
++        WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 7, 4, 3);
+     }else if(IEC958_mode == 2) { // search in word
+-      WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 5, 4, 3);
++        WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 5, 4, 3);
+     }else{
+-      WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 0, 4, 3);
++        WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 0, 4, 3);
+     }
+     WRITE_MPEG_REG(AIU_958_CHSTAT_L0, IEC958_chstat0_l);
+     WRITE_MPEG_REG(AIU_958_CHSTAT_L1, IEC958_chstat1_l);
+@@ -946,10 +883,10 @@ void audio_hw_958_raw(void)
+ void set_958_channel_status(_aiu_958_channel_status_t * set)
+ {
+     if (set) {
+-		WRITE_MPEG_REG(AIU_958_CHSTAT_L0, set->chstat0_l);
+-		WRITE_MPEG_REG(AIU_958_CHSTAT_L1, set->chstat1_l);
+-		WRITE_MPEG_REG(AIU_958_CHSTAT_R0, set->chstat0_r);
+-		WRITE_MPEG_REG(AIU_958_CHSTAT_R1, set->chstat1_r);
++        WRITE_MPEG_REG(AIU_958_CHSTAT_L0, set->chstat0_l);
++        WRITE_MPEG_REG(AIU_958_CHSTAT_L1, set->chstat1_l);
++        WRITE_MPEG_REG(AIU_958_CHSTAT_R0, set->chstat0_r);
++        WRITE_MPEG_REG(AIU_958_CHSTAT_R1, set->chstat1_r);
+     }
+ }
+ 
+@@ -962,11 +899,11 @@ static void audio_hw_set_958_pcm24(_aiu_958_raw_setting_t * set)
+ void audio_set_958_mode(unsigned mode, _aiu_958_raw_setting_t * set)
+ {
+     if(mode == AIU_958_MODE_PCM_RAW){
+-    	mode = AIU_958_MODE_PCM16; //use 958 raw pcm mode
+-       WRITE_MPEG_REG(AIU_958_VALID_CTRL,3);//enable 958 invalid bit	
+-    } 
+-    else
+-	WRITE_MPEG_REG(AIU_958_VALID_CTRL,0);
++        mode = AIU_958_MODE_PCM16; //use 958 raw pcm mode
++        WRITE_MPEG_REG(AIU_958_VALID_CTRL,3);//enable 958 invalid bit    
++    } else
++        WRITE_MPEG_REG(AIU_958_VALID_CTRL,0);
++    
+     if (mode == AIU_958_MODE_RAW) {
+ 
+         audio_hw_958_raw();
+@@ -1031,95 +968,64 @@ void audio_out_i2s_enable(unsigned flag)
+ }
+ void audio_hw_958_enable(unsigned flag)
+ {
+-    if (ENABLE_IEC958)
+-    {
+-    		if(flag){
+-        		WRITE_MPEG_REG(AIU_RST_SOFT, 0x04);
+-	              WRITE_MPEG_REG(AIU_958_FORCE_LEFT, 0);
+-	              WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 1, 0, 1);
+-	              WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 3, 1, 2);
+-    		}
+-		else{
+-	             WRITE_MPEG_REG(AIU_958_DCU_FF_CTRL, 0);
+-	             WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 0, 1, 2);			
+-		}	
++    if (ENABLE_IEC958){
++        if(flag){
++            WRITE_MPEG_REG(AIU_RST_SOFT, 0x04);
++            WRITE_MPEG_REG(AIU_958_FORCE_LEFT, 0);
++            WRITE_MPEG_REG_BITS(AIU_958_DCU_FF_CTRL, 1, 0, 1);
++            WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 3, 1, 2);
++        }else{
++            WRITE_MPEG_REG(AIU_958_DCU_FF_CTRL, 0);
++            WRITE_MPEG_REG_BITS(AIU_MEM_IEC958_CONTROL, 0, 1, 2);          
++        }   
+     }
+ }
+ 
+ unsigned int read_i2s_mute_swap_reg(void)
+ {
+-	unsigned int val;
+-    	val = READ_MPEG_REG(AIU_I2S_MUTE_SWAP);
+-    	return val;
++    unsigned int val;
++    val = READ_MPEG_REG(AIU_I2S_MUTE_SWAP);
++    return val;
+ }
+ 
+ void audio_i2s_swap_left_right(unsigned int flag)
+ {
+-	if (ENABLE_IEC958)
+-	{
+-		WRITE_MPEG_REG_BITS(AIU_958_CTRL, flag, 1, 2);
+-	}
+-	WRITE_MPEG_REG_BITS(AIU_I2S_MUTE_SWAP, flag, 0, 2);
++    if (ENABLE_IEC958){
++        WRITE_MPEG_REG_BITS(AIU_958_CTRL, flag, 1, 2);
++    }
++    WRITE_MPEG_REG_BITS(AIU_I2S_MUTE_SWAP, flag, 0, 2);
+ }
+ unsigned int audio_hdmi_init_ready()
+ {
+-	return 	READ_MPEG_REG_BITS(AIU_HDMI_CLK_DATA_CTRL, 0, 2);
++    return  READ_MPEG_REG_BITS(AIU_HDMI_CLK_DATA_CTRL, 0, 2);
+ }
+ /* power gate control for iec958 audio out */
+ unsigned audio_spdifout_pg_enable(unsigned char enable)
+ {
+-	if(enable){
+-			WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 1,14, 1);					
+-			AUDIO_CLK_GATE_ON(AIU_IEC958);
+-			AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
+-	}
+-	else{
+-			AUDIO_CLK_GATE_OFF(AIU_IEC958);
+-			AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);	
+-			WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 0,14, 1);								
+-	}
+-	return 0;
++    if(enable){
++        WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 1,14, 1);                   
++        AUDIO_CLK_GATE_ON(AIU_IEC958);
++        AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
++    }
++    else{
++        AUDIO_CLK_GATE_OFF(AIU_IEC958);
++        AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);   
++        WRITE_MPEG_REG_BITS( MPLL_958_CNTL, 0,14, 1);                               
++    }
++    return 0;
+ }
+ /*
+-	power gate control for normal aiu  domain including i2s in/out
+-	TODO: move i2s out /adc related gate to i2s cpu dai driver 
++    power gate control for normal aiu  domain including i2s in/out
++    TODO: move i2s out /adc related gate to i2s cpu dai driver 
+ */
+ unsigned audio_aiu_pg_enable(unsigned char enable)
+ {
+-	if(enable){
+-		AUDIO_CLK_GATE_ON(AIU_AMCLK_MEASURE);
+-		AUDIO_CLK_GATE_ON(AIU_AIFIFO2);
+-		AUDIO_CLK_GATE_ON(AIU_AUD_MIXER);
+-		AUDIO_CLK_GATE_ON(AIU_MIXER_REG);
+-		AUDIO_CLK_GATE_ON(AIU_AI_TOP_GLUE);
+-		AUDIO_CLK_GATE_ON(AIU_AOCLK);   		
+-		AUDIO_CLK_GATE_ON(AIU_I2S_OUT);
+-		AUDIO_CLK_GATE_ON(AIU_ADC);		
+-		AUDIO_CLK_GATE_ON(AUD_IN);
+-		AUDIO_CLK_GATE_ON(AIU_IEC958);
+-	#if MESON_CPU_TYPE != MESON_CPU_TYPE_MESON8B  	
+-		AUDIO_CLK_GATE_ON(AIU_PCLK);
+-	#endif
+-		AUDIO_CLK_GATE_ON(AIU_ICE958_AMCLK);
+-		AUDIO_CLK_GATE_ON(AIU_TOP_LEVEL);
+-	}
+-	else{
+-		AUDIO_CLK_GATE_OFF(AIU_AMCLK_MEASURE);
+-		AUDIO_CLK_GATE_OFF(AIU_AIFIFO2);
+-		AUDIO_CLK_GATE_OFF(AIU_AUD_MIXER);
+-		AUDIO_CLK_GATE_OFF(AIU_MIXER_REG);
+-		AUDIO_CLK_GATE_OFF(AIU_AI_TOP_GLUE);
+-		AUDIO_CLK_GATE_OFF(AIU_AOCLK);   		
+-		AUDIO_CLK_GATE_OFF(AIU_I2S_OUT);
+-		AUDIO_CLK_GATE_OFF(AIU_ADC);			
+-		AUDIO_CLK_GATE_OFF(AUD_IN);
+-		AUDIO_CLK_GATE_OFF(AIU_IEC958);
+-	#if MESON_CPU_TYPE != MESON_CPU_TYPE_MESON8B  
+-		AUDIO_CLK_GATE_OFF(AIU_PCLK);  
+-	#endif 
+-		AUDIO_CLK_GATE_OFF(AIU_ICE958_AMCLK);   
+-		AUDIO_CLK_GATE_OFF(AIU_TOP_LEVEL);
+-	}
++    if(enable){
++        switch_mod_gate_by_name("audio", 1);
++    }
++    else{
++        switch_mod_gate_by_name("audio", 0);
++    }
+     return 0;
+ }
+ 
+diff --git a/sound/soc/aml/m8/aml_g9tv.c b/sound/soc/aml/m8/aml_g9tv.c
+new file mode 100755
+index 000000000000..465191207897
+--- /dev/null
++++ b/sound/soc/aml/m8/aml_g9tv.c
+@@ -0,0 +1,559 @@
++/*
++ * aml_g9tv.c  --  amlogic  G9TV sound card machine driver code.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ */
++
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/clk.h>
++#include <linux/timer.h>
++#include <linux/workqueue.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/i2c.h>
++#include <linux/delay.h>
++
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/soc-dapm.h>
++#include <sound/jack.h>
++
++#include <asm/mach-types.h>
++#include <mach/hardware.h>
++
++#include <linux/switch.h>
++#include <linux/amlogic/saradc.h>
++#include <linux/clk.h>
++
++#include "aml_i2s_dai.h"
++#include "aml_i2s.h"
++#include "aml_g9tv.h"
++#include "aml_audio_hw.h"
++#include <mach/register.h>
++
++#ifdef CONFIG_USE_OF
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/amlogic/aml_audio_codec_probe.h>
++#include <linux/of_gpio.h>
++#include <mach/pinmux.h>
++#include <plat/io.h>
++#endif
++
++#define DRV_NAME "aml_snd_g9tv"
++extern int ext_codec;
++extern struct device *spdif_dev;
++
++static int aml_asoc_hw_params(struct snd_pcm_substream *substream,
++    struct snd_pcm_hw_params *params)
++{
++    struct snd_soc_pcm_runtime *rtd = substream->private_data;
++    struct snd_soc_dai *codec_dai = rtd->codec_dai;
++    struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
++    int ret;
++
++    printk(KERN_DEBUG "enter %s stream: %s rate: %d format: %d\n", __func__, 
++        (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ? "playback" : "capture", 
++        params_rate(params), params_format(params));
++
++    /* set codec DAI configuration */
++    ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_I2S |
++        SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBS_CFS);
++    if (ret < 0) {
++        printk(KERN_ERR "%s: set codec dai fmt failed!\n", __func__);
++        return ret;
++    }
++
++    /* set cpu DAI configuration */
++    ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_I2S |
++        SND_SOC_DAIFMT_IB_NF | SND_SOC_DAIFMT_CBM_CFM);
++    if (ret < 0) {
++        printk(KERN_ERR "%s: set cpu dai fmt failed!\n", __func__);
++        return ret;
++    }
++    
++    if(!strncmp(codec_info.name_bus,"dummy_codec",11)){
++        goto cpu_dai;
++    }
++
++    /* set codec DAI clock */
++    ret = snd_soc_dai_set_sysclk(codec_dai, 0, params_rate(params) * 256, SND_SOC_CLOCK_IN);
++    if (ret < 0) {
++        printk(KERN_ERR "%s: set codec dai sysclk failed (rate: %d)!\n", __func__, params_rate(params));
++        return ret;
++    }
++    
++cpu_dai:
++    /* set cpu DAI clock */
++    ret = snd_soc_dai_set_sysclk(cpu_dai, 0, params_rate(params) * 256, SND_SOC_CLOCK_OUT);
++    if (ret < 0) {
++        printk(KERN_ERR "%s: set cpu dai sysclk failed (rate: %d)!\n", __func__, params_rate(params));
++        return ret;
++    }
++
++    return 0;
++}
++
++static struct snd_soc_ops aml_asoc_ops = {
++    .hw_params = aml_asoc_hw_params,
++};
++
++struct aml_audio_private_data *p_audio;
++static bool aml_audio_i2s_mute_flag = 0;
++static bool aml_audio_spdif_mute_flag = 0;
++
++
++static int aml_audio_set_i2s_mute(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    aml_audio_i2s_mute_flag = ucontrol->value.integer.value[0];
++    printk("aml_audio_i2s_mute_flag: flag=%d\n",aml_audio_i2s_mute_flag);
++    if(aml_audio_i2s_mute_flag){
++        aml_audio_i2s_mute();
++    }else{
++        aml_audio_i2s_unmute();
++    }
++    return 0;
++}
++
++static int aml_audio_get_i2s_mute(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    ucontrol->value.integer.value[0] = aml_audio_i2s_mute_flag;
++    return 0;
++}
++
++static int aml_audio_set_spdif_mute(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    
++    aml_audio_spdif_mute_flag = ucontrol->value.integer.value[0];
++    printk("aml_audio_set_spdif_mute: flag=%d\n",aml_audio_spdif_mute_flag);
++    if(aml_audio_spdif_mute_flag){
++        aml_spdif_pinmux_deinit(spdif_dev);
++    }else{
++        aml_spdif_pinmux_init(spdif_dev);
++    }
++    return 0;
++}
++
++static int aml_audio_get_spdif_mute(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    ucontrol->value.integer.value[0] = aml_audio_spdif_mute_flag;
++    return 0;
++}
++
++static const char *audio_in_source_texts[] = {
++    "LINEIN", "ATV", "HDMI"
++};
++
++static const struct soc_enum audio_in_source_enum =
++    SOC_ENUM_SINGLE(SND_SOC_NOPM, 0,
++            ARRAY_SIZE(audio_in_source_texts),
++            audio_in_source_texts);
++
++static int aml_audio_get_in_source(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    int value = READ_MPEG_REG(AUDIN_SOURCE_SEL) & 0x3;
++    
++    if (value == 0)
++        ucontrol->value.enumerated.item[0] = 0;// linein
++    else if (value == 1)
++        ucontrol->value.enumerated.item[0] = 1;//ATV
++    else if (value == 2)
++        ucontrol->value.enumerated.item[0] = 2;//hdmi
++    else
++        printk(KERN_INFO "unknown source\n");
++    
++    return 0;
++}
++
++static int aml_audio_set_in_source(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    if (ucontrol->value.enumerated.item[0] == 0){// select external codec output as I2S source
++        WRITE_MPEG_REG(AUDIN_SOURCE_SEL, 0);
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,(1<<I2SIN_CHAN_EN)
++                                    |(3<<I2SIN_SIZE)
++                                    |(1<<I2SIN_LRCLK_INVT)
++                                    |(1<<I2SIN_LRCLK_SKEW)
++                                    |(0<<I2SIN_POS_SYNC)
++                                    |(1<<I2SIN_LRCLK_SEL)
++                                    |(1<<I2SIN_CLK_SEL)
++                                    |(1<<I2SIN_DIR));
++        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++    }else if (ucontrol->value.enumerated.item[0] == 1){// select ATV output as I2S source
++        WRITE_MPEG_REG(AUDIN_SOURCE_SEL, 1);
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,(1<<I2SIN_CHAN_EN)
++                                    |(0<<I2SIN_SIZE)
++                                    |(0<<I2SIN_LRCLK_INVT)
++                                    |(0<<I2SIN_LRCLK_SKEW)
++                                    |(0<<I2SIN_POS_SYNC)
++                                    |(0<<I2SIN_LRCLK_SEL)
++                                    |(0<<I2SIN_CLK_SEL)
++                                    |(0<<I2SIN_DIR));
++        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++    }else if (ucontrol->value.enumerated.item[0] == 2){// select HDMI-rx as I2S source
++        WRITE_MPEG_REG(AUDIN_SOURCE_SEL, (0  <<12)| // [14:12]cntl_hdmirx_chsts_sel: 0=Report chan1 status; 1=Report chan2 status; ...;
++                                         (0xf<< 8)| // [11:8] cntl_hdmirx_chsts_en
++                                         (1  << 4)| // [5:4]  spdif_src_sel: 1=Select HDMIRX SPDIF output as AUDIN source
++                                         (2  << 0)); // [1:0]  i2sin_src_sel: 2=Select HDMIRX I2S output as AUDIN source
++        WRITE_MPEG_REG(AUDIN_I2SIN_CTRL,(1<<I2SIN_CHAN_EN)
++                                    |(3<<I2SIN_SIZE)
++                                    |(1<<I2SIN_LRCLK_INVT)
++                                    |(1<<I2SIN_LRCLK_SKEW)
++                                    |(0<<I2SIN_POS_SYNC)
++                                    |(1<<I2SIN_LRCLK_SEL)
++                                    |(1<<I2SIN_CLK_SEL)
++                                    |(1<<I2SIN_DIR));
++        WRITE_MPEG_REG_BITS(AUDIN_I2SIN_CTRL, 1, I2SIN_EN, 1);
++    }
++    return 0;
++}
++
++/* HDMI audio format detect: LPCM or NONE-LPCM */           
++static const char *hdmi_audio_type_texts[] = {
++    "LPCM","NONE-LPCM","UN-KNOWN"
++};          
++static const struct soc_enum hdmi_audio_type_enum =
++    SOC_ENUM_SINGLE(SND_SOC_NOPM, 0,
++            ARRAY_SIZE(hdmi_audio_type_texts),
++            hdmi_audio_type_texts);
++
++static int aml_hdmi_audio_type_get_enum(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    int ch_status = 0;
++    if ((READ_MPEG_REG(AUDIN_DECODE_CONTROL_STATUS)>>24)&0x1){
++        ch_status = READ_MPEG_REG(AUDIN_DECODE_CHANNEL_STATUS_A_0);
++        if (ch_status&2) //NONE-LPCM
++            ucontrol->value.enumerated.item[0] = 1;
++        else //LPCM
++            ucontrol->value.enumerated.item[0] = 0;     
++    }
++    else
++        ucontrol->value.enumerated.item[0] = 2; //un-stable. un-known       
++    
++    return 0;
++}
++
++static int aml_hdmi_audio_type_set_enum(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    return 0;
++}
++
++#define RESAMPLE_BUFFER_SOURCE 1 //audioin fifo0
++#define RESAMPLE_CNT_CONTROL 255 //Cnt_ctrl = mclk/fs_out-1 ; fest 256fs
++
++static int hardware_resample_enable(int input_sr){
++    struct clk* clk_src;
++    unsigned long clk_rate = 0;
++    unsigned short Avg_cnt_init = 0;
++    
++    if(input_sr < 8000 || input_sr > 48000){
++        printk(KERN_INFO "Error input sample rate, you must set sr first!\n");
++        return -1;
++    }
++
++    clk_src = clk_get_sys("clk81", NULL);  // get clk81 clk_rate
++    clk_rate = clk_get_rate(clk_src);
++    Avg_cnt_init = (unsigned short)(clk_rate*4/input_sr);
++
++    WRITE_MPEG_REG(AUD_RESAMPLE_CTRL0, 0);
++    WRITE_MPEG_REG(AUD_RESAMPLE_CTRL0,  (0<<29)    //select the source [30:29]
++                                        |(1<<28)   //enable the resample [28]
++                                        |(0<<26)   //select the method 0 [27:26]
++                                        |(RESAMPLE_CNT_CONTROL<<16)  //calculate the cnt_ctrl [25:16]
++                                        | Avg_cnt_init);   //calculate the avg_cnt_init [15:0]
++    
++    return 0;
++}
++
++static int hardware_resample_disable(void){
++
++    WRITE_MPEG_REG(AUD_RESAMPLE_CTRL0, 0);
++    return 0;
++}
++
++static const char *hardware_resample_texts[] = {
++    "Disable", "Enable:32K", "Enable:44.1K","Enable:48K"
++};
++
++static const struct soc_enum hardware_resample_enum =
++    SOC_ENUM_SINGLE(SND_SOC_NOPM, 0,
++            ARRAY_SIZE(hardware_resample_texts),
++            hardware_resample_texts);
++
++static int aml_hardware_resample_get_enum(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++    return 0;
++}
++
++static int aml_hardware_resample_set_enum(struct snd_kcontrol *kcontrol,
++    struct snd_ctl_elem_value *ucontrol)
++{
++	if (ucontrol->value.enumerated.item[0] == 0){
++        hardware_resample_disable();
++    }else if (ucontrol->value.enumerated.item[0] == 1){
++        hardware_resample_enable(32000);
++    }else if (ucontrol->value.enumerated.item[0] == 2){
++        hardware_resample_enable(44100);
++    }else if (ucontrol->value.enumerated.item[0] == 3){
++        hardware_resample_enable(48000);
++    }
++    return 0;
++}
++
++static int aml_set_bias_level(struct snd_soc_card *card,
++        struct snd_soc_dapm_context *dapm, enum snd_soc_bias_level level)
++{
++    //printk(KERN_INFO "enter %s\n", __func__);
++    return 0;
++}
++
++static const struct snd_soc_dapm_widget aml_asoc_dapm_widgets[] = {
++    SND_SOC_DAPM_INPUT("LINEIN"),
++    SND_SOC_DAPM_OUTPUT("LINEOUT"),
++};
++
++static const struct snd_kcontrol_new aml_g9tv_controls[] = {
++
++    SOC_SINGLE_BOOL_EXT("Audio i2s mute", 0,
++        aml_audio_get_i2s_mute,
++        aml_audio_set_i2s_mute),
++        
++    SOC_SINGLE_BOOL_EXT("Audio spdif mute", 0,
++        aml_audio_get_spdif_mute,
++        aml_audio_set_spdif_mute),
++
++    SOC_ENUM_EXT("Audio In Source", audio_in_source_enum,
++        aml_audio_get_in_source,
++        aml_audio_set_in_source),
++
++    SOC_ENUM_EXT("HDMI Audio Type", hdmi_audio_type_enum,
++        aml_hdmi_audio_type_get_enum,
++        aml_hdmi_audio_type_set_enum),
++
++    SOC_ENUM_EXT("Hardware resample enable", hardware_resample_enum,
++        aml_hardware_resample_get_enum,
++        aml_hardware_resample_set_enum),
++    
++};
++
++static int aml_asoc_init(struct snd_soc_pcm_runtime *rtd)
++{
++    struct snd_soc_card *card = rtd->card;
++    struct snd_soc_codec *codec = rtd->codec;
++    struct snd_soc_dapm_context *dapm = &codec->dapm;
++    struct aml_audio_private_data * p_aml_audio;
++    int ret = 0;;
++    
++    printk(KERN_DEBUG "enter %s \n", __func__);
++    p_aml_audio = snd_soc_card_get_drvdata(card);
++    ret = snd_soc_add_card_controls(codec->card, aml_g9tv_controls,
++                ARRAY_SIZE(aml_g9tv_controls));
++    if (ret)
++       return ret;
++    /* Add specific widgets */
++    snd_soc_dapm_new_controls(dapm, aml_asoc_dapm_widgets,
++                  ARRAY_SIZE(aml_asoc_dapm_widgets));
++
++    return 0;
++}
++
++static struct snd_soc_dai_link aml_codec_dai_link[] = {
++    {
++        .name = "SND_G9TV",
++        .stream_name = "AML PCM",
++        .cpu_dai_name = "aml-i2s-dai.0",
++        .init = aml_asoc_init,
++        .platform_name = "aml-i2s.0",
++        .ops = &aml_asoc_ops,
++    },
++#ifdef CONFIG_SND_SOC_PCM2BT
++    {
++        .name = "BT Voice",
++        .stream_name = "Voice PCM",
++        .cpu_dai_name = "aml-pcm-dai.0",
++        .codec_dai_name = "pcm2bt-pcm",
++        .platform_name = "aml-pcm.0",
++        .codec_name = "pcm2bt.0",
++    },
++#endif
++    {
++        .name = "AML-SPDIF",
++        .stream_name = "SPDIF PCM",
++        .cpu_dai_name = "aml-spdif-dai.0",
++        .codec_dai_name = "dit-hifi",
++        .init = NULL,
++        .platform_name = "aml-i2s.0",
++        .codec_name = "spdif-dit.0",
++        .ops = NULL,      
++    },
++};
++
++static struct snd_soc_card aml_snd_soc_card = {
++    .driver_name = "SOC-Audio",
++    .dai_link = &aml_codec_dai_link[0],
++    .num_links = ARRAY_SIZE(aml_codec_dai_link),
++    .set_bias_level = aml_set_bias_level,
++};
++
++static void aml_g9tv_pinmux_init(struct snd_soc_card *card)
++{
++    struct aml_audio_private_data *p_aml_audio;
++    const char *str=NULL;
++    int ret;
++    p_aml_audio = snd_soc_card_get_drvdata(card);   
++    p_aml_audio->pin_ctl = devm_pinctrl_get_select(card->dev, "aml_snd_g9tv");
++    
++    p_audio = p_aml_audio;
++    printk(KERN_INFO "audio external codec = %d\n",ext_codec);
++
++    ret = of_property_read_string(card->dev->of_node, "mute_gpio", &str);
++    if (ret < 0) {
++        printk("aml_snd_g9tv: faild to get mute_gpio!\n");
++    }else{
++        p_aml_audio->gpio_mute = amlogic_gpio_name_map_num(str);
++        p_aml_audio->mute_inv = of_property_read_bool(card->dev->of_node,"mute_inv");
++        amlogic_gpio_request_one(p_aml_audio->gpio_mute,GPIOF_OUT_INIT_LOW,"mute_spk");
++        amlogic_set_value(p_aml_audio->gpio_mute, 0, "mute_spk");
++    }
++}
++
++static void aml_g9tv_pinmux_deinit(struct snd_soc_card *card)
++{
++    struct aml_audio_private_data *p_aml_audio;
++
++    p_aml_audio = snd_soc_card_get_drvdata(card);
++    if(p_aml_audio->pin_ctl)
++        devm_pinctrl_put(p_aml_audio->pin_ctl);
++}
++
++static int aml_g9tv_audio_probe(struct platform_device *pdev)
++{
++    struct snd_soc_card *card = &aml_snd_soc_card;
++    struct aml_audio_private_data *p_aml_audio;
++    char tmp[NAME_SIZE];
++    int ret = 0;
++
++#ifdef CONFIG_USE_OF
++    p_aml_audio = devm_kzalloc(&pdev->dev,
++            sizeof(struct aml_audio_private_data), GFP_KERNEL);
++    if (!p_aml_audio) {
++        dev_err(&pdev->dev, "Can't allocate aml_audio_private_data\n");
++        ret = -ENOMEM;
++        goto err;
++    }
++
++    card->dev = &pdev->dev;
++    platform_set_drvdata(pdev, card);
++    snd_soc_card_set_drvdata(card, p_aml_audio);
++    if (!(pdev->dev.of_node)) {
++        dev_err(&pdev->dev, "Must be instantiated using device tree\n");
++        ret = -EINVAL;
++        goto err;
++    }
++
++    ret = snd_soc_of_parse_card_name(card, "aml,sound_card");
++    if (ret)
++        goto err;
++
++    ret = of_property_read_string_index(pdev->dev.of_node, "aml,codec_dai",
++            codec_info.codec_index, &aml_codec_dai_link[0].codec_dai_name);
++    if (ret)
++        goto err;
++
++    printk("codec_name = %s\n", codec_info.name_bus);
++
++    aml_codec_dai_link[0].codec_name = codec_info.name_bus;
++    
++    snprintf(tmp, NAME_SIZE, "%s-%s", "aml,audio-routing", codec_info.name);
++
++    ret = snd_soc_of_parse_audio_routing(card, tmp);
++    if (ret)
++        goto err;
++
++    ret = snd_soc_register_card(card);
++    if (ret) {
++        dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n",
++            ret);
++        goto err;
++    }
++
++    aml_g9tv_pinmux_init(card);
++    return 0;
++#endif
++
++err:
++    kfree(p_aml_audio);
++    return ret;
++}
++
++static int aml_g9tv_audio_remove(struct platform_device *pdev)
++{
++    int ret = 0;
++    struct snd_soc_card *card = platform_get_drvdata(pdev);
++    struct aml_audio_private_data *p_aml_audio;
++
++    p_aml_audio = snd_soc_card_get_drvdata(card);
++    snd_soc_unregister_card(card);
++    aml_g9tv_pinmux_deinit(card);
++    kfree(p_aml_audio);
++    return ret;
++}
++
++#ifdef CONFIG_USE_OF
++static const struct of_device_id amlogic_audio_dt_match[]={
++    { .compatible = "sound_card, aml_snd_g9tv", },
++    {},
++};
++#else
++#define amlogic_audio_dt_match NULL
++#endif
++
++static struct platform_driver aml_g9tv_audio_driver = {
++    .probe  = aml_g9tv_audio_probe,
++    .remove = aml_g9tv_audio_remove,
++    .driver = {
++        .name = DRV_NAME,
++        .owner = THIS_MODULE,
++        .pm = &snd_soc_pm_ops,
++        .of_match_table = amlogic_audio_dt_match,
++    },
++};
++
++static int __init aml_g9tv_audio_init(void)
++{
++    return platform_driver_register(&aml_g9tv_audio_driver);
++}
++
++static void __exit aml_g9tv_audio_exit(void)
++{
++    platform_driver_unregister(&aml_g9tv_audio_driver);
++}
++
++module_init(aml_g9tv_audio_init);
++module_exit(aml_g9tv_audio_exit);
++
++/* Module information */
++MODULE_AUTHOR("AMLogic, Inc.");
++MODULE_DESCRIPTION("AML_G9TV audio machine Asoc driver");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("platform:" DRV_NAME);
++MODULE_DEVICE_TABLE(of, amlogic_audio_dt_match);
++
+diff --git a/sound/soc/aml/m8/aml_g9tv.h b/sound/soc/aml/m8/aml_g9tv.h
+new file mode 100755
+index 000000000000..5bed75c132a8
+--- /dev/null
++++ b/sound/soc/aml/m8/aml_g9tv.h
+@@ -0,0 +1,14 @@
++#ifndef AML_G9TV_H
++#define AML_G9TV_H
++
++struct aml_audio_private_data {
++    int gpio_mute;
++    bool mute_inv;
++    struct pinctrl *pin_ctl;
++};
++
++extern void aml_spdif_pinmux_init(struct device *pdev);
++extern void aml_spdif_pinmux_deinit(struct device *pdev);
++
++#endif
++
+diff --git a/sound/soc/aml/m8/aml_m_dummy.c b/sound/soc/aml/m8/aml_m_dummy.c
+old mode 100644
+new mode 100755
+index 6aca7c0ed16b..3b3f5fb668da
+--- a/sound/soc/aml/m8/aml_m_dummy.c
++++ b/sound/soc/aml/m8/aml_m_dummy.c
+@@ -122,6 +122,7 @@ static struct snd_soc_ops dummy_codec_soc_ops = {
+ };
+ 
+ static int dummy_codec_set_bias_level(struct snd_soc_card *card,
++				struct snd_soc_dapm_context *dapm,
+ 			      enum snd_soc_bias_level level)
+ {
+     int ret = 0;
+@@ -191,18 +192,18 @@ static void dummy_codec_device_init(void)
+ 	p = pinctrl_get(dummy_codec_dev);
+ 
+ 	if (IS_ERR(p))
+-		return p;
++		return;
+ 
+ 	s = pinctrl_lookup_state(p, "dummy_codec_audio");
+ 	if (IS_ERR(s)) {
+ 		pinctrl_put(p);
+-		return ERR_PTR(PTR_ERR(s));
++		return;
+ 	}
+ 
+ 	ret = pinctrl_select_state(p, s);
+ 	if (ret < 0) {
+ 		pinctrl_put(p);
+-		return ERR_PTR(ret);
++		return;
+ 	}
+ 	printk("=%s==,dummy_codec_audio init done\n",__func__);
+ #else
+@@ -296,8 +297,10 @@ static int dummy_codec_audio_probe(struct platform_device *pdev)
+ 
+     return ret;
+ 
++#if 0
+ err_device_add:
+     platform_device_put(dummy_codec_snd_device);
++#endif
+ err:
+ err1:
+     kfree(dummy_codec_pdata);
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index d11a9d8ce991..2b462abf2649 100755
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -529,7 +529,10 @@ config SND_SOC_TAS5707
+ 
+ config SND_SOC_AMLPMU3
+         tristate
+-        
++ 
++config SND_SOC_AMLPMU4
++	tristate
++	       
+ # Amp
+ config SND_SOC_LM4857
+ 	tristate
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 0c1573ffb447..19097d48768f 100755
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -126,6 +126,7 @@ snd-soc-es8323-objs := es8323.o
+ snd-soc-tas5711-objs := tas5711.o
+ snd-soc-tas5707-objs := tas5707.o
+ snd-soc-amlpmu3-objs := aml_pmu3.o
++snd-soc-amlpmu4-objs := aml_pmu4_codec.o
+ # Amp
+ snd-soc-max9877-objs := max9877.o
+ snd-soc-tpa6130a2-objs := tpa6130a2.o
+@@ -257,6 +258,7 @@ obj-$(CONFIG_SND_SOC_PCM2BT)    += snd-soc-pcm2bt.o
+ obj-$(CONFIG_SND_SOC_TAS5711)   += snd-soc-tas5711.o
+ obj-$(CONFIG_SND_SOC_TAS5707)   += snd-soc-tas5707.o
+ obj-$(CONFIG_SND_SOC_AMLPMU3)	+= snd-soc-amlpmu3.o
++obj-$(CONFIG_SND_SOC_AMLPMU4)	+= snd-soc-amlpmu4.o
+ # Amp
+ obj-$(CONFIG_SND_SOC_MAX9877)	+= snd-soc-max9877.o
+ obj-$(CONFIG_SND_SOC_TPA6130A2)	+= snd-soc-tpa6130a2.o
+diff --git a/sound/soc/codecs/aml_pmu4_codec.c b/sound/soc/codecs/aml_pmu4_codec.c
+new file mode 100755
+index 000000000000..dd033763d4e3
+--- /dev/null
++++ b/sound/soc/codecs/aml_pmu4_codec.c
+@@ -0,0 +1,601 @@
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/pm.h>
++#include <linux/i2c.h>
++#include <linux/platform_device.h>
++#include <linux/spi/spi.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/soc-dapm.h>
++#include <sound/initval.h>
++#include <sound/tlv.h>
++
++#include "aml_pmu4_codec.h"
++#include <linux/amlogic/aml_pmu.h>
++
++#ifdef CONFIG_USE_OF
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/of_gpio.h>
++#include <mach/pinmux.h>
++#include <plat/io.h>
++#endif
++
++struct aml_pmu4_audio_priv {
++	struct snd_soc_codec *codec;
++	struct snd_pcm_hw_params *params;
++};
++
++struct pmu4_audio_init_reg {
++    u8 reg;
++    u16 val;
++};
++
++static struct pmu4_audio_init_reg init_list[] = {
++    {PMU4_BLOCK_ENABLE    , 0xBc06}, // 
++    {PMU4_AUDIO_CONFIG    , 0x3c00}, //
++    {PMU4_PGA_IN_CONFIG   , 0x3535}, // ALI1,20dB;AR1,20dB
++    {PMU4_ADC_VOL_CTR     , 0x5050}, // 0dB
++    {PMU4_DAC_SOFT_MUTE   , 0xF080}, //
++    {PMU4_DAC_VOL_CTR     , 0xFFFF}, // 0dB
++    {PMU4_LINE_OUT_CONFIG , 0x4242}, 
++    
++};
++#define PMU4_AUDIO_INIT_REG_LEN ARRAY_SIZE(init_list)
++
++static int aml_pmu4_audio_reg_init(struct snd_soc_codec *codec)
++{
++    int i;
++
++    for (i = 0; i < PMU4_AUDIO_INIT_REG_LEN; i++)
++        snd_soc_write(codec, init_list[i].reg, init_list[i].val);
++
++    return 0;
++}
++
++static unsigned int aml_pmu4_audio_read(struct snd_soc_codec *codec, unsigned int reg)
++{
++	u16 pmu4_audio_reg;
++	u16 val;
++
++	pmu4_audio_reg = PMU4_AUDIO_BASE + reg;
++	aml1220_read16(pmu4_audio_reg, &val);
++
++	return val;
++
++}
++static int aml_pmu4_audio_write(struct snd_soc_codec *codec, unsigned int reg, 
++	                           unsigned int val)
++{
++	u16 pmu4_audio_reg;
++
++	pmu4_audio_reg = PMU4_AUDIO_BASE + reg;
++	aml1220_write16(pmu4_audio_reg, val);
++	return 0;
++}
++
++static const DECLARE_TLV_DB_SCALE(pga_in_tlv, -1200, 250, 1);
++static const DECLARE_TLV_DB_SCALE(adc_vol_tlv, -29625, 375, 1);
++static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -95250, 375, 1);
++
++
++static const struct snd_kcontrol_new pmu4_audio_snd_controls[] = {
++	/*PGA_IN Gain*/
++	SOC_DOUBLE_TLV("PGA IN Gain", PMU4_PGA_IN_CONFIG, 
++			PMU4_PGAL_IN_GAIN, PMU4_PGAR_IN_GAIN, 
++			0x1f, 0, pga_in_tlv),
++	
++	/*ADC Digital Volume control*/
++	SOC_DOUBLE_TLV("ADC Digital Capture Volume", PMU4_ADC_VOL_CTR,
++            PMU4_ADCL_VOL_CTR, PMU4_ADCR_VOL_CTR,
++            0x7f, 0, adc_vol_tlv),
++
++	/*DAC Digital Volume control*/
++	SOC_DOUBLE_TLV("DAC Digital Playback Volume", PMU4_DAC_VOL_CTR,
++            PMU4_DACL_VOL_CTR, PMU4_DACR_VOL_CTR,
++            0xff, 0, dac_vol_tlv),
++
++};
++
++/*pgain Left Channel Input */
++static const char *pmu4_pgain_left_txt[] = {
++	"None", "AIL1", "AIL2", "AIL3", "AIL4"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_pgain_left_enum, PMU4_PGA_IN_CONFIG, 
++	PMU4_PGAL_IN_SEL, pmu4_pgain_left_txt);
++
++static const struct snd_kcontrol_new pgain_ln_mux =
++	SOC_DAPM_ENUM("ROUTE_L", pmu4_pgain_left_enum);
++
++/*pgain right Channel Input */
++static const char *pmu4_pgain_right_txt[] = {
++	"None", "AIR1", "AIR2", "AIR3", "AIR4"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_pgain_right_enum, PMU4_PGA_IN_CONFIG, 
++	PMU4_PGAR_IN_SEL, pmu4_pgain_right_txt);
++
++static const struct snd_kcontrol_new pgain_rn_mux =
++	SOC_DAPM_ENUM("ROUTE_R", pmu4_pgain_right_enum);
++
++/*line out Left Positive mux */
++static const char *pmu4_out_lp_txt[] = {
++	"None", "LOLP_SEL_AIL_INV", "LOLP_SEL_AIL", "Reserved", "LOLP_SEL_DACL"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_out_lp_enum, PMU4_LINE_OUT_CONFIG, 
++	PMU4_LOLP_SEL_SHIFT, pmu4_out_lp_txt);
++
++
++static const struct snd_kcontrol_new line_out_lp_mux =
++	SOC_DAPM_ENUM("ROUTE_LP_OUT", pmu4_out_lp_enum);
++
++/*line out Left Negative mux */
++static const char *pmu4_out_ln_txt[] = {
++	"None", "LOLN_SEL_AIL", "LOLN_SEL_DACL", "Reserved", "LOLN_SEL_DACL_INV"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_out_ln_enum, PMU4_LINE_OUT_CONFIG, 
++	PMU4_LOLN_SEL_SHIFT, pmu4_out_ln_txt);
++
++static const struct snd_kcontrol_new line_out_ln_mux =
++	SOC_DAPM_ENUM("ROUTE_LN_OUT", pmu4_out_ln_enum);
++
++/*line out Right Positive mux */
++static const char *pmu4_out_rp_txt[] = {
++	"None", "LORP_SEL_AIR_INV", "LORP_SEL_AIR", "Reserved", "LORP_SEL_DACR"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_out_rp_enum, PMU4_LINE_OUT_CONFIG, 
++	PMU4_LORP_SEL_SHIFT, pmu4_out_rp_txt);
++
++static const struct snd_kcontrol_new line_out_rp_mux = 
++	SOC_DAPM_ENUM("ROUTE_RP_OUT", pmu4_out_rp_enum);
++
++/*line out Right Negative mux */
++static const char *pmu4_out_rn_txt[] = {
++	"None", "LORN_SEL_AIR", "LORN_SEL_DACR", "Reserved", "LORN_SEL_DACR_INV"};
++
++static const SOC_ENUM_SINGLE_DECL(
++	pmu4_out_rn_enum, PMU4_LINE_OUT_CONFIG, 
++	PMU4_LORN_SEL_SHIFT, pmu4_out_rn_txt);
++
++
++static const struct snd_kcontrol_new line_out_rn_mux = 
++	SOC_DAPM_ENUM("ROUTE_RN_OUT", pmu4_out_rn_enum);
++
++static const struct snd_soc_dapm_widget pmu4_audio_dapm_widgets[] = {
++  
++    /* Input */
++    SND_SOC_DAPM_INPUT("Linein left 1"),
++    SND_SOC_DAPM_INPUT("Linein left 2"),
++    SND_SOC_DAPM_INPUT("Linein left 3"),
++    SND_SOC_DAPM_INPUT("Linein left 4"),
++
++    SND_SOC_DAPM_INPUT("Linein right 1"),
++    SND_SOC_DAPM_INPUT("Linein right 2"),
++    SND_SOC_DAPM_INPUT("Linein right 3"),
++    SND_SOC_DAPM_INPUT("Linein right 4"),
++
++	/*PGA input*/
++	SND_SOC_DAPM_PGA("PGAL_IN_EN", PMU4_BLOCK_ENABLE,
++        PMU4_PGAL_IN_EN, 0, NULL, 0),
++    SND_SOC_DAPM_PGA("PGAR_IN_EN", PMU4_BLOCK_ENABLE,
++        PMU4_PGAR_IN_EN, 0, NULL, 0),
++
++	/*PGA input source select*/
++	SND_SOC_DAPM_MUX("Linein left switch", SND_SOC_NOPM, 
++		0, 0, &pgain_ln_mux),
++    SND_SOC_DAPM_MUX("Linein right switch", SND_SOC_NOPM, 
++    	0, 0, &pgain_rn_mux),
++    
++	/*ADC capture stream*/
++	SND_SOC_DAPM_ADC("Left ADC", "HIFI Capture", SND_SOC_NOPM, PMU4_ADCL_EN, 0),
++	SND_SOC_DAPM_ADC("Right ADC", "HIFI Capture", SND_SOC_NOPM, PMU4_ADCR_EN, 0),
++
++	/*Output*/
++    SND_SOC_DAPM_OUTPUT("Lineout left N"),
++    SND_SOC_DAPM_OUTPUT("Lineout left P"),
++    SND_SOC_DAPM_OUTPUT("Lineout right N"),
++    SND_SOC_DAPM_OUTPUT("Lineout right P"),
++
++	/*DAC playback stream*/
++	SND_SOC_DAPM_DAC("Left DAC", "HIFI Playback", SND_SOC_NOPM, PMU4_DACL_EN, 0),
++	SND_SOC_DAPM_DAC("Right DAC", "HIFI Playback", SND_SOC_NOPM, PMU4_DACR_EN, 0),
++
++	/*DRV output*/
++	SND_SOC_DAPM_OUT_DRV("LOLP_OUT_EN", PMU4_BLOCK_ENABLE,
++        PMU4_LOLP_EN, 0, NULL, 0),
++    SND_SOC_DAPM_OUT_DRV("LOLN_OUT_EN", PMU4_BLOCK_ENABLE,
++        PMU4_LOLN_EN, 0, NULL, 0),
++    SND_SOC_DAPM_OUT_DRV("LORP_OUT_EN", PMU4_BLOCK_ENABLE,
++        PMU4_LORP_EN, 0, NULL, 0),
++    SND_SOC_DAPM_OUT_DRV("LORN_OUT_EN", PMU4_BLOCK_ENABLE,
++        PMU4_LORN_EN, 0, NULL, 0),
++
++	/*MUX output source select*/
++    SND_SOC_DAPM_MUX("Lineout left P switch", SND_SOC_NOPM, 
++		0, 0, &line_out_lp_mux),
++    SND_SOC_DAPM_MUX("Lineout left N switch", SND_SOC_NOPM, 
++    	0, 0, &line_out_ln_mux),
++    SND_SOC_DAPM_MUX("Lineout right P switch", SND_SOC_NOPM, 
++		0, 0, &line_out_rp_mux),
++    SND_SOC_DAPM_MUX("Lineout right N switch", SND_SOC_NOPM, 
++    	0, 0, &line_out_rn_mux),
++};
++
++static const struct snd_soc_dapm_route pmu4_audio_dapm_routes[] = {
++/* Input path */
++{"Linein left switch", "AIL1", "Linein left 1"},
++{"Linein left switch", "AIL2", "Linein left 2"},
++{"Linein left switch", "AIL3", "Linein left 3"},
++{"Linein left switch", "AIL4", "Linein left 4"},
++
++{"Linein right switch", "AIR1", "Linein right 1"},
++{"Linein right switch", "AIR2", "Linein right 2"},
++{"Linein right switch", "AIR3", "Linein right 3"},
++{"Linein right switch", "AIR4", "Linein right 4"},
++
++{"PGAL_IN_EN", NULL, "Linein left switch"},
++{"PGAR_IN_EN", NULL, "Linein right switch"},
++
++{"Left ADC", NULL, "PGAL_IN_EN"},
++{"Right ADC", NULL, "PGAR_IN_EN"},
++
++/*Output path*/
++{"Lineout left P switch", "LOLP_SEL_DACL", "Left DAC"},
++{"Lineout left P switch", "LOLP_SEL_AIL", "PGAL_IN_EN"},
++{"Lineout left P switch", "LOLP_SEL_AIL_INV", "PGAL_IN_EN"},
++
++{"Lineout left N switch", "LOLN_SEL_AIL", "PGAL_IN_EN"},
++{"Lineout left N switch", "LOLN_SEL_DACL", "Left DAC"},
++{"Lineout left N switch", "LOLN_SEL_DACL_INV", "Left DAC"},
++
++{"Lineout right P switch", "LORP_SEL_DACR", "Right DAC"},
++{"Lineout right P switch", "LORP_SEL_AIR", "PGAR_IN_EN"},
++{"Lineout right P switch", "LORP_SEL_AIR_INV", "PGAR_IN_EN"},
++
++{"Lineout right N switch", "LORN_SEL_AIR", "PGAR_IN_EN"},
++{"Lineout right N switch", "LORN_SEL_DACR", "Right DAC"},
++{"Lineout right N switch", "LORN_SEL_DACR_INV", "Right DAC"},
++
++{"LOLN_OUT_EN", NULL, "Lineout left N switch"},
++{"LOLP_OUT_EN", NULL, "Lineout left P switch"},
++{"LORN_OUT_EN", NULL, "Lineout right N switch"},
++{"LORP_OUT_EN", NULL, "Lineout right P switch"},
++
++{"Lineout left N", NULL, "LOLN_OUT_EN"},
++{"Lineout left P", NULL, "LOLP_OUT_EN"},
++{"Lineout right N", NULL, "LORN_OUT_EN"},
++{"Lineout right P", NULL, "LORP_OUT_EN"},
++};
++
++static int aml_pmu4_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++    struct snd_soc_codec *codec = dai->codec;
++  
++    switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
++    case SND_SOC_DAIFMT_CBM_CFM:
++		snd_soc_update_bits(codec,PMU4_I2S_MODE,
++			PMU4_I2S_MODE_MASK,PMU4_I2S_MODE_MASK);
++        break;
++    case SND_SOC_DAIFMT_CBS_CFS:
++		snd_soc_update_bits(codec,PMU4_I2S_MODE,
++			PMU4_I2S_MODE_MASK,0);
++        break;
++    default:
++        return -EINVAL;
++    }
++    return 0;
++}
++
++static int aml_pmu4_set_dai_sysclk(struct snd_soc_dai *dai,
++        int clk_id, unsigned int freq, int dir)
++{
++	return 0;
++#if 0
++    struct snd_soc_codec *codec = dai->codec;
++    struct aml_pmu4_audio_priv *pmu4_audio = snd_soc_codec_get_drvdata(codec);
++    struct snd_pcm_hw_params *params = pmu4_audio->params;
++	
++	unsigned int fs = params_rate(params);
++	unsigned int ps = freq / fs;
++
++	if(256 == ps){
++		snd_soc_update_bits( codec,PMU4_AUDIO_CONFIG,
++			PMU4_MCLK_FREQ_MASK,0);
++	}else if(512 == ps){
++		snd_soc_update_bits( codec,PMU4_AUDIO_CONFIG,
++			PMU4_MCLK_FREQ_MASK,PMU4_MCLK_FREQ_MASK);
++	}  
++    return 0;
++#endif
++}
++
++
++static int aml_pmu4_hw_params(struct snd_pcm_substream *substream,
++			    struct snd_pcm_hw_params *params,
++			    struct snd_soc_dai *dai)
++{
++	struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	struct snd_soc_codec *codec =rtd->codec;
++	struct aml_pmu4_audio_priv *pmu4_audio = snd_soc_codec_get_drvdata(codec);
++
++	pmu4_audio->params = params;
++	
++	
++	return 0;
++}
++
++static int aml_pmu4_audio_set_bias_level(struct snd_soc_codec *codec,
++            enum snd_soc_bias_level level)
++{
++    switch (level) {
++    case SND_SOC_BIAS_ON:
++
++        break;
++
++    case SND_SOC_BIAS_PREPARE:
++
++        break;
++
++    case SND_SOC_BIAS_STANDBY:
++        if (SND_SOC_BIAS_OFF == codec->dapm.bias_level) {
++
++            codec->cache_only = false;
++            codec->cache_sync = 1;
++            snd_soc_cache_sync(codec);
++        }
++        break;
++
++    case SND_SOC_BIAS_OFF:
++
++        break;
++
++    default:
++        break;
++    }
++    codec->dapm.bias_level = level;
++
++    return 0;
++}
++
++static int aml_pmu4_prepare(struct snd_pcm_substream *substream,
++	        struct snd_soc_dai *dai)
++{
++	//struct snd_soc_codec *codec = dai->codec;
++	return 0;
++
++}
++
++static int aml_pmu4_audio_reset(struct snd_soc_codec *codec)
++{
++     snd_soc_write(codec, PMU4_SOFT_RESET, 0xF);
++	 snd_soc_write(codec, PMU4_SOFT_RESET, 0x0);
++	 msleep(10);
++	 return 0;
++}
++
++static int aml_pmu4_audio_start_up(struct snd_soc_codec *codec)
++{
++     snd_soc_write(codec, PMU4_BLOCK_ENABLE, 0xF000);
++	 msleep(200);
++	 snd_soc_write(codec, PMU4_BLOCK_ENABLE, 0xB000);
++	 return 0;
++}
++
++static int aml_pmu4_audio_power_init(void)
++{
++	uint8_t val = 0;
++	//set audio ldo supply en in,reg:0x05,bit 0
++	aml1220_read(AML1220_PMU_CTR_04,&val);
++	aml1220_write(AML1220_PMU_CTR_04, val | 0x01);
++	return 0;
++
++}
++
++static int aml_pmu4_codec_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++    struct snd_soc_codec *codec = dai->codec;
++    u16 reg;
++    if(stream == SNDRV_PCM_STREAM_PLAYBACK){
++        reg = snd_soc_read(codec, PMU4_DAC_SOFT_MUTE);
++        if (mute){
++            reg |= 0x8000;
++        }else
++            reg &= ~0x8000;
++
++        snd_soc_write(codec, PMU4_DAC_SOFT_MUTE, reg);
++    }
++    if(stream == SNDRV_PCM_STREAM_CAPTURE){
++        if (mute){
++            snd_soc_write(codec, PMU4_ADC_VOL_CTR, 0);
++        }else{
++            msleep(300);
++            snd_soc_write(codec, PMU4_ADC_VOL_CTR, 0x5050);
++        }
++    }
++    return 0;
++
++
++}
++
++
++static int aml_pmu4_audio_probe(struct snd_soc_codec *codec)
++{
++    struct aml_pmu4_audio_priv *pmu4_audio = NULL;
++
++    printk("enter %s\n",__func__);
++	pmu4_audio = kzalloc(sizeof(struct aml_pmu4_audio_priv), GFP_KERNEL);
++    if (NULL == pmu4_audio)
++        return -ENOMEM;
++	snd_soc_codec_set_drvdata(codec,pmu4_audio);
++#if 0
++    ret = snd_soc_codec_set_cache_io(codec, 8, 16, SND_SOC_I2C);
++    if (ret != 0) {
++        dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
++        return ret;
++    }
++#endif
++	
++	//enable LDO1V8 for audio
++	aml_pmu4_audio_power_init();  
++
++	//reset audio codec register
++    aml_pmu4_audio_reset(codec);
++	aml_pmu4_audio_start_up(codec);
++
++    aml_pmu4_audio_reg_init(codec);
++
++    codec->dapm.bias_level = SND_SOC_BIAS_STANDBY;
++
++    pmu4_audio->codec = codec;
++
++
++
++    return 0;
++}
++
++static int aml_pmu4_audio_remove(struct snd_soc_codec *codec)
++{
++    aml_pmu4_audio_set_bias_level(codec, SND_SOC_BIAS_OFF);
++    return 0;
++}
++
++#ifdef CONFIG_PM
++static int aml_pmu4_audio_suspend(struct snd_soc_codec *codec)
++{
++    aml_pmu4_audio_set_bias_level(codec, SND_SOC_BIAS_OFF);
++    return 0;
++}
++
++static int aml_pmu4_audio_resume(struct snd_soc_codec *codec)
++{
++    aml_pmu4_audio_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
++    return 0;
++}
++#else
++#define aml_pmu4_audio_suspend NULL
++#define aml_pmu4_audio_resume NULL
++#endif
++
++#define PMU4_AUDIO_STEREO_RATES SNDRV_PCM_RATE_8000_96000
++#define PMU4_AUDIO_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
++            SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
++
++struct snd_soc_dai_ops pmu4_audio_aif_dai_ops = {
++    .hw_params = aml_pmu4_hw_params,
++    .prepare = aml_pmu4_prepare,
++    .set_fmt = aml_pmu4_set_dai_fmt,
++    .set_sysclk = aml_pmu4_set_dai_sysclk,
++    .mute_stream = aml_pmu4_codec_mute_stream,
++};
++
++struct snd_soc_dai_driver aml_pmu4_audio_dai[] = {
++    {
++        .name = "pmu4-audio-hifi",
++        .id = 0,
++        .playback = {
++            .stream_name = "HIFI Playback",
++            .channels_min = 1,
++            .channels_max = 2,
++            .rates = PMU4_AUDIO_STEREO_RATES,
++            .formats = PMU4_AUDIO_FORMATS,
++        },
++        .capture = {
++            .stream_name = "HIFI Capture",
++            .channels_min = 1,
++            .channels_max = 2,
++            .rates = PMU4_AUDIO_STEREO_RATES,
++            .formats = PMU4_AUDIO_FORMATS,
++        },
++        .ops = &pmu4_audio_aif_dai_ops,
++    },
++};
++
++static struct snd_soc_codec_driver soc_codec_dev_aml_pmu4_audio = {
++    .probe = aml_pmu4_audio_probe,
++    .remove = aml_pmu4_audio_remove,
++    .suspend = aml_pmu4_audio_suspend,
++    .resume = aml_pmu4_audio_resume,
++    .read = aml_pmu4_audio_read,
++    .write = aml_pmu4_audio_write,
++    .set_bias_level = aml_pmu4_audio_set_bias_level,
++    .controls = pmu4_audio_snd_controls,
++    .num_controls = ARRAY_SIZE(pmu4_audio_snd_controls),
++    .dapm_widgets = pmu4_audio_dapm_widgets,
++    .num_dapm_widgets = ARRAY_SIZE(pmu4_audio_dapm_widgets),
++    .dapm_routes = pmu4_audio_dapm_routes,
++    .num_dapm_routes = ARRAY_SIZE(pmu4_audio_dapm_routes),
++    .reg_cache_size = 16,
++    .reg_word_size = sizeof(u16),
++    .reg_cache_step = 2,
++};
++
++static int aml_pmu4_audio_codec_probe(struct platform_device *pdev)
++{
++	int ret ;
++	printk(KERN_INFO "aml_pmu4_audio_codec_probe\n");
++    
++	ret = snd_soc_register_codec(&pdev->dev, 
++        &soc_codec_dev_aml_pmu4_audio, &aml_pmu4_audio_dai[0], 1);
++
++    return ret;
++}
++
++static int aml_pmu4_audio_codec_remove(struct platform_device *pdev)
++{
++	snd_soc_unregister_codec(&pdev->dev);
++	return 0;
++}
++
++#ifdef CONFIG_USE_OF
++static const struct of_device_id aml_pmu4_codec_dt_match[]={
++    { .compatible = "amlogic,aml_pmu4_codec", },
++    {},
++};
++#else
++#define aml_pmu4_codec_dt_match NULL
++#endif
++static struct platform_driver aml_pmu4_codec_platform_driver = {
++	.driver = {
++		.name = "aml_pmu4_codec",
++		.owner = THIS_MODULE,
++        .of_match_table = aml_pmu4_codec_dt_match,
++	},
++	.probe = aml_pmu4_audio_codec_probe,
++	.remove = aml_pmu4_audio_codec_remove,
++};
++
++static int __init aml_pmu4_audio_modinit(void)
++{
++	int ret = 0;
++
++	ret = platform_driver_register(&aml_pmu4_codec_platform_driver);
++	if (ret != 0) {
++		printk(KERN_ERR "Failed to register AML PMU4 codec platform driver: %d\n",
++		       ret);
++	}
++
++	return ret;
++}
++module_init(aml_pmu4_audio_modinit);
++
++static void __exit aml_pmu4_audio_exit(void)
++{
++	platform_driver_unregister(&aml_pmu4_codec_platform_driver);
++}
++module_exit(aml_pmu4_audio_exit);
++
++
++MODULE_DESCRIPTION("ASoC AML pmu4 audio codec driver");
++MODULE_AUTHOR("Chengshun Wang <chengshun.wang@amlogic.com>");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/sound/soc/codecs/aml_pmu4_codec.h b/sound/soc/codecs/aml_pmu4_codec.h
+new file mode 100755
+index 000000000000..8fec1f2dfe69
+--- /dev/null
++++ b/sound/soc/codecs/aml_pmu4_codec.h
+@@ -0,0 +1,103 @@
++#ifndef AML_PMU4_H_
++#define AML_PMU4_H_
++
++#define PMU4_AUDIO_BASE    0x40
++/*Info*/
++#define PMU4_SOFT_RESET                0x00
++#define PMU4_BLOCK_ENABLE              0x02
++#define PMU4_AUDIO_CONFIG              0x04
++#define PMU4_PGA_IN_CONFIG             0x06
++#define PMU4_ADC_VOL_CTR               0x08
++#define PMU4_DAC_SOFT_MUTE             0x0A
++#define PMU4_DAC_VOL_CTR               0x0C
++#define PMU4_LINE_OUT_CONFIG           0x0E
++
++
++/*Block Enable , Reg 0x02h*/
++#define PMU4_BIAS_CURRENT_MASK    (0x1<<13)
++#define PMU4_BIAS_CURRENT_EN    0xD
++#define PMU4_PGAL_IN_EN         0xB
++#define PMU4_PGAR_IN_EN         0xA
++#define PMU4_PGAL_IN_ZC_EN      0x9
++#define PMU4_PGAR_IN_ZC_EN      0x8
++#define PMU4_ADCL_EN            0x7
++#define PMU4_ADCR_EN            0x6
++#define PMU4_DACL_EN            0x5
++#define PMU4_DACR_EN            0x4
++#define PMU4_LOLP_EN            0x3
++#define PMU4_LOLN_EN            0x2
++#define PMU4_LORP_EN            0x1
++#define PMU4_LORN_EN            0x0
++
++
++/*Audio Config,Reg 0x04h*/
++#define PMU4_MCLK_FREQ_MASK               (0x1<<15)
++#define PMU4_MCLK_FREQ          0xF
++#define PMU4_I2S_MODE_MASK                (0x1<<14)
++#define PMU4_I2S_MODE           0xE
++#define PMU4_ADC_HPF_MODE       0xC
++#define PMU4_ADC_DEM_EN         0xA
++#define PMU4_ADC_CLK_TO_GPIO_EN 0x9
++#define PMU4_DAC_CLK_TO_GPIO_EN 0x8
++#define PMU4_DACL_DATA_SOURCE   0x7
++#define PMU4_DACR_DATA_SOURCE   0x6
++#define PMU4_DACL_INV           0x5
++#define PMU4_DACR_INV           0x4
++#define PMU4_ADCDATL_SOURCE     0x3
++#define PMU4_ADCDATR_SOURCE     0x2
++#define PMU4_ADCL_INV           0x1
++#define PMU4_ADCR_INV           0x0
++
++
++
++/*PGA_IN Config,  Reg 0x06h*/
++#define PMU4_PGAL_IN_SEL        0xD
++#define PMU4_PGAL_IN_GAIN       0x8
++#define PMU4_PGAR_IN_SEL        0x5
++#define PMU4_PGAR_IN_GAIN       0x0
++
++
++
++/*ADC_Volume_Control , Reg 0x08h*/
++#define PMU4_ADCL_VOL_CTR            0x8
++#define PMU4_ADCR_VOL_CTR            0x0
++
++
++
++
++/*DAC Soft Mute, Reg 0xA*/
++#define PMU4_DAC_SOFT_MUTE_BIT  0xF
++#define PMU4_DAC_UNMUTE_MODE    0xE
++#define PMU4_DAC_MUTE_MODE      0xD
++#define PMU4_DAC_VC_RAMP_MODE   0xC
++#define PMU4_DAC_RAMP_RATE      0xA
++#define PMU4_DAC_MONO           0x8
++#define PMU4_MUTE_DAC_PD_EN     0x7
++
++
++/*DAC_Volume_Control, Reg 0xC*/
++#define PMU4_DACL_VOL_CTR            0x8
++#define PMU4_DACR_VOL_CTR            0x0
++
++
++
++/*Line-Out Config, Reg 0xE*/
++#define PMU4_LOLP_SEL_DACL      0xE
++#define PMU4_LOLP_SEL_AIL       0xD
++//#define PMU4_LOLP_SEL_AIL_INV   0xC 
++#define PMU4_LOLP_SEL_SHIFT     0xC
++#define PMU4_LOLN_SEL_DACL_INV  0xA
++#define PMU4_LOLN_SEL_DACL      0x9
++//#define PMU4_LOLN_SEL_AIL       0x8
++#define PMU4_LOLN_SEL_SHIFT     0x8
++#define PMU4_LORP_SEL_DACR      0x6
++#define PMU4_LORP_SEL_AIR       0x5
++//#define PMU4_LORP_SEL_AIR_INV   0x4
++#define PMU4_LORP_SEL_SHIFT     0x4
++#define PMU4_LORN_SEL_DACR_INV  0x2
++#define PMU4_LORN_SEL_DACR      0x1
++//#define PMU4_LORN_SEL_AIR       0x0
++#define PMU4_LORN_SEL_SHIFT     0x0
++
++
++#endif
+\ No newline at end of file
+-- 
+2.19.0
+

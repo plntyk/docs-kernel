@@ -1,0 +1,336 @@
+From 966a36d0018a23ef1a5df265092a351a51e9aead Mon Sep 17 00:00:00 2001
+From: Mingliang Yang <mingliang.yang@amlogic.com>
+Date: Wed, 30 Oct 2013 14:54:13 +0800
+Subject: [PATCH 1615/5965] #PD 81459 add pts 64bit us fixed cts test from 3.8
+
+---
+ drivers/amlogic/amports/amstream.c       | 12 +++++++++
+ drivers/amlogic/amports/esparser.c       | 10 ++++++++
+ drivers/amlogic/amports/esparser.h       |  4 +++
+ drivers/amlogic/amports/ptsserv.c        | 31 ++++++++++++++++++++----
+ drivers/amlogic/amports/vh264.c          |  9 ++++---
+ drivers/amlogic/ppmgr/ppmgr_vpp.c        |  2 ++
+ drivers/amlogic/video_dev/amlvideo.c     | 11 +++++++--
+ include/linux/amlogic/amports/amstream.h |  4 ++-
+ include/linux/amlogic/amports/ptsserv.h  |  6 ++++-
+ include/linux/amlogic/amports/vframe.h   |  1 +
+ 10 files changed, 77 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 5c5759a1865c..60d1bcaa376f 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1294,6 +1294,18 @@ static long amstream_ioctl(struct file *file,
+             r = es_apts_checkin(&bufs[BUF_TYPE_AUDIO], arg);
+         }
+         break;
++	case AMSTREAM_IOC_TSTAMP_uS64:
++        if ((this->type & (PORT_TYPE_AUDIO | PORT_TYPE_VIDEO)) ==
++        	((PORT_TYPE_AUDIO | PORT_TYPE_VIDEO))) {	
++        	r = -EINVAL;
++        } else{
++            if (this->type & PORT_TYPE_VIDEO) {	
++                r = es_vpts_checkin_us64(&bufs[BUF_TYPE_VIDEO],arg);
++            } else if (this->type & PORT_TYPE_AUDIO) {
++                r = es_vpts_checkin_us64(&bufs[BUF_TYPE_AUDIO],arg);
++            }	
++        }
++        break;
+ 
+     case AMSTREAM_IOC_VDECSTAT:
+         if ((this->type & PORT_TYPE_VIDEO) == 0) {
+diff --git a/drivers/amlogic/amports/esparser.c b/drivers/amlogic/amports/esparser.c
+index 163c6989b3b6..4eaa1bec6c58 100755
+--- a/drivers/amlogic/amports/esparser.c
++++ b/drivers/amlogic/amports/esparser.c
+@@ -184,6 +184,16 @@ static ssize_t _esparser_write(const char __user *buf,
+     return len;
+ }
+ 
++s32 es_vpts_checkin_us64(struct stream_buf_s *buf, u64 us64)
++{
++    return pts_checkin_offset_us64(PTS_TYPE_VIDEO, video_data_parsed,us64);
++
++}
++s32 es_apts_checkin_us64(struct stream_buf_s *buf, u64 us64)
++{
++    return pts_checkin_offset_us64(PTS_TYPE_AUDIO, audio_data_parsed, us64);
++}
++
+ s32 es_vpts_checkin(struct stream_buf_s *buf, u32 pts)
+ {
+ #if 0
+diff --git a/drivers/amlogic/amports/esparser.h b/drivers/amlogic/amports/esparser.h
+index 1c75565c4254..2b88c96033ba 100755
+--- a/drivers/amlogic/amports/esparser.h
++++ b/drivers/amlogic/amports/esparser.h
+@@ -38,6 +38,10 @@ extern ssize_t esparser_write(struct file *file,
+                               struct stream_buf_s *stbuf,
+                               const char __user *buf, size_t count);
+ 
++extern s32 es_vpts_checkin_us64(struct stream_buf_s *buf, u64 us64);
++
++extern s32 es_apts_checkin_us64(struct stream_buf_s *buf, u64 us64);
++
+ extern int es_vpts_checkin(struct stream_buf_s *buf, u32 pts);
+ 
+ extern int es_apts_checkin(struct stream_buf_s *buf, u32 pts);
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 51a63ad96a40..38267b016d63 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -31,6 +31,7 @@ typedef struct pts_rec_s {
+     struct list_head list;
+     u32 offset;
+     u32 val;
++    u64 pts_uS64;
+ } pts_rec_t;
+ 
+ typedef struct pts_table_s {
+@@ -204,7 +205,7 @@ EXPORT_SYMBOL(calculation_stream_delayed_ms);
+ 
+ #endif
+ 
+-int pts_checkin_offset(u8 type, u32 offset, u32 val)
++static int pts_checkin_offset_inline(u8 type, u32 offset, u32 val,u64 uS64)
+ {
+     ulong flags;
+     pts_table_t *pTable;
+@@ -252,7 +253,8 @@ int pts_checkin_offset(u8 type, u32 offset, u32 val)
+ 
+         rec->offset = offset;
+         rec->val = val;
+-
++        rec->pts_uS64 = uS64;
++		
+ #ifdef CALC_CACHED_TIME
+ 	{
+ 		s32 diff = offset-pTable->last_checkin_offset;
+@@ -295,7 +297,7 @@ int pts_checkin_offset(u8 type, u32 offset, u32 val)
+                 printk("init apts[%d] at 0x%x\n", type, val);
+             }
+ 
+-            if (type == PTS_TYPE_VIDEO) {
++            if (type == PTS_TYPE_VIDEO) {	
+                 WRITE_MPEG_REG(VIDEO_PTS, val);
+             } else if (type == PTS_TYPE_AUDIO) {
+                 WRITE_MPEG_REG(AUDIO_PTS, val);
+@@ -312,8 +314,19 @@ int pts_checkin_offset(u8 type, u32 offset, u32 val)
+         return -EINVAL;
+     }
+ }
++int pts_checkin_offset(u8 type, u32 offset, u32 val){
++    u64 us;
++    us = div64_u64(val*100,9);
++    return pts_checkin_offset_inline(type,offset,val,us);
++}
++int pts_checkin_offset_us64(u8 type, u32 offset, u64 us){
++    u64 pts_val;
++    pts_val = div64_u64(us*9,100);
++    return pts_checkin_offset_inline(type,offset,(u32)pts_val,us);
++}
+ 
+ EXPORT_SYMBOL(pts_checkin_offset);
++EXPORT_SYMBOL(pts_checkin_offset_us64);
+ 
+ /* This type of PTS could happen in the past,
+  * e.g. from TS demux when the real time (wr_page, wr_ptr)
+@@ -433,8 +446,8 @@ int pts_lookup(u8 type, u32 *val, u32 pts_margin)
+ }
+ 
+ EXPORT_SYMBOL(pts_lookup);
+-
+-int pts_lookup_offset(u8 type, u32 offset, u32 *val, u32 pts_margin)
++static int pts_lookup_offset_inline(
++    u8 type, u32 offset, u32 *val, u32 pts_margin, u64 *uS64)
+ {
+     ulong flags;
+     pts_table_t *pTable;
+@@ -537,6 +550,7 @@ int pts_lookup_offset(u8 type, u32 offset, u32 *val, u32 pts_margin)
+                 }
+             }
+             *val = p2->val;
++            *uS64 = p2->pts_uS64;
+ 
+ #ifdef CALC_CACHED_TIME
+ 	    pTable->last_checkout_pts = p2->val;
+@@ -609,8 +623,15 @@ int pts_lookup_offset(u8 type, u32 offset, u32 *val, u32 pts_margin)
+ 
+     return -1;
+ }
++int pts_lookup_offset(u8 type, u32 offset, u32 *val, u32 pts_margin){
++	return pts_lookup_offset_inline(type,offset,val,pts_margin,0);
++}
++int pts_lookup_offset_us64(u8 type, u32 offset, u32 *val ,u32 pts_margin, u64 *uS64){
++	return pts_lookup_offset_inline(type,offset,val,pts_margin,uS64);
++}
+ 
+ EXPORT_SYMBOL(pts_lookup_offset);
++EXPORT_SYMBOL(pts_lookup_offset_us64);
+ 
+ int pts_set_resolution(u8 type, u32 level)
+ {
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 168168553c23..9bf39301e10e 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -796,6 +796,7 @@ static void vh264_isr(void)
+     vframe_t *vf;
+     unsigned int cpu_cmd;
+     unsigned int pts, pts_valid = 0, pts_duration = 0;
++	u64 pts_us64;
+     bool force_interlaced_frame = false;
+ 
+     WRITE_VREG(ASSIST_MBOX1_CLR_REG, 1);
+@@ -908,7 +909,8 @@ static void vh264_isr(void)
+                 break;
+             }
+ 
+-            if (pts_lookup_offset(PTS_TYPE_VIDEO, b_offset, &pts, 0) == 0) {
++            // add 64bit pts us ;
++            if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, b_offset, &pts, 0,&pts_us64) == 0){
+                 pts_valid = 1;
+ #ifdef DEBUG_PTS
+                 pts_hit++;
+@@ -919,7 +921,6 @@ static void vh264_isr(void)
+                 pts_missed++;
+ #endif
+             }
+-
+             if (sync_outside == 0) {
+                 if (h264_first_pts_ready == 0) {
+                     if (pts_valid == 0) {
+@@ -1013,7 +1014,7 @@ static void vh264_isr(void)
+                 vf->duration_pulldown = 0;
+                 vf->index = buffer_index;
+                 vf->pts = (pts_valid) ? pts : 0;
+-
++                vf->pts_us64= (pts_valid) ? pts_us64 : 0;
+                 vf->canvas0Addr = vf->canvas1Addr = spec2canvas(&buffer_spec[buffer_index]);
+                 vfbuf_use[buffer_index]++;
+ 
+@@ -1039,7 +1040,7 @@ static void vh264_isr(void)
+                 vf->duration_pulldown = 0;
+                 vf->index = buffer_index;
+                 vf->pts = (pts_valid) ? pts : 0;
+-
++                vf->pts_us64= (pts_valid) ? pts_us64 : 0;
+                 vf->canvas0Addr = vf->canvas1Addr = spec2canvas(&buffer_spec[buffer_index]);
+                 vfbuf_use[buffer_index]++;
+ 
+diff --git a/drivers/amlogic/ppmgr/ppmgr_vpp.c b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+index 1a4f19d1583b..a71aa307ecfb 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_vpp.c
++++ b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+@@ -1308,6 +1308,7 @@ static void process_vf_rotate(vframe_t *vf, ge2d_context_t *context, config_para
+ 
+     new_vf->duration_pulldown = vf->duration_pulldown;
+     new_vf->pts = vf->pts;
++    new_vf->pts_us64 = vf->pts_us64;
+     new_vf->type = VIDTYPE_VIU_444 | VIDTYPE_VIU_SINGLE_PLANE | VIDTYPE_VIU_FIELD;
+     new_vf->canvas0Addr = new_vf->canvas1Addr = index2canvas(pp_vf->index);
+     new_vf->orientation = vf->orientation;
+@@ -1759,6 +1760,7 @@ static void process_vf_change(vframe_t *vf, ge2d_context_t *context, config_para
+     temp_vf.duration = vf->duration;
+     temp_vf.duration_pulldown = vf->duration_pulldown;
+     temp_vf.pts = vf->pts;
++    temp_vf.pts_us64= vf->pts_us64;
+     temp_vf.type = VIDTYPE_VIU_444 | VIDTYPE_VIU_SINGLE_PLANE | VIDTYPE_VIU_FIELD;
+     temp_vf.canvas0Addr = temp_vf.canvas1Addr = ass_index;
+     cur_angle = (ppmgr_device.videoangle + vf->orientation)%4;
+diff --git a/drivers/amlogic/video_dev/amlvideo.c b/drivers/amlogic/video_dev/amlvideo.c
+index 66d7c8920aaa..e0a34ceb3a5c 100755
+--- a/drivers/amlogic/video_dev/amlvideo.c
++++ b/drivers/amlogic/video_dev/amlvideo.c
+@@ -482,14 +482,21 @@ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     }
+     mutex_lock(&vfpMutex);
+     ppmgrvf = vf_get(RECEIVER_NAME);
++
+     if (!ppmgrvf) {
+         mutex_unlock(&vfpMutex);
+         return -EAGAIN;
+     }
+     if (ppmgrvf->pts != 0) {
+         timestamp_vpts_set(ppmgrvf->pts);
+-    } else
++    } else{
+         timestamp_vpts_inc(DUR2PTS(ppmgrvf->duration));
++		ppmgrvf->pts=timestamp_vpts_get();
++    }
++
++	if(!ppmgrvf->pts)
++        ppmgrvf->pts_us64=ppmgrvf->pts*100/9;
++	
+     if (unregFlag || startFlag) {
+         if (ppmgrvf->pts == 0)
+             timestamp_vpts_set(timestamp_pcrscr_get());
+@@ -502,7 +509,7 @@ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     }
+     p->index = ppmgrvf->canvas0Addr&0xff - PPMGR_CANVAS_INDEX;
+     p->timestamp.tv_sec = 0;
+-    p->timestamp.tv_usec = timestamp_vpts_get();
++    p->timestamp.tv_usec = ppmgrvf->pts_us64;
+     return ret;
+ }
+ 
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index eb1fe23b7efa..e7c7f8221149 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -143,7 +143,8 @@
+ #define AMSTREAM_IOC_SET_VSYNC_UPINT   _IOW(AMSTREAM_IOC_MAGIC, 0x89, unsigned long)
+ #define AMSTREAM_IOC_SET_DEMUX  _IOW(AMSTREAM_IOC_MAGIC, 0x90, unsigned long)
+ #define AMSTREAM_IOC_SET_DRMMODE _IOW(AMSTREAM_IOC_MAGIC, 0x91, unsigned long)
+-
++#define AMSTREAM_IOC_TSTAMP_uS64 _IOW(AMSTREAM_IOC_MAGIC, 0x95, unsigned long)
++
+ #define AMSTREAM_IOC_SET_VIDEO_DELAY_LIMIT_MS _IOW(AMSTREAM_IOC_MAGIC, 0xa0, unsigned long)
+ #define AMSTREAM_IOC_GET_VIDEO_DELAY_LIMIT_MS _IOR(AMSTREAM_IOC_MAGIC, 0xa1, unsigned long)
+ #define AMSTREAM_IOC_SET_AUDIO_DELAY_LIMIT_MS _IOW(AMSTREAM_IOC_MAGIC, 0xa2, unsigned long)
+@@ -265,6 +266,7 @@ struct codec_profile_t
+ 	char *name;		// video codec short name 
+ 	char *profile;	// Attributes,seperated by commas 
+ };
++
+ #define SUPPORT_VDEC_NUM	(8)
+ 
+ int vcodec_profile_register(const struct codec_profile_t *vdec_profile);
+diff --git a/include/linux/amlogic/amports/ptsserv.h b/include/linux/amlogic/amports/ptsserv.h
+index e00b652dce1a..fadcdae7df90 100755
+--- a/include/linux/amlogic/amports/ptsserv.h
++++ b/include/linux/amlogic/amports/ptsserv.h
+@@ -40,13 +40,17 @@ extern int pts_checkin_wrptr(u8 type, u32 ptr, u32 val);
+ 
+ extern int pts_checkin_offset(u8 type, u32 offset, u32 val);
+ 
++extern int pts_checkin_offset_us64(u8 type, u32 offset, u64 us);
++
+ extern int get_last_checkin_pts(u8 type);
+ 
+ extern int get_last_checkout_pts(u8 type);
+ 
+ extern int pts_lookup(u8 type, u32 *val, u32 pts_margin);
+ 
+-extern int pts_lookup_offset(u8 type, u32 offset, u32 *val, u32 pts_margin);
++extern int pts_lookup_offset(u8 type, u32 offset,u32 *val, u32 pts_margin);
++
++extern int pts_lookup_offset_us64(u8 type, u32 offset, u32 *val, u32 pts_margin, u64 *uS64);
+ 
+ extern int pts_set_resolution(u8 type, u32 level);
+ 
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+index be4479ef1604..a29caa4ae648 100755
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -153,6 +153,7 @@ typedef struct vframe_s {
+         u32 duration;
+         u32 duration_pulldown;
+         u32 pts;
++        u64 pts_us64;
+         u32 flag;
+ 
+         u32 canvas0Addr;
+-- 
+2.19.0
+

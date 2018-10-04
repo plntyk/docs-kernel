@@ -1,0 +1,178 @@
+From 9c88b9927423013afc83f73921c13f1a50749fe3 Mon Sep 17 00:00:00 2001
+From: "qiufang.dai" <qiufang.dai@amlogic.com>
+Date: Mon, 29 Dec 2014 11:18:41 +0800
+Subject: [PATCH 5263/5965] PD #93985: fix rtc driver and ao cpu operate rtc
+ register conflict
+
+Change-Id: I8f01b56eee6eaa33522066a15b29f2c3ce9dd858
+
+PD #93985: delay time expand for stopping ao cpu
+
+Change-Id: I1e63cbcd3f8218b4748f318591959b7f4c2c3014
+
+PD #93985: fix wrong macro for m8b
+
+Change-Id: Ideff2a6f8fd461a79febe566e87e3c36bf160255
+---
+ arch/arm/mach-meson8b/arc_trig_clk.h | 27 +++++++++----------
+ arch/arm/mach-meson8b/pm.c           |  2 +-
+ drivers/amlogic/rtc/aml_rtc.c        | 40 +++++++++++++++++++++++++---
+ 3 files changed, 49 insertions(+), 20 deletions(-)
+
+diff --git a/arch/arm/mach-meson8b/arc_trig_clk.h b/arch/arm/mach-meson8b/arc_trig_clk.h
+index 4bbca77567fd..6f99eed929c3 100644
+--- a/arch/arm/mach-meson8b/arc_trig_clk.h
++++ b/arch/arm/mach-meson8b/arc_trig_clk.h
+@@ -48,23 +48,20 @@ const unsigned arc_code[]={
+ 	0x2000274a , 0x3000204a , 0x3000214a , 0x3000224a,
+ 	0x3000234a , 0x3000244a , 0x3f80240a , 0x80000000,
+ 	0x7000264a , 0x7000264a , 0x0000204a , 0x0f80210a,
+-	0x04300000 , 0x00001900 , 0x01012140 , 0x8f80210c,
+-	0x04380000 , 0xffc207f0 , 0x0000084a , 0x7000264a,
++	0x04040000 , 0x00001900 , 0x01012140 , 0x8f80210c,
++	0x040c0000 , 0xffc207f0 , 0x0000084a , 0x7000264a,
+ 	0x7000264a , 0x7000264a , 0x003f216f , 0x7000264a,
+ 	0x7000264a , 0x0f802020 , 0x03440000 , 0x0f802020,
+ 	0x034c0000 , 0x70041600 , 0x0054c810 , 0x0f80230a,
+ 	0x0054c810 , 0x22028340 , 0x0afd0102 , 0x7ee08004,
+-	0x1ce4c0f1 , 0xc641b348 , 0x1c0cc742 , 0x1c103400,
+-	0x1c143440 , 0x1c183480 , 0x42c334c0 , 0x004cc810,
+-	0x23458260 , 0xa26007c3 , 0xeeee42c3 , 0x1e00aaaa,
+-	0xc8107080 , 0x43c30004 , 0x0014c810 , 0x00111300,
+-	0xc81042c3 , 0x12000740 , 0x214f0010 , 0x1b002484,
+-	0x20450100 , 0xa2602803 , 0x47cb4548 , 0x090d0000,
+-	0xc81046cb , 0x706e0004 , 0x2f80220a , 0x0014c810,
+-	0x0a0d8540 , 0xbaa4011e , 0x78e0f003 , 0xa540ba84,
+-	0xffef0f66 , 0x864040e1 , 0x8f810ae9 , 0xeeeedddd,
+-	0x14c01e00 , 0x14001d00 , 0x24401a00 , 0x003f236f,
+-	0x00402069 , 0x7000264a , 0x7000264a , 0x7000264a,
+-	0x78e0f1e0 , 0x00010200 , 0x0000001a , 0x000001b2,
+-	0x00000000 , 0x00000000 , 0x00000000 , 0x00000000
++	0x1cf0c0f1 , 0xc641b348 , 0x1c0cc742 , 0x42c33400,
++	0x004cc810 , 0x23458260 , 0xa26007c3 , 0xeeee42c3,
++	0x1e00aaaa , 0xc8107080 , 0x42c30004 , 0x0740c810,
++	0xbb858260 , 0x4548a260 , 0x000047cb , 0x46cb090d,
++	0x0004c810 , 0x2000204a , 0x0a0d8540 , 0xbaa4011e,
++	0x78e0f003 , 0xa540ba84 , 0xffef0f8e , 0x864040e1,
++	0x8f810ae9 , 0xeeeedddd , 0x14001e00 , 0xbaa58540,
++	0x236fa540 , 0x2069003f , 0x264a0040 , 0x264a7000,
++	0x264a7000 , 0xf1e27000 , 0x00010200 , 0x0000001a,
++	0x000001b2 , 0x00000000 , 0x00000000 , 0x00000000
+ };
+diff --git a/arch/arm/mach-meson8b/pm.c b/arch/arm/mach-meson8b/pm.c
+index 39bca4bf38ea..08d706b9a609 100755
+--- a/arch/arm/mach-meson8b/pm.c
++++ b/arch/arm/mach-meson8b/pm.c
+@@ -307,7 +307,7 @@ int stop_ao_cpu(void)
+ 	if(cec_config & 0x1)// 4 bytes: use to control cec switch on/off,distinguish between Mbox and Tablet. bit[0]:1:Mbox; 0:Tablet
+     {
+     	aml_write_reg32(P_AO_RTI_STATUS_REG1, 0xddddeeee); //ask ao to halt.
+-    	udelay(15);
++		udelay(40);
+     	if(aml_read_reg32(P_AO_RTI_STATUS_REG1) == 0x0){
+     		printk("AO cpu stop ok.\n");
+     		return 0;
+diff --git a/drivers/amlogic/rtc/aml_rtc.c b/drivers/amlogic/rtc/aml_rtc.c
+index 8739a463000c..baf5f091f6df 100755
+--- a/drivers/amlogic/rtc/aml_rtc.c
++++ b/drivers/amlogic/rtc/aml_rtc.c
+@@ -119,12 +119,13 @@ static int  check_osc_clk(void);
+ int get_rtc_status(void)
+ {
+ 	static int rtc_fail = -1;
+-	if (rtc_fail < 0) {
+-		if (check_osc_clk() < 0)
++	//if (rtc_fail < 0) {
++		if (check_osc_clk() < 0) {
++			printk("rtc clock error\n");
+ 			rtc_fail = 1;
+-		else
++		} else
+ 			rtc_fail = 0;
+-	}
++	//}
+ 	return rtc_fail;
+ }
+ static DEFINE_SPINLOCK(com_lock);
+@@ -335,13 +336,24 @@ static void aml_rtc_reset(void)
+ #endif
+ }
+ 
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++extern int run_arc_program(void);
++extern int stop_ao_cpu(void);
++#endif
++
+ static unsigned int _ser_access_read_locked(unsigned long addr)
+ {
+ 	unsigned val = 0;
+ 	int s_nrdy_cnt = 0;
+ 	int rst_times = 0;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	int ret = 0;
++#endif
+ 	if (get_rtc_status())
+ 		return 0;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	ret = stop_ao_cpu();
++#endif
+ 	while(rtc_comm_init()<0){
+ 		RTC_DBG(RTC_DBG_VAL, "aml_rtc -- rtc_common_init fail\n");
+ 		if(s_nrdy_cnt>RESET_RETRY_TIMES) {
+@@ -362,6 +374,10 @@ static unsigned int _ser_access_read_locked(unsigned long addr)
+ 	rtc_set_mode(0); //Read
+ 	rtc_get_data(&val);
+ out:
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	if (ret >= 0)
++		run_arc_program();
++#endif
+ 	return val;
+ }
+ 
+@@ -369,8 +385,14 @@ static void _ser_access_write_locked(unsigned long addr, unsigned long data)
+ {
+ 	int s_nrdy_cnt = 0;
+ 	int rst_times = 0;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	int ret = 0;
++#endif
+ 	if (get_rtc_status())
+ 		return;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	ret = stop_ao_cpu();
++#endif
+ 	while(rtc_comm_init()<0){
+ 		
+ 		if(s_nrdy_cnt>RESET_RETRY_TIMES) {
+@@ -391,6 +413,10 @@ static void _ser_access_write_locked(unsigned long addr, unsigned long data)
+ 	rtc_send_addr_data(1,addr);
+ 	rtc_set_mode(1); //Write
+ out:
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	if (ret >= 0)
++		run_arc_program();
++#endif
+ 	return;
+ }
+ 
+@@ -483,10 +509,16 @@ int rtc_set_alarm_aml(struct device *dev, alarm_data_t *alarm_data) {
+ 
+ 	data |= alarm_data->alarm_sec - 1;
+ 	
++	printk("write alarm data: %u\n", data);
+ 	ser_access_write(RTC_GPO_COUNTER_ADDR, data);
+ 	rtc_wait_s_ready();
+ 	rtc_comm_delay();
+ 
++	data = ser_access_read(RTC_GPO_COUNTER_ADDR);
++
++	printk("read alarm data: %u\n", data);
++	printk("read alarm count: %u\n", ser_access_read(RTC_COUNTER_ADDR));
++
+ 	return 0;
+ }
+ 
+-- 
+2.19.0
+

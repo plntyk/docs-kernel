@@ -1,0 +1,193 @@
+From b844c7b25c24c2e78343fe48dfa61217354f8d4b Mon Sep 17 00:00:00 2001
+From: "kieth.liu" <kieth.liu@amlogic.com>
+Date: Wed, 21 Jan 2015 17:02:13 +0800
+Subject: [PATCH 5366/5965] PD#102624: g9tv: enable thermal
+
+Change-Id: I551c8a82d25fd65b0c1e69aee3247227d12a49c6
+---
+ arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd | 56 ++++++++++++++++++++
+ arch/arm/configs/mesong9tv_defconfig         |  1 +
+ arch/arm/mach-mesong9tv/thermal.c            |  7 +--
+ drivers/amlogic/efuse/efuse_hw.c             |  2 +
+ drivers/amlogic/efuse/efuse_regs.h           |  1 +
+ drivers/amlogic/input/saradc/saradc_reg.h    | 11 +++-
+ 6 files changed, 73 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+index 301129970860..5ee8e642556a 100755
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+@@ -1530,4 +1530,60 @@
+ 		reg = <0xc8022080 0x20>;
+ 	};
+ 
++/// ***************************************************************************************
++///	-	Efuse
++//$$ MODULE="Efuse"
++//$$ DEVICE="efuse"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "plat-pos"
++//$$ L2 PROP_U32 = "plat-count"
++//$$ L2 PROP_U32 = "usid-min"
++//$$ L2 PROP_U32 = "usid-max"
++    efuse{
++		compatible = "amlogic,efuse";
++		dev_name = "efuse";
++		status = "okay";
++		plat-pos = <0 454>;
++		plat-count = <58>;
++		usid-min = <8>; /*reserved*/
++		usid-max = <31>; /*reserved*/
++	};
++		
++///	-	Thermal
++//$$ MODULE="Thermal"
++//$$ DEVICE="thermal"
++//$$ L2 PROP_U32 3*3 = "trip_point"
++//$$ L2 PROP_U32 = "#thermal-cells"
++//$$ L2 PROP_U32 = "cpu_cali_a"
++//$$ L2 PROP_U32 = "idle_interval"
++	thermal{
++		compatible = "amlogic-thermal";
++		#thermal-cells=<7>;
++		dev_name = "aml_thermal";
++        trip_point=<70 1608001 1608001 511 511 3 5 
++                    80 1200001 1200001 435 435 2 4
++                    90  800001 800001  328 328 2 3
++                    260 0xffffffff 0xffffffff 0xffffffff 0xffffffff 0xffffffff 0xffffffff>;
++		cpu_cali_a=<0>;
++		idle_interval=<1000>;
++        use_virtual_thermal;
++        freq_sample_period=<30>;
++        report_time=<1 10 30 60>;         /* based on freq_sample_period */
++        cpu_virtual=<
++             500000  40  40  40  40
++             600000  45  55  60  65
++             800000  50  60  65  70
++            1000000  55  65  70  75
++            1200000  60  70  75  80
++            1400000  65  75  80  85
++        >;
++        gpu_virtual=<
++            183      40  40  40  40
++            251      40  45  50  55
++            319      50  60  65  70
++            426      55  65  70  75
++            511      60  70  75  80
++        >;
++	};
++
+ }; /* end of root */
+diff --git a/arch/arm/configs/mesong9tv_defconfig b/arch/arm/configs/mesong9tv_defconfig
+index 764e8eeba3f5..b25fc0e455af 100755
+--- a/arch/arm/configs/mesong9tv_defconfig
++++ b/arch/arm/configs/mesong9tv_defconfig
+@@ -236,6 +236,7 @@ CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+ # CONFIG_HWMON is not set
+ CONFIG_THERMAL=y
+ CONFIG_CPU_THERMAL=y
++CONFIG_AML_VIRTUAL_THERMAL=y
+ CONFIG_CPUCORE_THERMAL=y
+ CONFIG_GPU_THERMAL=y
+ CONFIG_GPUCORE_THERMAL=y
+diff --git a/arch/arm/mach-mesong9tv/thermal.c b/arch/arm/mach-mesong9tv/thermal.c
+index d8d4a65efd8b..ba3c8c6dc57e 100644
+--- a/arch/arm/mach-mesong9tv/thermal.c
++++ b/arch/arm/mach-mesong9tv/thermal.c
+@@ -3,7 +3,7 @@
+ #include <linux/amlogic/saradc.h>
+ #include <mach/thermal.h>
+ #include <linux/slab.h>
+-
++#include <mach/am_regs.h>
+ #define  NOT_WRITE_EFUSE 0x0
+ #define EFUSE_MIGHT_WRONG 0x8
+ #define EFUEE_PRIVATE 0x4
+@@ -52,7 +52,8 @@ int thermal_firmware_init(void)
+ 		temps->efuse_flag=-1;
+ 	}
+ 	if(temps->flag){
+-		temp_sensor_adc_init(temps->trimming);
++		aml_set_reg32_mask(P_AO_SAR_ADC_REG11,((1<<13)|(1<<19)|(1<<21)));
++		aml_set_reg32_bits(P_AO_SAR_ADC_REG11,temps->trimming,14,5);
+ 		return 0;
+ 	}
+ 	else
+@@ -67,7 +68,7 @@ int get_cpu_temp(void)
+ 	if(temps->flag){
+ 		ret=get_adc_sample(6);
+ 		if(ret>=0){
+-			tempa=(10*(ret-temps->adc_efuse))/32+27;
++			tempa=(10*(ret-temps->adc_efuse))/34+27;
+ 			ret=tempa;
+ 		}
+ 	}
+diff --git a/drivers/amlogic/efuse/efuse_hw.c b/drivers/amlogic/efuse/efuse_hw.c
+index ab6d1ce52dec..98e8bbcc1bb5 100755
+--- a/drivers/amlogic/efuse/efuse_hw.c
++++ b/drivers/amlogic/efuse/efuse_hw.c
+@@ -379,6 +379,7 @@ struct efuse_chip_identify_t{
+ 	efuse_socchip_type_e type;
+ };
+ static const struct efuse_chip_identify_t efuse_chip_hw_info[]={
++	{.chiphw_mver=28, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_G9TV},      //M8BABY 
+ 	{.chiphw_mver=27, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M8BABY},      //M8BABY 
+ 	{.chiphw_mver=26, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6TVD},      //M6TVD 
+ 	{.chiphw_mver=25, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M8},      //M8 
+@@ -1054,6 +1055,7 @@ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 		case EFUSE_SOC_CHIP_M8BABY:
++		case EFUSE_SOC_CHIP_G9TV:
+ 			if(strcasecmp(intl_item,"temperature") == 0){
+ 				pos = 502;
+ 				len = 2;
+diff --git a/drivers/amlogic/efuse/efuse_regs.h b/drivers/amlogic/efuse/efuse_regs.h
+index 0aee633fb396..87ae075dfd30 100755
+--- a/drivers/amlogic/efuse/efuse_regs.h
++++ b/drivers/amlogic/efuse/efuse_regs.h
+@@ -149,6 +149,7 @@ typedef enum {
+ 	EFUSE_SOC_CHIP_M8,
+ 	EFUSE_SOC_CHIP_M6TVD,
+ 	EFUSE_SOC_CHIP_M8BABY,
++	EFUSE_SOC_CHIP_G9TV,
+ 	EFUSE_SOC_CHIP_UNKNOW,
+ }efuse_socchip_type_e;
+ 
+diff --git a/drivers/amlogic/input/saradc/saradc_reg.h b/drivers/amlogic/input/saradc/saradc_reg.h
+index 8d3ce3d7e85e..82c46e36900d 100755
+--- a/drivers/amlogic/input/saradc/saradc_reg.h
++++ b/drivers/amlogic/input/saradc/saradc_reg.h
+@@ -222,13 +222,19 @@ enum {
+ 
+ // REG10
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-#ifdef CONFIG_ARCH_MESONG9TV
++#ifdef CONFIG_G9TV
+ #define enable_bandgap()    set_bits(P_AO_SAR_ADC_REG11, 1, 13, 1)
+ #define disable_bandgap()   set_bits(P_AO_SAR_ADC_REG11, 0, 13, 1)
++#define set_trimming(x)     set_bits(P_AO_SAR_ADC_REG11, x, 14, 5)
++#define enable_temp__()     {}
++#define disable_temp__()    {}
++#define enable_temp()       set_bits(P_AO_SAR_ADC_REG11, 1, 19, 1)
++#define disable_temp()      set_bits(P_AO_SAR_ADC_REG11, 0, 19, 1)
++#define select_temp()       set_bits(P_AO_SAR_ADC_REG11, 1, 21, 1)
++#define unselect_temp()     set_bits(P_AO_SAR_ADC_REG11, 0, 21, 1)
+ #else
+ #define enable_bandgap()    set_bits(PP_SAR_ADC_DELTA_10, 1, 10, 1)
+ #define disable_bandgap()   set_bits(PP_SAR_ADC_DELTA_10, 0, 10, 1)
+-#endif
+ #define set_trimming(x)     set_bits(PP_SAR_ADC_DELTA_10, x, 11, 4)
+ #define enable_temp__()     set_bits(PP_SAR_ADC_DELTA_10, 1, 15, 1)
+ #define disable_temp__()    set_bits(PP_SAR_ADC_DELTA_10, 0, 15, 1)
+@@ -237,6 +243,7 @@ enum {
+ #define select_temp()       set_bits(PP_SAR_ADC_DELTA_10, 1, 27, 1)
+ #define unselect_temp()     set_bits(PP_SAR_ADC_DELTA_10, 0, 27, 1)
+ #endif
++#endif
+ #define set_trimming1(x)     set_bits(P_HHI_DPLL_TOP_0, x, 9, 1)
+ #define XN_OFF		(0<<0)
+ #define XN_ON		(1<<0)
+-- 
+2.19.0
+

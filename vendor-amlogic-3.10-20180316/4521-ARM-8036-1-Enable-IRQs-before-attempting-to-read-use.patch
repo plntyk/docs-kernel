@@ -1,0 +1,107 @@
+From 9993ce3189789d773cc50481ff9a9ada628e872a Mon Sep 17 00:00:00 2001
+From: Catalin Marinas <catalin.marinas@arm.com>
+Date: Tue, 22 Apr 2014 16:14:29 +0100
+Subject: [PATCH 4521/5965] ARM: 8036/1: Enable IRQs before attempting to read
+ user space in __und_usr
+
+The Undef abort handler in the kernel reads the undefined instruction
+from user space. If the page table was modified from another CPU, the
+user access could fail and do_page_fault() will be executed with
+interrupts disabled. This can potentially deadlock on ARM11MPCore or on
+Cortex-A15 with erratum 798181 workaround enabled (both implying IPI for
+TLB maintenance with page table lock held).
+
+This patch enables the IRQs in __und_usr before attempting to read the
+instruction from user space.
+
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+Tested-by: Arun KS <getarunks@gmail.com>
+Cc: Hartley Sweeten <hsweeten@visionengravers.com>
+Cc: Ryan Mallon <rmallon@gmail.com>
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+---
+ arch/arm/kernel/entry-armv.S | 11 +++++++----
+ arch/arm/kernel/iwmmxt.S     |  2 +-
+ arch/arm/vfp/entry.S         |  3 +--
+ 3 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/kernel/entry-armv.S b/arch/arm/kernel/entry-armv.S
+index 5bc061dbee4b..236768da7f85 100644
+--- a/arch/arm/kernel/entry-armv.S
++++ b/arch/arm/kernel/entry-armv.S
+@@ -412,6 +412,11 @@ __und_usr:
+ 	@
+ 	adr	r9, BSYM(ret_from_exception)
+ 
++	@ IRQs must be enabled before attempting to read the instruction from
++	@ user space since that could cause a page/translation fault if the
++	@ page table was modified by another CPU.
++	enable_irq
++
+ 	tst	r3, #PSR_T_BIT			@ Thumb mode?
+ 	bne	__und_usr_thumb
+ 	sub	r4, r2, #4			@ ARM instr at LR - 4
+@@ -516,7 +521,7 @@ ENDPROC(__und_usr)
+  *  r9  = normal "successful" return address
+  *  r10 = this threads thread_info structure
+  *  lr  = unrecognised instruction return address
+- * IRQs disabled, FIQs enabled.
++ * IRQs enabled, FIQs enabled.
+  */
+ 	@
+ 	@ Fall-through from Thumb-2 __und_usr
+@@ -623,7 +628,6 @@ call_fpe:
+ #endif
+ 
+ do_fpe:
+-	enable_irq
+ 	ldr	r4, .LCfp
+ 	add	r10, r10, #TI_FPSTATE		@ r10 = workspace
+ 	ldr	pc, [r4]			@ Call FP module USR entry point
+@@ -651,8 +655,7 @@ __und_usr_fault_32:
+ 	b	1f
+ __und_usr_fault_16:
+ 	mov	r1, #2
+-1:	enable_irq
+-	mov	r0, sp
++1:	mov	r0, sp
+ 	adr	lr, BSYM(ret_from_exception)
+ 	b	__und_fault
+ ENDPROC(__und_usr_fault_32)
+diff --git a/arch/arm/kernel/iwmmxt.S b/arch/arm/kernel/iwmmxt.S
+index a08783823b32..f07d42b0da47 100644
+--- a/arch/arm/kernel/iwmmxt.S
++++ b/arch/arm/kernel/iwmmxt.S
+@@ -61,7 +61,7 @@
+  * r9  = ret_from_exception
+  * lr  = undefined instr exit
+  *
+- * called from prefetch exception handler with interrupts disabled
++ * called from prefetch exception handler with interrupts enabled
+  */
+ 
+ ENTRY(iwmmxt_task_enable)
+diff --git a/arch/arm/vfp/entry.S b/arch/arm/vfp/entry.S
+index 46e17492fd1f..c20fb9702f28 100644
+--- a/arch/arm/vfp/entry.S
++++ b/arch/arm/vfp/entry.S
+@@ -19,7 +19,7 @@
+ @  r9  = normal "successful" return address
+ @  r10 = this threads thread_info structure
+ @  lr  = unrecognised instruction return address
+-@  IRQs disabled.
++@  IRQs enabled.
+ @
+ ENTRY(do_vfp)
+ #ifdef CONFIG_PREEMPT_COUNT
+@@ -27,7 +27,6 @@ ENTRY(do_vfp)
+ 	add	r11, r4, #1		@ increment it
+ 	str	r11, [r10, #TI_PREEMPT]
+ #endif
+-	enable_irq
+  	ldr	r4, .LCvfp
+ 	ldr	r11, [r10, #TI_CPU]	@ CPU number
+ 	add	r10, r10, #TI_VFPSTATE	@ r10 = workspace
+-- 
+2.19.0
+

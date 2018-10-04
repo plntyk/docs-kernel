@@ -1,0 +1,1191 @@
+From c420685e121cfb3e456f2632e925f806224459d7 Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Tue, 20 Jan 2015 15:55:32 +0800
+Subject: [PATCH 5359/5965] PD#102266: lcd: update lcd test pattern, and add
+ gamma debug tooling
+
+Change-Id: Ic3df714d52b39bc23f23085f7f26841973ecea91
+---
+ arch/arm/mach-meson6/lcd/lcd_config.c  | 254 ++++++++++++------------
+ arch/arm/mach-meson6/lcd/lcd_config.h  |   2 +-
+ arch/arm/mach-meson8/lcd/lcd_config.c  | 265 ++++++++++++-------------
+ arch/arm/mach-meson8/lcd/lcd_config.h  |   2 +-
+ arch/arm/mach-meson8b/lcd/lcd_config.c | 186 ++++++++---------
+ arch/arm/mach-meson8b/lcd/lcd_config.h |   2 +-
+ drivers/amlogic/display/vout/lcdoutc.c | 117 ++++++++---
+ include/linux/amlogic/vout/lcdoutc.h   |   3 +-
+ 8 files changed, 434 insertions(+), 397 deletions(-)
+
+diff --git a/arch/arm/mach-meson6/lcd/lcd_config.c b/arch/arm/mach-meson6/lcd/lcd_config.c
+index a1b1e5ccb57d..0fdbf233fced 100755
+--- a/arch/arm/mach-meson6/lcd/lcd_config.c
++++ b/arch/arm/mach-meson6/lcd/lcd_config.c
+@@ -65,6 +65,27 @@ static const char *lcd_ss_level_table[]={
+ 	"5%",
+ };
+ 
++static unsigned int spread_spectrum_ctrl[][3] = {
++	//ctrl2,      ctrl3,       ctrl4
++	{0x814d3928,  0x6b425012,  0x110},  //level0, 0%, disable
++	{0x16110696,  0x6d625012,  0x130},  //level1, 0.5%
++	{0x16110696,  0x4d625012,  0x130},  //level2, 1%
++	{0x16110696,  0x2d425012,  0x130},  //level3, 2%
++	{0x16110696,  0x1d425012,  0x130},  //level4, 3%
++	{0x16110696,  0x0d125012,  0x130},  //level5, 4%
++	{0x16110696,  0x0e425012,  0x130},  //level6, 5%
++};
++
++#define LVDS_VSWING_LEVEL_MAX  5
++static unsigned int lvds_vswing_ctrl[] = {
++//vswing_ctrl   level   voltage
++    0xaf20,     //0      0.2V
++    0xaf40,     //1      0.3V
++    0xa840,     //2      0.4V
++    0xa880,     //3      0.5V
++    0xa8c0,     //4      0.6V
++};
++
+ static void print_lcd_driver_version(void)
+ {
+     printk("lcd driver version: %s%s\n\n", LCD_DRV_DATE, LCD_DRV_TYPE);
+@@ -228,7 +249,7 @@ static void write_gamma_table(u16 *data, u32 rgb_mask, u16 gamma_coeff, u32 gamm
+ 	spin_unlock_irqrestore(&gamma_write_lock, flags);
+ }
+ 
+-static void set_gamma_table_lcd(unsigned gamma_en)
++static void set_gamma_table_lcd(unsigned int gamma_en)
+ {
+ 	lcd_print("%s\n", __FUNCTION__);
+ 
+@@ -613,48 +634,11 @@ static void set_lcd_spread_spectrum(int ss_level)
+ 	unsigned pll_ctrl2, pll_ctrl3, pll_ctrl4;
+ 	lcd_print("%s.\n", __FUNCTION__);
+ 	
+-	switch (ss_level) {
+-		case 1:  //about 0.5%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x6d625012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 2:  //about 1%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x4d625012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 3:  //about 2%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x2d425012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 4:  //about 3%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x1d425012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 5:  //about 4%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x0d125012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 6:  //about 5%
+-			pll_ctrl2 = 0x16110696;
+-			pll_ctrl3 = 0x0e425012;
+-			pll_ctrl4 = 0x130;
+-			break;
+-		case 0:	//disable ss
+-		default:
+-			pll_ctrl2 = 0x814d3928;
+-			pll_ctrl3 = 0x6b425012;
+-			pll_ctrl4 = 0x110;
+-			break;
+-	}
+-
+-	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL2, pll_ctrl2);
+-	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL3, pll_ctrl3);
+-	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL4, pll_ctrl4);
++	ss_level = (ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX - 1) : ss_level;
++	
++	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL2, spread_spectrum_ctrl[ss_level][0]);
++	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL3, spread_spectrum_ctrl[ss_level][1]);
++	WRITE_LCD_CBUS_REG(HHI_VIID_PLL_CNTL4, spread_spectrum_ctrl[ss_level][2]);
+ }
+ 
+ static void vclk_set_lcd(int lcd_type, unsigned long pll_reg, unsigned long vid_div_reg, unsigned int clk_ctrl_reg)
+@@ -1251,33 +1235,15 @@ static void set_control_mlvds(Lcd_Config_t *pConf)
+ 
+ static void init_phy_lvds(Lcd_Config_t *pConf)
+ {
+-    unsigned swing_ctrl;
++    unsigned int swing_level;
+     lcd_print("%s\n", __FUNCTION__);
+ 	
+     WRITE_LCD_REG(LVDS_PHY_CNTL3, 0xee1);
+     WRITE_LCD_REG(LVDS_PHY_CNTL4 ,0);
+ 
+-	switch (pConf->lcd_control.lvds_config->lvds_vswing) {
+-		case 0:
+-			swing_ctrl = 0xaf20;
+-			break;
+-		case 1:
+-			swing_ctrl = 0xaf40;
+-			break;
+-		case 2:
+-			swing_ctrl = 0xa840;
+-			break;
+-		case 3:
+-			swing_ctrl = 0xa880;
+-			break;
+-		case 4:
+-			swing_ctrl = 0xa8c0;
+-			break;
+-		default:
+-			swing_ctrl = 0xaf40;
+-			break;
+-	}
+-	WRITE_LCD_REG(LVDS_PHY_CNTL5, swing_ctrl);
++	swing_level = (pConf->lcd_control.lvds_config->lvds_vswing >= LVDS_VSWING_LEVEL_MAX) ? (LVDS_VSWING_LEVEL_MAX - 1) : pConf->lcd_control.lvds_config->lvds_vswing;
++	
++	WRITE_LCD_REG(LVDS_PHY_CNTL5, lvds_vswing_ctrl[swing_level]);
+ 
+ 	WRITE_LCD_REG(LVDS_PHY_CNTL0,0x001f);
+ 	WRITE_LCD_REG(LVDS_PHY_CNTL1,0xffff);
+@@ -1381,7 +1347,31 @@ static void _enable_vsync_interrupt(void)
+ 	}
+ }
+ 
+-static void lcd_test(unsigned num)
++#define LCD_ENC_TST_NUM_MAX    8
++static const char *lcd_enc_tst_str[] = {
++	"None",        //0
++	"Color Bar",   //1
++	"Thin Line",   //2
++	"Dot Grid",    //3
++	"Gray",        //4
++	"Red",         //5
++	"Green",       //6
++	"Blue",        //7
++};
++
++static unsigned int lcd_enc_tst[][6] = {
++//tst_mode,  Y,       Cb,     Cr,    tst_en, vfifo_en
++  {0,       0x200,   0x200,  0x200,   0,      1},  //0
++  {1,       0x200,   0x200,  0x200,   1,      0},  //1
++  {2,       0x200,   0x200,  0x200,   1,      0},  //2
++  {3,       0x200,   0x200,  0x200,   1,      0},  //3
++  {0,       0x200,   0x200,  0x200,   1,      0},  //4
++  {0,       0x130,   0x153,  0x3fd,   1,      0},  //5
++  {0,       0x256,   0x0ae,  0x055,   1,      0},  //6
++  {0,       0x074,   0x3fd,  0x1ad,   1,      0},  //7
++};
++
++static void lcd_test(unsigned int num)
+ {
+ 	unsigned venc_video_mode, venc_test_base;
+ 	
+@@ -1394,70 +1384,71 @@ static void lcd_test(unsigned num)
+ 		venc_test_base = ENCL_TST_EN;
+ 	}
+ 	
+-	switch (num) {
+-		case 0:
+-			WRITE_LCD_REG(venc_video_mode, 0x8);
+-			printk("disable bist pattern\n");
+-			break;
+-		case 1:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 1);
+-			WRITE_LCD_REG((venc_test_base+5), lcd_Conf->lcd_timing.video_on_pixel);
+-			WRITE_LCD_REG((venc_test_base+6), (lcd_Conf->lcd_basic.h_active / 9));
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show bist pattern 1: Color Bar\n");
+-			break;
+-		case 2:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 2);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show bist pattern 2: Thin Line\n");
+-			break;
+-		case 3:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 3);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show bist pattern 3: Dot Grid\n");
+-			break;
+-		case 4:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 0);
+-			WRITE_LCD_REG((venc_test_base+2), 0x200);
+-			WRITE_LCD_REG((venc_test_base+3), 0x200);
+-			WRITE_LCD_REG((venc_test_base+4), 0x200);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show test pattern 4: Gray\n");
+-			break;
+-		case 5:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 0);
+-			WRITE_LCD_REG((venc_test_base+2), 0);
+-			WRITE_LCD_REG((venc_test_base+3), 0);
+-			WRITE_LCD_REG((venc_test_base+4), 0x3ff);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show test pattern 5: Red\n");
+-			break;
+-		case 6:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 0);
+-			WRITE_LCD_REG((venc_test_base+2), 0x3ff);
+-			WRITE_LCD_REG((venc_test_base+3), 0);
+-			WRITE_LCD_REG((venc_test_base+4), 0);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show test pattern 6: Green\n");
+-			break;
+-		case 7:
+-			WRITE_LCD_REG(venc_video_mode, 0);
+-			WRITE_LCD_REG((venc_test_base+1), 0);
+-			WRITE_LCD_REG((venc_test_base+2), 0);
+-			WRITE_LCD_REG((venc_test_base+3), 0x3ff);
+-			WRITE_LCD_REG((venc_test_base+4), 0);
+-			WRITE_LCD_REG(venc_test_base, 1);
+-			printk("show test pattern 7: Blue\n");
+-			break;
+-		default:
+-			printk("un-support pattern num\n");
+-			break;
++	num = (num >= LCD_ENC_TST_NUM_MAX) ? 0 : num;
++	
++	WRITE_LCD_REG((venc_test_base+1), lcd_enc_tst[num][0]);
++	WRITE_LCD_REG((venc_test_base+2), lcd_enc_tst[num][1]);
++	WRITE_LCD_REG((venc_test_base+3), lcd_enc_tst[num][2]);
++	WRITE_LCD_REG((venc_test_base+4), lcd_enc_tst[num][3]);
++	WRITE_LCD_REG((venc_test_base+5), lcd_Conf->lcd_timing.video_on_pixel);
++	WRITE_LCD_REG((venc_test_base+6), (lcd_Conf->lcd_basic.h_active / 9));
++	WRITE_LCD_REG(venc_test_base, lcd_enc_tst[num][4]);
++	WRITE_LCD_REG_BITS(venc_video_mode, lcd_enc_tst[num][5], 3, 1);
++	
++	if (num > 0)
++		printk("show test pattern %d: %s\n", num, lcd_enc_tst_str[num]);
++	else
++		printk("disable test pattern\n");
++}
++
++static unsigned int gamma_tst_y[18] = {
++// Y_val    test_level   gray_level
++	0x000,   //1          //0
++	0x072,   //2          //15
++	0x0a4,   //3          //30
++	0x0d7,   //4          //45
++	0x10b,   //5          //60
++	0x13f,   //6          //75
++	0x175,   //7          //90
++	0x1a8,   //8          //105
++	0x1dc,   //9          //120
++	0x210,   //10         //135
++	0x23f,   //11         //150
++	0x274,   //12         //165
++	0x2a8,   //13         //180
++	0x2da,   //14         //195
++	0x30e,   //15         //210
++	0x342,   //16         //225
++	0x376,   //17         //240
++	0x3aa,   //18         //255
++};
++
++static void lcd_gamma_test(unsigned int num)
++{
++	unsigned venc_video_mode, venc_test_base;
++	
++	if (lcd_Conf->lcd_basic.lcd_type == LCD_DIGITAL_TTL) {
++		venc_video_mode = ENCT_VIDEO_MODE_ADV;
++		venc_test_base = ENCT_TST_EN;
++	}
++	else {
++		venc_video_mode = ENCL_VIDEO_MODE_ADV;
++		venc_test_base = ENCL_TST_EN;
++	}
++	
++	if ((num >= 1) && (num <= 18)) {
++		WRITE_LCD_REG((venc_test_base+1), 0);
++		WRITE_LCD_REG((venc_test_base+2), gamma_tst_y[num-1]);
++		WRITE_LCD_REG((venc_test_base+3), 0x200);
++		WRITE_LCD_REG((venc_test_base+4), 0x200);
++		WRITE_LCD_REG(venc_test_base, 1);
++		WRITE_LCD_REG_BITS(venc_video_mode, 0, 3, 1);
++		printk("gamma test level: %d, gray level: %d\n", num, ((num - 1) * 15));
++	}
++	else {
++		WRITE_LCD_REG_BITS(venc_video_mode, 1, 3, 1);
++		WRITE_LCD_REG(venc_test_base, 0);
++		printk("gamma test pattern disabled\n");
+ 	}
+ }
+ 
+@@ -1814,7 +1805,7 @@ static void lcd_control_config_pre(Lcd_Config_t *pConf)
+     }
+ 
+     ss_level = ((pConf->lcd_timing.clk_ctrl >> CLK_CTRL_SS) & 0xf);
+-    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX-1) : ss_level);
++    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX - 1) : ss_level);
+ 
+     switch (pConf->lcd_basic.lcd_type) {
+         case LCD_DIGITAL_LVDS:
+@@ -1874,6 +1865,7 @@ static Lcd_Config_t lcd_config = {
+         .gamma_g_coeff = 100,
+         .gamma_b_coeff = 100,
+         .set_gamma_table = set_gamma_table_lcd,
++        .gamma_test = lcd_gamma_test,
+     },
+     .lcd_control = {
+         .lvds_config = &lcd_lvds_config,
+diff --git a/arch/arm/mach-meson6/lcd/lcd_config.h b/arch/arm/mach-meson6/lcd/lcd_config.h
+index 28c5d5f1b919..a8c3b03a005d 100755
+--- a/arch/arm/mach-meson6/lcd/lcd_config.h
++++ b/arch/arm/mach-meson6/lcd/lcd_config.h
+@@ -8,7 +8,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c6"
+-#define LCD_DRV_DATE      "20150105"
++#define LCD_DRV_DATE      "20150112"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8/lcd/lcd_config.c b/arch/arm/mach-meson8/lcd/lcd_config.c
+index e8dd37946e6f..4c4213cd8ddb 100755
+--- a/arch/arm/mach-meson8/lcd/lcd_config.c
++++ b/arch/arm/mach-meson8/lcd/lcd_config.c
+@@ -72,6 +72,36 @@ static const char *edp_link_rate_string_table[]={
+     "invalid",
+ };
+ 
++#define LVDS_VSWING_LEVEL_MAX  5
++static unsigned int lvds_vswing_ctrl[] = {
++//vswing_ctrl   level   voltage
++    0x028,      //0      0.2V
++    0x048,      //1      0.4V
++    0x088,      //2      0.6V
++    0x0c8,      //3      0.8V
++    0x0f8,      //4      1.2V
++};
++
++#define EDP_VSWING_LEVEL_MAX  4
++static unsigned int edp_vswing_ctrl[] = {//[7:4]swing b:800mv, step 50mv
++//vswing_ctrl   level   voltage
++    0x8018,     //0      0.4V
++    0x8088,     //1      0.6V
++    0x80c8,     //2      0.8V
++    0x80f8,     //3      1.2V
++};
++
++#define EDP_PREEM_LEVEL_MAX  3
++#if 0
++static unsigned int edp_preemphasis_ctrl[] = { //to do
++//preemp_ctrl   level   amplitude
++    0x0,        //0      0db
++    0x0,        //1      3.5db
++    0x0,        //2      6db
++    0x0,        //3      9.5db
++};
++#endif
++
+ static void print_lcd_driver_version(void)
+ {
+     printk("lcd driver version: %s%s\n\n", LCD_DRV_DATE, LCD_DRV_TYPE);
+@@ -321,7 +351,7 @@ static void write_gamma_table(u16 *data, u32 rgb_mask, u16 gamma_coeff, u32 gamm
+ 	spin_unlock_irqrestore(&gamma_write_lock, flags);
+ }
+ 
+-static void set_gamma_table_lcd(unsigned gamma_en)
++static void set_gamma_table_lcd(unsigned int gamma_en)
+ {
+ 	lcd_print("%s\n", __FUNCTION__);
+ 	lcd_gamma_init_err = 0;
+@@ -860,39 +890,12 @@ static void select_edp_link_config(Lcd_Config_t *pConf)
+ 
+ void edp_phy_config_update(unsigned char vswing_tx, unsigned char preemp_tx)
+ {
+-    unsigned vswing_ctrl, preemphasis_ctrl;
+-
+     vswing_tx =  get_edp_config_index(&edp_vswing_table[0], vswing_tx);
++    vswing_tx = (vswing_tx >= EDP_VSWING_LEVEL_MAX) ? (EDP_VSWING_LEVEL_MAX - 1) : vswing_tx;
+     preemp_tx =  get_edp_config_index(&edp_preemphasis_table[0], preemp_tx);
+-    switch (vswing_tx) {
+-        case 0: //0.4V
+-            vswing_ctrl = 0x8018; //0x8038;
+-            break;
+-        case 1: //0.6V
+-            vswing_ctrl = 0x8088;
+-            break;
+-        case 2: //0.8V
+-            vswing_ctrl = 0x80c8;
+-            break;
+-        case 3: //1.2V
+-            vswing_ctrl = 0x80f8;
+-            break;
+-        default:
+-            vswing_ctrl = 0x80f8;
+-            break;
+-    }
++    preemp_tx = (preemp_tx >= EDP_PREEM_LEVEL_MAX) ? (EDP_PREEM_LEVEL_MAX - 1) : preemp_tx;
+ 
+-    switch (preemp_tx) {
+-        case 0: //0db
+-        case 1: //3.5db
+-        case 2: //6db
+-        case 3: //9.5db
+-        default:
+-            preemphasis_ctrl = 0x0; //to do
+-            break;
+-    }
+-
+-    WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, vswing_ctrl);
++    WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, edp_vswing_ctrl[vswing_tx]);
+     printk("edp link adaptive update: vswing_level=%u, preemphasis_level=%u\n", vswing_tx, preemp_tx);
+ }
+ 
+@@ -907,10 +910,10 @@ static void lcd_config_edp_edid_load(void)
+                 WRITE_LCD_CBUS_REG(HHI_EDP_APB_CLK_CNTL_M8M2, (1 << 7) | (2 << 0)); //fclk_div5---fixed 510M, div to 170M, edp apb clk
+ 
+             WRITE_LCD_CBUS_REG(HHI_DSI_LVDS_EDP_CNTL0, LCD_DIGITAL_EDP);    //dphy select by interface
+-            WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, 0x8018);//[7:4]swing b:800mv, step 50mv
++            WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, edp_vswing_ctrl[0]);//[7:4]swing b:800mv, step 50mv
+             WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL2, ((0x6 << 16) | (0xf5d7 << 0)));
+             WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL3, ((0xc2b2 << 16) | (0x600 << 0)));//0xd2b0fe00);
+-            WRITE_LCD_CBUS_REG_BITS(HHI_DIF_CSI_PHY_CNTL3, 0x10, 11, 5); //enable AUX channel
++            WRITE_LCD_CBUS_REG_BITS(HHI_DIF_CSI_PHY_CNTL3, EDP_LANE_AUX, BIT_DPHY_LANE, 5); //enable AUX channel
+             lcd_Conf->lcd_power_ctrl.power_ctrl(ON);
+             edp_edid_pre_enable();
+ 
+@@ -989,7 +992,7 @@ static void set_control_ttl(Lcd_Config_t *pConf)
+ 
+ static void init_phy_lvds(Lcd_Config_t *pConf)
+ {
+-	unsigned swing_ctrl;
++	unsigned int swing_level;
+ 	lcd_print("%s\n", __FUNCTION__);
+ 	
+ 	WRITE_LCD_REG(LVDS_SER_EN, 0xfff);	//Enable the serializers
+@@ -998,28 +1001,9 @@ static void init_phy_lvds(Lcd_Config_t *pConf)
+ 	WRITE_LCD_REG(LVDS_PHY_CNTL1, 0xff00);
+ 	WRITE_LCD_REG(LVDS_PHY_CNTL4, 0x007f);
+ 	
+-	//WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, 0x00000348);
+-	switch (pConf->lcd_control.lvds_config->lvds_vswing) {
+-		case 0:
+-			swing_ctrl = 0x028;
+-			break;
+-		case 1:
+-			swing_ctrl = 0x048;
+-			break;
+-		case 2:
+-			swing_ctrl = 0x088;
+-			break;
+-		case 3:
+-			swing_ctrl = 0x0c8;
+-			break;
+-		case 4:
+-			swing_ctrl = 0x0f8;
+-			break;
+-		default:
+-			swing_ctrl = 0x048;
+-			break;
+-	}
+-	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, swing_ctrl);
++	swing_level = (pConf->lcd_control.lvds_config->lvds_vswing >= LVDS_VSWING_LEVEL_MAX) ? (LVDS_VSWING_LEVEL_MAX - 1) : pConf->lcd_control.lvds_config->lvds_vswing;
++	
++	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, lvds_vswing_ctrl[swing_level]);
+ 	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL2, 0x000665b7);
+ 	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL3, 0x84070000);
+ }
+@@ -1035,28 +1019,12 @@ static void init_phy_mipi(Lcd_Config_t *pConf)
+ 
+ static void init_phy_edp(Lcd_Config_t *pConf)
+ {
+-    unsigned swing_ctrl;
++    unsigned char swing_level;
+     lcd_print("%s\n", __FUNCTION__);
+ 
+-    switch (pConf->lcd_control.edp_config->vswing) {
+-        case 0:	//0.4V
+-            swing_ctrl = 0x8018;
+-            break;
+-        case 1:	//0.6V
+-            swing_ctrl = 0x8088;
+-            break;
+-        case 2:	//0.8V
+-            swing_ctrl = 0x80c8;
+-            break;
+-        case 3:	//1.2V
+-            swing_ctrl = 0x80f8;
+-            break;
+-        default:
+-            swing_ctrl = 0x8018;
+-            break;
+-    }
++    swing_level = (pConf->lcd_control.edp_config->vswing >= EDP_VSWING_LEVEL_MAX) ? (EDP_VSWING_LEVEL_MAX - 1) : pConf->lcd_control.edp_config->vswing;
+ 
+-    WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, swing_ctrl);//[7:4]swing b:800mv, step 50mv
++    WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, edp_vswing_ctrl[swing_level]);//[7:4]swing b:800mv, step 50mv
+     WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL2, ((0x6 << 16) | (0xf5d7 << 0)));
+     WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL3, ((0xc2b2 << 16) | (0x600 << 0)));//0xd2b0fe00);
+ }
+@@ -1173,72 +1141,86 @@ static void _enable_vsync_interrupt(void)
+ 	}
+ }
+ 
+-static void lcd_test(unsigned num)
++#define LCD_ENC_TST_NUM_MAX    8
++static const char *lcd_enc_tst_str[] = {
++	"None",        //0
++	"Color Bar",   //1
++	"Thin Line",   //2
++	"Dot Grid",    //3
++	"Gray",        //4
++	"Red",         //5
++	"Green",       //6
++	"Blue",        //7
++};
++
++static unsigned int lcd_enc_tst[][6] = {
++//tst_mode,  Y,       Cb,     Cr,    tst_en, vfifo_en
++  {0,       0x200,   0x200,  0x200,   0,      1},  //0
++  {1,       0x200,   0x200,  0x200,   1,      0},  //1
++  {2,       0x200,   0x200,  0x200,   1,      0},  //2
++  {3,       0x200,   0x200,  0x200,   1,      0},  //3
++  {0,       0x200,   0x200,  0x200,   1,      0},  //4
++  {0,       0x130,   0x153,  0x3fd,   1,      0},  //5
++  {0,       0x256,   0x0ae,  0x055,   1,      0},  //6
++  {0,       0x074,   0x3fd,  0x1ad,   1,      0},  //7
++};
++
++static void lcd_test(unsigned int num)
+ {
+-	switch (num) {
+-		case 0:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0x8);
+-			printk("disable bist pattern\n");
+-			break;
+-		case 1:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 1);
+-			WRITE_LCD_REG(ENCL_TST_CLRBAR_STRT, lcd_Conf->lcd_timing.video_on_pixel);
+-			WRITE_LCD_REG(ENCL_TST_CLRBAR_WIDTH, (lcd_Conf->lcd_basic.h_active / 9));
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 1: Color Bar\n");
+-			break;
+-		case 2:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 2);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 2: Thin Line\n");
+-			break;
+-		case 3:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 3);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 3: Dot Grid\n");
+-			break;
+-		case 4:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 4: Gray\n");
+-			break;
+-		case 5:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 5: Red\n");
+-			break;
+-		case 6:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 6: Green\n");
+-			break;
+-		case 7:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 7: Blue\n");
+-			break;
+-		default:
+-			printk("un-support pattern num\n");
+-			break;
++	num = (num >= LCD_ENC_TST_NUM_MAX) ? 0 : num;
++	
++	WRITE_LCD_REG(ENCL_TST_MDSEL, lcd_enc_tst[num][0]);
++	WRITE_LCD_REG(ENCL_TST_Y, lcd_enc_tst[num][1]);
++	WRITE_LCD_REG(ENCL_TST_CB, lcd_enc_tst[num][2]);
++	WRITE_LCD_REG(ENCL_TST_CR, lcd_enc_tst[num][3]);
++	WRITE_LCD_REG(ENCL_TST_CLRBAR_STRT, lcd_Conf->lcd_timing.video_on_pixel);
++	WRITE_LCD_REG(ENCL_TST_CLRBAR_WIDTH, (lcd_Conf->lcd_basic.h_active / 9));
++	WRITE_LCD_REG(ENCL_TST_EN, lcd_enc_tst[num][4]);
++	WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, lcd_enc_tst[num][5], 3, 1);
++	
++	if (num > 0)
++		printk("show test pattern %d: %s\n", num, lcd_enc_tst_str[num]);
++	else
++		printk("disable test pattern\n");
++}
++
++static unsigned int gamma_tst_y[18] = {
++// Y_val    test_level   gray_level
++	0x000,   //1          //0
++	0x072,   //2          //15
++	0x0a4,   //3          //30
++	0x0d7,   //4          //45
++	0x10b,   //5          //60
++	0x13f,   //6          //75
++	0x175,   //7          //90
++	0x1a8,   //8          //105
++	0x1dc,   //9          //120
++	0x210,   //10         //135
++	0x23f,   //11         //150
++	0x274,   //12         //165
++	0x2a8,   //13         //180
++	0x2da,   //14         //195
++	0x30e,   //15         //210
++	0x342,   //16         //225
++	0x376,   //17         //240
++	0x3aa,   //18         //255
++};
++
++static void lcd_gamma_test(unsigned int num)
++{
++	if ((num >= 1) && (num <= 18)) {
++		WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
++		WRITE_LCD_REG(ENCL_TST_Y,  gamma_tst_y[num-1]);
++		WRITE_LCD_REG(ENCL_TST_CB, 0x200);
++		WRITE_LCD_REG(ENCL_TST_CR, 0x200);
++		WRITE_LCD_REG(ENCL_TST_EN, 1);
++		WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, 0, 3, 1);
++		printk("gamma test level: %d, gray level: %d\n", num, ((num - 1) * 15));
++	}
++	else {
++		WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, 1, 3, 1);
++		WRITE_LCD_REG(ENCL_TST_EN, 0);
++		printk("gamma test pattern disabled\n");
+ 	}
+ }
+ 
+@@ -1768,7 +1750,7 @@ static void lcd_control_config_pre(Lcd_Config_t *pConf)
+     }
+ 
+     ss_level = ((pConf->lcd_timing.clk_ctrl >> CLK_CTRL_SS) & 0xf);
+-    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX-1) : ss_level);
++    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX - 1) : ss_level);
+ 
+     switch (pConf->lcd_basic.lcd_type) {
+         case LCD_DIGITAL_MIPI:
+@@ -1874,6 +1856,7 @@ static Lcd_Config_t lcd_config = {
+         .gamma_g_coeff = 100,
+         .gamma_b_coeff = 100,
+         .set_gamma_table = set_gamma_table_lcd,
++        .gamma_test = lcd_gamma_test,
+     },
+     .lcd_control = {
+         .mipi_config = &lcd_mipi_config,
+diff --git a/arch/arm/mach-meson8/lcd/lcd_config.h b/arch/arm/mach-meson8/lcd/lcd_config.h
+index a1affe1f3ff0..5a0456978a4b 100755
+--- a/arch/arm/mach-meson8/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8"
+-#define LCD_DRV_DATE      "20150105"
++#define LCD_DRV_DATE      "20150112"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8b/lcd/lcd_config.c b/arch/arm/mach-meson8b/lcd/lcd_config.c
+index 16b7964d15d3..ba2cf112811a 100755
+--- a/arch/arm/mach-meson8b/lcd/lcd_config.c
++++ b/arch/arm/mach-meson8b/lcd/lcd_config.c
+@@ -64,6 +64,16 @@ static const char *lcd_ss_level_table[]={
+ 	"2%",
+ };
+ 
++#define LVDS_VSWING_LEVEL_MAX  5
++static unsigned int lvds_vswing_ctrl[] = {
++//vswing_ctrl   level   voltage
++    0x028,      //0      0.2V
++    0x048,      //1      0.4V
++    0x088,      //2      0.6V
++    0x0c8,      //3      0.8V
++    0x0f8,      //4      1.2V
++};
++
+ static void print_lcd_driver_version(void)
+ {
+     printk("lcd driver version: %s%s\n\n", LCD_DRV_DATE, LCD_DRV_TYPE);
+@@ -276,7 +286,7 @@ static void write_gamma_table(u16 *data, u32 rgb_mask, u16 gamma_coeff, u32 gamm
+ 	spin_unlock_irqrestore(&gamma_write_lock, flags);
+ }
+ 
+-static void set_gamma_table_lcd(unsigned gamma_en)
++static void set_gamma_table_lcd(unsigned int gamma_en)
+ {
+ 	lcd_print("%s\n", __FUNCTION__);
+ 	lcd_gamma_init_err = 0;
+@@ -689,7 +699,7 @@ static void set_control_ttl(Lcd_Config_t *pConf)
+ 
+ static void init_phy_lvds(Lcd_Config_t *pConf)
+ {
+-    unsigned swing_ctrl;
++    unsigned int swing_level;
+     lcd_print("%s\n", __FUNCTION__);
+ 	
+ 	WRITE_LCD_REG(LVDS_SER_EN, 0xfff);	//Enable the serializers
+@@ -698,28 +708,9 @@ static void init_phy_lvds(Lcd_Config_t *pConf)
+     WRITE_LCD_REG(LVDS_PHY_CNTL1, 0xff00);
+ 	WRITE_LCD_REG(LVDS_PHY_CNTL4, 0x007f);
+ 	
+-	//WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, 0x00000348);
+-	switch (pConf->lcd_control.lvds_config->lvds_vswing) {
+-		case 0:
+-			swing_ctrl = 0x028;
+-			break;
+-		case 1:
+-			swing_ctrl = 0x048;
+-			break;
+-		case 2:
+-			swing_ctrl = 0x088;
+-			break;
+-		case 3:
+-			swing_ctrl = 0x0c8;
+-			break;
+-		case 4:
+-			swing_ctrl = 0x0f8;
+-			break;
+-		default:
+-			swing_ctrl = 0x048;
+-			break;
+-	}
+-	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, swing_ctrl);
++	swing_level = (pConf->lcd_control.lvds_config->lvds_vswing >= LVDS_VSWING_LEVEL_MAX) ? (LVDS_VSWING_LEVEL_MAX - 1) : pConf->lcd_control.lvds_config->lvds_vswing;
++	
++	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL1, lvds_vswing_ctrl[swing_level]);
+ 	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL2, 0x000665b7);
+ 	WRITE_LCD_CBUS_REG(HHI_DIF_CSI_PHY_CNTL3, 0x84070000);
+ }
+@@ -836,72 +827,86 @@ static void _enable_vsync_interrupt(void)
+ 	}
+ }
+ 
+-static void lcd_test(unsigned num)
++#define LCD_ENC_TST_NUM_MAX    8
++static const char *lcd_enc_tst_str[] = {
++	"None",        //0
++	"Color Bar",   //1
++	"Thin Line",   //2
++	"Dot Grid",    //3
++	"Gray",        //4
++	"Red",         //5
++	"Green",       //6
++	"Blue",        //7
++};
++
++static unsigned int lcd_enc_tst[][6] = {
++//tst_mode,  Y,       Cb,     Cr,    tst_en, vfifo_en
++  {0,       0x200,   0x200,  0x200,   0,      1},  //0
++  {1,       0x200,   0x200,  0x200,   1,      0},  //1
++  {2,       0x200,   0x200,  0x200,   1,      0},  //2
++  {3,       0x200,   0x200,  0x200,   1,      0},  //3
++  {0,       0x200,   0x200,  0x200,   1,      0},  //4
++  {0,       0x130,   0x153,  0x3fd,   1,      0},  //5
++  {0,       0x256,   0x0ae,  0x055,   1,      0},  //6
++  {0,       0x074,   0x3fd,  0x1ad,   1,      0},  //7
++};
++
++static void lcd_test(unsigned int num)
+ {
+-	switch (num) {
+-		case 0:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0x8);
+-			printk("disable bist pattern\n");
+-			break;
+-		case 1:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 1);
+-			WRITE_LCD_REG(ENCL_TST_CLRBAR_STRT, lcd_Conf->lcd_timing.video_on_pixel);
+-			WRITE_LCD_REG(ENCL_TST_CLRBAR_WIDTH, (lcd_Conf->lcd_basic.h_active / 9));
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 1: Color Bar\n");
+-			break;
+-		case 2:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 2);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 2: Thin Line\n");
+-			break;
+-		case 3:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 3);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show bist pattern 3: Dot Grid\n");
+-			break;
+-		case 4:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0x200);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 4: Gray\n");
+-			break;
+-		case 5:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 5: Red\n");
+-			break;
+-		case 6:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 6: Green\n");
+-			break;
+-		case 7:
+-			WRITE_LCD_REG(ENCL_VIDEO_MODE_ADV, 0);
+-			WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
+-			WRITE_LCD_REG(ENCL_TST_Y, 0);
+-			WRITE_LCD_REG(ENCL_TST_CB, 0x3ff);
+-			WRITE_LCD_REG(ENCL_TST_CR, 0);
+-			WRITE_LCD_REG(ENCL_TST_EN, 1);
+-			printk("show test pattern 7: Blue\n");
+-			break;
+-		default:
+-			printk("un-support pattern num\n");
+-			break;
++	num = (num >= LCD_ENC_TST_NUM_MAX) ? 0 : num;
++	
++	WRITE_LCD_REG(ENCL_TST_MDSEL, lcd_enc_tst[num][0]);
++	WRITE_LCD_REG(ENCL_TST_Y, lcd_enc_tst[num][1]);
++	WRITE_LCD_REG(ENCL_TST_CB, lcd_enc_tst[num][2]);
++	WRITE_LCD_REG(ENCL_TST_CR, lcd_enc_tst[num][3]);
++	WRITE_LCD_REG(ENCL_TST_CLRBAR_STRT, lcd_Conf->lcd_timing.video_on_pixel);
++	WRITE_LCD_REG(ENCL_TST_CLRBAR_WIDTH, (lcd_Conf->lcd_basic.h_active / 9));
++	WRITE_LCD_REG(ENCL_TST_EN, lcd_enc_tst[num][4]);
++	WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, lcd_enc_tst[num][5], 3, 1);
++	
++	if (num > 0)
++		printk("show test pattern %d: %s\n", num, lcd_enc_tst_str[num]);
++	else
++		printk("disable test pattern\n");
++}
++
++static unsigned int gamma_tst_y[18] = {
++// Y_val    test_level   gray_level
++	0x000,   //1          //0
++	0x072,   //2          //15
++	0x0a4,   //3          //30
++	0x0d7,   //4          //45
++	0x10b,   //5          //60
++	0x13f,   //6          //75
++	0x175,   //7          //90
++	0x1a8,   //8          //105
++	0x1dc,   //9          //120
++	0x210,   //10         //135
++	0x23f,   //11         //150
++	0x274,   //12         //165
++	0x2a8,   //13         //180
++	0x2da,   //14         //195
++	0x30e,   //15         //210
++	0x342,   //16         //225
++	0x376,   //17         //240
++	0x3aa,   //18         //255
++};
++
++static void lcd_gamma_test(unsigned int num)
++{
++	if ((num >= 1) && (num <= 18)) {
++		WRITE_LCD_REG(ENCL_TST_MDSEL, 0);
++		WRITE_LCD_REG(ENCL_TST_Y,  gamma_tst_y[num-1]);
++		WRITE_LCD_REG(ENCL_TST_CB, 0x200);
++		WRITE_LCD_REG(ENCL_TST_CR, 0x200);
++		WRITE_LCD_REG(ENCL_TST_EN, 1);
++		WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, 0, 3, 1);
++		printk("gamma test level: %d, gray level: %d\n", num, ((num - 1) * 15));
++	}
++	else {
++		WRITE_LCD_REG_BITS(ENCL_VIDEO_MODE_ADV, 1, 3, 1);
++		WRITE_LCD_REG(ENCL_TST_EN, 0);
++		printk("gamma test pattern disabled\n");
+ 	}
+ }
+ 
+@@ -1334,7 +1339,7 @@ static void lcd_control_config_pre(Lcd_Config_t *pConf)
+     }
+ 
+     ss_level = ((pConf->lcd_timing.clk_ctrl >> CLK_CTRL_SS) & 0xf);
+-    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX-1) : ss_level);
++    ss_level = ((ss_level >= SS_LEVEL_MAX) ? (SS_LEVEL_MAX - 1) : ss_level);
+ 
+     switch (pConf->lcd_basic.lcd_type) {
+         case LCD_DIGITAL_MIPI:
+@@ -1420,6 +1425,7 @@ static Lcd_Config_t lcd_config = {
+         .gamma_g_coeff = 100,
+         .gamma_b_coeff = 100,
+         .set_gamma_table = set_gamma_table_lcd,
++        .gamma_test = lcd_gamma_test,
+     },
+     .lcd_control = {
+         .mipi_config = &lcd_mipi_config,
+diff --git a/arch/arm/mach-meson8b/lcd/lcd_config.h b/arch/arm/mach-meson8b/lcd/lcd_config.h
+index 66a36f055716..3063368e340a 100755
+--- a/arch/arm/mach-meson8b/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8b/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8b"
+-#define LCD_DRV_DATE      "20150105"
++#define LCD_DRV_DATE      "20150112"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index 7c76e9488c00..86a465e1289b 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -540,7 +540,7 @@ static void read_current_gamma_table(Lcd_Config_t *pConf)
+     printk("\n");
+ }
+ 
+-static int write_gamma_table(Lcd_Config_t *pConf)
++static int write_gamma_table(Lcd_Config_t *pConf, unsigned int en)
+ {
+     int ret = 0;
+ 
+@@ -549,8 +549,7 @@ static int write_gamma_table(Lcd_Config_t *pConf)
+         ret = -1;
+     }
+     else {
+-        pConf->lcd_effect.set_gamma_table(1); //force enable gamma table
+-        printk("write gamma table ");
++        pConf->lcd_effect.set_gamma_table(en);
+     }
+     return ret;
+ }
+@@ -560,8 +559,25 @@ static void set_gamma_coeff(Lcd_Config_t *pConf, unsigned r_coeff, unsigned g_co
+     pConf->lcd_effect.gamma_r_coeff = (unsigned short)(r_coeff);
+     pConf->lcd_effect.gamma_g_coeff = (unsigned short)(g_coeff);
+     pConf->lcd_effect.gamma_b_coeff = (unsigned short)(b_coeff);
+-    if (write_gamma_table(pConf) == 0)
+-        printk("with scale factor R:%u%%, G:%u%%, B:%u%%.\n", r_coeff, g_coeff, b_coeff);
++    if (write_gamma_table(pConf, 1) == 0)
++        printk("write gamma table with scale factor R:%u%%, G:%u%%, B:%u%%.\n", r_coeff, g_coeff, b_coeff);
++}
++
++static void reset_gamma_table(Lcd_Config_t *pConf)
++{
++    int i;
++
++    for (i=0; i<256; i++) {
++        pConf->lcd_effect.GammaTableR[i] = gamma_adjust_r[i];
++        pConf->lcd_effect.GammaTableG[i] = gamma_adjust_g[i];
++        pConf->lcd_effect.GammaTableB[i] = gamma_adjust_b[i];
++    }
++    pConf->lcd_effect.gamma_ctrl = gamma_ctrl;
++    pConf->lcd_effect.gamma_r_coeff = gamma_r_coeff;
++    pConf->lcd_effect.gamma_g_coeff = gamma_g_coeff;
++    pConf->lcd_effect.gamma_b_coeff = gamma_b_coeff;
++    if (write_gamma_table(pConf, ((pConf->lcd_effect.gamma_ctrl >> GAMMA_CTRL_EN) & 1)) == 0)
++        printk("write gamma table to original.\n");
+ }
+ 
+ static const char * usage_str =
+@@ -580,9 +596,16 @@ static const char * usage_str =
+ "    <value> : 0xXXXXXXXX, 32bit in Hex, 2 or 4 gamma table values (8 or 10bit gamma) combia in one <value>\n"
+ "\n"
+ "    echo f[r | g | b | w] <level_value> > write ; write R/G/B/white gamma level with fixed level_value\n"
++"    echo reset > write ; reset the gamma table to original\n"
+ "data format:\n"
+ "    <level_value>  : a number in Dec(0~255)\n"
+ "\n"
++"    echo test <num> > write ; gamma curve test, you should control gamma table and video adjust enable manually by other command\n"
++"    echo auto [enable] > write ; gamma curve auto test, auto disable video adjust and run test pattern\n"
++"data format:\n"
++"    <num>   : a number in Dec(1~18), num=0 will disable gamma test pattern\n"
++"    <enable>: 0=disable gamma table(default), 1=enable gamma table."
++"\n"
+ "    echo [0 | 1] > read ; readback original/current gamma table\n"
+ };
+ 
+@@ -623,20 +646,28 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+             t[0] = 1;
+             t[1] = 0;
+             ret = sscanf(buf, "ctrl %u %u", &t[0], &t[1]);
++            t[0] = (t[0] > 0) ? 1 : 0;
++            t[1] = (t[1] > 0) ? 1 : 0;
+             pDev->pConf->lcd_effect.gamma_ctrl = ((t[0] << GAMMA_CTRL_EN) | (t[1] << GAMMA_CTRL_REVERSE));
+-            if (write_gamma_table(pDev->pConf) == 0)
+-                printk(" finished.\n");
++            printk("set gamma table enable=%d, reverse=%d.\n", t[0], t[1]);
++            if (write_gamma_table(pDev->pConf, t[0]) == 0)
++                printk("write gamma table finished.\n");
+         }
+         break;
+     case 'r':
+-        ret = sscanf(buf, "r %x %x %x %x %x %x %x %x %x", &i, &t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7]);
+-        if (i<16) {
+-            i =  i * 8;
+-            for (j=0; j<8; j++) {
+-                gamma_adjust_r_temp[i+j] = t[j];
+-            }
+-            printk("write R table: step %u.\n", i/8);
+-        }
++        if (buf[1] == 'e') {
++			reset_gamma_table(pDev->pConf);
++		}
++		else {
++			ret = sscanf(buf, "r %x %x %x %x %x %x %x %x %x", &i, &t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7]);
++			if (i<16) {
++				i =  i * 8;
++				for (j=0; j<8; j++) {
++					gamma_adjust_r_temp[i+j] = t[j];
++				}
++				printk("write R table: step %u.\n", i/8);
++			}
++		}
+         break;
+     case 'g':
+         ret = sscanf(buf, "g %x %x %x %x %x %x %x %x %x", &i, &t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7]);
+@@ -669,8 +700,8 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                     pDev->pConf->lcd_effect.GammaTableB[i*4+j] = (unsigned short)(((gamma_adjust_b_temp[i] >> (24-j*8)) & 0xff) << 2);
+                 }
+             }
+-            if (write_gamma_table(pDev->pConf) == 0)
+-                printk("8bit finished.\n");
++            if (write_gamma_table(pDev->pConf, 1) == 0)
++                printk("write gamma table 8bit finished.\n");
+         }
+         else if (i == 10) {
+             for (i=0; i<128; i++) {
+@@ -680,17 +711,11 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                     pDev->pConf->lcd_effect.GammaTableB[i*2+j] = (unsigned short)((gamma_adjust_b_temp[i] >> (16-j*16)) & 0xffff);
+                 }
+             }
+-            if (write_gamma_table(pDev->pConf) == 0)
+-                printk("10bit finished.\n");
++            if (write_gamma_table(pDev->pConf, 1) == 0)
++                printk("write gamma table 10bit finished.\n");
+         }
+         else {
+-            for (i=0; i<256; i++) {
+-                pDev->pConf->lcd_effect.GammaTableR[i] = gamma_adjust_r[i];
+-                pDev->pConf->lcd_effect.GammaTableG[i] = gamma_adjust_g[i];
+-                pDev->pConf->lcd_effect.GammaTableB[i] = gamma_adjust_b[i];
+-            }
+-            if (write_gamma_table(pDev->pConf) == 0)
+-                printk("to original.\n");
++            reset_gamma_table(pDev->pConf);
+         }
+         break;
+     case 'f':
+@@ -702,7 +727,7 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                 pDev->pConf->lcd_effect.GammaTableR[j] = i<<2;
+             }
+             set_gamma_coeff(pDev->pConf, 100, 0, 0);
+-            printk("with R fixed value %u finished.\n", i);
++            printk("R fixed value: %u.\n", i);
+         }
+         else if (buf[1] == 'g') {
+             ret = sscanf(buf, "fg %u", &i);
+@@ -711,7 +736,7 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                 pDev->pConf->lcd_effect.GammaTableG[j] = i<<2;
+             }
+             set_gamma_coeff(pDev->pConf, 0, 100, 0);
+-            printk("with G fixed value %u finished.\n", i);
++            printk("G fixed value: %u.\n", i);
+         }
+         else if (buf[1] == 'b') {
+             ret = sscanf(buf, "fb %u", &i);
+@@ -720,7 +745,7 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                 pDev->pConf->lcd_effect.GammaTableB[j] = i<<2;
+             }
+             set_gamma_coeff(pDev->pConf, 0, 0, 100);
+-            printk("with B fixed value %u finished.\n", i);
++            printk("B fixed value: %u.\n", i);
+         }
+         else {
+             ret = sscanf(buf, "fw %u", &i);
+@@ -731,11 +756,41 @@ static ssize_t aml_lcd_gamma_debug(struct class *class, struct class_attribute *
+                 pDev->pConf->lcd_effect.GammaTableB[j] = i<<2;
+             }
+             set_gamma_coeff(pDev->pConf, 100, 100, 100);
+-            printk("with fixed value %u finished.\n", i);
++            printk("RGB fixed value: %u.\n", i);
++        }
++        break;
++    case 't':
++        ret = sscanf(buf, "test %u", &i);
++        if (pDev->pConf->lcd_effect.gamma_test)
++            pDev->pConf->lcd_effect.gamma_test(i);
++        else
++            printk("gamma test function is null\n");
++        break;
++    case 'a':
++        i = 0;
++        ret = sscanf(buf, "auto %u", &i);
++        i = (i > 0) ? 1 : 0;
++        if (write_gamma_table(pDev->pConf, i) == 0)
++            printk("%s gamma table.\n", i ? "enable" : "disable");
++
++        WRITE_LCD_REG(VPP_VADJ_CTRL, 0);
++        printk("disable video adjust.\n");
++
++        if (pDev->pConf->lcd_effect.gamma_test) {
++            for (i=1; i<=18; i++) {
++                pDev->pConf->lcd_effect.gamma_test(i);
++                for (j=0; j<10; j++) {
++                    printk("%d\n", (10-j));
++                    msleep(2000);
++                }
++            }
++            pDev->pConf->lcd_effect.gamma_test(0);
+         }
++        else
++            printk("gamma test function is null\n");
+         break;
+     default:
+-            printk("wrong format of gamma table writing.\n");
++        printk("wrong format of gamma table writing.\n");
+     }
+ 
+     if (ret != 1 || ret !=2)
+diff --git a/include/linux/amlogic/vout/lcdoutc.h b/include/linux/amlogic/vout/lcdoutc.h
+index 066db6b05ecc..f3cab2700fb6 100755
+--- a/include/linux/amlogic/vout/lcdoutc.h
++++ b/include/linux/amlogic/vout/lcdoutc.h
+@@ -176,7 +176,8 @@ typedef struct {
+ 	u16 GammaTableR[256];
+ 	u16 GammaTableG[256];
+ 	u16 GammaTableB[256];
+-	void (*set_gamma_table)(unsigned gamma_en);
++	void (*set_gamma_table)(unsigned int gamma_en);
++	void (*gamma_test)(unsigned int num);
+ } Lcd_Effect_t;
+ 
+ //mipi-dsi config
+-- 
+2.19.0
+

@@ -1,0 +1,1012 @@
+From b5ec8a0d2cee1d900935cf3b33b3663e399acf51 Mon Sep 17 00:00:00 2001
+From: "zhancai.yang" <zhancai.yang@amlogic.com>
+Date: Mon, 4 Nov 2013 13:12:00 +0800
+Subject: [PATCH 1637/5965] fix wifi suspend
+
+---
+ arch/arm/configs/meson8_defconfig             |   1 +
+ drivers/amlogic/wifi/broadcm_40181/Kconfig    |   7 +
+ drivers/amlogic/wifi/broadcm_40181/Makefile   |  17 +-
+ .../wifi/broadcm_40181/bcmsdh_sdmmc_linux.c   |  26 +-
+ drivers/amlogic/wifi/broadcm_40181/dhd.h      |   1 +
+ .../amlogic/wifi/broadcm_40181/dhd_common.c   |   5 +
+ .../amlogic/wifi/broadcm_40181/dhd_config.c   | 232 +++++++++++++++---
+ .../amlogic/wifi/broadcm_40181/dhd_config.h   |  36 ++-
+ .../amlogic/wifi/broadcm_40181/dhd_linux.c    |   5 +-
+ drivers/amlogic/wifi/broadcm_40181/dhd_sdio.c |   2 +-
+ .../wifi/broadcm_40181/include/dhdioctl.h     |   1 +
+ .../amlogic/wifi/broadcm_40181/wl_android.c   |  17 +-
+ .../amlogic/wifi/broadcm_40181/wl_android.h   |  23 +-
+ .../amlogic/wifi/broadcm_40181/wl_cfg80211.c  | 100 +++++++-
+ .../amlogic/wifi/broadcm_40181/wldev_common.c |   1 -
+ 15 files changed, 400 insertions(+), 74 deletions(-)
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 818e1f90d8e1..1186c7a7d678 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -169,6 +169,7 @@ CONFIG_AML_NEXT_GEN_NAND=y
+ CONFIG_AM_ETHERNET=y
+ CONFIG_AM_WIFI=y
+ CONFIG_AM_WIFI_SD_MMC=y
++CONFIG_BCMDHD_POWER_OFF_IN_SUSPEND=y
+ CONFIG_SDIO_DHD_CDC_WIFI_40181_MODULE=m
+ CONFIG_BCMDHD_OOB=y
+ CONFIG_AM_WIFI_USB=y
+diff --git a/drivers/amlogic/wifi/broadcm_40181/Kconfig b/drivers/amlogic/wifi/broadcm_40181/Kconfig
+index 0d87e1ee1504..3bef37c07aa2 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/Kconfig
++++ b/drivers/amlogic/wifi/broadcm_40181/Kconfig
+@@ -28,6 +28,13 @@ config BCMDHD_CONFIG_PATH
+ 	---help---
+ 	  Path to the driver configuration file.
+ 
++config BCMDHD_POWER_OFF_IN_SUSPEND
++	depends on SDIO_DHD_CDC_WIFI_40181_MODULE
++    bool "Power off in suspend"
++	default n
++    ---help---
++	  Shut down Wi-Fi power in suspend.
++
+ config BCMDHD_WEXT
+ 	bool "Enable WEXT support"
+ 	depends on SDIO_DHD_CDC_WIFI_40181_MODULE && CFG80211 = n
+diff --git a/drivers/amlogic/wifi/broadcm_40181/Makefile b/drivers/amlogic/wifi/broadcm_40181/Makefile
+index 6929230f6d98..b8fd38c65874 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/Makefile
++++ b/drivers/amlogic/wifi/broadcm_40181/Makefile
+@@ -3,7 +3,7 @@ DHDCFLAGS = -Wall -Wstrict-prototypes -Dlinux -DBCMDRIVER                \
+ 	-DBCMDONGLEHOST -DUNRELEASEDCHIP -DBCMDMA32 -DWLBTAMP -DBCMFILEIMAGE  \
+ 	-DDHDTHREAD -DDHD_DEBUG -DSDTEST -DBDC -DTOE                          \
+ 	-DDHD_BCMEVENTS -DSHOW_EVENTS -DPROP_TXSTATUS -DBCMDBG                \
+-	-DMMC_SDIO_ABORT -DBCMSDIO -DBCMLXSDMMC -DBCMPLATFORM_BUS -DWLP2P     \
++	-DMMC_SDIO_ABORT -DBCMSDIO -DBCMLXSDMMC -DBCMPLATFORM_BUS             \
+ 	-DWIFI_ACT_FRAME -DARP_OFFLOAD_SUPPORT                                \
+ 	-DKEEP_ALIVE -DPKT_FILTER_SUPPORT                                     \
+ 	-DEMBEDDED_PLATFORM -DENABLE_INSMOD_NO_FW_LOAD -DPNO_SUPPORT          \
+@@ -12,7 +12,7 @@ DHDCFLAGS = -Wall -Wstrict-prototypes -Dlinux -DBCMDRIVER                \
+ 	-DESCAN_RESULT_PATCH -DHT40_GO -DPASS_ARP_PACKET -DSUPPORT_PM2_ONLY   \
+ 	-DDHD_DONOT_FORWARD_BCMEVENT_AS_NETWORK_PKT -DAMPDU_HOSTREORDER       \
+ 	-DCUSTOM_SDIO_F2_BLKSIZE=128 -DWL_SDO -DWLTDLS                        \
+-	-DWL_SUPPORT_BACKPORTED_KPATCHES -DHT_40_GO                           \
++	-DWL_SUPPORT_BACKPORTED_KPATCHES                                      \
+ 	-Idrivers/amlogic/wifi/broadcm_40181 -Idrivers/amlogic/wifi/broadcm_40181/include
+ 
+ DHDOFILES = aiutils.o bcmsdh_sdmmc_linux.o dhd_linux.o siutils.o bcmutils.o   \
+@@ -40,6 +40,10 @@ else
+ DHDCFLAGS += -DSDIO_ISR_THREAD
+ endif
+ 
++ifeq ($(CONFIG_BCMDHD_POWER_OFF_IN_SUSPEND),y)
++DHDCFLAGS += -DPOWER_OFF_IN_SUSPEND
++endif
++
+ ifeq ($(CONFIG_BCMDHD_AG),y)
+ DHDCFLAGS += -DBAND_AG
+ endif
+@@ -50,7 +54,14 @@ DHDCFLAGS += -DSOFTAP -DWL_WIRELESS_EXT -DUSE_IW
+ endif
+ ifneq ($(CONFIG_CFG80211),)
+ dhd-objs += wl_cfg80211.o wl_cfgp2p.o wl_linux_mon.o dhd_cfg80211.o
+-DHDCFLAGS += -DWL_CFG80211 -DWL_CFG80211_STA_EVENT
++DHDCFLAGS += -DWL_CFG80211 -DWLP2P -DWL_CFG80211_STA_EVENT
++DHDCFLAGS += -DCUSTOM_ROAM_TRIGGER_SETTING=-65
++DHDCFLAGS += -DCUSTOM_ROAM_DELTA_SETTING=15
++DHDCFLAGS += -DCUSTOM_KEEP_ALIVE_SETTING=28000
++DHDCFLAGS += -DCUSTOM_PNO_EVENT_LOCK_xTIME=7
++endif
++ifneq ($(CONFIG_DHD_USE_SCHED_SCAN),)
++DHDCFLAGS += -DWL_SCHED_SCAN
+ endif
+ EXTRA_CFLAGS = $(DHDCFLAGS)
+ ifeq ($(CONFIG_SDIO_DHD_CDC_WIFI_40181_MODULE),m)
+diff --git a/drivers/amlogic/wifi/broadcm_40181/bcmsdh_sdmmc_linux.c b/drivers/amlogic/wifi/broadcm_40181/bcmsdh_sdmmc_linux.c
+index 17e4177eb2c5..c98192589bac 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/bcmsdh_sdmmc_linux.c
++++ b/drivers/amlogic/wifi/broadcm_40181/bcmsdh_sdmmc_linux.c
+@@ -36,6 +36,7 @@
+ #include <linux/mmc/card.h>
+ #include <linux/mmc/sdio_func.h>
+ #include <linux/mmc/sdio_ids.h>
++#include <dhd_config.h>
+ 
+ #if !defined(SDIO_VENDOR_ID_BROADCOM)
+ #define SDIO_VENDOR_ID_BROADCOM		0x02d0
+@@ -145,6 +146,9 @@ static int bcmsdh_sdmmc_probe(struct sdio_func *func,
+ 	} else {
+ 		ret = -ENODEV;
+ 	}
++#ifdef POWER_OFF_IN_SUSPEND
++	dhd_conf_register_wifi_suspend(func);
++#endif
+ 
+ 	return ret;
+ }
+@@ -158,6 +162,9 @@ static void bcmsdh_sdmmc_remove(struct sdio_func *func)
+ 		sd_info(("sdio_device: 0x%04x\n", func->device));
+ 		sd_info(("Function#: 0x%04x\n", func->num));
+ 
++#ifdef POWER_OFF_IN_SUSPEND
++		dhd_conf_unregister_wifi_suspend(func);
++#endif
+ 		if (gInstance->func[2]) {
+ 			sd_trace(("F2 found, calling bcmsdh_remove...\n"));
+ 			bcmsdh_remove(&func->dev);
+@@ -193,8 +200,10 @@ MODULE_DEVICE_TABLE(sdio, bcmsdh_sdmmc_ids);
+ static int bcmsdh_sdmmc_suspend(struct device *pdev)
+ {
+ 	struct sdio_func *func = dev_to_sdio_func(pdev);
++#ifndef POWER_OFF_IN_SUSPEND
+ 	mmc_pm_flag_t sdio_flags;
+ 	int ret;
++#endif
+ 
+ 	if (func->num != 2)
+ 		return 0;
+@@ -202,6 +211,10 @@ static int bcmsdh_sdmmc_suspend(struct device *pdev)
+ 	sd_trace(("%s Enter\n", __FUNCTION__));
+ 	if (dhd_os_check_wakelock(bcmsdh_get_drvdata()))
+ 		return -EBUSY;
++
++#ifdef POWER_OFF_IN_SUSPEND
++	dhd_conf_wifi_suspend(func);
++#else
+ 	sdio_flags = sdio_get_host_pm_caps(func);
+ 
+ 	if (!(sdio_flags & MMC_PM_KEEP_POWER)) {
+@@ -217,7 +230,8 @@ static int bcmsdh_sdmmc_suspend(struct device *pdev)
+ 	}
+ #if defined(OOB_INTR_ONLY)
+ 	bcmsdh_oob_intr_set(0);
+-#endif 
++#endif
++#endif
+ 	dhd_mmc_suspend = TRUE;
+ 	smp_mb();
+ 
+@@ -226,16 +240,20 @@ static int bcmsdh_sdmmc_suspend(struct device *pdev)
+ 
+ static int bcmsdh_sdmmc_resume(struct device *pdev)
+ {
+-#if defined(OOB_INTR_ONLY)
++#if defined(OOB_INTR_ONLY) || defined(POWER_OFF_IN_SUSPEND)
+ 	struct sdio_func *func = dev_to_sdio_func(pdev);
+-#endif 
++#endif
+ 	sd_trace(("%s Enter\n", __FUNCTION__));
+ 	dhd_mmc_suspend = FALSE;
++	
++#ifdef POWER_OFF_IN_SUSPEND
++	gInstance->func[func->num] = func;
++#else
+ #if defined(OOB_INTR_ONLY)
+ 	if ((func->num == 2) && dhd_os_check_if_up(bcmsdh_get_drvdata()))
+ 		bcmsdh_oob_intr_set(1);
+ #endif 
+-
++#endif
+ 	smp_mb();
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd.h b/drivers/amlogic/wifi/broadcm_40181/dhd.h
+index 4f96468437ff..621fde32522b 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd.h
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd.h
+@@ -666,6 +666,7 @@ extern uint dhd_watchdog_ms;
+ extern uint dhd_console_ms;
+ #endif /* defined(DHD_DEBUG) */
+ extern uint android_msg_level;
++extern uint config_msg_level;
+ #ifdef WL_WIRELESS_EXT
+ extern uint iw_msg_level;
+ #endif
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd_common.c b/drivers/amlogic/wifi/broadcm_40181/dhd_common.c
+index 170662098ef4..a71cd83172e0 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd_common.c
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd_common.c
+@@ -347,6 +347,7 @@ dhd_doiovar(dhd_pub_t *dhd_pub, const bcm_iovar_t *vi, uint32 actionid, const ch
+ 
+ 	case IOV_GVAL(IOV_WLMSGLEVEL):
+ 		printk("android_msg_level=0x%x\n", android_msg_level);
++		printk("config_msg_level=0x%x\n", config_msg_level);
+ #if defined(WL_WIRELESS_EXT)
+ 		int_val = (int32)iw_msg_level;
+ 		bcopy(&int_val, arg, val_size);
+@@ -364,6 +365,10 @@ dhd_doiovar(dhd_pub_t *dhd_pub, const bcm_iovar_t *vi, uint32 actionid, const ch
+ 			android_msg_level = (uint)(int_val & 0xFFFF);
+ 			printk("android_msg_level=0x%x\n", android_msg_level);
+ 		}
++		if (int_val & DHD_CONFIG_VAL) {
++			config_msg_level = (uint)(int_val & 0xFFFF);
++			printk("config_msg_level=0x%x\n", config_msg_level);
++		}
+ #if defined(WL_WIRELESS_EXT)
+ 		if (int_val & DHD_IW_VAL) {
+ 			iw_msg_level = (uint)(int_val & 0xFFFF);
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd_config.c b/drivers/amlogic/wifi/broadcm_40181/dhd_config.c
+index ebe1343c3b42..650a44f01c6a 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd_config.c
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd_config.c
+@@ -222,20 +222,38 @@ dhd_conf_set_nv_path(dhd_pub_t *dhd, char *nv_path)
+ 	}
+ }
+ 
++int
++dhd_conf_set_band(dhd_pub_t *dhd)
++{
++	int bcmerror = -1;
++
++	if ((bcmerror = dhd_wl_ioctl_cmd(dhd, WLC_SET_BAND, &dhd->conf->band,
++		sizeof(dhd->conf->band), TRUE, 0)) < 0)
++		CONFIG_ERROR(("%s: band set failed %d\n", __FUNCTION__, bcmerror));
++
++	return bcmerror;
++}
++
++uint
++dhd_conf_get_band(dhd_pub_t *dhd)
++{
++	return dhd->conf->band;
++}
++
+ int
+ dhd_conf_set_country(dhd_pub_t *dhd)
+ {
+ 	int bcmerror = -1;
+ 	char iovbuf[WL_EVENTING_MASK_LEN + 12];	/*  Room for "event_msgs" + '\0' + bitvec  */
+ 	
+-	printf("Set country %s, revision %d\n", dhd->conf->cspec.ccode, dhd->conf->cspec.rev);
+-	bcm_mkiovar("country", (char *)&dhd->dhd_cspec,
++	memset(&dhd->dhd_cspec, 0, sizeof(wl_country_t));
++	printf("%s: Set country %s, revision %d\n", __FUNCTION__,
++		dhd->conf->cspec.ccode, dhd->conf->cspec.rev);
++	bcm_mkiovar("country", (char *)&dhd->conf->cspec,
+ 		sizeof(wl_country_t), iovbuf, sizeof(iovbuf));
+ 	if ((bcmerror = dhd_wl_ioctl_cmd(dhd, WLC_SET_VAR, iovbuf, sizeof(iovbuf), TRUE, 0)) < 0)
+ 		printf("%s: country code setting failed %d\n", __FUNCTION__, bcmerror);
+ 
+-	memcpy(&dhd->dhd_cspec, &dhd->conf->cspec, sizeof(wl_country_t));
+-
+ 	return bcmerror;
+ }
+ 
+@@ -243,34 +261,32 @@ int
+ dhd_conf_get_country(dhd_pub_t *dhd)
+ {
+ 	int bcmerror = -1;
+-	wl_country_t *cspec = &dhd->dhd_cspec;
++	wl_country_t cspec;
+ 
+-	memset(cspec, 0, sizeof(wl_country_t));
+-	bcm_mkiovar("country", NULL, 0, (char*)cspec, sizeof(wl_country_t));
+-	if ((bcmerror = dhd_wl_ioctl_cmd(dhd, WLC_GET_VAR, cspec, sizeof(wl_country_t), FALSE, 0)) < 0)
++	memset(&cspec, 0, sizeof(wl_country_t));
++	bcm_mkiovar("country", NULL, 0, (char*)&cspec, sizeof(wl_country_t));
++	if ((bcmerror = dhd_wl_ioctl_cmd(dhd, WLC_GET_VAR, &cspec, sizeof(wl_country_t), FALSE, 0)) < 0)
+ 		printf("%s: country code getting failed %d\n", __FUNCTION__, bcmerror);
+ 	else
+-		printf("Country code: %s (%s/%d)\n", cspec->country_abbrev, cspec->ccode, cspec->rev);
++		printf("Country code: %s (%s/%d)\n", cspec.country_abbrev, cspec.ccode, cspec.rev);
+ 
+ 	return bcmerror;
+ }
+ 
+-int
+-dhd_conf_set_band(dhd_pub_t *dhd)
++bool
++dhd_conf_match_channel(dhd_pub_t *dhd, uint32 channel)
+ {
+-	int bcmerror = -1;
+-
+-	if ((bcmerror = dhd_wl_ioctl_cmd(dhd, WLC_SET_BAND, &dhd->conf->band,
+-		sizeof(dhd->conf->band), TRUE, 0)) < 0)
+-		CONFIG_ERROR(("%s: band set failed %d\n", __FUNCTION__, bcmerror));
++	int i;
+ 
+-	return bcmerror;
+-}
++	if (dhd->conf->channels.count== 0)
++		return true;
++	for (i=0; i<dhd->conf->channels.count; i++) {
++		if (channel == dhd->conf->channels.channel[i]) {
++			return true;
++		}
++	}
+ 
+-uint
+-dhd_conf_get_band(dhd_pub_t *dhd)
+-{
+-	return dhd->conf->band;
++	return false;
+ }
+ 
+ int
+@@ -376,11 +392,11 @@ process_config_vars(char *varbuf, unsigned int len, char *pickbuf, char *param)
+ int
+ dhd_conf_download_config(dhd_pub_t *dhd)
+ {
+-	int bcmerror = -1;
++	int bcmerror = -1, i;
+ 	uint len, len_val;
+ 	void * image = NULL;
+ 	char * memblock = NULL;
+-	char *bufp, pick[MAXSZ_BUF];
++	char *bufp, pick[MAXSZ_BUF], *pch, *pick_tmp;
+ 	char *pconf_path;
+ 	bool conf_file_exists;
+ 
+@@ -429,25 +445,45 @@ dhd_conf_download_config(dhd_pub_t *dhd)
+ 			printf("%s: nv_path = %s\n", __FUNCTION__, dhd->conf->nv_path);
+ 		}
+ 
++		/* Process band */
++		memset(pick, 0, MAXSZ_BUF);
++		len_val = process_config_vars(bufp, len, pick, "band=");
++		if (len_val) {
++			if (!strncmp(pick, "b", len_val))
++				dhd->conf->band = WLC_BAND_2G;
++			printf("%s: band = %d\n", __FUNCTION__, dhd->conf->band);
++		}
++
+ 		/* Process country code */
+ 		memset(pick, 0, MAXSZ_BUF);
+ 		len_val = process_config_vars(bufp, len, pick, "ccode=");
+ 		if (len_val) {
+-			memcpy(dhd->dhd_cspec.country_abbrev, pick, len_val);
+-			memcpy(dhd->dhd_cspec.ccode, pick, len_val);
++			memset(&dhd->conf->cspec, 0, sizeof(wl_country_t));
++			memcpy(dhd->conf->cspec.country_abbrev, pick, len_val);
++			memcpy(dhd->conf->cspec.ccode, pick, len_val);
+ 			memset(pick, 0, MAXSZ_BUF);
+ 			len_val = process_config_vars(bufp, len, pick, "regrev=");
+ 			if (len_val)
+-				dhd->dhd_cspec.rev = (int32)simple_strtol(pick, NULL, 10);
++				dhd->conf->cspec.rev = (int32)simple_strtol(pick, NULL, 10);
+ 		}
+ 
+-		/* Process band */
++		/* Process channels */
+ 		memset(pick, 0, MAXSZ_BUF);
+-		len_val = process_config_vars(bufp, len, pick, "band=");
++		len_val = process_config_vars(bufp, len, pick, "channels=");
++		pick_tmp = pick;
+ 		if (len_val) {
+-			if (!strncmp(pick, "b", len_val))
+-				dhd->conf->band = WLC_BAND_2G;
+-			printf("%s: band = %d\n", __FUNCTION__, dhd->conf->band);
++			pch = bcmstrtok(&pick_tmp, " ,.-", 0);
++			i=0;
++			while (pch != NULL && i<WL_NUMCHANNELS) {
++				dhd->conf->channels.channel[i] = (uint32)simple_strtol(pch, NULL, 10);
++				pch = bcmstrtok(&pick_tmp, " ,.-", 0);
++				i++;
++			}
++			dhd->conf->channels.count = i;
++			printf("%s: channels = ", __FUNCTION__);
++			for (i=0; i<dhd->conf->channels.count; i++)
++				printf("%d ", dhd->conf->channels.channel[i]);
++			printf("\n");
+ 		}
+ 
+ 		/* Process roam */
+@@ -516,10 +552,11 @@ dhd_conf_download_config(dhd_pub_t *dhd)
+ 		/* Process keep alive period */
+ 		memset(pick, 0, MAXSZ_BUF);
+ 		len_val = process_config_vars(bufp, len, pick, "keep_alive_period=");
+-		if (len_val)
++		if (len_val) {
+ 			dhd->conf->keep_alive_period = (int)simple_strtol(pick, NULL, 10);
+-		printf("%s: keep_alive_period = %d\n", __FUNCTION__,
+-			dhd->conf->keep_alive_period);
++			printf("%s: keep_alive_period = %d\n", __FUNCTION__,
++				dhd->conf->keep_alive_period);
++		}
+ 
+ 		bcmerror = 0;
+ 	} else {
+@@ -542,10 +579,11 @@ dhd_conf_preinit(dhd_pub_t *dhd)
+ {
+ 	memset(dhd->conf, 0, sizeof(dhd_conf_t));
+ 
++	dhd->conf->band = WLC_BAND_AUTO;
+ 	strcpy(dhd->conf->cspec.country_abbrev, "ALL");
+ 	dhd->conf->cspec.rev = 0;
+ 	strcpy(dhd->conf->cspec.ccode, "ALL");
+-	dhd->conf->band = WLC_BAND_AUTO;
++	memset(&dhd->conf->channels, 0, sizeof(wl_channel_list_t));
+ 	dhd->conf->roam_off = 1;
+ 	dhd->conf->roam_off_suspend = 1;
+ #ifdef CUSTOM_ROAM_TRIGGER_SETTING
+@@ -600,7 +638,6 @@ fail:
+ 	return BCME_NOMEM;
+ }
+ 
+-/* ~NOTE~ What if another thread is waiting on the semaphore?  Holding it? */
+ void
+ dhd_conf_detach(dhd_pub_t *dhd)
+ {
+@@ -609,3 +646,124 @@ dhd_conf_detach(dhd_pub_t *dhd)
+ 	dhd->conf = NULL;
+ }
+ 
++#ifdef POWER_OFF_IN_SUSPEND
++struct net_device *g_netdev;
++#if defined(CONFIG_HAS_EARLYSUSPEND)
++#include <linux/earlysuspend.h>
++struct sdio_early_suspend_info {
++	struct sdio_func *func;
++	struct early_suspend sdio_early_suspend;
++	struct work_struct	tqueue;
++	int do_late_resume;
++};
++struct sdio_early_suspend_info sdioinfo[4];
++
++void
++dhd_conf_wifi_stop(struct net_device *dev)
++{
++	if (!dev) {
++		CONFIG_ERROR(("%s: dev is null\n", __FUNCTION__));
++		return;
++	}
++
++	printk("%s in 1\n", __FUNCTION__);
++	dhd_net_if_lock(dev);
++	printk("%s in 2: g_wifi_on=%d, name=%s\n", __FUNCTION__, g_wifi_on, dev->name);
++	if (g_wifi_on) {
++		wl_cfg80211_user_sync(true);
++		wl_cfg80211_stop();
++		dhd_bus_devreset(bcmsdh_get_drvdata(), true);
++		sdioh_stop(NULL);
++		dhd_customer_gpio_wlan_ctrl(WLAN_RESET_OFF);
++		g_wifi_on = FALSE;
++		wl_cfg80211_user_sync(false);
++	}
++	printk("%s out\n", __FUNCTION__);
++	dhd_net_if_unlock(dev);
++
++}
++
++void
++dhd_conf_wifi_power(bool on)
++{
++	printk("%s: Enter %d\n", __FUNCTION__, on);
++	if (on) {
++		wl_cfg80211_user_sync(true);
++		wl_android_wifi_on(g_netdev);
++		wl_cfg80211_send_disconnect();
++		wl_cfg80211_user_sync(false);
++	} else {
++		dhd_conf_wifi_stop(g_netdev);
++	}
++}
++
++void
++dhd_conf_probe_workqueue(struct work_struct *work)
++{
++    dhd_conf_wifi_power(true);
++}
++
++void
++dhd_conf_early_suspend(struct early_suspend *h)
++{
++	struct sdio_early_suspend_info *sdioinfo = container_of(h, struct sdio_early_suspend_info, sdio_early_suspend);
++
++	printk("%s: Enter\n", __FUNCTION__);
++	if(sdioinfo->func->num == 2)
++		sdioinfo->do_late_resume = 0;
++}
++
++void
++dhd_conf_late_resume(struct early_suspend *h)
++{
++	struct sdio_early_suspend_info *sdioinfo = container_of(h, struct sdio_early_suspend_info, sdio_early_suspend);
++
++	printk("%s: Enter\n", __FUNCTION__);
++	if(sdioinfo->func->num == 2 && sdioinfo->do_late_resume ){
++		sdioinfo->do_late_resume = 0;
++		schedule_work(&sdioinfo->tqueue);
++	}
++}
++#endif /* defined(CONFIG_HAS_EARLYSUSPEND) */
++
++void
++dhd_conf_wifi_suspend(struct sdio_func *func)
++{
++#ifdef CONFIG_HAS_EARLYSUSPEND
++	if (!sdioinfo[func->num].do_late_resume) {
++		dhd_conf_wifi_power(false);
++		sdioinfo[func->num].do_late_resume = 1;
++	}
++#endif
++}
++
++void
++dhd_conf_register_wifi_suspend(struct sdio_func *func)
++{
++#ifdef CONFIG_HAS_EARLYSUSPEND
++	if (func->num == 2) {
++		sdioinfo[func->num].func = func;
++		sdioinfo[func->num].do_late_resume = 0;
++		sdioinfo[func->num].sdio_early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 30;
++		sdioinfo[func->num].sdio_early_suspend.suspend = dhd_conf_early_suspend;
++		sdioinfo[func->num].sdio_early_suspend.resume = dhd_conf_late_resume;
++		register_early_suspend(&sdioinfo[func->num].sdio_early_suspend);
++		INIT_WORK(&sdioinfo[func->num].tqueue, dhd_conf_probe_workqueue);
++	}
++#endif
++}
++
++void
++dhd_conf_unregister_wifi_suspend(struct sdio_func *func)
++{
++#ifdef CONFIG_HAS_EARLYSUSPEND
++	if (func->num == 2) {
++		if (sdioinfo[func->num].sdio_early_suspend.suspend) {
++			unregister_early_suspend(&sdioinfo[func->num].sdio_early_suspend);
++			sdioinfo[func->num].sdio_early_suspend.suspend = NULL;
++		}
++	}
++#endif
++}
++#endif
++
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd_config.h b/drivers/amlogic/wifi/broadcm_40181/dhd_config.h
+index c57ee15dc14a..2200ef4f2385 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd_config.h
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd_config.h
+@@ -6,15 +6,29 @@
+ #include <dngl_stats.h>
+ #include <dhd.h>
+ #include <wlioctl.h>
++#ifdef POWER_OFF_IN_SUSPEND
++#include <wl_android.h>
++#include <bcmsdbus.h>
++#include <linux/mmc/sdio_func.h>
++#endif
+ 
+ #define FW_PATH_AUTO_SELECT 1
+ extern char firmware_path[MOD_PARAM_PATHLEN];
+ 
++/* channel list */
++typedef struct wl_channel_list {
++	/* in - # of channels, out - # of entries */
++	uint32 count;
++	/* variable length channel list */
++	uint32 channel[WL_NUMCHANNELS];
++} wl_channel_list_t;
++
+ typedef struct dhd_conf {
+ 	char fw_path[MOD_PARAM_PATHLEN];		/* Firmware path */
+ 	char nv_path[MOD_PARAM_PATHLEN];		/* NVRAM path */
+-	wl_country_t cspec;		/* Country cod */
+ 	uint band;			/* Band, b:2.4G only, otherwise for auto */
++	wl_country_t cspec;		/* Country */
++	wl_channel_list_t channels;	/* Support channels */
+ 	uint roam_off;		/* Roaming, 0:enable, 1:disable */
+ 	uint roam_off_suspend;		/* Roaming in suspend, 0:enable, 1:disable */
+ 	int roam_trigger[2];		/* The RSSI threshold to trigger roaming */
+@@ -29,10 +43,11 @@ void dhd_conf_set_fw_name_by_chip(dhd_pub_t *dhd, char *dst, char *src);
+ void dhd_conf_set_hw_oob_intr(bcmsdh_info_t *sdh, uint chip);
+ void dhd_conf_set_fw_path(dhd_pub_t *dhd, char *fw_path);
+ void dhd_conf_set_nv_path(dhd_pub_t *dhd, char *nv_path);
+-int dhd_conf_set_country(dhd_pub_t *dhd);
+-int dhd_conf_get_country(dhd_pub_t *dhd);
+ int dhd_conf_set_band(dhd_pub_t *dhd);
+ uint dhd_conf_get_band(dhd_pub_t *dhd);
++int dhd_conf_set_country(dhd_pub_t *dhd);
++int dhd_conf_get_country(dhd_pub_t *dhd);
++bool dhd_conf_match_channel(dhd_pub_t *dhd, uint32 channel);
+ int dhd_conf_set_roam(dhd_pub_t *dhd);
+ void dhd_conf_set_bw(dhd_pub_t *dhd);
+ int dhd_conf_download_config(dhd_pub_t *dhd);
+@@ -40,4 +55,19 @@ int dhd_conf_preinit(dhd_pub_t *dhd);
+ int dhd_conf_attach(dhd_pub_t *dhd);
+ void dhd_conf_detach(dhd_pub_t *dhd);
+ 
++extern void *bcmsdh_get_drvdata(void);
++
++#ifdef POWER_OFF_IN_SUSPEND
++extern struct net_device *g_netdev;
++#if defined(CONFIG_HAS_EARLYSUSPEND)
++extern int g_wifi_on;
++void wl_cfg80211_stop(void);
++void wl_cfg80211_send_disconnect(void);
++void wl_cfg80211_user_sync(bool lock);
++#endif
++void dhd_conf_wifi_suspend(struct sdio_func *func);
++void dhd_conf_register_wifi_suspend(struct sdio_func *func);
++void dhd_conf_unregister_wifi_suspend(struct sdio_func *func);
++#endif
++
+ #endif /* _dhd_config_ */
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd_linux.c b/drivers/amlogic/wifi/broadcm_40181/dhd_linux.c
+index 2023bfe9e9d7..ef047e26bde0 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd_linux.c
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd_linux.c
+@@ -378,6 +378,7 @@ module_param(iw_msg_level, int, 0);
+ module_param(wl_dbg_level, int, 0);
+ #endif
+ module_param(android_msg_level, int, 0);
++module_param(config_msg_level, int, 0);
+ 
+ #ifdef ARP_OFFLOAD_SUPPORT
+ /* ARP offload enable */
+@@ -575,8 +576,6 @@ static int dhd_sleep_pm_callback(struct notifier_block *nfb, unsigned long actio
+ {
+ 	int ret = NOTIFY_DONE;
+ 
+-// terence 20130711: Enable dhd_mmc_suspend to prevent driver sending command to mmc if mmc is not ready to read/write
+-#if (LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 39))
+ 
+ 	switch (action) {
+ 	case PM_HIBERNATION_PREPARE:
+@@ -591,7 +590,7 @@ static int dhd_sleep_pm_callback(struct notifier_block *nfb, unsigned long actio
+ 		break;
+ 	}
+ 	smp_mb();
+-#endif
++
+ 	return ret;
+ }
+ 
+diff --git a/drivers/amlogic/wifi/broadcm_40181/dhd_sdio.c b/drivers/amlogic/wifi/broadcm_40181/dhd_sdio.c
+index ff46c9f55e8d..d7c8c610c10f 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/dhd_sdio.c
++++ b/drivers/amlogic/wifi/broadcm_40181/dhd_sdio.c
+@@ -6048,7 +6048,7 @@ dhdsdio_dpc(dhd_bus_t *bus)
+ 
+ 	// terence 20131025: fix kernel panic issue if user is enabling and disabling Wi-Fi
+ 	if (bus->dhd->busstate == DHD_BUS_DOWN) {
+-		DHD_ERROR(("%s: Bus down, ret\n", __FUNCTION__));
++		DHD_ERROR(("%s: Bus down 2, ret\n", __FUNCTION__));
+ 		bus->intstatus = 0;
+ 		dhd_os_sdunlock(bus->dhd);
+ 		return 0;
+diff --git a/drivers/amlogic/wifi/broadcm_40181/include/dhdioctl.h b/drivers/amlogic/wifi/broadcm_40181/include/dhdioctl.h
+index 6959bf079cb0..a1895e21838a 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/include/dhdioctl.h
++++ b/drivers/amlogic/wifi/broadcm_40181/include/dhdioctl.h
+@@ -75,6 +75,7 @@ enum {
+ #define DHD_ANDROID_VAL	0x10000
+ #define DHD_IW_VAL	0x20000
+ #define DHD_CFG_VAL	0x40000
++#define DHD_CONFIG_VAL	0x80000
+ 
+ #ifdef SDTEST
+ /* For pktgen iovar */
+diff --git a/drivers/amlogic/wifi/broadcm_40181/wl_android.c b/drivers/amlogic/wifi/broadcm_40181/wl_android.c
+index 872e24821454..a5a5a43ef0ce 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/wl_android.c
++++ b/drivers/amlogic/wifi/broadcm_40181/wl_android.c
+@@ -19,6 +19,7 @@
+ #include <dhd_dbg.h>
+ #include <dngl_stats.h>
+ #include <dhd.h>
++#include <dhd_config.h>
+ #ifdef PNO_SUPPORT
+ #include <dhd_pno.h>
+ #endif
+@@ -265,7 +266,7 @@ extern char iface_name[IFNAMSIZ];
+  * time (only) in dhd_open, subsequential wifi on will be handled by
+  * wl_android_wifi_on
+  */
+-static int g_wifi_on = TRUE;
++int g_wifi_on = TRUE;
+ 
+ /**
+  * Local (static) function definitions
+@@ -821,6 +822,9 @@ int wl_android_wifi_on(struct net_device *dev)
+ 	dhd_net_if_lock(dev);
+ 	printk("%s in 2: g_wifi_on=%d\n", __FUNCTION__, g_wifi_on);
+ 	if (!g_wifi_on) {
++#ifdef POWER_OFF_IN_SUSPEND
++		g_netdev = dev;
++#endif
+ 		do {
+ 			dhd_customer_gpio_wlan_ctrl(WLAN_RESET_ON);
+ 			ret = sdioh_start(NULL, 0);
+@@ -2092,13 +2096,14 @@ wl_delete_dirty_rssi_cache(wl_rssi_cache_ctrl_t *rssi_cache_ctrl)
+ #else
+ 	int max = RSSICACHE_LEN;
+ #endif
++	max = min(max, RSSICACHE_LEN);
+ 
+ 	rssi_head = &rssi_cache_ctrl->m_cache_head;
+ 	node = *rssi_head;
+ 	prev = node;
+ 	for (;node;) {
+ 		i++;
+-		if (node->dirty >= max || node->dirty >= RSSICACHE_LEN) {
++		if (node->dirty >= max) {
+ 			if (node == *rssi_head) {
+ 				tmp = 1;
+ 				*rssi_head = node->next;
+@@ -2180,6 +2185,9 @@ wl_update_connected_rssi_cache(struct net_device *net, wl_rssi_cache_ctrl_t *rss
+ 	int rssi, error=0;
+ 	struct ether_addr bssid;
+ 
++	if (!g_wifi_on)
++		return 0;
++
+ 	error = wldev_ioctl(net, WLC_GET_BSSID, &bssid, sizeof(bssid), false);
+ 	if (error == BCME_NOTASSOCIATED) {
+ 		ANDROID_INFO(("%s: Not Associated! res:%d\n", __FUNCTION__, error));
+@@ -2334,6 +2342,9 @@ wl_update_rssi_offset(int rssi)
+ {
+ 	uint chip, chiprev;
+ 
++	if (!g_wifi_on)
++		return rssi;
++
+ 	chip = dhd_bus_chip_id(bcmsdh_get_drvdata());
+ 	chiprev = dhd_bus_chiprev_id(bcmsdh_get_drvdata());
+ 	if (chip == BCM4330_CHIP_ID && chiprev == BCM4330B2_CHIP_REV) {
+@@ -2390,7 +2401,7 @@ wl_delete_dirty_bss_cache(wl_bss_cache_ctrl_t *bss_cache_ctrl)
+ 	prev = node;
+ 	for (;node;) {
+ 		i++;
+-		if (node->dirty >= BSSCACHE_LEN*REPEATED_SCAN_RESULT_CNT) {
++		if (node->dirty >= BSSCACHE_LEN) {
+ 			if (node == *bss_head) {
+ 				tmp = 1;
+ 				*bss_head = node->next;
+diff --git a/drivers/amlogic/wifi/broadcm_40181/wl_android.h b/drivers/amlogic/wifi/broadcm_40181/wl_android.h
+index 5c7336f2f846..e8b6c13d69f9 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/wl_android.h
++++ b/drivers/amlogic/wifi/broadcm_40181/wl_android.h
+@@ -6,6 +6,9 @@
+  * $Id: wl_android.h 367305 2012-11-07 13:49:55Z $
+  */
+ 
++#ifndef _wl_android_
++#define _wl_android_
++
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
+ #include <wldev_common.h>
+@@ -101,9 +104,15 @@ s32 wl_genl_send_msg(struct net_device *ndev, u32 event_type,
+ #define RSSIOFFSET
+ //#define RSSIOFFSET_NEW
+ 
++#if defined(ESCAN_RESULT_PATCH)
++#define REPEATED_SCAN_RESULT_CNT	2
++#else
++#define REPEATED_SCAN_RESULT_CNT	1
++#endif
++
+ #if defined(RSSIAVG)
+-#define RSSIAVG_LEN 8
+-#define RSSICACHE_LEN 8
++#define RSSIAVG_LEN (4*REPEATED_SCAN_RESULT_CNT)
++#define RSSICACHE_LEN (4*REPEATED_SCAN_RESULT_CNT)
+ 
+ typedef struct wl_rssi_cache {
+ 	struct wl_rssi_cache *next;
+@@ -125,13 +134,6 @@ int wl_update_connected_rssi_cache(struct net_device *net, wl_rssi_cache_ctrl_t
+ int16 wl_get_avg_rssi(wl_rssi_cache_ctrl_t *rssi_cache_ctrl, void *addr);
+ #endif
+ 
+-
+-#if defined(ESCAN_RESULT_PATCH)
+-#define REPEATED_SCAN_RESULT_CNT	2
+-#else
+-#define REPEATED_SCAN_RESULT_CNT	1
+-#endif
+-
+ #if defined(RSSIOFFSET)
+ #define RSSI_OFFSET	5
+ #define RSSI_MAX -80
+@@ -143,7 +145,7 @@ int wl_update_rssi_offset(int rssi);
+ #endif
+ 
+ #if defined(BSSCACHE)
+-#define BSSCACHE_LEN	4
++#define BSSCACHE_LEN	(4*REPEATED_SCAN_RESULT_CNT)
+ #define BSSCACHE_TIME	15000
+ 
+ typedef struct wl_bss_cache {
+@@ -167,3 +169,4 @@ void wl_run_bss_cache_timer(wl_bss_cache_ctrl_t *bss_cache_ctrl, int kick_off);
+ void wl_release_bss_cache_ctrl(wl_bss_cache_ctrl_t *bss_cache_ctrl);
+ void wl_init_bss_cache_ctrl(wl_bss_cache_ctrl_t *bss_cache_ctrl);
+ #endif
++#endif /* _wl_android_ */
+\ No newline at end of file
+diff --git a/drivers/amlogic/wifi/broadcm_40181/wl_cfg80211.c b/drivers/amlogic/wifi/broadcm_40181/wl_cfg80211.c
+index d02297f0fb5f..b9c3a9d491ce 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/wl_cfg80211.c
++++ b/drivers/amlogic/wifi/broadcm_40181/wl_cfg80211.c
+@@ -46,6 +46,7 @@
+ #include <wl_cfg80211.h>
+ #include <wl_cfgp2p.h>
+ #include <wl_android.h>
++#include <dhd_config.h>
+ 
+ #ifdef PROP_TXSTATUS
+ #include <dhd_wlfc.h>
+@@ -1538,8 +1539,8 @@ wl_cfg80211_change_virtual_iface(struct wiphy *wiphy, struct net_device *ndev,
+ 			chspec = wl_cfg80211_get_shared_freq(wiphy);
+ 
+ 			wlif_type = WL_P2P_IF_GO;
+-			WL_ERR(("%s : ap (%d), infra (%d), iftype: (%d)\n",
+-				ndev->name, ap, infra, type));
++			printk("%s : ap (%d), infra (%d), iftype: (%d)\n",
++				ndev->name, ap, infra, type);
+ 			wl_set_p2p_status(wl, IF_CHANGING);
+ 			wl_clr_p2p_status(wl, IF_CHANGED);
+ 			wl_cfgp2p_ifchange(wl, &wl->p2p->int_addr, htod32(wlif_type), chspec);
+@@ -2855,7 +2856,7 @@ wl_cfg80211_join_ibss(struct wiphy *wiphy, struct net_device *dev,
+ 	} else {
+ 		wl->ibss_starter = true;
+ 	}
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0))
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0))
+ 	chan = params->chandef.chan;
+ #else
+ 	chan = params->channel;
+@@ -5616,8 +5617,8 @@ wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
+ 
+ 	dev = ndev_to_wlc_ndev(dev, wl);
+ 	_chan = ieee80211_frequency_to_channel(chan->center_freq);
+-	WL_ERR(("netdev_ifidx(%d), chan_type(%d) target channel(%d) \n",
+-		dev->ifindex, channel_type, _chan));
++	printk("netdev_ifidx(%d), chan_type(%d) target channel(%d) \n",
++		dev->ifindex, channel_type, _chan);
+ 
+ 
+ 	if (chan->band == IEEE80211_BAND_5GHZ) {
+@@ -6466,9 +6467,9 @@ wl_cfg80211_del_station(
+ 		sizeof(scb_val_t), true);
+ 	if (err < 0)
+ 		WL_ERR(("WLC_SCB_DEAUTHENTICATE_FOR_REASON err %d\n", err));
+-	WL_ERR(("Disconnect STA : %s scb_val.val %d\n",
++	printk("Disconnect STA : %s scb_val.val %d\n",
+ 		bcm_ether_ntoa((const struct ether_addr *)mac_addr, eabuf),
+-		scb_val.val));
++		scb_val.val);
+ 
+ 	if (num_associated > 0 && ETHER_ISBCAST(mac_addr))
+ 		wl_delay(400);
+@@ -7337,7 +7338,8 @@ static s32 wl_inform_single_bss(struct wl_priv *wl, struct wl_bss_info *bi)
+ 	}
+ 	channel = ieee80211_get_channel(wiphy, freq);
+ 	if (unlikely(!channel)) {
+-		WL_ERR(("ieee80211_get_channel error\n"));
++		WL_ERR(("ieee80211_get_channel error, freq=%d, channel=%d\n",
++			freq, notif_bss_info->channel));
+ 		kfree(notif_bss_info);
+ 		return -EINVAL;
+ 	}
+@@ -7593,10 +7595,13 @@ exit:
+ 		}
+ 		sinfo.assoc_req_ies = data;
+ 		sinfo.assoc_req_ies_len = len;
++		printk("%s: connected device "MACDBG"\n", __FUNCTION__, MAC2STRDBG(e->addr.octet));
+ 		cfg80211_new_sta(ndev, e->addr.octet, &sinfo, GFP_ATOMIC);
+ 	} else if (event == WLC_E_DISASSOC_IND) {
++		printk("%s: disassociated device "MACDBG"\n", __FUNCTION__, MAC2STRDBG(e->addr.octet));
+ 		cfg80211_del_sta(ndev, e->addr.octet, GFP_ATOMIC);
+ 	} else if ((event == WLC_E_DEAUTH_IND) || (event == WLC_E_DEAUTH)) {
++		printk("%s: deauthenticated device "MACDBG"\n", __FUNCTION__, MAC2STRDBG(e->addr.octet));
+ 		cfg80211_del_sta(ndev, e->addr.octet, GFP_ATOMIC);
+ 	}
+ #endif /* LINUX_VERSION < VERSION(3,2,0) && !WL_CFG80211_STA_EVENT && !WL_COMPAT_WIRELESS */
+@@ -9352,6 +9357,8 @@ static s32 wl_escan_handler(struct wl_priv *wl, bcm_struct_cfgdev *cfgdev,
+ 			WL_ERR(("No valid band\n"));
+ 			goto exit;
+ 		}
++		if (!dhd_conf_match_channel(bcmsdh_get_drvdata(), channel))
++			goto exit;
+ 		/* ----- terence 20130524: skip invalid bss */
+ 
+ 		if (wl_escan_check_sync_id(status, escan_result->sync_id,
+@@ -9669,7 +9676,7 @@ static void wl_cfg80211_determine_vsdb_mode(struct wl_priv *wl)
+ 			}
+ 		}
+ 	}
+-	WL_ERR(("%s concurrency is enabled\n", wl->vsdb_mode ? "Multi Channel" : "Same Channel"));
++	printk("%s concurrency is enabled\n", wl->vsdb_mode ? "Multi Channel" : "Same Channel");
+ 	return;
+ }
+ 
+@@ -10491,6 +10498,8 @@ static int wl_construct_reginfo(struct wl_priv *wl, s32 bw_cap)
+ 		c = (chanspec_t)dtoh32(list->element[i]);
+ 		c = wl_chspec_driver_to_host(c);
+ 		channel = CHSPEC_CHANNEL(c);
++		if (!dhd_conf_match_channel(bcmsdh_get_drvdata(), channel))
++			continue;
+ 		if (CHSPEC_IS40(c)) {
+ 			if (CHSPEC_SB_UPPER(c))
+ 				channel += CH_10MHZ_APART;
+@@ -13026,3 +13035,76 @@ wl_get_public_action(void *frame, u32 frame_len, u8 *ret_action)
+ 	WL_INFO(("Public Action : %d\n", *ret_action));
+ 	return BCME_OK;
+ }
++
++#ifdef POWER_OFF_IN_SUSPEND
++static void wl_scan_complete(struct wl_priv *wl)
++{
++	wl_event_msg_t msg;
++	WL_TRACE(("In\n"));
++
++	if (!(wl->scan_request)) {
++		WL_ERR(("timer expired but no scan request\n"));
++		return;
++	}
++	bzero(&msg, sizeof(wl_event_msg_t));
++	if (wl->escan_on && wl->escan_info.escan_state == WL_ESCAN_STATE_SCANING) {
++		msg.event_type = hton32(WLC_E_ESCAN_RESULT);
++		msg.status = hton32(WLC_E_STATUS_SUCCESS);
++		msg.reason = 0;
++		wl_cfg80211_event(wl_to_prmry_ndev(wl), &msg, NULL);
++	}
++}
++
++void wl_cfg80211_stop(void)
++{
++	struct wl_priv *wl;
++
++	wl = wlcfg_drv_priv;
++
++	WL_TRACE(("In\n"));
++
++	wl_scan_complete(wl);
++
++	if (wl->btcoex_info && wl->btcoex_info->timer_on) {
++		wl->btcoex_info->timer_on = 0;
++		del_timer_sync(&wl->btcoex_info->timer);
++	}
++
++	if (wl->p2p_supported) {
++		if (timer_pending(&wl->p2p->listen_timer))
++			del_timer_sync(&wl->p2p->listen_timer);
++	}
++
++	del_timer_sync(&wl->scan_timeout);
++
++#if defined(RSSIAVG)
++	wl_free_rssi_cache(&g_rssi_cache_ctrl);
++	wl_free_rssi_cache(&g_rssi2_cache_ctrl);
++#endif
++#if defined(BSSCACHE)
++	wl_free_bss_cache(&g_bss_cache_ctrl);
++	wl_run_bss_cache_timer(&g_bss_cache_ctrl, 0);
++#endif
++}
++
++void wl_cfg80211_send_disconnect(void)
++{
++	struct wl_priv *wl;
++
++	wl = wlcfg_drv_priv;
++
++	WL_TRACE(("In\n"));
++	cfg80211_disconnected(wl_to_prmry_ndev(wl), 0, NULL, 0, GFP_KERNEL);
++}
++
++void wl_cfg80211_user_sync(bool lock)
++{
++	struct wl_priv *wl;
++
++	wl = wlcfg_drv_priv;
++	if (lock)
++		mutex_lock(&wl->usr_sync);
++	else
++		mutex_unlock(&wl->usr_sync);
++}
++#endif
+\ No newline at end of file
+diff --git a/drivers/amlogic/wifi/broadcm_40181/wldev_common.c b/drivers/amlogic/wifi/broadcm_40181/wldev_common.c
+index 245e93c4cf8a..32b6eae35a3f 100755
+--- a/drivers/amlogic/wifi/broadcm_40181/wldev_common.c
++++ b/drivers/amlogic/wifi/broadcm_40181/wldev_common.c
+@@ -28,7 +28,6 @@
+ 		printk args;							\
+ 	} while (0)
+ 
+-extern void *bcmsdh_get_drvdata(void);
+ extern int dhd_ioctl_entry_local(struct net_device *net, wl_ioctl_t *ioc, int cmd);
+ 
+ s32 wldev_ioctl(
+-- 
+2.19.0
+

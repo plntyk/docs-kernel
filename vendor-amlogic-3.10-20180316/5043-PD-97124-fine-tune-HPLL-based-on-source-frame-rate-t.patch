@@ -1,0 +1,2512 @@
+From e683ae0bfcc722ffd8c5771c11201395a5243adb Mon Sep 17 00:00:00 2001
+From: "tao.dong" <tao.dong@amlogic.com>
+Date: Wed, 12 Nov 2014 10:10:27 +0800
+Subject: [PATCH 5043/5965] PD #97124 : fine tune HPLL based on source frame
+ rate to implement frame_rate_automation Conflicts: 
+ drivers/amlogic/amports/vh264.c squash commits: 	PD #97124. Add source
+ frame rate notification to display device. 	Change-Id:
+ I8152293ac5a73d47cad71d1076672bf1b8fa049e
+
+	PD #97124: implement frame_rate_automation feature for vout/hdmi for m8/m8b.
+	Change-Id: I8cd67544ee9d98f98c9b3f36c0a315621a6051d7
+
+	PD #97124. Add source frame rate notification to display device for more decoder drivers.
+	Change-Id: Icd465ccc6b4462082cb2ed84c626edc772e93029
+
+	PD #97124 : fine tune HPLL but not change display mode to implement frame_rate_automation for vout/hdmi for m8/m8b
+	Change-Id: Ia5c6fdb6d1153c3e95e32db12bc47b03da22c84b
+
+	PD #97124 : add sync_duration_den/sync_duration_num change notify to video to implement frame_rate_automation for vout/hdmi for m8/m8b
+	Change-Id: Icbc9874cbc332ca991cd8d2e4f9fb8d32d56b48d
+
+	PD #97124: fix a handwritting error for 0.999*clk of m8.amlogic-pd-97124
+	Change-Id: Ib70f8b353c5e31e93fb432ecbb014e0753ce0db3
+
+Change-Id: I8bb88b5018d2aded468c388d461b5e15f7cb70e2
+---
+ arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c  |  64 +++
+ arch/arm/mach-meson8/include/mach/tvregs.h    |  42 ++
+ arch/arm/mach-meson8/vpu.c                    |  21 +
+ arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c |  64 +++
+ arch/arm/mach-meson8b/include/mach/tvregs.h   |  21 +
+ arch/arm/mach-meson8b/vpu.c                   |  21 +
+ drivers/amlogic/amports/timestamp.c           |  23 +
+ drivers/amlogic/amports/vavs.c                |   4 +
+ drivers/amlogic/amports/vh264.c               |  23 +-
+ drivers/amlogic/amports/vh264_4k2k.c          |   4 +
+ drivers/amlogic/amports/vh264mvc.c            |  18 +-
+ drivers/amlogic/amports/vh265.c               |   4 +
+ drivers/amlogic/amports/video.c               |  33 +-
+ drivers/amlogic/amports/vmjpeg.c              |   4 +
+ drivers/amlogic/amports/vmpeg12.c             |  11 +
+ drivers/amlogic/amports/vmpeg4.c              |   6 +-
+ drivers/amlogic/amports/vreal.c               |   4 +
+ drivers/amlogic/amports/vvc1.c                |   4 +
+ drivers/amlogic/d2d3/d2d3_drv.c               |   8 +
+ drivers/amlogic/deinterlace/deinterlace.c     |   7 +-
+ drivers/amlogic/display/osd/osd_hw.c          |  14 +
+ drivers/amlogic/display/vout/Kconfig          |   7 +
+ drivers/amlogic/display/vout/enc_clk_config.c | 133 ++++-
+ drivers/amlogic/display/vout/tvconf.c         | 527 +++++++++++++++++-
+ drivers/amlogic/display/vout/tvmode.h         |  21 +
+ drivers/amlogic/display/vout/tvoutc.c         |  21 +
+ drivers/amlogic/display/vout/vout_notify.c    |  49 ++
+ drivers/amlogic/display/vout/vout_serve.c     |  45 ++
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c        |  91 ++-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c   |  21 +
+ drivers/amlogic/ppmgr/ppmgr_vpp.c             |  16 +-
+ include/linux/amlogic/amports/timestamp.h     |   2 +
+ .../linux/amlogic/amports/vframe_receiver.h   |  24 +-
+ include/linux/amlogic/vout/vinfo.h            |  21 +
+ include/linux/amlogic/vout/vout_notify.h      |  18 +-
+ 35 files changed, 1349 insertions(+), 47 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
+index bea53c8261ba..7ca2e79e2652 100755
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
+@@ -1964,12 +1964,76 @@ static void hdmitx_config_tvenc_reg(int vic, unsigned reg, unsigned val)
+     }
+ }
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++//
++// func: hdmitx_set_pll_fr_auto
++// params: none
++// return:
++//		1: current vmode is special and clock setting handled
++//		0: current vmode is not special and clock setting not handled
++//
++// desc:
++//		special vmode has same hdmi vic with normal mode, such as 1080p59hz - 1080p60hz
++//	so pll should not only be set according hdmi vic.
++//
++extern const vinfo_t *get_current_vinfo(void);
++static int hdmitx_set_pll_fr_auto(void)
++{
++	int ret = 0;
++	const vinfo_t *pvinfo = get_current_vinfo();
++	
++	if( strncmp(pvinfo->name, "480p59hz", strlen("480p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_480P_59HZ);
++		ret = 1;
++	}
++	if( strncmp(pvinfo->name, "720p59hz", strlen("720p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_720P_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080i59hz", strlen("1080i59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080I_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080p59hz", strlen("1080p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080P_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080p23hz", strlen("1080p23hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080P_23HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "4k2k29hz", strlen("4k2k29hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_4K2K_29HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "4k2k23hz", strlen("4k2k23hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_4K2K_23HZ);
++		ret = 1;
++	}
++
++	return ret;		
++}
++#endif
++
+ static void hdmitx_set_pll(Hdmi_tx_video_para_t *param)
+ {
+     hdmi_print(IMP, SYS "set pll\n");
+     hdmi_print(IMP, SYS "param->VIC:%d\n", param->VIC);
+     
+     cur_vout_index = get_cur_vout_index();
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	if( hdmitx_set_pll_fr_auto() )
++		return ;
++#endif
++
+     switch(param->VIC)
+     {
+         case HDMI_480p60:
+diff --git a/arch/arm/mach-meson8/include/mach/tvregs.h b/arch/arm/mach-meson8/include/mach/tvregs.h
+index 25094dc86719..15ecae53b3c2 100755
+--- a/arch/arm/mach-meson8/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8/include/mach/tvregs.h
+@@ -1502,6 +1502,9 @@ static const reg_t *tvregsTab[] = {
+     tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+     tvregs_480cvbs,
+     tvregs_480p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++    tvregs_480p,
++#endif
+     tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+     tvregs_576i,
+     tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+@@ -1509,15 +1512,33 @@ static const reg_t *tvregsTab[] = {
+     tvregs_576p,
+     tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+     tvregs_720p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_720p,
++#endif
+     tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080i,
++#endif	
+     tvregs_1080p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080p,
++#endif
+     tvregs_720p_50hz,
+     tvregs_1080i_50hz,
+     tvregs_1080p_50hz,
+     tvregs_1080p_24hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080p_24hz,
++#endif
+     tvregs_4k2k_30hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_4k2k_30hz,
++#endif
+     tvregs_4k2k_25hz,
+     tvregs_4k2k_24hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_4k2k_24hz,
++#endif
+     tvregs_4k2k_smpte,
+     tvregs_vga_640x480,
+     tvregs_svga_800x600,
+@@ -1529,6 +1550,9 @@ static const tvinfo_t tvinfoTab[] = {
+     {.xres =  720, .yres =  480, .id = "480i_rpt"},
+     {.xres =  720, .yres =  480, .id = "480cvbs"},
+     {.xres =  720, .yres =  480, .id = "480p"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres =  720, .yres =  480, .id = "480p59hz"},
++#endif
+     {.xres =  720, .yres =  480, .id = "480p_rpt"},
+     {.xres =  720, .yres =  576, .id = "576i"},
+     {.xres =  720, .yres =  576, .id = "576i_rpt"},
+@@ -1536,15 +1560,33 @@ static const tvinfo_t tvinfoTab[] = {
+     {.xres =  720, .yres =  576, .id = "576p"},
+     {.xres =  720, .yres =  576, .id = "576p_prt"},
+     {.xres = 1280, .yres =  720, .id = "720p"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres = 1280, .yres =  720, .id = "720p59hz"},
++#endif
+     {.xres = 1920, .yres = 1080, .id = "1080i"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
++  	{.xres = 1920, .yres = 1080, .id = "1080i59hz"},
++#endif  	
+     {.xres = 1920, .yres = 1080, .id = "1080p"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres = 1920, .yres = 1080, .id = "1080p59hz"},
++#endif
+     {.xres = 1280, .yres =  720, .id = "720p50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080i50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080p50hz"},
+     {.xres = 1920, .yres = 1080, .id = "1080p24hz"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres = 1920, .yres = 1080, .id = "1080p23hz"},
++#endif
+     {.xres = 3840, .yres = 2160, .id = "4k2k30hz"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres = 3840, .yres = 2160, .id = "4k2k29hz"},
++#endif
+     {.xres = 3840, .yres = 2160, .id = "4k2k25hz"},
+     {.xres = 3840, .yres = 2160, .id = "4k2k24hz"},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{.xres = 3840, .yres = 2160, .id = "4k2k23hz"},
++#endif
+     {.xres = 4096, .yres = 2160, .id = "4k2ksmpte"},
+     {.xres = 640, .yres = 480, .id = "vga"},
+     {.xres = 800, .yres = 600, .id = "svga"},
+diff --git a/arch/arm/mach-meson8/vpu.c b/arch/arm/mach-meson8/vpu.c
+index 046ec6e11d9b..2de621d5fd94 100755
+--- a/arch/arm/mach-meson8/vpu.c
++++ b/arch/arm/mach-meson8/vpu.c
+@@ -153,19 +153,40 @@ static vpu_mod_t get_vpu_mod(unsigned int vmod)
+ 	if (vmod < VPU_MOD_START) {
+ 		switch (vmod) {
+ 			case VMODE_480P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_480P_59HZ:
++#endif
+             case VMODE_480P_RPT:
+ 			case VMODE_576P:
+ 			case VMODE_576P_RPT:
+ 			case VMODE_720P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_720P_59HZ:
++#endif
+ 			case VMODE_1080I:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080I_59HZ:
++#endif
+ 			case VMODE_1080P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080P_59HZ:
++#endif
+ 			case VMODE_720P_50HZ:
+ 			case VMODE_1080I_50HZ:
+ 			case VMODE_1080P_50HZ:
+ 			case VMODE_1080P_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080P_23HZ:
++#endif
+ 			case VMODE_4K2K_30HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_4K2K_29HZ:
++#endif
+ 			case VMODE_4K2K_25HZ:
+ 			case VMODE_4K2K_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_4K2K_23HZ:
++#endif
+ 			case VMODE_4K2K_SMPTE:
+ 			case VMODE_VGA:
+ 			case VMODE_SVGA:
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
+index 9b26749c2f06..32f1fe40b3bb 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_hw.c
+@@ -1726,12 +1726,76 @@ static void hdmitx_config_tvenc_reg(int vic, unsigned reg, unsigned val)
+     }
+ }
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++//
++// func: hdmitx_set_pll_fr_auto
++// params: none
++// return:
++//		1: current vmode is special and clock setting handled
++//		0: current vmode is not special and clock setting not handled
++//
++// desc:
++//		special vmode has same hdmi vic with normal mode, such as 1080p59hz - 1080p60hz
++//	so pll should not only be set according hdmi vic.
++//
++extern const vinfo_t *get_current_vinfo(void);
++static int hdmitx_set_pll_fr_auto(void)
++{
++	int ret = 0;
++	const vinfo_t *pvinfo = get_current_vinfo();
++
++	if( strncmp(pvinfo->name, "480p59hz", strlen("480p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_480P_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "720p59hz", strlen("720p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_720P_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080i59hz", strlen("1080i59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080I_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080p59hz", strlen("1080p59hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080P_59HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "1080p23hz", strlen("1080p23hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_1080P_23HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "4k2k29hz", strlen("4k2k29hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_4K2K_29HZ);
++		ret = 1;
++	}
++	else if( strncmp(pvinfo->name, "4k2k23hz", strlen("4k2k23hz")) == 0 )
++	{
++		set_vmode_clk(VMODE_4K2K_23HZ);
++		ret = 1;
++	}
++
++	return ret;		
++}
++#endif
++
+ static void hdmitx_set_pll(Hdmi_tx_video_para_t *param)
+ {
+     hdmi_print(IMP, SYS "set pll\n");
+     hdmi_print(IMP, SYS "param->VIC:%d\n", param->VIC);
+     
+     cur_vout_index = get_cur_vout_index();
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	if( hdmitx_set_pll_fr_auto() )
++		return ;
++#endif
++
+     switch(param->VIC)
+     {
+         case HDMI_480p60:
+diff --git a/arch/arm/mach-meson8b/include/mach/tvregs.h b/arch/arm/mach-meson8b/include/mach/tvregs.h
+index f3a9cc9cf53a..a483a3934cfc 100755
+--- a/arch/arm/mach-meson8b/include/mach/tvregs.h
++++ b/arch/arm/mach-meson8b/include/mach/tvregs.h
+@@ -1468,6 +1468,9 @@ static const reg_t *tvregsTab[] = {
+     tvregs_480i,        // For REPEAT MODE use, ENC setting is same
+     tvregs_480cvbs,
+     tvregs_480p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_480p,
++#endif
+     tvregs_480p,        // For REPEAT MODE use, ENC setting is same
+     tvregs_576i,
+     tvregs_576i,        // For REPEAT MODE use, ENC setting is same
+@@ -1475,15 +1478,33 @@ static const reg_t *tvregsTab[] = {
+     tvregs_576p,
+     tvregs_576p,        // For REPEAT MODE use, ENC setting is same
+     tvregs_720p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_720p,
++#endif
+     tvregs_1080i,       //Adjust tvregs_* sequences and match the enum define in tvmode.h
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080i,
++#endif
+     tvregs_1080p,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080p,
++#endif
+     tvregs_720p_50hz,
+     tvregs_1080i_50hz,
+     tvregs_1080p_50hz,
+     tvregs_1080p_24hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_1080p_24hz,
++#endif
+     tvregs_4k2k_30hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_4k2k_30hz,
++#endif
+     tvregs_4k2k_25hz,
+     tvregs_4k2k_24hz,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	tvregs_4k2k_24hz,
++#endif
+     tvregs_4k2k_smpte,
+     tvregs_vga_640x480,
+     tvregs_svga_800x600,
+diff --git a/arch/arm/mach-meson8b/vpu.c b/arch/arm/mach-meson8b/vpu.c
+index 40a356b1fa11..bb333a5ce770 100755
+--- a/arch/arm/mach-meson8b/vpu.c
++++ b/arch/arm/mach-meson8b/vpu.c
+@@ -128,19 +128,40 @@ static vpu_mod_t get_vpu_mod(unsigned int vmod)
+ 	if (vmod < VPU_MOD_START) {
+ 		switch (vmod) {
+ 			case VMODE_480P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_480P_59HZ:
++#endif
+             case VMODE_480P_RPT:
+ 			case VMODE_576P:
+ 			case VMODE_576P_RPT:
+ 			case VMODE_720P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_720P_59HZ:
++#endif
+ 			case VMODE_1080I:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080I_59HZ:
++#endif
+ 			case VMODE_1080P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080P_59HZ:
++#endif
+ 			case VMODE_720P_50HZ:
+ 			case VMODE_1080I_50HZ:
+ 			case VMODE_1080P_50HZ:
+ 			case VMODE_1080P_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_1080P_23HZ:
++#endif
+ 			case VMODE_4K2K_30HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_4K2K_29HZ:
++#endif
+ 			case VMODE_4K2K_25HZ:
+ 			case VMODE_4K2K_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			case VMODE_4K2K_23HZ:
++#endif
+ 			case VMODE_4K2K_SMPTE:
+ 			case VMODE_VGA:
+ 			case VMODE_SVGA:
+diff --git a/drivers/amlogic/amports/timestamp.c b/drivers/amlogic/amports/timestamp.c
+index da2f1090322b..278edece7dd3 100755
+--- a/drivers/amlogic/amports/timestamp.c
++++ b/drivers/amlogic/amports/timestamp.c
+@@ -21,6 +21,9 @@ static u32 audio_pts_started = 0;
+ static u32 first_vpts = 0;
+ static u32 first_apts = 0;
+ 
++static u32 system_time_scale_base = 1;
++static u32 system_time_scale_remainder = 0;
++
+ #ifdef MODIFY_TIMESTAMP_INC_WITH_PLL
+ #define PLL_FACTOR 10000
+ static u32 timestamp_inc_factor=PLL_FACTOR;
+@@ -192,6 +195,26 @@ void timestamp_pcrscr_inc(s32 inc)
+ 
+ EXPORT_SYMBOL(timestamp_pcrscr_inc);
+ 
++void timestamp_pcrscr_inc_scale(s32 inc, u32 base)
++{
++    if (system_time_scale_base != base) {
++        system_time_scale_remainder = system_time_scale_remainder * base / system_time_scale_base;
++        system_time_scale_base = base;
++    }
++
++    if (system_time_up) {
++        u32 r;
++        system_time += div_u64_rem(90000ULL * inc, base, &r) + system_time_inc_adj;
++        system_time_scale_remainder += r;
++        if (system_time_scale_remainder >= system_time_scale_base) {
++            system_time++;
++            system_time_scale_remainder -= system_time_scale_base;
++        }
++    }
++}
++
++EXPORT_SYMBOL(timestamp_pcrscr_inc_scale);
++
+ void timestamp_pcrscr_set_adj(s32 inc)
+ {
+     system_time_inc_adj = inc;
+diff --git a/drivers/amlogic/amports/vavs.c b/drivers/amlogic/amports/vavs.c
+index 0e8b49bbb806..cdaea478070b 100755
+--- a/drivers/amlogic/amports/vavs.c
++++ b/drivers/amlogic/amports/vavs.c
+@@ -807,6 +807,8 @@ static s32 vavs_init(void)
+     vf_reg_provider(&vavs_vf_prov);
+  #endif 
+ 
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vavs_amstream_dec_info.rate);
++
+         stat |= STAT_VF_HOOK;
+ 
+         recycle_timer.data = (ulong) & recycle_timer;
+@@ -880,6 +882,8 @@ static int amvdec_avs_remove(struct platform_device *pdev)
+ 
+         if (stat & STAT_VF_HOOK)
+         {
++                vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+                 vf_unreg_provider(&vavs_vf_prov);
+                 stat &= ~STAT_VF_HOOK;
+         }
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 7f044a1c2164..0ce47650065d 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -249,9 +249,12 @@ static void *mc_cpu_addr;
+ #define MC_TOTAL_SIZE       (20*SZ_1K)
+ #define MC_SWAP_SIZE        ( 4*SZ_1K)
+ 
++#define MODE_ERROR 0
++#define MODE_FULL  1
++
+ static DEFINE_SPINLOCK(lock);
+ 
+-static int vh264_stop(void);
++static int vh264_stop(int mode);
+ static s32 vh264_init(void);
+ extern u32 set_blackout_policy(int policy);
+ extern u32 get_blackout_policy(void);
+@@ -1082,7 +1085,7 @@ static void vh264_isr(void)
+                             unsigned int old_duration=frame_dur;
+                             h264pts2 = pts;
+ 
+-                            pts_duration = ((h264pts2 - h264pts1) / h264_pts_count) * 16 / 15;
++                            pts_duration = (h264pts2 - h264pts1) * 16 / (h264_pts_count * 15);
+ 
+                             if ((pts_duration != frame_dur) && (!pts_outside)) {
+                                 if (use_idr_framerate) {
+@@ -1783,6 +1786,9 @@ static s32 vh264_init(void)
+     vf_provider_init(&vh264_vf_prov, PROVIDER_NAME, &vh264_vf_provider_ops, NULL);
+     vf_reg_provider(&vh264_vf_prov);
+  #endif
++
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)frame_dur);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -1807,7 +1813,7 @@ static s32 vh264_init(void)
+     return 0;
+ }
+ 
+-static int vh264_stop(void)
++static int vh264_stop(int mode)
+ {
+     if (stat & STAT_VDEC_RUN) {
+         amvdec_stop();
+@@ -1827,6 +1833,10 @@ static int vh264_stop(void)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        if (mode == MODE_FULL) {
++            vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++        }
++
+         vf_unreg_provider(&vh264_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+@@ -2071,10 +2081,11 @@ static int amvdec_h264_probe(struct platform_device *pdev)
+ 
+ static int amvdec_h264_remove(struct platform_device *pdev)
+ {
+-     cancel_work_sync(&error_wd_work);
+-     cancel_work_sync(&stream_switching_work);
++    cancel_work_sync(&error_wd_work);
++    cancel_work_sync(&stream_switching_work);
++
+     mutex_lock(&vh264_mutex);
+-    vh264_stop();
++    vh264_stop(MODE_FULL);
+ 
+     atomic_set(&vh264_active, 0);
+ 
+diff --git a/drivers/amlogic/amports/vh264_4k2k.c b/drivers/amlogic/amports/vh264_4k2k.c
+index c62989c17652..2ceed44f906d 100755
+--- a/drivers/amlogic/amports/vh264_4k2k.c
++++ b/drivers/amlogic/amports/vh264_4k2k.c
+@@ -1286,6 +1286,8 @@ static s32 vh264_4k2k_init(void)
+     vf_reg_provider(&vh264_4k2k_vf_prov);
+     vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_START,NULL);
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vh264_4k2k_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -1344,6 +1346,8 @@ static int vh264_4k2k_stop(void)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vh264_4k2k_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/vh264mvc.c b/drivers/amlogic/amports/vh264mvc.c
+index 32378e497aae..affe61465e46 100755
+--- a/drivers/amlogic/amports/vh264mvc.c
++++ b/drivers/amlogic/amports/vh264mvc.c
+@@ -107,7 +107,10 @@ extern u32 trickmode_i;
+ 
+ static DEFINE_SPINLOCK(lock);
+ 
+-static int vh264mvc_stop(void);
++#define MODE_ERROR 0
++#define MODE_FULL  1
++
++static int vh264mvc_stop(int mode);
+ static s32 vh264mvc_init(void);
+ 
+ /***************************
+@@ -1092,6 +1095,8 @@ static s32 vh264mvc_init(void)
+     vf_reg_provider(&vh264mvc_vf_prov);
+     vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_START,NULL);
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vh264mvc_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -1112,7 +1117,7 @@ static s32 vh264mvc_init(void)
+     return 0;
+ }
+ 
+-static int vh264mvc_stop(void)
++static int vh264mvc_stop(int mode)
+ {
+     if (stat & STAT_VDEC_RUN) {
+         amvdec_stop();
+@@ -1135,6 +1140,11 @@ static int vh264mvc_stop(void)
+ 
+     if (stat & STAT_VF_HOOK) {
+         ulong flags;
++
++        if (mode == MODE_FULL) {
++            vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++        }
++
+         spin_lock_irqsave(&lock, flags);
+         spin_unlock_irqrestore(&lock, flags);
+         vf_unreg_provider(&vh264mvc_vf_prov);
+@@ -1150,7 +1160,7 @@ static int vh264mvc_stop(void)
+ static void error_do_work(struct work_struct *work)
+ {
+     if (atomic_read(&vh264mvc_active)) {
+-        vh264mvc_stop();
++        vh264mvc_stop(MODE_ERROR);
+         vh264mvc_init();
+     }
+ }
+@@ -1196,7 +1206,7 @@ static int amvdec_h264mvc_probe(struct platform_device *pdev)
+ static int amvdec_h264mvc_remove(struct platform_device *pdev)
+ {
+     printk("amvdec_h264mvc_remove\n");
+-    vh264mvc_stop();
++    vh264mvc_stop(MODE_FULL);
+ 
+     atomic_set(&vh264mvc_active, 0);
+ 
+diff --git a/drivers/amlogic/amports/vh265.c b/drivers/amlogic/amports/vh265.c
+index 543b98d87445..163421e36c47 100755
+--- a/drivers/amlogic/amports/vh265.c
++++ b/drivers/amlogic/amports/vh265.c
+@@ -3794,6 +3794,8 @@ static s32 vh265_init(void)
+     vf_reg_provider(&vh265_vf_prov);
+     vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_START,NULL);
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)frame_dur);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -3861,6 +3863,8 @@ static int vh265_stop(void)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vh265_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 801551e07217..347f99e313f8 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -609,6 +609,8 @@ static const vinfo_t *vinfo = NULL;
+ static vframe_t *cur_dispbuf = NULL;
+ static vframe_t vf_local;
+ static u32 vsync_pts_inc;
++static u32 vsync_pts_inc_scale;
++static u32 vsync_pts_inc_scale_base = 1;
+ static u32 vsync_pts_inc_upint = 0;
+ static u32 vsync_pts_inc_adj = 0;
+ static u32 vsync_pts_125 = 0;
+@@ -2573,7 +2575,9 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         if(cur_dev_idx == 0){
+             cur_dev = &video_dev[0];
+             vinfo = get_current_vinfo();
+-    	      vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++    	    vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++            vsync_pts_inc_scale = vinfo->sync_duration_den;
++            vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+             video_property_changed = true;
+             printk("Change to video 0\n");
+         }
+@@ -2582,19 +2586,21 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         if(cur_dev_idx != 0){
+             cur_dev = &video_dev[1];
+             vinfo = get_current_vinfo2();
+-    	      vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++    	    vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++            vsync_pts_inc_scale = vinfo->sync_duration_den;
++            vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+             video_property_changed = true;
+             printk("Change to video 1\n");
+         }
+     }
+ 
+-
+     if((dev_id_s[dev_id_len-1] == '2' && cur_dev_idx == 0) ||
+         (dev_id_s[dev_id_len-1] != '2' && cur_dev_idx != 0)){
+         return IRQ_HANDLED;
+     }
+     //printk("%s: %s\n", __func__, dev_id_s);
+ #endif
++
+     vf = video_vf_peek();
+     if((vf)&&((vf->type & VIDTYPE_NO_VIDEO_ENABLE) == 0)){
+ 	    if( (old_vmode != new_vmode)||(debug_flag == 8)){
+@@ -2679,8 +2685,12 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             printk("invalid vsync_slow_factor, set to 1\n");
+             vsync_slow_factor = 1;
+         }
+-        timestamp_pcrscr_inc(vsync_pts_inc / vsync_slow_factor);
+-        timestamp_apts_inc(vsync_pts_inc / vsync_slow_factor);
++
++        if (vsync_slow_factor == 1) {
++            timestamp_pcrscr_inc_scale(vsync_pts_inc_scale, vsync_pts_inc_scale_base);
++        } else {
++            timestamp_pcrscr_inc(vsync_pts_inc / vsync_slow_factor);
++        }
+     }
+     if (omx_secret_mode == true) {
+         u32 system_time = timestamp_pcrscr_get();
+@@ -3118,7 +3128,6 @@ SET_FILTER:
+     }
+ 
+ exit:
+-
+     if (likely(video_onoff_state != VIDEO_ENABLE_STATE_IDLE)) {
+         /* state change for video layer enable/disable */
+ 
+@@ -3541,6 +3550,12 @@ static int video_receiver_event_fun(int type, void* data, void* private_data)
+             printk("%s VFRAME_EVENT_PROVIDER_FORCE_BLACKOUT\n", __func__);
+         }
+     }
++    else if(type == VFRAME_EVENT_PROVIDER_FR_HINT){
++        set_vframe_rate_hint((int)data);
++    }
++    else if(type == VFRAME_EVENT_PROVIDER_FR_END_HINT){
++        set_vframe_rate_end_hint();
++    }
+     return 0;
+ }
+ 
+@@ -5546,6 +5561,8 @@ int vout_notify_callback(struct notifier_block *block, unsigned long cmd , void
+   	vinfo = info;
+ 	/* pre-calculate vsync_pts_inc in 90k unit */
+     	vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++        vsync_pts_inc_scale = vinfo->sync_duration_den;
++        vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+ 	spin_unlock_irqrestore(&lock, flags);
+ 	new_vmode = vinfo->mode;
+ 	break;
+@@ -5577,6 +5594,8 @@ int vout2_notify_callback(struct notifier_block *block, unsigned long cmd , void
+   	vinfo = info;
+ 	/* pre-calculate vsync_pts_inc in 90k unit */
+     	vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++        vsync_pts_inc_scale = vinfo->sync_duration_den;
++        vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+ 	spin_unlock_irqrestore(&lock, flags);
+ 	break;
+ 	case VOUT_EVENT_OSD_PREBLEND_ENABLE:
+@@ -5624,6 +5643,8 @@ static void vout_hook(void)
+ 
+     if (vinfo) {
+         vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++        vsync_pts_inc_scale = vinfo->sync_duration_den;
++        vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+         old_vmode = new_vmode = vinfo->mode;
+     }
+ 
+diff --git a/drivers/amlogic/amports/vmjpeg.c b/drivers/amlogic/amports/vmjpeg.c
+index de5fb9f85721..4a5d6ed7558c 100755
+--- a/drivers/amlogic/amports/vmjpeg.c
++++ b/drivers/amlogic/amports/vmjpeg.c
+@@ -709,6 +709,8 @@ static s32 vmjpeg_init(void)
+     vf_reg_provider(&vmjpeg_vf_prov);
+ #endif 
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vmjpeg_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong)&recycle_timer;
+@@ -784,6 +786,8 @@ static int amvdec_mjpeg_remove(struct platform_device *pdev)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vmjpeg_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index 1d7cd38c8f24..ec70071a637e 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -158,6 +158,8 @@ static DEFINE_SPINLOCK(lock);
+ 
+ static u32 frame_rpt_state;
+ 
++static struct dec_sysinfo vmpeg12_amstream_dec_info;
++
+ /* for error handling */
+ static s32 frame_force_skip_flag = 0;
+ static s32 error_frame_skip_level = 0;
+@@ -829,6 +831,8 @@ static s32 vmpeg12_init(void)
+     vf_reg_provider(&vmpeg_vf_prov);
+  #endif 
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vmpeg12_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong)&recycle_timer;
+@@ -859,6 +863,11 @@ static int amvdec_mpeg12_probe(struct platform_device *pdev)
+         return -EFAULT;
+     }
+ 
++
++    if (pdata->sys_info) {
++        vmpeg12_amstream_dec_info = *pdata->sys_info;
++    }
++
+     buf_start = pdata->mem_start;
+     buf_size  = pdata->mem_end - pdata->mem_start + 1;
+ 
+@@ -891,6 +900,8 @@ static int amvdec_mpeg12_remove(struct platform_device *pdev)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vmpeg_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/vmpeg4.c b/drivers/amlogic/amports/vmpeg4.c
+index a2cce67e6ad1..dc6a4cbb95a8 100755
+--- a/drivers/amlogic/amports/vmpeg4.c
++++ b/drivers/amlogic/amports/vmpeg4.c
+@@ -756,7 +756,7 @@ static void vmpeg4_local_init(void)
+ 
+     vmpeg4_ratio = vmpeg4_amstream_dec_info.ratio;
+ 	
+-	vmpeg4_ratio64 = vmpeg4_amstream_dec_info.ratio64;
++    vmpeg4_ratio64 = vmpeg4_amstream_dec_info.ratio64;
+ 
+     vmpeg4_rotation = (((u32)vmpeg4_amstream_dec_info.param) >> 16) & 0xffff;
+ 
+@@ -866,6 +866,8 @@ static s32 vmpeg4_init(void)
+     vf_provider_init(&vmpeg_vf_prov, PROVIDER_NAME, &vmpeg_vf_provider, NULL);
+     vf_reg_provider(&vmpeg_vf_prov);
+ #endif 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vmpeg4_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -929,6 +931,8 @@ static int amvdec_mpeg4_remove(struct platform_device *pdev)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vmpeg_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/vreal.c b/drivers/amlogic/amports/vreal.c
+index 5396d1701bd2..cadc5fb0a368 100755
+--- a/drivers/amlogic/amports/vreal.c
++++ b/drivers/amlogic/amports/vreal.c
+@@ -778,6 +778,8 @@ s32 vreal_init(void)
+     vf_reg_provider(&vreal_vf_prov);
+ #endif 
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vreal_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -876,6 +878,8 @@ static int amvdec_real_remove(struct platform_device *pdev)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vreal_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/amports/vvc1.c b/drivers/amlogic/amports/vvc1.c
+index 224509260d9b..377502c7d1d1 100755
+--- a/drivers/amlogic/amports/vvc1.c
++++ b/drivers/amlogic/amports/vvc1.c
+@@ -875,6 +875,8 @@ static s32 vvc1_init(void)
+     vf_reg_provider(&vvc1_vf_prov);
+ #endif 
+ 
++    vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_HINT, (void *)vvc1_amstream_dec_info.rate);
++
+     stat |= STAT_VF_HOOK;
+ 
+     recycle_timer.data = (ulong) & recycle_timer;
+@@ -938,6 +940,8 @@ static int amvdec_vc1_remove(struct platform_device *pdev)
+     }
+ 
+     if (stat & STAT_VF_HOOK) {
++        vf_notify_receiver(PROVIDER_NAME, VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
++
+         vf_unreg_provider(&vvc1_vf_prov);
+         stat &= ~STAT_VF_HOOK;
+     }
+diff --git a/drivers/amlogic/d2d3/d2d3_drv.c b/drivers/amlogic/d2d3/d2d3_drv.c
+index 39edcc0e0071..4d008341af44 100755
+--- a/drivers/amlogic/d2d3/d2d3_drv.c
++++ b/drivers/amlogic/d2d3/d2d3_drv.c
+@@ -352,6 +352,14 @@ static int d2d3_receiver_event_fun(int type, void* data, void* arg)
+                 pre_count++;
+ 
+         }
++        else if(VFRAME_EVENT_PROVIDER_FR_HINT == type)
++        {
++               vf_notify_receiver(d2d3_devp->vfm_name,VFRAME_EVENT_PROVIDER_FR_HINT,data);
++        }
++        else if(VFRAME_EVENT_PROVIDER_FR_END_HINT == type)
++        {
++               vf_notify_receiver(d2d3_devp->vfm_name,VFRAME_EVENT_PROVIDER_FR_END_HINT,data);
++        }
+         return ret;
+ }
+ 
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+index da948099a96d..6910b1aa7945 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -6650,7 +6650,12 @@ light_unreg:
+         di_pre_stru.vframe_interleave_flag = flag;
+     }
+ #endif
+-
++    else if(type == VFRAME_EVENT_PROVIDER_FR_HINT){
++        vf_notify_receiver(VFM_NAME,VFRAME_EVENT_PROVIDER_FR_HINT,data);
++    }
++    else if(type == VFRAME_EVENT_PROVIDER_FR_END_HINT){
++        vf_notify_receiver(VFM_NAME,VFRAME_EVENT_PROVIDER_FR_END_HINT,data);
++    }
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index 64c72954930b..24e2152c364c 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -726,6 +726,9 @@ int osd_set_scan_mode(int index)
+ 		break;
+ 		case VMODE_1080I:
+ 		case VMODE_1080I_50HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case VMODE_1080I_59HZ:
++#endif
+ 			if(osd_hw.free_scale_mode[index]){
+ 				osd_hw.field_out_en = 1;
+ 
+@@ -1286,6 +1289,10 @@ void osd_get_window_axis_hw(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1)
+  		        case VMODE_576CVBS:
+  		        case VMODE_1080I:
+  		        case VMODE_1080I_50HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++				case VMODE_1080I_59HZ:
++#endif
++
+  		        	  *y0 = osd_hw.free_dst_data[index].y_start*2;
+  			          *y1 = osd_hw.free_dst_data[index].y_end*2;
+  		        break;
+@@ -1314,6 +1321,10 @@ void osd_set_window_axis_hw(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
+ 		case VMODE_576CVBS:
+ 		case VMODE_1080I:
+ 		case VMODE_1080I_50HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case VMODE_1080I_59HZ:
++#endif
++
+ 		osd_hw.free_dst_data[index].y_start = y0/2;
+ 		osd_hw.free_dst_data[index].y_end = y1/2;
+ 		break;
+@@ -1542,6 +1553,9 @@ void osd_set_osd_antiflicker_hw(u32 index, u32 vmode, u32 yres)
+ 		case VMODE_576CVBS:
+ 		case VMODE_1080I:
+ 		case VMODE_1080I_50HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case VMODE_1080I_59HZ:
++#endif
+ 			osd_need_antiflicker = false;
+ 		break;
+ 		default:
+diff --git a/drivers/amlogic/display/vout/Kconfig b/drivers/amlogic/display/vout/Kconfig
+index d150c4c682db..d2b78031cb45 100755
+--- a/drivers/amlogic/display/vout/Kconfig
++++ b/drivers/amlogic/display/vout/Kconfig
+@@ -9,6 +9,13 @@ config AM_TV_OUTPUT
+ 	help  
+ 		tv output module
+ 
++config AML_VOUT_FRAMERATE_AUTOMATION
++	bool "framerate automation"
++	default y
++	depends on AM_TV_OUTPUT
++	help
++		framerate adjustment automatically from video source
++
+ config AM_LCD_OUTPUT
+ 	tristate "LCD output" 
+ 	default y
+diff --git a/drivers/amlogic/display/vout/enc_clk_config.c b/drivers/amlogic/display/vout/enc_clk_config.c
+index de471a7697c6..c1aaaecad623 100755
+--- a/drivers/amlogic/display/vout/enc_clk_config.c
++++ b/drivers/amlogic/display/vout/enc_clk_config.c
+@@ -67,6 +67,9 @@ static void set_hpll_clk_out(unsigned clk)
+     aml_write_reg32(P_HHI_VID2_PLL_CNTL2, 0x430a800);       // internal LDO share with HPLL & VIID PLL
+     switch(clk){
+         case 2971:      // only for 4k mode
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case 2976:		// only for 4k mode with clock*0.999
++#endif
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0xce49c022);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x4123b100);
+@@ -77,9 +80,20 @@ static void set_hpll_clk_out(unsigned clk)
+             WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             h_delay();
+             aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00016385);   // optimise HPLL VCO 2.97GHz performance
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			if( clk == 2976 )
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84d04); // lower div_frac to get clk*0.999
++			else
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#else
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#endif
++
+             break;
+         case 2970:      // for 1080p/i 720p mode
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case 2975:		// FOR 1080P/i 720p mode with clock*0.999
++#endif
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a46c023);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x4123b100);
+@@ -89,7 +103,14 @@ static void set_hpll_clk_out(unsigned clk)
+             WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             h_delay();
+             aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00016385);   // optimise HPLL VCO 2.97GHz performance
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			if( clk == 2975 )
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84d04); // lower div_frac to get clk*0.999
++			else
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#else
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#endif
+             break;
+         case 2160:
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
+@@ -100,11 +121,30 @@ static void set_hpll_clk_out(unsigned clk)
+             aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042d);
+             WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             break;
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case 2161:
++            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84f48);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a46c023);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x0123b100);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x12385);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6001042c);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042c);
++            WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
++			break;
++#endif			
+         case 1080:
+             aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6000042d);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4000042d);
+             WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             break;
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION		
++		case 1081:
++			aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c8cf48);
++			aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6000042c);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4000042c);
++            WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
++            break;
++#endif
+         case 1296:
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x59c88000);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0xca49b022);
+@@ -132,6 +172,9 @@ static void set_hpll_clk_out(unsigned clk)
+     aml_write_reg32(P_HHI_VID2_PLL_CNTL2, 0x430a800);       // internal LDO share with HPLL & VIID PLL
+     switch(clk){
+         case 2970:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case 2975:		// FOR 1080P/i 720p mode with clock*0.999
++#endif
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a46c023);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x4123b100);
+@@ -141,8 +184,26 @@ static void set_hpll_clk_out(unsigned clk)
+             WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             h_delay();
+             aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x00016385);   // optimise HPLL VCO 2.97GHz performance
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++			if( clk == 2975 )
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84d04); // lower div_frac to get clk*0.999
++			else
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#else
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++#endif
++            break;
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case 2161:
++            aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84f48);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a46c023);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL4, 0x0123b100);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL5, 0x12385);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x6001042c);
++            aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042c);
++            WAIT_FOR_PLL_LOCKED(P_HHI_VID_PLL_CNTL);
+             break;
++#endif			
+         case 2160:
+             aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
+             aml_write_reg32(P_HHI_VID_PLL_CNTL3, 0x8a46c023);
+@@ -389,6 +450,9 @@ static enc_clk_val_t setting_enc_clk_val_m8m2[] = {
+ 		{VMODE_480I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+ 		{VMODE_480CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+ 		{VMODE_480P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		{VMODE_480P_59HZ,  2161, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#endif		
+ 		{VMODE_480P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+ 		{VMODE_576I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+ 		{VMODE_576I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+@@ -396,16 +460,39 @@ static enc_clk_val_t setting_enc_clk_val_m8m2[] = {
+ 		{VMODE_576P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_576P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+ 		{VMODE_720P,       2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		// 2975 for hpll: vco2970 * 0.999
++		{VMODE_720P,       2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_1080I,      2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		{VMODE_1080I_59HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		// 2975 for hpll: vco2970 * 0.999
++		{VMODE_1080P,      2975, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_720P_50HZ,  2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_1080I_50HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_1080P_50HZ, 2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_1080P_24HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		// 2975 for hpll: vco2970 * 0.999
++		{VMODE_1080P_24HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_4K2K_30HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		// 2976 for hpll: vco2970(4k) * 0.999
++		{VMODE_4K2K_30HZ,  2976, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_4K2K_25HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_4K2K_24HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		// 2976 for hpll: vco2970(4k) * 0.999
++		{VMODE_4K2K_24HZ,  2976, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+ 		{VMODE_4K2K_SMPTE, 2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+ 		{VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+ 		{VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+@@ -417,17 +504,35 @@ static enc_clk_val_t setting_enc_clk_val[] = {
+     {VMODE_480I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_480CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_480P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{VMODE_480P_59HZ,  2161, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#endif	
+     {VMODE_576I,       2160, 8, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_576CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_576P,       2160, 8, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_720P,       2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_720P,       2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_1080I,      2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{VMODE_1080I_59HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_1080P,      2975, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_720P_50HZ,  2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080I_50HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_50HZ, 2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_24HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_1080P_24HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+     {VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+     {VMODE_XGA, 1085, 1, 1, 1, VIU_ENCP, 5, 1, 1, 1, -1, -1, -1,  1,  1},
+@@ -438,6 +543,9 @@ static enc_clk_val_t setting_enc_clk_val[] = {
+     {VMODE_480I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+     {VMODE_480CVBS,    1296, 4, 1, 1, VIU_ENCI,  6, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_480P,       1080, 4, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{VMODE_480P_59HZ,  1081, 4, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_480P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+     {VMODE_576I,       1080, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_576I_RPT,   2160, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  4, -1, -1,  2,  -1},
+@@ -445,16 +553,39 @@ static enc_clk_val_t setting_enc_clk_val[] = {
+     {VMODE_576P,       1080, 4, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_576P_RPT,   2160, 2, 1, 1, VIU_ENCP,  5, 4, 1, 2, -1, -1, -1,  1,  -1},
+     {VMODE_720P,       2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+-    {VMODE_1080I,      2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_720P_59HZ,  2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
++	{VMODE_1080I,      2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{VMODE_1080I_59HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P,      2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_1080P_59HZ, 2975, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_720P_50HZ,  2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080I_50HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_50HZ, 2970, 2, 2, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_24HZ, 2970, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2975 for hpll: vco2970 * 0.999
++	{VMODE_1080P_23HZ, 2975, 4, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_4K2K_30HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2976 for hpll: vco2970(4k) * 0.999
++	{VMODE_4K2K_29HZ,  2976, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_4K2K_25HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_4K2K_24HZ,  2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	// 2976 for hpll: vco2970(4k) * 0.999
++	{VMODE_4K2K_23HZ,  2976, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++#endif
+     {VMODE_4K2K_SMPTE, 2971, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+     {VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 0dd673f07497..d403262f889a 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -58,6 +58,18 @@ static void  parse_vdac_setting(char *para);
+ 
+ SET_TV_CLASS_ATTR(vdac_setting,parse_vdac_setting)
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++
++#define DEFAULT_POLICY_FR_AUTO	1
++
++static int fr_auto_policy = DEFAULT_POLICY_FR_AUTO;
++static void policy_framerate_automation_store(char* para);
++
++SET_TV_CLASS_ATTR(policy_fr_auto, policy_framerate_automation_store)
++
++#endif
++
++
+ 
+ /*****************************
+ *	default settings :
+@@ -72,8 +84,35 @@ SET_TV_CLASS_ATTR(vdac_setting,parse_vdac_setting)
+ 
+ static const tvmode_t vmode_tvmode_tab[] =
+ {
+-	TVMODE_480I, TVMODE_480I_RPT, TVMODE_480CVBS, TVMODE_480P, TVMODE_480P_RPT, TVMODE_576I, TVMODE_576I_RPT, TVMODE_576CVBS, TVMODE_576P, TVMODE_576P_RPT, TVMODE_720P, TVMODE_1080I, TVMODE_1080P,
+-    TVMODE_720P_50HZ, TVMODE_1080I_50HZ, TVMODE_1080P_50HZ,TVMODE_1080P_24HZ, TVMODE_4K2K_30HZ, TVMODE_4K2K_25HZ, TVMODE_4K2K_24HZ, TVMODE_4K2K_SMPTE, 
++	TVMODE_480I, TVMODE_480I_RPT, TVMODE_480CVBS, TVMODE_480P, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_480P_59HZ,
++#endif
++	TVMODE_480P_RPT, TVMODE_576I, TVMODE_576I_RPT, TVMODE_576CVBS, TVMODE_576P, TVMODE_576P_RPT, TVMODE_720P, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_720P_59HZ , // for 720p 59.94hz
++#endif
++	TVMODE_1080I, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080I_59HZ,
++#endif	
++	TVMODE_1080P,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_59HZ , // for 1080p 59.94hz
++#endif
++    TVMODE_720P_50HZ, TVMODE_1080I_50HZ, TVMODE_1080P_50HZ,TVMODE_1080P_24HZ, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_23HZ , // for 1080p 23.97hz
++#endif
++	TVMODE_4K2K_30HZ, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		TVMODE_4K2K_29HZ , // for 4k2k 29.97hz
++#endif
++	TVMODE_4K2K_25HZ, TVMODE_4K2K_24HZ, 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		TVMODE_4K2K_23HZ , // for 4k2k 23.97hz
++#endif
++	TVMODE_4K2K_SMPTE, 
+     TVMODE_VGA, TVMODE_SVGA, TVMODE_XGA, TVMODE_SXGA, TVMODE_WSXGA, TVMODE_FHDVGA,
+ };
+ 
+@@ -128,6 +167,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 27000000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_480P_59HZ */
++		.name              = "480p59hz",
++		.mode              = VMODE_480P_59HZ,
++        .width             = 720,
++        .height            = 480,
++        .field_height      = 480,
++        .aspect_ratio_num  = 4,
++        .aspect_ratio_den  = 3,
++        .sync_duration_num = 60000,
++        .sync_duration_den = 1001,
++        .video_clk         = 27000000,
++    },
++#endif
+     { /* VMODE_480P_RPT */
+         .name              = "480p_rpt",
+         .mode              = VMODE_480P_RPT,
+@@ -212,6 +265,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 74250000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_720P_59HZ */
++		.name              = "720p59hz",
++		.mode              = VMODE_720P_59HZ,
++        .width             = 1280,
++        .height            = 720,
++        .field_height      = 720,
++        .aspect_ratio_num  = 16,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 60000,
++        .sync_duration_den = 1001,
++        .video_clk         = 74250000,
++    },
++#endif
+     { /* VMODE_1080I */
+ 		.name              = "1080i",
+ 		.mode              = VMODE_1080I,
+@@ -224,6 +291,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 74250000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
++    { /* VMODE_1080I_59HZ */
++		.name              = "1080i59hz",
++		.mode              = VMODE_1080I_59HZ,
++        .width             = 1920,
++        .height            = 1080,
++        .field_height      = 540,
++        .aspect_ratio_num  = 16,
++        .aspect_ratio_den  = 9,
++        .sync_duration_num = 60000,
++        .sync_duration_den = 1001,
++        .video_clk         = 74250000,
++    },
++#endif
+     { /* VMODE_1080P */
+ 		.name              = "1080p",
+ 		.mode              = VMODE_1080P,
+@@ -236,6 +317,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 148500000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_1080P_59HZ */
++		.name			   = "1080p59hz",
++		.mode			   = VMODE_1080P_59HZ,
++		.width			   = 1920,
++		.height 		   = 1080,
++		.field_height	   = 1080,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 60000,
++		.sync_duration_den = 1001,
++		.video_clk		   = 148500000,
++	},
++#endif
+     { /* VMODE_720P_50hz */
+ 		.name              = "720p50hz",
+ 		.mode              = VMODE_720P_50HZ,
+@@ -284,6 +379,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 74250000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_1080P_23HZ */
++		.name			   = "1080p23hz",
++		.mode			   = VMODE_1080P_23HZ,
++		.width			   = 1920,
++		.height 		   = 1080,
++		.field_height	   = 1080,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 2397,
++		.sync_duration_den = 100,
++		.video_clk		   = 74250000,
++	},
++#endif
+     { /* VMODE_4K2K_30HZ */
+         .name              = "4k2k30hz",
+         .mode              = TVMODE_4K2K_30HZ,
+@@ -296,6 +405,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 297000000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_4K2K_29HZ */
++		.name			   = "4k2k29hz",
++		.mode			   = TVMODE_4K2K_29HZ,
++		.width			   = 3840,
++		.height 		   = 2160,
++		.field_height	   = 2160,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 2997,
++		.sync_duration_den = 100,
++		.video_clk		   = 297000000,
++	},
++#endif
+     { /* VMODE_4K2K_25HZ */
+         .name              = "4k2k25hz",
+         .mode              = TVMODE_4K2K_25HZ,
+@@ -320,6 +443,20 @@ static const vinfo_t tv_info[] =
+         .sync_duration_den = 1,
+         .video_clk         = 297000000,
+     },
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{ /* VMODE_4K2K_23HZ */
++		.name			   = "4k2k23hz",
++		.mode			   = TVMODE_4K2K_23HZ,
++		.width			   = 3840,
++		.height 		   = 2160,
++		.field_height	   = 2160,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 2397,
++		.sync_duration_den = 100,
++		.video_clk		   = 297000000,
++	},
++#endif
+     { /* VMODE_4K2K_SMPTE */
+         .name              = "4k2ksmpte",
+         .mode              = TVMODE_4K2K_SMPTE,
+@@ -491,6 +628,359 @@ static int tv_module_disable(vmode_t cur_vmod)
+ 	//video_dac_disable();
+ 	return 0;
+ }
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++
++static char* get_name_from_vmode(vmode_t mode)
++{
++	int i = 0, count = 0;
++	
++	count = ARRAY_SIZE(tv_info);
++	for( i=0; i<count; i++ )
++	{
++		if( tv_info[i].mode == mode )
++			break;
++	}
++
++	if( i == count )
++		return NULL;
++
++	return tv_info[i].name;
++}
++
++// frame_rate = 9600/duration/100 hz
++static int get_vsource_frame_rate(int duration)
++{
++	int frame_rate = 0;
++
++	switch( duration )
++	{
++		case 1600:
++			frame_rate = 6000;
++			break;
++		case 1601:
++		case 1602:
++			frame_rate = 5994;
++			break;
++		case 1920:
++			frame_rate = 5000;
++			break;
++		case 3200:
++			frame_rate = 3000;
++			break;
++		case 3203:
++			frame_rate = 2997;
++			break;
++		case 3840:
++			frame_rate = 2500;
++			break;
++		case 4000:
++			frame_rate = 2400;
++			break;
++		case 4004:
++			frame_rate = 2397;
++			break;
++		default:
++			break;
++	}
++
++	return frame_rate;
++}
++
++static int get_target_frame_rate(int framerate_vsource, int policy)
++{
++	const vinfo_t *pvinfo ;
++	int framerate_target = 0;
++	pvinfo = tv_get_current_info();
++	switch( policy )
++	{
++		case 0: // not change
++			break;
++		case 1: // change to the frame rate of video source
++			if( (framerate_vsource==2397) || (framerate_vsource==2997) || (framerate_vsource==5994) ){
++				switch(pvinfo->sync_duration_num)
++				{
++				case 24:
++					framerate_target=2397;
++					break;
++				case 30:
++					framerate_target=2997;
++					break;
++				case 60:
++					framerate_target=5994;
++					break;	
++				default:
++					framerate_target = ( pvinfo->sync_duration_num > 100 ? pvinfo->sync_duration_num : pvinfo->sync_duration_num*100 );
++					break;
++				}
++			}
++			else
++				framerate_target = framerate_vsource;
++			break;
++		case 2: // change to the frame rate of video source, but use 59.94 for 23.97/29.97
++			if( (framerate_vsource==2397) || (framerate_vsource==2997) )
++				framerate_target = 5994;
++			else
++				framerate_target = framerate_vsource;
++			break;
++		default:
++			break;
++	}
++	return framerate_target;
++}
++
++extern int hdmitx_is_vmode_supported(char *mode_name);
++
++static int get_target_vmode(int framerate_target)
++{
++	int is_receiver_supported = 0;
++	const vinfo_t *pvinfo ;
++	vmode_t mode_target = VMODE_INIT_NULL;
++
++	printk("vout [%s] frame_rate_target = %d\n", __FUNCTION__, framerate_target);
++
++	pvinfo = tv_get_current_info();
++
++	mode_target = pvinfo->mode;
++
++	if( (framerate_target==2397) || (framerate_target==2997) || (framerate_target==5994) ){
++		switch( mode_target ){
++			case VMODE_480P:
++				mode_target = VMODE_480P_59HZ;
++				break;
++			case VMODE_720P:
++				mode_target = VMODE_720P_59HZ;
++				break;
++			case VMODE_1080I:
++				mode_target = VMODE_1080I_59HZ;
++				break;
++			case VMODE_1080P_24HZ:
++				mode_target = VMODE_1080P_23HZ;
++				break;
++			case VMODE_1080P:
++				mode_target = VMODE_1080P_59HZ;
++				break;
++			case VMODE_4K2K_24HZ:
++				mode_target = VMODE_4K2K_23HZ;
++				break;
++			case VMODE_4K2K_30HZ:
++				mode_target = VMODE_4K2K_29HZ;
++				break;
++			default:
++				break;
++		}
++	}
++	is_receiver_supported = hdmitx_is_vmode_supported(get_name_from_vmode(mode_target));
++	
++	switch( is_receiver_supported )
++	{
++		case 0: // not supported in edid
++			mode_target = pvinfo->mode;
++			break;
++		case 1: // supported in edid
++			break;
++		case 2: // no edid
++			mode_target = pvinfo->mode;
++			break;
++		default:
++			break;
++	}
++	return mode_target;
++}
++
++// return values:
++//		0: 		same vmode, need not change
++//		1: 		similar vmode, just change pll to add 0.1% clock
++//		0xff: 	similar vmode, just change pll to reduce 0.1% clock
++//		2: 		different vmode, need change mode
++static int get_exchange_mode(vmode_t mode_target)
++{
++	const vinfo_t *pvinfo;
++	vmode_t mode_current = VMODE_INIT_NULL;
++	
++	pvinfo = tv_get_current_info();
++	mode_current = pvinfo->mode;
++	
++	if( mode_current == mode_target )
++		return 0;
++	
++	if( ((mode_current==VMODE_480P) && (mode_target==VMODE_480P_59HZ)) ||
++		((mode_current==VMODE_480P_59HZ) && (mode_target==VMODE_480P)) ||
++		((mode_current==VMODE_720P) && (mode_target==VMODE_720P_59HZ)) ||
++		((mode_current==VMODE_720P_59HZ) && (mode_target==VMODE_720P)) ||
++		((mode_current==VMODE_1080I) && (mode_target==VMODE_1080I_59HZ))||
++		((mode_current==VMODE_1080I_59HZ) && (mode_target==VMODE_1080I))||
++		((mode_current==VMODE_1080P) && (mode_target==VMODE_1080P_59HZ))||
++		((mode_current==VMODE_1080P_59HZ) && (mode_target==VMODE_1080P))||
++		((mode_current==VMODE_1080P_24HZ) && (mode_target==VMODE_1080P_23HZ))||
++		((mode_current==VMODE_1080P_23HZ) && (mode_target==VMODE_1080P_24HZ) )||
++		((mode_current==VMODE_4K2K_30HZ) && (mode_target==VMODE_4K2K_29HZ))||
++		((mode_current==VMODE_4K2K_29HZ) && (mode_target==VMODE_4K2K_30HZ))||
++		((mode_current==VMODE_4K2K_24HZ) && (mode_target==VMODE_4K2K_23HZ))||
++		((mode_current==VMODE_4K2K_23HZ) && (mode_target==VMODE_4K2K_24HZ)) )
++		return 0x1;
++
++	return 2;
++}
++
++// just to fine tune the 0.1% clock
++static int clock_fine_tune(void)
++{
++	const vinfo_t *pvinfo ;
++	pvinfo = tv_get_current_info();
++#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON8) || (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON8B)
++	switch( pvinfo->mode )
++	{
++		case VMODE_720P_59HZ:
++		case VMODE_1080I_59HZ:
++		case VMODE_1080P_23HZ:
++		case VMODE_1080P_59HZ:
++		case VMODE_4K2K_29HZ:
++		case VMODE_4K2K_23HZ:
++			aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84d04);
++			break;
++		case VMODE_720P:
++		case VMODE_1080I:
++		case VMODE_1080P:
++		case VMODE_1080P_24HZ:
++		case VMODE_4K2K_30HZ:	
++		case VMODE_4K2K_24HZ:
++			aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84e00);
++			break;
++		case VMODE_480P_59HZ:
++			if( (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON8B) || (IS_MESON_M8M2_CPU) ){
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84f48);
++				aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042c);
++			}
++			else{
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c8cf48);
++				aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4008042c);
++			}
++			break;
++		case VMODE_480P:
++			if( (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON8B) || (IS_MESON_M8M2_CPU) ){
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c84000);
++				aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4001042d);
++			}
++			else{
++				aml_write_reg32(P_HHI_VID_PLL_CNTL2, 0x69c88000);
++				aml_write_reg32(P_HHI_VID_PLL_CNTL,  0x4008042d);
++			}
++			break;
++		default:
++			break;
++	}
++
++#endif
++
++	return 0;
++}
++
++extern void update_vmode_status(char* name);
++extern void set_vout_mode_fr_auto(char * name);
++
++static void update_current_vinfo(vmode_t mode)
++{
++	if ((mode&VMODE_MODE_BIT_MASK)> VMODE_FHDVGA)
++		return ;
++
++	info->vinfo = &tv_info[mode & VMODE_MODE_BIT_MASK];
++
++	return ;
++}
++
++static int framerate_automation_set_mode(vmode_t mode_target)
++{
++	int auto_mode = 0;
++
++	auto_mode = get_exchange_mode(mode_target);
++
++	printk("vout [%s] mode_target = %d\n", __FUNCTION__, mode_target);
++	printk("+++++++++++++++++%s[%d]auto_mode=%d++++++++++++++++\n",__func__,__LINE__,auto_mode);
++	switch( auto_mode )
++	{
++		case 0:
++			// need not change vmode
++			break;
++		case 1:
++			// just change pll to adjust clock
++		 	update_vmode_status(get_name_from_vmode(mode_target));
++			update_current_vinfo(mode_target);
++			clock_fine_tune();
++			vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE,&mode_target) ;
++			break;
++		case 2:
++			// change vmode and notify all client
++			set_vout_mode_fr_auto(get_name_from_vmode(mode_target));
++			break;
++		default:
++			break;
++	}
++
++	return 0;
++}
++
++static int framerate_automation_process(int duration)
++{
++	int policy=0, fr_vsource = 0, fr_target = 0;
++	vmode_t mode_target = VMODE_INIT_NULL;
++	const vinfo_t *pvinfo;
++
++	printk("vout [%s] duration = %d\n", __FUNCTION__, duration);
++	policy = fr_auto_policy;
++	if( policy == 0 )
++	{
++		printk("vout frame rate automation disabled!\n");
++		return 1;
++	}
++
++	fr_vsource = get_vsource_frame_rate(duration);
++	fr_target = get_target_frame_rate(fr_vsource, policy);
++
++	pvinfo = tv_get_current_info();
++	if( (pvinfo->sync_duration_num==fr_target) || (pvinfo->sync_duration_num==(fr_target/100)) )
++		return 0;
++
++	mode_target = get_target_vmode(fr_target);
++	
++	framerate_automation_set_mode(mode_target);
++
++	return 0;
++}
++
++#endif
++static int tv_set_vframe_rate_hint(int duration)
++{
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++
++	printk("vout [%s] duration = %d, policy = %d!\n", __FUNCTION__, duration, fr_auto_policy);
++
++	framerate_automation_process(duration);
++
++#endif
++
++	return 0;
++}
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++extern vmode_t mode_by_user ;
++#endif
++
++static int tv_set_vframe_rate_end_hint(void)
++{
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++
++	printk("vout [%s] return mode = %d, policy = %d!\n", __FUNCTION__, mode_by_user, fr_auto_policy);
++	if( fr_auto_policy != 0 )
++	{
++		framerate_automation_set_mode(mode_by_user);
++	}
++
++#endif
++
++	return 0;
++}
++
+ #ifdef  CONFIG_PM
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ extern void cvbs_cntl_output(unsigned int open);
+@@ -519,6 +1009,8 @@ static vout_server_t tv_server={
+ 		.validate_vmode=tv_validate_vmode,
+ 		.vmode_is_supported=tv_vmode_is_supported,
+ 		.disable = tv_module_disable,
++		.set_vframe_rate_hint = tv_set_vframe_rate_hint,
++		.set_vframe_rate_end_hint = tv_set_vframe_rate_end_hint,
+ #ifdef  CONFIG_PM  
+ 		.vout_suspend=tv_suspend,
+ 		.vout_resume=tv_resume,
+@@ -568,8 +1060,34 @@ static void  parse_vdac_setting(char *para)
+ 	
+ 	change_vdac_setting(vdac_sequence,get_current_vmode());
+ }
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++//
++// 0: disable frame_rate_automation feature
++// 1: enable frame_rate_automation feature, same with frame rate of video source
++// 2: enable frame_rate_automation feature, use 59.94 instead of 23.97/29.97
++//
++static void policy_framerate_automation_store(char* para)
++{
++	int policy = 0;
++
++	policy = simple_strtoul(para, NULL, 10);
++
++	if( (policy>=0) && (policy<3) )
++	{
++		fr_auto_policy = policy;
++	}
++
++	return ;
++}
++
++#endif
++
+ static  struct  class_attribute   *tv_attr[]={
+ &class_TV_attr_vdac_setting,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++&class_TV_attr_policy_fr_auto,
++#endif
+ };
+ static int  create_tv_attr(disp_module_info_t* info)
+ {
+@@ -591,6 +1109,11 @@ static int  create_tv_attr(disp_module_info_t* info)
+ 		}
+ 	}
+ 	sprintf(vdac_setting,"%x",get_current_vdac_setting());
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	sprintf(policy_fr_auto, "%d", DEFAULT_POLICY_FR_AUTO);
++#endif
++
+ 	return   0;
+ }
+ static int __init tv_init_module(void)
+diff --git a/drivers/amlogic/display/vout/tvmode.h b/drivers/amlogic/display/vout/tvmode.h
+index 7356c58e86fc..54659c1b37f0 100755
+--- a/drivers/amlogic/display/vout/tvmode.h
++++ b/drivers/amlogic/display/vout/tvmode.h
+@@ -30,6 +30,9 @@ typedef enum {
+     TVMODE_480I_RPT  ,
+     TVMODE_480CVBS,
+     TVMODE_480P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_480P_59HZ , // for framerate automation 480p 59.94hz
++#endif
+     TVMODE_480P_RPT  ,
+     TVMODE_576I  ,
+     TVMODE_576I_RPT  ,
+@@ -37,15 +40,33 @@ typedef enum {
+     TVMODE_576P  ,
+     TVMODE_576P_RPT  ,
+     TVMODE_720P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_720P_59HZ , // for framerate automation 720p 59.94hz
++#endif
+     TVMODE_1080I ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080I_59HZ , // for framerate automation 1080i 59.94hz
++#endif
+     TVMODE_1080P ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_59HZ , // for framerate automation 1080p 59.94hz
++#endif
+     TVMODE_720P_50HZ ,
+     TVMODE_1080I_50HZ ,
+     TVMODE_1080P_50HZ ,
+     TVMODE_1080P_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_1080P_23HZ , // for framerate automation 1080p 23.97hz
++#endif
+     TVMODE_4K2K_30HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_4K2K_29HZ , // for framerate automation 4k2k 29.97hz
++#endif
+     TVMODE_4K2K_25HZ ,
+     TVMODE_4K2K_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	TVMODE_4K2K_23HZ , // for framerate automation 4k2k 23.97hz
++#endif
+     TVMODE_4K2K_SMPTE ,
+     TVMODE_VGA ,
+     TVMODE_SVGA,
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index 79fce2cbc569..757b84cc4527 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -511,19 +511,40 @@ int tvoutc_setmode(tvmode_t mode)
+         aml_set_reg32_bits(P_VPU_VIU_VENC_MUX_CTRL, 1, 8, 4); //reg0x271a,Enable VIU of ENC_I domain to VDIN;
+ 			  break;
+ 		case TVMODE_480P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_480P_59HZ:
++#endif
+ 		case TVMODE_480P_RPT:
+ 		case TVMODE_576P:
+ 		case TVMODE_576P_RPT:
+ 		case TVMODE_720P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_720P_59HZ:
++#endif
+ 		case TVMODE_720P_50HZ:
+ 		case TVMODE_1080I: //??
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_1080I_59HZ:
++#endif
+ 		case TVMODE_1080I_50HZ: //??
+ 		case TVMODE_1080P:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_1080P_59HZ:
++#endif
+ 		case TVMODE_1080P_50HZ:
+ 		case TVMODE_1080P_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_1080P_23HZ:
++#endif
+         case TVMODE_4K2K_30HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_4K2K_29HZ:
++#endif
+         case TVMODE_4K2K_25HZ:
+         case TVMODE_4K2K_24HZ:
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++		case TVMODE_4K2K_23HZ:
++#endif
+         case TVMODE_4K2K_SMPTE:
+ 		case TVMODE_VGA:
+ 		case TVMODE_SVGA:
+diff --git a/drivers/amlogic/display/vout/vout_notify.c b/drivers/amlogic/display/vout/vout_notify.c
+index fa7cfde0f42c..7ea787b61f55 100755
+--- a/drivers/amlogic/display/vout/vout_notify.c
++++ b/drivers/amlogic/display/vout/vout_notify.c
+@@ -91,6 +91,55 @@ vmode_t get_current_vmode(void)
+ 	return mode;
+ }
+ EXPORT_SYMBOL(get_current_vmode);
++
++/*
++*interface export to client who want to notify about source frame rate.
++*/
++int set_vframe_rate_hint(int duration)
++{
++        int r=-1;
++        vout_server_t  *p_server;
++
++        //mutex_lock(&vout_mutex);
++        list_for_each_entry(p_server, &vout_module.vout_server_list, list)
++        {
++		if (p_server->op.set_vframe_rate_hint(duration) == 0)
++                {
++			mutex_unlock(&vout_mutex);
++			return 0;
++                }
++        }
++
++        //mutex_unlock(&vout_mutex);
++
++        return r;
++}
++EXPORT_SYMBOL(set_vframe_rate_hint);
++
++/*
++*interface export to client who want to notify about source frame rate end.
++*/
++int set_vframe_rate_end_hint(void)
++{
++        int r=-1;
++        vout_server_t  *p_server;
++
++        //mutex_lock(&vout_mutex);
++        list_for_each_entry(p_server, &vout_module.vout_server_list, list)
++        {
++                if (p_server->op.set_vframe_rate_end_hint() == 0)
++                {
++                        mutex_unlock(&vout_mutex);
++                        return 0;
++                }
++        }
++
++        //mutex_unlock(&vout_mutex);
++
++        return r;
++}
++EXPORT_SYMBOL(set_vframe_rate_end_hint);
++
+ #ifdef CONFIG_SCREEN_ON_EARLY
+ static int wake_up_flag;
+ void wakeup_early_suspend_proc(void)
+diff --git a/drivers/amlogic/display/vout/vout_serve.c b/drivers/amlogic/display/vout/vout_serve.c
+index 7feb7a6b3521..240767f95e1f 100755
+--- a/drivers/amlogic/display/vout/vout_serve.c
++++ b/drivers/amlogic/display/vout/vout_serve.c
+@@ -134,6 +134,10 @@ static int  meson_vout_suspend(struct platform_device *pdev, pm_message_t state)
+ static int  meson_vout_resume(struct platform_device *pdev);
+ #endif
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++vmode_t mode_by_user = VMODE_INIT_NULL;
++#endif
++
+ static  void  set_vout_mode(char * name)
+ {
+ 	vmode_t    mode;
+@@ -145,17 +149,58 @@ static  void  set_vout_mode(char * name)
+ 		amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"no matched vout mode\n");
+ 		return ; 
+ 	}
++
++	mode_by_user = mode;
++
+ 	if(mode==get_current_vmode())
+ 	{
+ 		amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"don't set the same mode as current.\n");
+ 		return ;
+ 	}
++
+ 	set_current_vmode(mode);
+ 	amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"new mode %s set ok\n",name);
+ 	vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE,&mode) ;
+ 	printk("%s[%d]\n", __func__, __LINE__);
+ }
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++void update_vmode_status(char* name)
++{
++	snprintf(mode, 40, "%s\n", name);
++}
++
++EXPORT_SYMBOL(update_vmode_status);
++
++void set_vout_mode_fr_auto(char* name)
++{
++	vmode_t    vmode;
++
++	amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"tvmode set to %s\n",name);
++
++	vmode=validate_vmode(name);
++	if(VMODE_MAX==vmode)
++	{
++		amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"no matched vout mode\n");
++		return ; 
++	}
++	if(vmode==get_current_vmode())
++	{
++		amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"don't set the same mode as current.\n");
++		return ;
++	}
++	
++	update_vmode_status(name);
++
++	set_current_vmode(vmode);
++	amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_HIGH,"new mode %s set ok\n",name);
++	vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE,&vmode) ;
++	printk("%s[%d]\n", __func__, __LINE__);
++}
++EXPORT_SYMBOL(set_vout_mode_fr_auto);
++
++#endif
++
+ char* get_vout_mode_internal(void)
+ {
+ 	return mode;
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index 10a50979985a..a135e72e8cdc 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -239,6 +239,14 @@ static  int  set_disp_mode(const char *mode)
+     else if(strncmp(mode, "4k2ksmpte", strlen("4k2ksmpte")) == 0) {
+         vic = HDMI_4k2k_smpte_24;
+     }
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	else if(strncmp(mode, "4k2k29hz", strlen("4k2k29hz")) == 0) {
++        vic = HDMI_4k2k_30;
++    }
++	else if(strncmp(mode, "4k2k23hz", strlen("4k2k23hz")) == 0) {
++        vic = HDMI_4k2k_24;
++    }
++#endif
+     else {
+         //nothing
+     }
+@@ -299,6 +307,63 @@ static void hdmitx_pre_display_init(void)
+     hdmitx_device.internal_mode_change = 0;
+ }
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++// judge whether the mode exchange is between similar vmode, such as between 1080p60 and 1080p59hz
++// "vic_old==HDMI_720P60" means old vic is HDMI_1080p60, but vmode maybe VMODE_1080P or VMODE_1080P_59HZ 
++static int is_similar_hdmi_vic(HDMI_Video_Codes_t vic_old, vmode_t mode_new)
++{
++	if( (vic_old==HDMI_480p60_16x9) && 
++		( (mode_new==VMODE_480P) || (mode_new==VMODE_480P_59HZ) ) )
++		return 1;	
++	if( (vic_old==HDMI_720p60) && 
++		( (mode_new==VMODE_720P) || (mode_new==VMODE_720P_59HZ) ) )
++		return 1;
++	if( (vic_old==HDMI_1080i60) && 
++		( (mode_new==VMODE_1080I) || (mode_new==VMODE_1080I_59HZ) ) )
++		return 1;
++	if( (vic_old==HDMI_1080p60) && 
++		( (mode_new==VMODE_1080P) || (mode_new==VMODE_1080P_59HZ) ) )
++		return 1;
++	if( (vic_old==HDMI_1080p24) && 
++		( (mode_new==VMODE_1080P_24HZ) || (mode_new==VMODE_1080P_23HZ) ) )
++		return 1;
++	if( (vic_old==HDMI_4k2k_30) && 
++		( (mode_new==VMODE_4K2K_30HZ) || (mode_new==VMODE_4K2K_29HZ) ) )
++		return 1;
++	if( (vic_old==HDMI_4k2k_24) && 
++		( (mode_new==VMODE_4K2K_24HZ) || (mode_new==VMODE_4K2K_23HZ) ) )
++		return 1;
++
++	return 0;
++}
++
++//
++// input para: name of vmode, such as "1080p50hz"
++// return values:
++//		0: not supported in edid
++//		1: supported in edid
++//		2: no edid
++//
++int hdmitx_is_vmode_supported(char *mode_name)
++{
++	HDMI_Video_Codes_t vic;
++
++	if( hdmitx_device.tv_no_edid )
++		return 2;
++
++	vic = hdmitx_edid_get_VIC(&hdmitx_device, mode_name, 0);
++	if( vic != HDMI_Unkown )
++		return 1;
++	else
++		return 0;
++
++	return 0;
++}
++
++EXPORT_SYMBOL(hdmitx_is_vmode_supported);
++
++#endif
++
+ static int set_disp_mode_auto(void)
+ {
+     int ret=-1;
+@@ -326,7 +391,6 @@ static int set_disp_mode_auto(void)
+     else {
+         hdmi_print(IMP, VID "get current mode: %s\n", info->name);
+     }
+-
+ // If info->name equals to cvbs, then set mode to I mode to hdmi
+     if((strncmp(info->name, "480cvbs", 7) == 0) || (strncmp(info->name, "576cvbs", 7) == 0) ||
+        (strncmp(info->name, "panel", 5) == 0) || (strncmp(info->name, "null", 4) == 0)) {
+@@ -359,6 +423,11 @@ static int set_disp_mode_auto(void)
+         //nothing
+     }
+ 
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	if( is_similar_hdmi_vic(vic_ready, info->mode) )
++		vic_ready = HDMI_Unkown;
++#endif
++
+     if((vic_ready != HDMI_Unkown) && (vic_ready == vic)) {
+         hdmi_print(IMP, SYS "[%s] ALREADY init VIC = %d\n", __func__, vic);
+         if(hdmitx_device.RXCap.IEEEOUI == 0) {
+@@ -877,11 +946,29 @@ static DEVICE_ATTR(cec_lang_config, S_IWUSR | S_IRUGO | S_IWGRP, show_cec_lang_c
+ ******************************/
+ static int hdmitx_notify_callback_v(struct notifier_block *block, unsigned long cmd , void *para)
+ {
+-    if(get_cur_vout_index()!=1)
++	const vinfo_t *info = NULL;
++	HDMI_Video_Codes_t vic_ready = HDMI_Unkown;
++	if(get_cur_vout_index()!=1)
+         return 0;
+ 
+     if (cmd != VOUT_EVENT_MODE_CHANGE)
+         return 0;
++	
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION	
++    // vic_ready got from IP
++    vic_ready = hdmitx_device.HWOp.GetState(&hdmitx_device, STAT_VIDEO_VIC, 0);
++	// get current vinfo
++    info = hdmi_get_current_vinfo();
++    if(info == NULL) {
++        hdmi_print(ERR, VID "cann't get valid mode\n");
++        return -1;
++    }
++    else {
++        hdmi_print(IMP, VID "get current mode: %s\n", info->name);
++    }
++	if( is_similar_hdmi_vic(vic_ready, info->mode) )
++		return 0;
++#endif
+     if(hdmitx_device.vic_count == 0){
+         if(is_dispmode_valid_for_hdmi()){
+             hdmitx_device.mux_hpd_if_pin_high_flag = 1;
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+index 387b8263fc24..0b06bf57dde3 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+@@ -1339,6 +1339,9 @@ static dispmode_vic_t dispmode_VIC_tab[]=
+     {"480p_4_3",  HDMI_480p60},
+     {"480p_rpt",  HDMI_480p60_16x9_rpt},
+     {"480p",      HDMI_480p60_16x9},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"480p59hz",  HDMI_480p60_16x9},
++#endif
+     {"576i_4_3",  HDMI_576i50},
+     {"576i_rpt",  HDMI_576i50_16x9_rpt},
+     {"576i",      HDMI_576i50_16x9},
+@@ -1347,15 +1350,33 @@ static dispmode_vic_t dispmode_VIC_tab[]=
+     {"576p",      HDMI_576p50_16x9},
+     {"720p50hz",  HDMI_720p50},
+     {"720p",      HDMI_720p60},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"720p59hz",  HDMI_720p60},
++#endif
+     {"1080i50hz", HDMI_1080i50},
+     {"1080i",     HDMI_1080i60},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++    {"1080i59hz", HDMI_1080i60},
++#endif
+     {"1080p50hz", HDMI_1080p50},
+     {"1080p30hz", HDMI_1080p30},
+     {"1080p24hz", HDMI_1080p24},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"1080p23hz", HDMI_1080p24},
++#endif
+     {"1080p",     HDMI_1080p60},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"1080p59hz", HDMI_1080p60},
++#endif
+     {"4k2k30hz",  HDMI_4k2k_30},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"4k2k29hz",  HDMI_4k2k_30},
++#endif
+     {"4k2k25hz",  HDMI_4k2k_25},
+     {"4k2k24hz",  HDMI_4k2k_24},
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	{"4k2k23hz",  HDMI_4k2k_24},
++#endif
+     {"4k2ksmpte", HDMI_4k2k_smpte_24},
+ };
+ 
+diff --git a/drivers/amlogic/ppmgr/ppmgr_vpp.c b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+index 25147a612bc1..b880bc09d8d1 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_vpp.c
++++ b/drivers/amlogic/ppmgr/ppmgr_vpp.c
+@@ -411,23 +411,27 @@ static int ppmgr_receiver_event_fun(int type, void *data, void *private_data)
+                 return RECEIVER_INACTIVE;
+             }
+             break;
+-            case VFRAME_EVENT_PROVIDER_START:
++        case VFRAME_EVENT_PROVIDER_START:
+ #ifdef DDD
+         printk("register now \n");
+ #endif
+             vf_ppmgr_reg_provider();
+             break;
+-            case VFRAME_EVENT_PROVIDER_UNREG:
++        case VFRAME_EVENT_PROVIDER_UNREG:
+ #ifdef DDD
+         printk("unregister now \n");
+ #endif
+             vf_ppmgr_unreg_provider();
+             break;
+-            case VFRAME_EVENT_PROVIDER_LIGHT_UNREG:
++        case VFRAME_EVENT_PROVIDER_LIGHT_UNREG:
++            break;
++        case VFRAME_EVENT_PROVIDER_RESET       :
++            vf_ppmgr_reset(0);
++            break;
++        case VFRAME_EVENT_PROVIDER_FR_HINT:
++        case VFRAME_EVENT_PROVIDER_FR_END_HINT:
++            vf_notify_receiver(PROVIDER_NAME,type,data);
+             break;
+-            case VFRAME_EVENT_PROVIDER_RESET       :
+-            	vf_ppmgr_reset(0);
+-            	break;
+         default:
+             break;
+     }
+diff --git a/include/linux/amlogic/amports/timestamp.h b/include/linux/amlogic/amports/timestamp.h
+index 8ff24a4b1aa1..89d2d0ceaaa1 100755
+--- a/include/linux/amlogic/amports/timestamp.h
++++ b/include/linux/amlogic/amports/timestamp.h
+@@ -40,6 +40,8 @@ extern void timestamp_pcrscr_set(u32 pts);
+ 
+ extern void timestamp_pcrscr_inc(s32 val);
+ 
++extern void timestamp_pcrscr_inc_scale(s32 inc, u32 base);
++
+ extern void timestamp_pcrscr_enable(u32 enable);
+ 
+ extern u32 timestamp_pcrscr_enable_state(void);
+diff --git a/include/linux/amlogic/amports/vframe_receiver.h b/include/linux/amlogic/amports/vframe_receiver.h
+index 8267a00a4289..498cb14f5d4a 100755
+--- a/include/linux/amlogic/amports/vframe_receiver.h
++++ b/include/linux/amlogic/amports/vframe_receiver.h
+@@ -28,18 +28,20 @@
+ /* Amlogic headers */
+ #include <linux/amlogic/amports/vframe.h>
+ 
+-#define VFRAME_EVENT_PROVIDER_UNREG             1
+-#define VFRAME_EVENT_PROVIDER_LIGHT_UNREG       2
+-#define VFRAME_EVENT_PROVIDER_START             3
+-#define VFRAME_EVENT_PROVIDER_VFRAME_READY      4
+-#define VFRAME_EVENT_PROVIDER_QUREY_STATE        5 
+-#define VFRAME_EVENT_PROVIDER_RESET             6
+-#define VFRAME_EVENT_PROVIDER_FORCE_BLACKOUT		7
+-#define VFRAME_EVENT_PROVIDER_REG               8
+-#define VFRAME_EVENT_PROVIDER_LIGHT_UNREG_RETURN_VFRAME   9
+-#define VFRAME_EVENT_PROVIDER_DPBUF_CONFIG              10
+-#define VFRAME_EVENT_PROVIDER_QUREY_VDIN2NR         11
++#define VFRAME_EVENT_PROVIDER_UNREG                            1
++#define VFRAME_EVENT_PROVIDER_LIGHT_UNREG                      2
++#define VFRAME_EVENT_PROVIDER_START                            3
++#define VFRAME_EVENT_PROVIDER_VFRAME_READY                     4
++#define VFRAME_EVENT_PROVIDER_QUREY_STATE                      5
++#define VFRAME_EVENT_PROVIDER_RESET                            6
++#define VFRAME_EVENT_PROVIDER_FORCE_BLACKOUT		       7
++#define VFRAME_EVENT_PROVIDER_REG                              8
++#define VFRAME_EVENT_PROVIDER_LIGHT_UNREG_RETURN_VFRAME        9
++#define VFRAME_EVENT_PROVIDER_DPBUF_CONFIG                     10
++#define VFRAME_EVENT_PROVIDER_QUREY_VDIN2NR                    11
+ #define VFRAME_EVENT_PROVIDER_SET_3D_VFRAME_INTERLEAVE         12
++#define VFRAME_EVENT_PROVIDER_FR_HINT                          13
++#define VFRAME_EVENT_PROVIDER_FR_END_HINT                      14
+ 
+ typedef enum {
+   RECEIVER_STATE_NULL = -1,
+diff --git a/include/linux/amlogic/vout/vinfo.h b/include/linux/amlogic/vout/vinfo.h
+index b2ba613daa9d..3c057bd3178b 100755
+--- a/include/linux/amlogic/vout/vinfo.h
++++ b/include/linux/amlogic/vout/vinfo.h
+@@ -32,6 +32,9 @@ typedef enum {
+     VMODE_480I_RPT  ,
+     VMODE_480CVBS,
+     VMODE_480P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION    
++    VMODE_480P_59HZ,// for framerate automation 480p 59.94hz
++#endif   
+     VMODE_480P_RPT  ,
+     VMODE_576I   ,
+     VMODE_576I_RPT  ,
+@@ -39,15 +42,33 @@ typedef enum {
+     VMODE_576P  ,
+     VMODE_576P_RPT  ,
+     VMODE_720P  ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	VMODE_720P_59HZ , // for framerate automation 720p 59.94hz
++#endif
+     VMODE_1080I ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++    VMODE_1080I_59HZ , // for framerate automation 1080i 59.94hz
++#endif   
+     VMODE_1080P ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	VMODE_1080P_59HZ , // for framerate automation 1080p 59.94hz
++#endif
+     VMODE_720P_50HZ ,
+     VMODE_1080I_50HZ ,
+     VMODE_1080P_50HZ ,
+     VMODE_1080P_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	VMODE_1080P_23HZ , // for framerate automation 1080p 23.97hz
++#endif
+     VMODE_4K2K_30HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	VMODE_4K2K_29HZ , // for framerate automation 4k2k 29.97hz
++#endif
+     VMODE_4K2K_25HZ ,
+     VMODE_4K2K_24HZ ,
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	VMODE_4K2K_23HZ , // for framerate automation 4k2k 23.97hz
++#endif
+     VMODE_4K2K_SMPTE,
+     VMODE_VGA,
+     VMODE_SVGA,
+diff --git a/include/linux/amlogic/vout/vout_notify.h b/include/linux/amlogic/vout/vout_notify.h
+index 5ff2dddf08bc..7b0e04917b2b 100755
+--- a/include/linux/amlogic/vout/vout_notify.h
++++ b/include/linux/amlogic/vout/vout_notify.h
+@@ -31,13 +31,15 @@
+ 
+ typedef struct 
+ {
+-	const vinfo_t* (*get_vinfo)(void);
+-	int		 (*set_vmode)(vmode_t);
+-	vmode_t  (*validate_vmode)(char *);
+-	int		(*vmode_is_supported)(vmode_t);
+-	int		(*disable)(vmode_t );
+-	int		(*vout_suspend)(void);
+-	int		(*vout_resume)(void);
++    const vinfo_t* (*get_vinfo)(void);
++    int	           (*set_vmode)(vmode_t);
++    vmode_t        (*validate_vmode)(char *);
++    int            (*vmode_is_supported)(vmode_t);
++    int            (*disable)(vmode_t );
++    int            (*set_vframe_rate_hint)(int);
++    int            (*set_vframe_rate_end_hint)(void);
++    int            (*vout_suspend)(void);
++    int            (*vout_resume)(void);
+ }vout_op_t ;
+ 
+ 
+@@ -66,6 +68,8 @@ extern const vinfo_t *get_current_vinfo(void);
+ extern vmode_t get_current_vmode(void);
+ extern int set_current_vmode(vmode_t);
+ extern vmode_t validate_vmode(char *);
++extern int set_vframe_rate_hint(int);
++extern int set_vframe_rate_end_hint(void);
+ 
+ extern int vout_suspend(void); 
+ extern int vout_resume(void);
+-- 
+2.19.0
+

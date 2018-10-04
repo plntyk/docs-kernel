@@ -1,0 +1,114 @@
+From 24388993ba3cad5eaaab6c320e28d8817bfa7573 Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Fri, 10 Jan 2014 14:13:46 +0800
+Subject: [PATCH 2958/5965] mmc: distinguish card detect on M8 and M6
+
+---
+ arch/arm/mach-meson6/include/mach/sd.h | 11 ++++-------
+ drivers/amlogic/mmc/amlsd.c            | 24 ++++++++++++++++++++++++
+ 2 files changed, 28 insertions(+), 7 deletions(-)
+ mode change 100644 => 100755 arch/arm/mach-meson6/include/mach/sd.h
+
+diff --git a/arch/arm/mach-meson6/include/mach/sd.h b/arch/arm/mach-meson6/include/mach/sd.h
+old mode 100644
+new mode 100755
+index e27e6a6ebaf0..149e04e6d514
+--- a/arch/arm/mach-meson6/include/mach/sd.h
++++ b/arch/arm/mach-meson6/include/mach/sd.h
+@@ -586,6 +586,7 @@ void aml_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq);
+ int aml_sdhc_get_cd(struct mmc_host *mmc);
+ extern void amlsd_init_debugfs(struct mmc_host *host);
+ 
++extern struct mmc_host *sdio_host;
+ 
+ #define     SPI_BOOT_FLAG                   0
+ #define     NAND_BOOT_FLAG                  1
+@@ -610,14 +611,10 @@ extern void amlsd_init_debugfs(struct mmc_host *host);
+ 		printk("[%s] " fmt, __FUNCTION__, ##args);	\
+ }while(0)
+ 
+-// P_AO_SECURE_REG1 is "Secure Register 1" in <M8-Secure-AHB-Registers.doc>
+-#define aml_jtag_gpioao() do{\
+-    writel(0x102, (u32 *)P_AO_SECURE_REG1); \
+-}while(0)
++// don't support uart_debug board on M6, do nothing
++#define aml_jtag_gpioao()
+ 
+-#define aml_jtag_sd() do{\
+-    writel(0x220, (u32 *)P_AO_SECURE_REG1); \
+-}while(0)
++#define aml_jtag_sd()
+ 
+ #define aml_uart_pinctrl() do {\
+     \
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index c04b9980e6e5..7acb3935c84d 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -907,6 +907,7 @@ static int aml_is_card_insert (struct amlsd_platform * pdata)
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_ARCH_MESON8
+ static int aml_is_sdjtag(struct amlsd_platform * pdata)
+ {
+     int card0;
+@@ -1026,6 +1027,7 @@ static int aml_uart_switch(struct amlsd_platform* pdata, bool on)
+     pdata->uart_ao_pinctrl);
+ #endif
+ }
++#endif
+ 
+ // clear detect information
+ void aml_sd_uart_detect_clr (struct amlsd_platform* pdata)
+@@ -1036,6 +1038,7 @@ void aml_sd_uart_detect_clr (struct amlsd_platform* pdata)
+ 
+ void aml_sd_uart_detect (struct amlsd_platform* pdata)
+ {
++#ifdef CONFIG_ARCH_MESON8
+     static bool is_jtag = false;
+ 
+     if (aml_is_card_insert(pdata)){
+@@ -1087,7 +1090,26 @@ void aml_sd_uart_detect (struct amlsd_platform* pdata)
+         if(pdata->caps & MMC_CAP_4_BIT_DATA)
+             pdata->mmc->caps |= MMC_CAP_4_BIT_DATA;
+     }
++#else
++    if (aml_is_card_insert(pdata)){
++        if (!pdata->is_in) { // status change, last time is out, and now is in
++            // printk("\033[0;40;35m normal SD card in \033[0m\n");
++            printk("normal card in\n");
++        }/*  else { */
++        // printk("\033[0;40;35m normal SD card in again---------------- \033[0m\n");
++        /* } */
++        pdata->is_in = true;
++    } else {
++        if (pdata->is_in) { // status change, last time is in, and now is out
++            // printk("\033[0;40;31m card out \033[0m\n");
++            printk("card out\n");
++        } /* else { */
++            // printk("\033[0;40;31m card out again---------------- \033[0m\n");
++        /* } */
+ 
++        pdata->is_in = false;
++    }
++#endif
+     return;
+ }
+ 
+@@ -1112,10 +1134,12 @@ irqreturn_t aml_sd_irq_cd(int irq, void *dev_id)
+ void aml_sduart_pre (struct amlsd_platform* pdata)
+ {
+     if (((pdata->port == MESON_SDIO_PORT_B) || (pdata->port == MESON_SDIO_PORT_XC_B))) {
++#ifdef CONFIG_ARCH_MESON8
+         // clear pinmux of CARD_0 and CARD_4 to make them used as gpio
+         CLEAR_CBUS_REG_MASK(PERIPHS_PIN_MUX_2, 0x00005040);
+         CLEAR_CBUS_REG_MASK(PERIPHS_PIN_MUX_8, 0x00000400);
+         aml_jtag_gpioao();
++#endif
+         aml_sd_uart_detect(pdata);
+     }
+ }
+-- 
+2.19.0
+

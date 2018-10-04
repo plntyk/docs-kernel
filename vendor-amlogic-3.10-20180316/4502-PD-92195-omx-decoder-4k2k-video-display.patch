@@ -1,0 +1,264 @@
+From 0c41db7586f29dd02d13119a60325da23ba9c396 Mon Sep 17 00:00:00 2001
+From: "jintao.xu" <jintao.xu@amlogic.com>
+Date: Fri, 23 May 2014 11:24:10 +0800
+Subject: [PATCH 4502/5965] PD #92195 omx decoder 4k2k video display
+
+---
+ drivers/amlogic/amports/video.c          |  22 +++-
+ drivers/amlogic/video_dev/amlvideo.c     | 123 +++++++++++++++++++++--
+ include/linux/amlogic/amports/amstream.h |   1 +
+ 3 files changed, 139 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index cfe41bb0c505..50805893624c 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -91,6 +91,8 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_DEFAULT_LEVEL_DESC, LOG_MASK_DESC);
+ 
+ static int debugflags=0;
+ static int output_fps = 0;
++static u32 omx_pts = 0;
++bool omx_secret_mode = false;
+ #define DEBUG_FLAG_FFPLAY	(1<<0)
+ #define DEBUG_FLAG_CALC_PTS_INC	(1<<1)
+ 
+@@ -2222,7 +2224,17 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         timestamp_pcrscr_inc(vsync_pts_inc / vsync_slow_factor);
+         timestamp_apts_inc(vsync_pts_inc / vsync_slow_factor);
+     }
+-
++    if (omx_secret_mode == true) {
++        u32 system_time = timestamp_pcrscr_get();
++        int diff = omx_pts - system_time;
++        if (diff>11000 || diff<-11000) {
++            timestamp_pcrscr_enable(1);
++            //printk("system_time=%d,omx_pts=%d,diff=%d\n",system_time,omx_pts,diff);
++            timestamp_pcrscr_set(omx_pts);
++        }
++    } else {
++        omx_pts = 0;
++    }
+     if (trickmode_duration_count > 0) {
+         trickmode_duration_count -= vsync_pts_inc;
+     }
+@@ -3367,6 +3379,14 @@ static long amvideo_ioctl(struct file *file,
+     void *argp = (void *)arg;
+ 
+     switch (cmd) {
++    case AMSTREAM_IOC_SET_OMX_VPTS:
++        {
++            u32 pts;
++            memcpy(&pts,arg,sizeof(u32));
++            omx_pts = pts;
++        }
++        break;
++
+     case AMSTREAM_IOC_TRICKMODE:
+         if (arg == TRICKMODE_I) {
+             trickmode_i = 1;
+diff --git a/drivers/amlogic/video_dev/amlvideo.c b/drivers/amlogic/video_dev/amlvideo.c
+index 154f43bd9d47..2ce9663df2b9 100755
+--- a/drivers/amlogic/video_dev/amlvideo.c
++++ b/drivers/amlogic/video_dev/amlvideo.c
+@@ -28,7 +28,7 @@
+ #include <linux/highmem.h>
+ #include <linux/freezer.h>
+ #include <media/videobuf-res.h>
+-#include <media/videobuf-core.h>
++#include <media/videobuf2-core.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <linux/types.h>
+@@ -40,6 +40,7 @@
+ #include <linux/amlogic/amports/timestamp.h>
+ #include <linux/kernel.h>
+ #include <linux/amlogic/amports/tsync.h>
++#include <linux/amlogic/amports/vfp.h>
+ 
+ #define AVMLVIDEO_MODULE_NAME "amlvideo"
+ 
+@@ -55,6 +56,14 @@
+ #define MAGIC_RE_MEM 0x123039dc
+ 
+ #define RECEIVER_NAME "amlvideo"
++#define PROVIDER_NAME "amlvideo"
++
++#define AMLVIDEO_POOL_SIZE 16
++static vfq_t q_ready;
++extern omx_secret_mode;
++static u8 first_frame;
++static u32 vpts_last;
++
+ 
+ #define DUR2PTS(x) ((x) - ((x) >> 4))
+ #define DUR2PTS_RM(x) ((x) & 0xf)
+@@ -144,6 +153,60 @@ static struct vivi_fmt formats[] = {
+ #endif
+     };
+ 
++struct vframe_s *amlvideo_pool_ready[AMLVIDEO_POOL_SIZE+1];
++/* ------------------------------------------------------------------
++ *           provider operations
++ *-----------------------------------------------------------------*/
++static vframe_t *amlvideo_vf_peek(void *op_arg) {
++    return vfq_peek(&q_ready);
++}
++
++static vframe_t *amlvideo_vf_get(void *op_arg) {
++    return vfq_pop(&q_ready);
++}
++
++static void amlvideo_vf_put(vframe_t *vf, void *op_arg) {
++    vf_put(vf, RECEIVER_NAME);
++}
++
++static int amlvideo_event_cb(int type, void *data, void *private_data)
++{
++    //printk("ionvideo_event_cb_type=%d\n",type);
++    if (type & VFRAME_EVENT_RECEIVER_PUT) {
++        //printk("video put, avail=%d\n", vfq_level(&q_ready) );
++    }else if (type & VFRAME_EVENT_RECEIVER_GET) {
++        //    printk("video get, avail=%d\n", vfq_level(&q_ready) );
++    }else if(type & VFRAME_EVENT_RECEIVER_FRAME_WAIT){
++        // up(&thread_sem);
++        //   printk("receiver is waiting\n");
++    }else if(type & VFRAME_EVENT_RECEIVER_FRAME_WAIT){
++        //     printk("frame wait\n");
++    }
++    return 0;
++}
++
++static int amlvideo_vf_states(vframe_states_t *states, void *op_arg) {
++    //unsigned long flags;
++    //spin_lock_irqsave(&lock, flags);
++    states->vf_pool_size    = AMLVIDEO_POOL_SIZE;
++    states->buf_recycle_num = 0;
++    states->buf_free_num    =  AMLVIDEO_POOL_SIZE - vfq_level(&q_ready);
++    states->buf_avail_num   = vfq_level(&q_ready);
++    //spin_unlock_irqrestore(&lock, flags);
++    return 0;
++}
++
++static const struct vframe_operations_s amlvideo_vf_provider = {
++    .peek      = amlvideo_vf_peek,
++    .get       = amlvideo_vf_get,
++    .put       = amlvideo_vf_put,
++    .event_cb  = amlvideo_event_cb,
++    .vf_states = amlvideo_vf_states,
++};
++
++static struct vframe_provider_s amlvideo_vf_prov;
++
++
+ static struct vframe_receiver_s video_vf_recv;
+ 
+ static struct vivi_fmt *get_format(struct v4l2_format *f) {
+@@ -225,14 +288,35 @@ static int video_receiver_event_fun(int type, void* data, void* private_data) {
+         unregFlag = 1;
+         if (index != 8)
+             mutex_lock(&vfpMutex);
+-        printk("VFRAME_EVENT_PROVIDER_UNREG");
++        printk("AML:VFRAME_EVENT_PROVIDER_UNREG\n");
++        if (vf_get_receiver(PROVIDER_NAME)) {
++            printk("unreg:amlvideo\n");
++            vf_unreg_provider(&amlvideo_vf_prov);
++            omx_secret_mode = false;
++        }
++        first_frame = 0;
+     }
+     if (type == VFRAME_EVENT_PROVIDER_REG) {
+-        printk("VFRAME_EVENT_PROVIDER_REG");
++        printk("AML:VFRAME_EVENT_PROVIDER_REG\n");
++
+         if (unregFlag == 0)
+             vf_notify_provider(RECEIVER_NAME, VFRAME_EVENT_RECEIVER_PARAM_SET, (void*) eventparam);
+         ppmgrvf = NULL;
++        first_frame = 0;
+         mutex_unlock(&vfpMutex);
++    }else if (type == VFRAME_EVENT_PROVIDER_QUREY_STATE) {
++        return RECEIVER_ACTIVE ;
++    }else if (type == VFRAME_EVENT_PROVIDER_START) {
++        printk("AML:VFRAME_EVENT_PROVIDER_START\n");
++        if (vf_get_receiver(PROVIDER_NAME)) {
++            struct vframe_receiver_s * aaa = vf_get_receiver(PROVIDER_NAME);
++            printk("aaa->name=%s",aaa->name);
++            omx_secret_mode = true;
++            vf_provider_init(&amlvideo_vf_prov, PROVIDER_NAME ,&amlvideo_vf_provider, NULL);
++            vf_reg_provider(&amlvideo_vf_prov);
++            vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_START,NULL);
++            vfq_init(&q_ready, AMLVIDEO_POOL_SIZE+1, &amlvideo_pool_ready[0]);
++        }
+     }
+     return 0;
+ }
+@@ -431,6 +515,9 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p) {
+     int ret = 0;
++    if (omx_secret_mode == true) {
++        return ret;
++    }
+     if (ppmgrvf) {
+         vf_put(ppmgrvf, RECEIVER_NAME);
+         vf_notify_provider(RECEIVER_NAME, VFRAME_EVENT_RECEIVER_PUT, NULL );
+@@ -479,18 +566,42 @@ static int freerun_cleancache_dqbuf(struct v4l2_buffer *p) {
+ 
+ static int freerun_dqbuf(struct v4l2_buffer *p) {
+     int ret = 0;
+-
++    if (omx_secret_mode == true) {
++        if (vfq_level(&q_ready)>AMLVIDEO_POOL_SIZE-1) {
++            msleep(10);
++            return -EAGAIN;
++        }
++    }
+     if (!vf_peek(RECEIVER_NAME)) {
+         msleep(10);
+         return -EAGAIN;
+     }
+-    mutex_lock(&vfpMutex);
++    if (omx_secret_mode != true) {
++        mutex_lock(&vfpMutex);
++    }
+     ppmgrvf = vf_get(RECEIVER_NAME);
+-
+     if (!ppmgrvf) {
+         mutex_unlock(&vfpMutex);
+         return -EAGAIN;
+     }
++    if (omx_secret_mode == true) {
++        vfq_push(&q_ready, ppmgrvf);
++        p->index = 0;
++        p->timestamp.tv_sec = 0;
++
++        if (ppmgrvf->pts) {
++            first_frame = 1;
++            p->timestamp.tv_usec = ppmgrvf->pts;
++        } else if (first_frame == 0){
++            first_frame = 1;
++            p->timestamp.tv_usec = 0;
++        } else {
++            p->timestamp.tv_usec = vpts_last + (DUR2PTS(ppmgrvf->duration));
++        }
++        vpts_last = p->timestamp.tv_usec;
++        //printk("p->timestamp.tv_usec=%d\n",p->timestamp.tv_usec);
++        return ret;
++    }   
+     if (ppmgrvf->pts != 0) {
+         timestamp_vpts_set(ppmgrvf->pts);
+     } else{
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 241a5ab52d5d..7138b774ae2d 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -169,6 +169,7 @@
+ //subtitle.c get/set subtitle info
+ #define AMSTREAM_IOC_GET_SUBTITLE_INFO       _IOR(AMSTREAM_IOC_MAGIC, 0xad, unsigned long)
+ #define AMSTREAM_IOC_SET_SUBTITLE_INFO       _IOW(AMSTREAM_IOC_MAGIC, 0xae, unsigned long)
++#define AMSTREAM_IOC_SET_OMX_VPTS            _IOW(AMSTREAM_IOC_MAGIC, 0xaf, unsigned long)
+ #define TRICKMODE_NONE       0x00
+ #define TRICKMODE_I          0x01
+ #define TRICKMODE_FFFB       0x02
+-- 
+2.19.0
+

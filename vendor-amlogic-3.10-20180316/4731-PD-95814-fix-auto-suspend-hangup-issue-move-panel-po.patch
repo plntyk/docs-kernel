@@ -1,0 +1,118 @@
+From 6897af4559fcd564c2438926ba71206503b71a44 Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Thu, 21 Aug 2014 10:47:00 +0800
+Subject: [PATCH 4731/5965] PD#95814:fix auto-suspend hangup issue,move panel
+ power init to PMU init
+
+Change-Id: I0fe5c5ce924c45ae292458ba4ffb671e2568790d
+---
+ .../backlight/aml_bl_extern/pmu_aml1218.c     | 47 ++++++++++++++-----
+ 1 file changed, 36 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+index b275cf8591fe..9004df253f16 100755
+--- a/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+@@ -41,9 +41,9 @@ static int bl_extern_set_level(unsigned int level)
+ {
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+     struct aml_pmu_driver *pmu_driver;
+-#endif
+     unsigned char temp;
+-    int ret;
++#endif
++    int ret = 0;
+ 
+     if (bl_ext_config == NULL) {
+         printk("no %s driver\n", BL_EXTERN_NAME);
+@@ -62,7 +62,9 @@ static int bl_extern_set_level(unsigned int level)
+     else {
+         if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
+             ret = pmu_driver->pmu_reg_read(0x005f, &temp);
+-            ret = pmu_driver->pmu_reg_write(0x005f, ((temp & ~(0x3f << 2)) | (level << 2)));
++            temp &= ~(0x3f << 2);
++            temp |= (level << 2);
++            ret = pmu_driver->pmu_reg_write(0x005f, temp);
+         }
+         else {
+             printk("no pmu_reg_read/write\n");
+@@ -70,16 +72,16 @@ static int bl_extern_set_level(unsigned int level)
+         }
+     }
+ #endif
+-    return 0;
++    return ret;
+ }
+ 
+ static int bl_extern_power_on(void)
+ {
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+     struct aml_pmu_driver *pmu_driver;
+-#endif
+     unsigned char temp;
+-    int ret;
++#endif
++    int ret = 0;
+ 
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+     pmu_driver = aml_pmu_get_driver();
+@@ -89,10 +91,9 @@ static int bl_extern_power_on(void)
+     }
+     else {
+         if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
+-            ret = pmu_driver->pmu_reg_read(0x005d, &temp);
+-            ret = pmu_driver->pmu_reg_write(0x005d, (temp | (1 << 1)));//DCEXT_IREF_ENLV2
+             ret = pmu_driver->pmu_reg_read(0x005e, &temp);
+-            ret = pmu_driver->pmu_reg_write(0x005e, (temp | (1 << 7)));//DCEXT_IREF_ADJLV2_EN
++            temp |= (1 << 7);
++            ret = pmu_driver->pmu_reg_write(0x005e, temp);//DCEXT_IREF_ADJLV2_EN
+         }
+         else {
+             printk("no pmu_reg_read/write\n");
+@@ -105,17 +106,41 @@ static int bl_extern_power_on(void)
+     }
+ 
+     printk("%s\n", __FUNCTION__);
+-    return 0;
++    return ret;
+ }
+ 
+ static int bl_extern_power_off(void)
+ {
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    struct aml_pmu_driver *pmu_driver;
++    unsigned char temp;
++#endif
++    int ret = 0;
++
+     if (bl_ext_config->gpio_used > 0) {
+         bl_extern_gpio_direction_output(bl_ext_config->gpio, 0);
+     }
++#ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
++    pmu_driver = aml_pmu_get_driver();
++    if (pmu_driver == NULL) {
++        printk("no pmu driver\n");
++        return -1;
++    }
++    else {
++        if ((pmu_driver->pmu_reg_write) && (pmu_driver->pmu_reg_read)) {
++            ret = pmu_driver->pmu_reg_read(0x005e, &temp);
++            temp &= ~(1 << 7);
++            ret = pmu_driver->pmu_reg_write(0x005e, temp);//DCEXT_IREF_ADJLV2_EN
++        }
++        else {
++            printk("no pmu_reg_read/write\n");
++            return -1;
++        }
++    }
++#endif
+ 
+     printk("%s\n", __FUNCTION__);
+-    return 0;
++    return ret;
+ }
+ 
+ static int bl_extern_driver_update(void)
+-- 
+2.19.0
+

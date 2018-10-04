@@ -1,0 +1,115 @@
+From c3b3f8b1bc4a424779bc342ef998b6273b16b72f Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Mon, 24 Aug 2015 13:57:08 +0800
+Subject: [PATCH 5780/5965] PD#111329: lcd: fix 1080p black screen when change
+ 50/60hz
+
+add hpll_load_init & hpll_load_en
+
+Change-Id: I9669035f90a63082bcc97b3914117fb9641f893d
+---
+ .../display/lcd/aml_tv_lcd_port/lcd_common.c  | 57 +++++++++++++++++--
+ 1 file changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+index c816e31c540b..6a932707a018 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+@@ -366,10 +366,48 @@ generate_clk_done:
+ 	}
+ }
+ 
++static void hpll_load_initial(void)
++{
++	//printk("lcd: %s\n", __func__);
++	//hdmi load initial
++	aml_write_reg32(P_HHI_VID_CLK_CNTL2, 0x2c);
++	aml_write_reg32(P_HHI_VID_CLK_DIV, 0x100);
++	aml_write_reg32(P_HHI_VIID_CLK_CNTL, 0x0);
++	aml_write_reg32(P_HHI_VIID_CLK_DIV, 0x101);
++	aml_write_reg32(P_HHI_VID_LOCK_CLK_CNTL, 0x80);
++
++	//    aml_write_reg32(P_HHI_VPU_CLK_CNTL, 25);
++	//    aml_set_reg32_bits(P_HHI_VPU_CLK_CNTL, 1, 8, 1);
++	aml_write_reg32(P_AO_RTI_GEN_PWR_SLEEP0, 0x0);
++	aml_write_reg32(P_HHI_HDMI_PLL_CNTL6, 0x100);
++
++	aml_write_reg32(P_VPU_CLK_GATE, 0xffff);
++	aml_write_reg32(P_ENCL_VIDEO_VSO_BLINE, 0x0);
++	aml_write_reg32(P_ENCL_VIDEO_VSO_BEGIN, 0x0);
++	aml_write_reg32(P_VPU_VLOCK_GCLK_EN, 0x7);
++	aml_write_reg32(P_VPU_VLOCK_ADJ_EN_SYNC_CTRL, 0x108010ff);
++	aml_write_reg32(P_VPU_VLOCK_CTRL, 0xe0f50f1b);
++}
++
++static void hpll_load_en(void)
++{
++	//printk("lcd: %s\n", __func__);
++	//hdmi load gen
++	aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 1, 19, 1);
++	aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 7, 0 , 3);
++	aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 1, 16, 3);  // tmp use fclk_div4
++	aml_write_reg32(P_ENCL_VIDEO_EN, 0x1);
++	//    msleep(20);
++	aml_write_reg32(P_ENCL_VIDEO_EN, 0x0);
++	//    msleep(20);
++	//    printk("read Addr: 0x%x[0x%x]  Data: 0x%x\n", P_HHI_HDMI_PLL_CNTL, (P_HHI_HDMI_PLL_CNTL & 0xffff) >> 2, aml_read_reg32(P_HHI_HDMI_PLL_CNTL));
++	aml_set_reg32_bits(P_HHI_VID_CLK_CNTL, 0, 16, 3);  // use vid_pll
++}
++
+ static void lcd_set_pll(unsigned int pll_reg, unsigned int clk_ctrl_reg)
+ {
+ 	unsigned m, n, od1, od2, od3, frac;
+-	int wait_loop = PLL_WAIT_LOCK_CNT;
++	int wait_loop = 10;
+ 	unsigned pll_lock = 0;
+ 	unsigned pll_ctrl, pll_ctrl2;
+ 
+@@ -382,7 +420,7 @@ static void lcd_set_pll(unsigned int pll_reg, unsigned int clk_ctrl_reg)
+ 
+ 	pll_ctrl = ((1 << 30) | (n << 9) | (m << 0));
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
+-	pll_ctrl2 = ((1 << 30) | (od1 << 16) | (od2 << 18) | (od3 << 22));
++	pll_ctrl2 = ((od1 << 16) | (od2 << 18) | (od3 << 22));
+ #elif (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB)
+ 	pll_ctrl2 = ((od1 << 16) | (od2 << 18) | (od3 << 22));
+ #endif
+@@ -392,6 +430,8 @@ static void lcd_set_pll(unsigned int pll_reg, unsigned int clk_ctrl_reg)
+ 	//printk("pll_ctrl : 0x%x \n",pll_ctrl | (1 << 28));
+ 	//printk("pll_ctrl2 : 0x%x \n",pll_ctrl2);
+ 
++	hpll_load_initial();
++
+ 	aml_write_reg32(P_HHI_HDMI_PLL_CNTL, pll_ctrl | (1 << 28));
+ 	aml_write_reg32(P_HHI_HDMI_PLL_CNTL2, pll_ctrl2);
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
+@@ -405,15 +445,24 @@ static void lcd_set_pll(unsigned int pll_reg, unsigned int clk_ctrl_reg)
+ 	aml_write_reg32(P_HHI_HDMI_PLL_CNTL6, 0x00000a55);
+ 	aml_write_reg32(P_HHI_HDMI_PLL_CNTL, pll_ctrl);
+ 	do {
+-		udelay(50);
++		hpll_load_en();
++		mdelay(10);
+ 		pll_lock = (aml_read_reg32(P_HHI_HDMI_PLL_CNTL) >> 31) & 0x1;
+ 		wait_loop--;
+ 	} while ((pll_lock == 0) && (wait_loop > 0));
+ 	if (wait_loop == 0)
+ 		printk("[error]: hpll lock failed\n");
++#if 0
++	printk("dump hpll registers:\n");
++	printk("  0x10c8:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL));
++	printk("  0x10c9:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL2));
++	printk("  0x10ca:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL3));
++	printk("  0x10cb:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL4));
++	printk("  0x10cc:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL5));
++	printk("  0x10cd:    0x%08x\n", aml_read_reg32(P_HHI_HDMI_PLL_CNTL6));
++#endif
+ }
+ 
+-
+ static unsigned int lcd_clk_div_table[][3] = {
+ 	/* divider,        shift_val,  shift_sel */
+ 	{CLK_DIV_SEL_1,    0xffff,     0,},
+-- 
+2.19.0
+

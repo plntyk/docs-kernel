@@ -1,0 +1,79 @@
+From ac9ac6f26904c94e8aec47cab6936dd241c2eb66 Mon Sep 17 00:00:00 2001
+From: Dmitry Shmidt <dimitrysh@google.com>
+Date: Thu, 14 Oct 2010 15:20:21 -0700
+Subject: [PATCH 0053/5965] mmc: Fix pm_notifier obeying deferred resume
+
+Signed-off-by: Dmitry Shmidt <dimitrysh@google.com>
+---
+ drivers/mmc/core/core.c  | 16 +++++++++++++++-
+ include/linux/mmc/host.h |  1 +
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 00abe448f071..297367ab5486 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -1596,11 +1596,17 @@ static inline void mmc_bus_put(struct mmc_host *host)
+ 
+ int mmc_resume_bus(struct mmc_host *host)
+ {
++	unsigned long flags;
++
+ 	if (!mmc_bus_needs_resume(host))
+ 		return -EINVAL;
+ 
+ 	printk("%s: Starting deferred resume\n", mmc_hostname(host));
++	spin_lock_irqsave(&host->lock, flags);
+ 	host->bus_resume_flags &= ~MMC_BUSRESUME_NEEDS_RESUME;
++	host->rescan_disable = 0;
++	spin_unlock_irqrestore(&host->lock, flags);
++
+ 	mmc_bus_get(host);
+ 	if (host->bus_ops && !host->bus_dead) {
+ 		mmc_power_up(host);
+@@ -2722,7 +2728,7 @@ int mmc_resume_host(struct mmc_host *host)
+ 	int err = 0;
+ 
+ 	mmc_bus_get(host);
+-	if (host->bus_resume_flags & MMC_BUSRESUME_MANUAL_RESUME) {
++	if (mmc_bus_manual_resume(host)) {
+ 		host->bus_resume_flags |= MMC_BUSRESUME_NEEDS_RESUME;
+ 		mmc_bus_put(host);
+ 		return 0;
+@@ -2788,6 +2794,10 @@ int mmc_pm_notify(struct notifier_block *notify_block,
+ 		}
+ 
+ 		spin_lock_irqsave(&host->lock, flags);
++		if (mmc_bus_needs_resume(host)) {
++			spin_unlock_irqrestore(&host->lock, flags);
++			break;
++		}
+ 		host->rescan_disable = 1;
+ 		spin_unlock_irqrestore(&host->lock, flags);
+ 		cancel_delayed_work_sync(&host->detect);
+@@ -2811,6 +2821,10 @@ int mmc_pm_notify(struct notifier_block *notify_block,
+ 	case PM_POST_RESTORE:
+ 
+ 		spin_lock_irqsave(&host->lock, flags);
++		if (mmc_bus_manual_resume(host)) {
++			spin_unlock_irqrestore(&host->lock, flags);
++			break;
++		}
+ 		host->rescan_disable = 0;
+ 		spin_unlock_irqrestore(&host->lock, flags);
+ 		mmc_detect_change(host, 0);
+diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
+index b81b8485eefe..d286d7ecaee4 100644
+--- a/include/linux/mmc/host.h
++++ b/include/linux/mmc/host.h
+@@ -403,6 +403,7 @@ static inline void *mmc_priv(struct mmc_host *host)
+ #define mmc_classdev(x)	(&(x)->class_dev)
+ #define mmc_hostname(x)	(dev_name(&(x)->class_dev))
+ #define mmc_bus_needs_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_NEEDS_RESUME)
++#define mmc_bus_manual_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_MANUAL_RESUME)
+ 
+ static inline void mmc_set_bus_resume_policy(struct mmc_host *host, int manual)
+ {
+-- 
+2.19.0
+

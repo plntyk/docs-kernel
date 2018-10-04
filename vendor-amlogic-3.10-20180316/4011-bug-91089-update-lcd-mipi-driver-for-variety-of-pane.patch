@@ -1,0 +1,3684 @@
+From d9cbcca5195072d34856c91ce4f425d8afaad7f2 Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Sun, 4 May 2014 16:05:19 +0800
+Subject: [PATCH 4011/5965] bug#91089: update lcd mipi driver, for variety of
+ panels
+
+---
+ arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd  |  32 +-
+ arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd  |  32 +-
+ arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd  | 107 ++-
+ .../arm/boot/dts/amlogic/meson8_k101_512M.dtd |  52 +-
+ arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd  |  84 ++-
+ arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd  |  84 ++-
+ arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd  | 143 ++--
+ drivers/amlogic/display/vout/Kconfig          |   7 -
+ drivers/amlogic/display/vout/Makefile         |   2 +-
+ drivers/amlogic/display/vout/aml_lcd.dtd      | 301 ++++++--
+ .../amlogic/display/vout/lcd_extern/Kconfig   |  12 -
+ .../amlogic/display/vout/lcd_extern/Makefile  |   9 +-
+ .../amlogic/display/vout/lcd_extern/aml.dtd   |  15 +-
+ .../display/vout/lcd_extern/mipi_LD070WX4.c   | 155 ----
+ .../display/vout/lcd_extern/mipi_N070ICN.c    | 341 ++++-----
+ drivers/amlogic/display/vout/lcdoutc.c        | 191 ++---
+ drivers/amlogic/display/vout/mipi_dsi_util.c  | 680 ++++++++++--------
+ drivers/amlogic/display/vout/mipi_dsi_util.h  | 314 ++------
+ include/linux/amlogic/vout/lcdoutc.h          |  18 +-
+ 19 files changed, 1365 insertions(+), 1214 deletions(-)
+ delete mode 100755 drivers/amlogic/display/vout/lcd_extern/Kconfig
+ delete mode 100755 drivers/amlogic/display/vout/lcd_extern/mipi_LD070WX4.c
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+index 60fa0847c330..a35677688f45 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+@@ -1034,9 +1034,7 @@ sdio{
+ 		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 		
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1143,8 +1141,13 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+ //	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ //		model_name="B080XAN01";	/** lcd model name */
+ //		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1159,9 +1162,18 @@ sdio{
+ //		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ //		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-//        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-//        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-//        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++//		dsi_lane_num=<4>;/** mipi dsi data lane number */
++//		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++//		dsi_init_on=<0x05 0x11 0 //sleep out
++//					0xff 20      //delay 20ms
++//					0x05 0x29 0  //display on
++//					0xff 20      //delay 20ms
++//					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		dsi_init_off=<0x05 0x28 0 //display off
++//					0xff 10       //delay 10ms
++//					0x05 0x10 0   //sleep in
++//					0xff 10       //delay 10ms
++//					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ //	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+@@ -1277,12 +1289,12 @@ sdio{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+index 1644766140ce..deaaf983f606 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+@@ -1044,9 +1044,7 @@ sdio{
+ 		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 		
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1153,8 +1151,13 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+ //	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ //		model_name="B080XAN01";	/** lcd model name */
+ //		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1169,9 +1172,18 @@ sdio{
+ //		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ //		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-//        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-//        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-//        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++//		dsi_lane_num=<4>;/** mipi dsi data lane number */
++//		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++//		dsi_init_on=<0x05 0x11 0 //sleep out
++//					0xff 20      //delay 20ms
++//					0x05 0x29 0  //display on
++//					0xff 20      //delay 20ms
++//					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		dsi_init_off=<0x05 0x28 0 //display off
++//					0xff 10       //delay 10ms
++//					0x05 0x10 0   //sleep in
++//					0xff 10       //delay 10ms
++//					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ //	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+@@ -1287,12 +1299,12 @@ sdio{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+index c1d7de07e356..58650712c7e7 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+@@ -986,10 +986,8 @@ sdio{
+  		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+-		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
++		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap: (0=normal, 1=swap) */
+ 
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+@@ -1095,8 +1093,13 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1111,10 +1114,23 @@ sdio{
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
+-	};
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		pclk_lanebyteclk_factor =<0>;/** special adjust, default is 0 */
++		dsi_transfer_ctrl=<0 0>;/** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++					0xff 20      //delay 20ms
++					0x05 0x29 0  //display on
++					0xff 20      //delay 20ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++					0xff 10       //delay 10ms
++					0x05 0x10 0   //sleep in
++					0xff 10       //delay 10ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		lcd_extern_init=<0>;/** lcd extern init command control(0=disable, 1=enable) */
++    };
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+ //$$ L2 PROP_STR = "model_name"
+@@ -1129,10 +1145,13 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_operation_mode"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+-//$$ L2 PROP_U32 2 = "dsi_on_off_init"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 42 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+ //lcd_LD070WX4:lcd_LD070WX4{
+ //		model_name="LD070WX4";	/** lcd model name */
+ //		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1148,11 +1167,31 @@ sdio{
+ //		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ //		vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 
+-//        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-//        dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-//        dsi_operation_mode=<0>;/** mipi dsi init operation mode: (0=video mode, 1=command mode), default is 1 */
+-//        dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
+-//        dsi_on_off_init=<1 0>; /** dsi init command when display on and display off (0=disable, 1=enable) */
++//		dsi_lane_num=<4>;/** mipi dsi data lane number */
++//		dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++//		dsi_bit_rate_min_max=<400 500>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++//		pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++//		dsi_transfer_ctrl=<0 0>;  /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++//		dsi_init_on=<0x15 0x01 1 0x0 
++//				0xff 20     //delay 20ms
++//				0x15 0xAE 1 0x0B 
++//				0x15 0xEE 1 0xEA 
++//				0x15 0xEF 1 0x5F 
++//				0x15 0xF2 1 0x68 
++//				0x15 0xEE 1 0x0 
++//				0x15 0xEF 1 0x0 
++//
++//				0x05 0x11 0  //sleep out
++//				0xff 200     //delay 200ms
++//				0x05 0x29 0  //display on
++//				0xff 100     //delay 100ms
++//				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		dsi_init_off=<0x05 0x28 0 //display off
++//				0xff 10       //delay 10ms
++//				0x05 0x10 0   //sleep in
++//				0xff 10       //delay 10ms
++//				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		lcd_extern_init=<0>;  /** lcd extern init command control(0=disable, 1=enable) */
+ //	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+@@ -1245,10 +1284,13 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ //$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+ //	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ //		model_name="CLAA101FP05XG";	/** lcd model name */
+ //		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1263,11 +1305,22 @@ sdio{
+ //		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ //		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-//        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-//        dsi_transfer_ctrl=<1>;/** auto stop clk lane in LP mode : (0=disable, 1=enable), default is 0 */
+-//        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-//        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+-//        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++//		dsi_lane_num=<4>;/** mipi dsi data lane number */
++//		dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++//		dsi_bit_rate_min_max=<900 1000>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++//		pclk_lanebyteclk_factor =<15>;   /** special adjust, default is 0 */
++//		dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++//		dsi_init_on=<0x05 0x11 0 //sleep out
++//				0xff 100     //delay 100ms
++//				0x05 0x29 0  //display on
++//				0xff 100     //delay 100ms
++//				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		dsi_init_off=<0x05 0x28 0 //display off
++//				0xff 10       //delay 10ms
++//				0x05 0x10 0   //sleep in
++//				0xff 10       //delay 10ms
++//				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
+ //	};
+ 
+ //******************************************************************************
+@@ -1305,12 +1358,12 @@ sdio{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+index 72ad4cb4c33a..a0faeb841b92 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+@@ -987,9 +987,7 @@ sdio{
+  		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1097,7 +1095,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1112,9 +1111,18 @@ sdio{
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++					0xff 20      //delay 20ms
++					0x05 0x29 0  //display on
++					0xff 20      //delay 20ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++					0xff 10       //delay 10ms
++					0x05 0x10 0   //sleep in
++					0xff 10       //delay 10ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+@@ -1207,10 +1215,11 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_transfer_ctrl"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ //$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ //	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ //		model_name="CLAA101FP05XG";	/** lcd model name */
+ //		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1225,11 +1234,20 @@ sdio{
+ //		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ //		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-//        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-//        dsi_transfer_ctrl=<1>;/** auto stop clk lane in LP mode : (0=disable, 1=enable), default is 0 */
+-//        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-//        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+-//        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++//		dsi_lane_num=<4>;/** mipi dsi data lane number */
++//		dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++//		pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++//		dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++//		dsi_init_on=<0x05 0x11 0 //sleep out
++//				0xff 100     //delay 100ms
++//				0x05 0x29 0  //display on
++//				0xff 100     //delay 100ms
++//				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++//		dsi_init_off=<0x05 0x28 0 //display off
++//				0xff 10       //delay 10ms
++//				0x05 0x10 0   //sleep in
++//				0xff 10       //delay 10ms
++//				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ //	};
+ 
+ //******************************************************************************
+@@ -1267,12 +1285,12 @@ sdio{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+index 35d63bfa1cc0..31d87394607c 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+@@ -1043,9 +1043,7 @@ sdio{
+  		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1153,7 +1151,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_KD079D1:lcd_KD079D1{	//k102
+ 		model_name="KD079D1";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1168,9 +1167,18 @@ sdio{
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++					0xff 20      //delay 20ms
++					0x05 0x29 0  //display on
++					0xff 20      //delay 20ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++					0xff 10       //delay 10ms
++					0x05 0x10 0   //sleep in
++					0xff 10       //delay 10ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+@@ -1186,10 +1194,10 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_operation_mode"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+-//$$ L2 PROP_U32 2 = "dsi_on_off_init"
++//$$ L2 PROP_U32 42 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ lcd_LD070WX4:lcd_LD070WX4{
+ 		model_name="LD070WX4";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1206,13 +1214,29 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 		
+ 		dsi_lane_num=<4>;/** mipi dsi data lane number */
+-		dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-		dsi_operation_mode=<0>;/** mipi dsi init operation mode: (0=video mode, 1=command mode), default is 1 */
+-		dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
+-		dsi_on_off_init=<1 0>; /** dsi init command when display on and display off (0=disable, 1=enable) */
++		dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++		dsi_bit_rate_min_max=<400 500>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x15 0x01 1 0x0 
++				0xff 20     //delay 20ms
++				0x15 0xAE 1 0x0B 
++				0x15 0xEE 1 0xEA 
++				0x15 0xEF 1 0x5F 
++				0x15 0xF2 1 0x68 
++				0x15 0xEE 1 0x0 
++				0x15 0xEF 1 0x0 
++
++				0x05 0x11 0  //sleep out
++				0xff 200     //delay 200ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+-
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+ //$$ L2 PROP_STR = "model_name"
+ //$$ L2 PROP_STR = "interface"
+@@ -1303,10 +1327,11 @@ lcd_LD070WX4:lcd_LD070WX4{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_transfer_ctrl"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ //$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1321,11 +1346,20 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_transfer_ctrl=<1>;/** auto stop clk lane in LP mode : (0=disable, 1=enable), default is 0 */
+-        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+-        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++		dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++				0xff 100     //delay 100ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //******************************************************************************
+@@ -1363,12 +1397,12 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+index d245512a224c..93ae29a85964 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+@@ -1006,9 +1006,7 @@ sdio{
+  		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1116,7 +1114,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1131,9 +1130,18 @@ sdio{
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++					0xff 20      //delay 20ms
++					0x05 0x29 0  //display on
++					0xff 20      //delay 20ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++					0xff 10       //delay 10ms
++					0x05 0x10 0   //sleep in
++					0xff 10       //delay 10ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+@@ -1149,10 +1157,10 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_operation_mode"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+-//$$ L2 PROP_U32 2 = "dsi_on_off_init"
++//$$ L2 PROP_U32 42 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ lcd_LD070WX4:lcd_LD070WX4{
+ 		model_name="LD070WX4";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1169,13 +1177,29 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 		
+ 		dsi_lane_num=<4>;/** mipi dsi data lane number */
+-		dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-		dsi_operation_mode=<0>;/** mipi dsi init operation mode: (0=video mode, 1=command mode), default is 1 */
+-		dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
+-		dsi_on_off_init=<1 0>; /** dsi init command when display on and display off (0=disable, 1=enable) */
++		dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++		dsi_bit_rate_min_max=<400 500>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x15 0x01 1 0x0 
++				0xff 20     //delay 20ms
++				0x15 0xAE 1 0x0B 
++				0x15 0xEE 1 0xEA 
++				0x15 0xEF 1 0x5F 
++				0x15 0xF2 1 0x68 
++				0x15 0xEE 1 0x0 
++				0x15 0xEF 1 0x0 
++
++				0x05 0x11 0  //sleep out
++				0xff 200     //delay 200ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+-
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+ //$$ L2 PROP_STR = "model_name"
+ //$$ L2 PROP_STR = "interface"
+@@ -1266,10 +1290,11 @@ lcd_LD070WX4:lcd_LD070WX4{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_transfer_ctrl"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ //$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1284,11 +1309,20 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_transfer_ctrl=<1>;/** auto stop clk lane in LP mode : (0=disable, 1=enable), default is 0 */
+-        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+-        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++		dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++				0xff 100     //delay 100ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //******************************************************************************
+@@ -1326,12 +1360,12 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
+ 		status = "disabled";
+ 
+ 		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
+index 3ba9ddc031f9..c5b42eedcf12 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k160_v1.dtd
+@@ -1026,9 +1026,7 @@ sdio{
+  		lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+ 		/* below configs are decided by hardware design, you can modify them if needed. */
+-		//ttl config
+ 		ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-		//lvds config
+ 		lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 
+ 		/* recommend settings, you can modify them if needed. */
+@@ -1136,7 +1134,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1151,9 +1150,18 @@ sdio{
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++					0xff 20      //delay 20ms
++					0x05 0x29 0  //display on
++					0xff 20      //delay 20ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++					0xff 10       //delay 10ms
++					0x05 0x10 0   //sleep in
++					0xff 10       //delay 10ms
++					0xff 0xff>;/** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+@@ -1169,10 +1177,10 @@ sdio{
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_transfer_mode"
+-//$$ L2 PROP_U32 18 = "dsi_power_on_cmd"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 42 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ lcd_LD070WX4:lcd_LD070WX4{
+ 		model_name="LD070WX4";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1188,23 +1196,30 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 		vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_transfer_mode=<0>;/** mipi dsi transfer mode: (0=command mode, 1=video mode) */
+-        dsi_power_on_cmd =< 0x01  0x0
+-                            0xFF  0x20
+-                            0xAE  0x0B 
+-                            0xEE  0xEA 
+-                            0xEF  0x5F 
+-                            0xF2  0x68 
+-                            0xEE  0x0 
+-                            0xEF  0x0 
+-                            0xFF  0xFF
+-                          >;/** special power on command, 2 data is a pair(reg, value), if the first valu is 0xff, second value is delay time(unit: ms), ending flag is 0xff,0xff.*/
+-        dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++		dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		dsi_init_on=<0x15 0x01 1 0x0 
++				0xff 20     //delay 20ms
++				0x15 0xAE 1 0x0B 
++				0x15 0xEE 1 0xEA 
++				0x15 0xEF 1 0x5F 
++				0x15 0xF2 1 0x68 
++				0x15 0xEE 1 0x0 
++				0x15 0xEF 1 0x0 
++
++				0x05 0x11 0  //sleep out
++				0xff 200     //delay 200ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+-
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+ //$$ L2 PROP_STR = "model_name"
+ //$$ L2 PROP_STR = "interface"
+@@ -1295,45 +1310,87 @@ lcd_LD070WX4:lcd_LD070WX4{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
+ 	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+ 		active_area=<216 135>;		/** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
+-		lcd_bits_option=<8 1>;		/** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
++		lcd_bits_option=<8 0>;		/** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
+ 
+ 		resolution=<1920 1200>;	/** horizontal resolution, vertical resolution */
+ 		period=<2080 1235>;		/** horizontal period(htotal), vertical period(vtotal) */
+ 
+ 		clock_hz_pol=<154128000 0>;	/** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
+-		hsync_width_backporch=<32 80>;	/** hsync_width, hsync_backporch(include hsync_width) */
++		hsync_width_backporch=<32 112>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++		dsi_lane_num=<4>;/** mipi dsi data lane number */
++		dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++		pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++		dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++		dsi_init_on=<0x05 0x11 0 //sleep out
++				0xff 100     //delay 100ms
++				0x05 0x29 0  //display on
++				0xff 100     //delay 100ms
++				0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++		dsi_init_off=<0x05 0x28 0 //display off
++				0xff 10       //delay 10ms
++				0x05 0x10 0   //sleep in
++				0xff 10       //delay 10ms
++				0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
+ 	};
+ 
+-//$$ DEVICE="lcd_extern"
++//******************************************************************************
++//lcd extern
++//Notice: only one dev support
++//******************************************************************************
++//$$ DEVICE = "lcd_extern_i2c_tc101"
+ //$$ L2 PROP_STR = "status"
+-	lcd_extern{
+-		compatible = "amlogic,lcd_extern";
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_STR = "i2c_bus"
++	lcd_extern_i2c_tc101{
++		compatible = "amlogic,lcd_i2c_tc101";
++		dev_name ="lcd_i2c_tc101";
+ 		status = "disabled";
+ 
+-//$$ DEVICE = "lcd_extern_tc101"
+-//$$ L2 PROP_STR = "i2c_bus"
+-//$$ L2 PROP_U32 = "reg"
++		type = <0>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
++		i2c_address = <0x7e>; /** i2c address */
++		i2c_bus = "i2c_bus_a";
++	};
++
++//$$ DEVICE = "lcd_extern_spi_LD070WS2"
+ //$$ L2 PROP_STR = "status"
+-		lcd_extern_tc101{
+-			dev_name ="lcd_tc101";
+-			type = <0>;	/** lcd_extern_driver type: 0=i2c, 1=spi */
+-			address = <0x7e>;
+-			i2c_bus = "i2c_bus_a";
+-			status = "disabled";
+-		};
++//$$ L2 PROP_U32 = "type"
++//$$ L2 PROP_U32 = "gpio_spi_cs"
++//$$ L2 PROP_U32 = "gpio_spi_clk"
++//$$ L2 PROP_U32 = "gpio_spi_data"
++	lcd_extern_spi_LD070WS2{
++		compatible = "amlogic,lcd_spi_LD070WS2";
++		dev_name ="lcd_spi_LD070WS2";
++		status = "disabled";
++
++		type = <1>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
++		gpio_spi_cs="GPIODV_1";
++		gpio_spi_clk="GPIODV_16";
++		gpio_spi_data="GPIODV_17";
+ 	};
++
++//$$ DEVICE = "lcd_extern_mipi_N070ICN"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "type"
++	lcd_extern_mipi_N070ICN{
++		compatible = "amlogic,lcd_mipi_N070ICN";
++		dev_name ="lcd_mipi_N070ICN";
++		status = "disabled";
++
++		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
++	};
++
+ /// ***************************************************************************************
+ ///     -       Sensors
+ //$$ MODULE="Sensors"
+diff --git a/drivers/amlogic/display/vout/Kconfig b/drivers/amlogic/display/vout/Kconfig
+index bbe5b0646512..d150c4c682db 100755
+--- a/drivers/amlogic/display/vout/Kconfig
++++ b/drivers/amlogic/display/vout/Kconfig
+@@ -15,13 +15,6 @@ config AM_LCD_OUTPUT
+ 	help  
+ 		LCD output module
+ 
+-config AML_LCD_EXTERN
+-	tristate "AML lcd external bridge driver"
+-	default y
+-	depends on  AM_LCD_OUTPUT
+-	help
+-		AML lcd external bridge driver		
+-		
+ config AML_GAMMA_DEBUG
+ 	tristate "AML Gamma debug"
+ 	default y
+diff --git a/drivers/amlogic/display/vout/Makefile b/drivers/amlogic/display/vout/Makefile
+index 17deac493918..ebf05e24ed31 100755
+--- a/drivers/amlogic/display/vout/Makefile
++++ b/drivers/amlogic/display/vout/Makefile
+@@ -9,6 +9,6 @@ am_tvout-objs :=   tvoutc.o  tvconf.o enc_clk_config.o
+ obj-$(CONFIG_AM_LCD_OUTPUT)  += lcdoutc.o
+ obj-$(CONFIG_AM_LCD_OUTPUT)  += edp_drv.o
+ obj-$(CONFIG_AM_LCD_OUTPUT)  += mipi_dsi_util.o
+-obj-$(CONFIG_AM_LCD_OUTPUT)	+= lcd_extern/
++obj-$(CONFIG_AM_LCD_OUTPUT)  += lcd_extern/
+ 
+ #EXTRA_CFLAGS += -DCONFIG_PM
+diff --git a/drivers/amlogic/display/vout/aml_lcd.dtd b/drivers/amlogic/display/vout/aml_lcd.dtd
+index 63f7e74c8f22..fb967030ebe3 100755
+--- a/drivers/amlogic/display/vout/aml_lcd.dtd
++++ b/drivers/amlogic/display/vout/aml_lcd.dtd
+@@ -82,9 +82,7 @@
+         lcd_bits_user=<6>;	/** user defined lcd bits(6 or 8, decided by hardware design; only valid when lcd_bits_option=1) */
+ 
+         /* below configs are decided by hardware design, you can modify them if needed. */
+-        //ttl config
+         ttl_rb_bit_swap=<0 0>;	/** ttl rb_swap, bit_swap : (0=normal, 1=swap) */
+-        //lvds config
+         lvds_channel_pn_swap=<0>;	/** lvds channel pn swap(0=normal, 1=swap) */
+ 
+         /* recommend settings, you can modify them if needed. */
+@@ -168,25 +166,43 @@
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 2= "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2= "dsi_sleep_out_display_on_delay"
+-    lcd_B080XAN01:lcd_B080XAN01{	//k101
+-        model_name="B080XAN01";	/** lcd model name */
+-        interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+-        active_area=<119 159>;		/** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
+-        lcd_bits_option=<6 1>;		/** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
+-
+-        resolution=<768 1024>;	/** horizontal resolution, vertical resolution */
+-        period=<948 1140>;		/** horizontal period(htotal), vertical period(vtotal) */
+-
+-        clock_hz_pol=<64843200 0>;	/** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
+-        hsync_width_backporch=<64 120>;	/** hsync_width, hsync_backporch(include hsync_width) */
+-        vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+-        pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-
+-        dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
++    lcd_B080XAN01:lcd_B080XAN01{ //k101
++        model_name="B080XAN01"; /** lcd model name */
++        interface="mipi";       /** lcd_interface(mipi, lvds, edp, ttl) */
++        active_area=<119 159>;  /** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
++        lcd_bits_option=<6 1>;  /** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
++
++        resolution=<768 1024>;  /** horizontal resolution, vertical resolution */
++        period=<948 1140>;      /** horizontal period(htotal), vertical period(vtotal) */
++
++        clock_hz_pol=<64843200 0>; /** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
++        hsync_width_backporch=<64 120>; /** hsync_width, hsync_backporch(include hsync_width) */
++        vsync_width_backporch=<50 80>;  /** vsync_width, vsync_backporch(include vsync_width) */
++        pol_hsync_vsync=<0 0>;          /** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
++
++        dsi_lane_num=<4>; /** mipi dsi data lane number */
++        dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<500 600>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x05 0x11 0 //sleep out
++                    0xff 20      //delay 20ms
++                    0x05 0x29 0  //display on
++                    0xff 20      //delay 20ms
++                    0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0x05 0x28 0 //display off
++                    0xff 10       //delay 10ms
++                    0x05 0x10 0   //sleep in
++                    0xff 10       //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
+     };
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_KD079D1>
+@@ -201,25 +217,43 @@
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 2= "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2= "dsi_sleep_out_display_on_delay"
+-    lcd_KD079D1:lcd_KD079D1{	//k102
+-        model_name="KD079D1";	/** lcd model name */
+-        interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+-        active_area=<119 159>;		/** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
+-        lcd_bits_option=<6 1>;		/** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
+-
+-        resolution=<768 1024>;	/** horizontal resolution, vertical resolution */
+-        period=<948 1140>;		/** horizontal period(htotal), vertical period(vtotal) */
+-
+-        clock_hz_pol=<64843200 0>;	/** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
+-        hsync_width_backporch=<64 120>;	/** hsync_width, hsync_backporch(include hsync_width) */
+-        vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+-        pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
++    lcd_KD079D1:lcd_KD079D1{ //k102
++        model_name="KD079D1";  /** lcd model name */
++        interface="mipi";      /** lcd_interface(mipi, lvds, edp, ttl) */
++        active_area=<119 159>; /** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
++        lcd_bits_option=<6 1>; /** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
++
++        resolution=<768 1024>; /** horizontal resolution, vertical resolution */
++        period=<948 1140>;     /** horizontal period(htotal), vertical period(vtotal) */
++
++        clock_hz_pol=<64843200 0>; /** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
++        hsync_width_backporch=<64 120>; /** hsync_width, hsync_backporch(include hsync_width) */
++        vsync_width_backporch=<50 80>;  /** vsync_width, vsync_backporch(include vsync_width) */
++        pol_hsync_vsync=<0 0>;          /** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+         dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++        dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<500 600>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x05 0x11 0 //sleep out
++                    0xff 100     //delay 100ms
++                    0x05 0x29 0  //display on
++                    0xff 100     //delay 100ms
++                    0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0x05 0x28 0 //display off
++                    0xff 10       //delay 10ms
++                    0x05 0x10 0   //sleep in
++                    0xff 10       //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
+     };
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAA101FP05XG>
+@@ -234,10 +268,13 @@
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ //$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 12 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+     lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+         model_name="CLAA101FP05XG";	/** lcd model name */
+         interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -253,10 +290,21 @@
+         pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 
+         dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_transfer_ctrl=<1>;/** auto stop clk lane in LP mode : (0=disable, 1=enable), default is 0 */
+-        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+-        dsi_sleep_out_display_on_delay=<100 100>; /** mipi dsi basic delay: (unit: ms) */
++        dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<900 1000>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<15>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<1 0>; /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x05 0x11 0 //sleep out
++                    0xff 100     //delay 100ms
++                    0x05 0x29 0  //display on
++                    0xff 100     //delay 100ms
++                    0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0x05 0x28 0 //display off
++                    0xff 10       //delay 10ms
++                    0x05 0x10 0   //sleep in
++                    0xff 10       //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
+     };
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+@@ -272,10 +320,13 @@
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_operation_mode"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+-//$$ L2 PROP_U32 2 = "dsi_on_off_init"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 42 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+     lcd_LD070WX4:lcd_LD070WX4{
+         model_name="LD070WX4";	/** lcd model name */
+         interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -292,10 +343,30 @@
+         vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 
+         dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_operation_mode=<0>;/** mipi dsi init operation mode: (0=video mode, 1=command mode), default is 1 */
+-        dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
+-        dsi_on_off_init=<1 0>; /** dsi init command when display on and display off (0=disable, 1=enable) */
++        dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<400 500>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 0>;  /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x15 0x01 1 0x0 
++                    0xff 20     //delay 20ms
++                    0x15 0xAE 1 0x0B 
++                    0x15 0xEE 1 0xEA 
++                    0x15 0xEF 1 0x5F 
++                    0x15 0xF2 1 0x68 
++                    0x15 0xEE 1 0x0 
++                    0x15 0xEF 1 0x0 
++
++                    0x05 0x11 0  //sleep out
++                    0xff 200     //delay 200ms
++                    0x05 0x29 0  //display on
++                    0xff 100     //delay 100ms
++                    0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0x05 0x28 0 //display off
++                    0xff 10       //delay 10ms
++                    0x05 0x10 0   //sleep in
++                    0xff 10       //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;  /** lcd extern init command control(0=disable, 1=enable) */
+     };
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_N070ICN>
+@@ -311,10 +382,13 @@
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_operation_mode"
+-//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+-//$$ L2 PROP_U32 2 = "dsi_on_off_init"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 2 = "dsi_init_on"
++//$$ L2 PROP_U32 2 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+     lcd_N070ICN:lcd_N070ICN{
+         model_name="N070ICN";	/** lcd model name */
+         interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -331,9 +405,119 @@
+         vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+ 
+         dsi_lane_num=<4>;/** mipi dsi data lane number */
+-        dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-        dsi_sleep_out_display_on_delay=<30 30>; /** mipi dsi basic delay: (unit: ms) */
+-        dsi_on_off_init=<1 0>; /** dsi init command when display on and display off (0=disable, 1=enable) */
++        dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<400 500>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 0>;  /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0xff 0xff>;  /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0xff 0xff>; /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<1>;    /** lcd extern init command control(0=disable, 1=enable) */
++    };
++
++//$$ MATCH "lcd_model_config_match" = <&lcd_HSD101PUW1>
++//$$ L2 PROP_STR = "model_name"
++//$$ L2 PROP_STR = "interface"
++//$$ L2 PROP_U32 2 = "active_area"
++//$$ L2 PROP_U32 2 = "lcd_bits_option"
++//$$ L2 PROP_U32 2 = "resolution"
++//$$ L2 PROP_U32 2 = "period"
++//$$ L2 PROP_U32 2 = "clock_hz_pol"
++//$$ L2 PROP_U32 2 = "hsync_width_backporch"
++//$$ L2 PROP_U32 2 = "vsync_width_backporch"
++//$$ L2 PROP_U32 2 = "pol_hsync_vsync"
++//$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 5 = "dsi_init_on"
++//$$ L2 PROP_U32 2 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
++    lcd_HSD101PUW1:lcd_HSD101PUW1{
++        model_name="HSD101PUW1"; /** lcd model name */
++        interface="mipi";        /** lcd_interface(mipi, lvds, edp, ttl) */
++        active_area=<216 135>;   /** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
++        lcd_bits_option=<8 0>;   /** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
++
++        resolution=<1920 1200>;  /** horizontal resolution, vertical resolution */
++        period=<1984 1235>;      /** horizontal period(htotal), vertical period(vtotal) */
++
++        clock_hz_pol=<147010000 0>; /** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
++        hsync_width_backporch=<16 48>; /** hsync_width, hsync_backporch(include hsync_width) */
++        vsync_width_backporch=<2 20>;  /** vsync_width, vsync_backporch(include vsync_width) */
++        pol_hsync_vsync=<0 0>;         /** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_operation_mode=<0 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<800 900>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 2>;  /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x32 0x0 0  //turn on peripheral
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0xff 0xff>; /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
++    };
++
++//$$ MATCH "lcd_model_config_match" = <&lcd_LT070ME05>
++//$$ L2 PROP_STR = "model_name"
++//$$ L2 PROP_STR = "interface"
++//$$ L2 PROP_U32 2 = "active_area"
++//$$ L2 PROP_U32 2 = "lcd_bits_option"
++//$$ L2 PROP_U32 2 = "resolution"
++//$$ L2 PROP_U32 2 = "period"
++//$$ L2 PROP_U32 2 = "clock_hz_pol"
++//$$ L2 PROP_U32 2 = "hsync_width_backporch"
++//$$ L2 PROP_U32 2 = "vsync_width_backporch"
++//$$ L2 PROP_U32 2 = "pol_hsync_vsync"
++//$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_operation_mode"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_transfer_ctrl"
++//$$ L2 PROP_U32 50 = "dsi_init_on"
++//$$ L2 PROP_U32 12 = "dsi_init_off"
++//$$ L2 PROP_U32 = "lcd_extern_init"
++    lcd_LT070ME05:lcd_LT070ME05{
++        model_name="LT070ME05"; /** lcd model name */
++        interface="mipi";       /** lcd_interface(mipi, lvds, edp, ttl) */
++        active_area=<94 151>;   /** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
++        lcd_bits_option=<8 0>;  /** lcd_bits(6,8), bits_option(0=only support one mode as lcd_bits define, 1=both support 6/8bit) */
++
++        resolution=<1200 1920>; /** horizontal resolution, vertical resolution */
++        period=<1392 1956>;     /** horizontal period(htotal), vertical period(vtotal) */
++
++        clock_hz_pol=<136138000 0>; /** clock_hz(unit in Hz, both support clk and frame_rate, >200 regard as clk, <200 regard as frame_rate), clk_pol(only valid for TTL) */
++        hsync_width_backporch=<12 72>; /** hsync_width, hsync_backporch(include hsync_width) */
++        vsync_width_backporch=<2 8>;   /** vsync_width, vsync_backporch(include vsync_width) */
++        pol_hsync_vsync=<0 0>;         /** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_operation_mode=<1 0>; /** operation mode when init and display: (0=video mode, 1=command mode). default is <1 0> */
++        dsi_bit_rate_min_max=<800 900>; /** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<0>;   /** special adjust, default is 0 */
++        dsi_transfer_ctrl=<0 0>;  /** clk_lane auto stop in LP mode: (0=disable, 1=enable), transfer switch between LP and HS: (0=auto, 1=standard, 2=slow). default is <0 0> */
++        dsi_init_on=<0x05 0x01 0  //soft reset
++                    0xff 5        //delay 5ms
++                    0x23 0xb0 1 0x00  //MCAP
++                    0x29 0xb4 1 0x0c  //interface ID setting
++                    0x29 0xb6 2 0x3a 0xd3 //DSI control
++
++                    0x15 0x51 1 0xe6 //write display brightness
++                    0x15 0x53 1 0x2c //write control display
++
++                    0x15 0x3a 1 0x77 //set pixel format
++                    0x05 0x11 0 //sleep out
++                    0xff 120    //delay 120ms
++                    0x29 0xb3 5 0x14 0x08 0x00 0x22 0x00 //Interface setting
++                    0x05 0x29 0 //display on
++                    0xff 30     //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        dsi_init_off=<0x05 0x28 0 //display off
++                    0xff 10       //delay 10ms
++                    0x05 0x10 0   //sleep in
++                    0xff 10       //delay 10ms
++                    0xff 0xff>;   /** mipi command(data_type, command, para_num, parameters). 0xff,0xff is ending flag. 0xff,n(n<0xff) means delay n(unit: ms) */
++        lcd_extern_init=<0>;    /** lcd extern init command control(0=disable, 1=enable) */
+     };
+ 
+ //******************************************************************************
+@@ -639,6 +823,7 @@
+ //$$ L2 PROP_U32 2 = "hsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
++//$$ L2 PROP_U32 = "lcd_extern_init"
+     lcd_LD070WS2:lcd_LD070WS2{
+         model_name="LD070WS2";	/** lcd model name */
+         interface="lvds";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -652,6 +837,8 @@
+         hsync_width_backporch=<10 170>;	/** hsync_width, hsync_backporch(include hsync_width) */
+         vsync_width_backporch=<2 25>;	/** vsync_width, vsync_backporch(include vsync_width) */
+         pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
++
++        lcd_extern_init=<1>;/** lcd extern init command control(0=disable, 1=enable) */
+     };
+ //******************************************************************************
+ //ttl
+diff --git a/drivers/amlogic/display/vout/lcd_extern/Kconfig b/drivers/amlogic/display/vout/lcd_extern/Kconfig
+deleted file mode 100755
+index 7aab495c7283..000000000000
+--- a/drivers/amlogic/display/vout/lcd_extern/Kconfig
++++ /dev/null
+@@ -1,12 +0,0 @@
+-#
+-# Video output configuration
+-#
+-menu "Amlogic LCD External driver"
+-
+-config AML_LCD_EXTERN
+-	tristate "LCD External driver"
+-	default y
+-	help  
+-		lcd exteranl driver
+-
+-endmenu
+diff --git a/drivers/amlogic/display/vout/lcd_extern/Makefile b/drivers/amlogic/display/vout/lcd_extern/Makefile
+index 5de0d91c85dd..3a5b2b01a5e8 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/Makefile
++++ b/drivers/amlogic/display/vout/lcd_extern/Makefile
+@@ -1,7 +1,6 @@
+ 
+-obj-$(CONFIG_AML_LCD_EXTERN)	+= lcd_extern.o
+-obj-$(CONFIG_AML_LCD_EXTERN)	+= i2c_tc101.o
+-obj-$(CONFIG_AML_LCD_EXTERN)	+= mipi_LD070WX4.o
+-obj-$(CONFIG_AML_LCD_EXTERN)	+= mipi_N070ICN.o
+-obj-$(CONFIG_AML_LCD_EXTERN)	+= spi_LD070WS2.o
++obj-y	+= lcd_extern.o
++obj-y	+= i2c_tc101.o
++obj-y	+= mipi_N070ICN.o
++obj-y	+= spi_LD070WS2.o
+ 
+diff --git a/drivers/amlogic/display/vout/lcd_extern/aml.dtd b/drivers/amlogic/display/vout/lcd_extern/aml.dtd
+index a7b817bfa566..ca49f7b104a0 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/aml.dtd
++++ b/drivers/amlogic/display/vout/lcd_extern/aml.dtd
+@@ -1,6 +1,6 @@
+-#ifdef CONFIG_AML_LCD_EXTERN
++#ifdef CONFIG_AM_LCD_OUTPUT
+ //******************************************************************************
+-//lcd extern
++//lcd extern 
+ //Notice: only one dev support
+ //******************************************************************************
+ //$$ DEVICE = "lcd_extern_i2c_tc101"
+@@ -34,17 +34,6 @@
+ 		gpio_spi_data="GPIODV_17";
+ 	};
+ 
+-//$$ DEVICE = "lcd_extern_mipi_LD070WX4"
+-//$$ L2 PROP_STR = "status"
+-//$$ L2 PROP_U32 = "type"
+-	lcd_extern_mipi_LD070WX4{
+-		compatible = "amlogic,lcd_mipi_LD070WX4";
+-		dev_name ="lcd_mipi_LD070WX4";
+-		status = "disabled";
+-
+-		type = <2>;	/** lcd_extern_driver type: 0=i2c, 1=spi, 2=mipi */
+-	};
+-
+ //$$ DEVICE = "lcd_extern_mipi_N070ICN"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 = "type"
+diff --git a/drivers/amlogic/display/vout/lcd_extern/mipi_LD070WX4.c b/drivers/amlogic/display/vout/lcd_extern/mipi_LD070WX4.c
+deleted file mode 100755
+index 86b1c603c6e7..000000000000
+--- a/drivers/amlogic/display/vout/lcd_extern/mipi_LD070WX4.c
++++ /dev/null
+@@ -1,155 +0,0 @@
+-/*
+- * AMLOGIC lcd external driver.
+- *
+- * Communication protocol:
+- * MIPI 
+- *
+- */
+-
+-#include <linux/kernel.h>
+-#include <linux/init.h>
+-#include <linux/module.h>
+-#include <linux/platform_device.h>
+-#include <linux/slab.h>
+-#include <linux/jiffies.h> 
+-#include <linux/i2c.h>
+-#include <linux/i2c-aml.h>
+-#include <linux/miscdevice.h>
+-#include <linux/mutex.h>
+-#include <linux/mm.h>
+-#include <linux/device.h>
+-#include <linux/fs.h>
+-#include <linux/delay.h>
+-#include <linux/sysctl.h>
+-#include <asm/uaccess.h>
+-#include <mach/pinmux.h>
+-#include <mach/gpio.h>
+-#include <linux/amlogic/vout/aml_lcd_extern.h>
+-
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
+-
+-//#define LCD_EXT_DEBUG_INFO
+-#ifdef LCD_EXT_DEBUG_INFO
+-#define DBG_PRINT(...)		printk(__VA_ARGS__)
+-#else
+-#define DBG_PRINT(...)
+-#endif
+-
+-#define LCD_EXTERN_NAME			"lcd_mipi_LD070WX4"
+-
+-static unsigned char mipi_init_table[] = {
+-    2,0x01,0x0,
+-    0xff,0x20,//mdelay flag
+-    2,0xAE,0x0B,
+-    2,0xEE,0xEA,
+-    2,0xEF,0x5F,
+-    2,0xF2,0x68,
+-    2,0xEE,0x0,
+-    2,0xEF,0x0,
+-    0xff,0xff,//ending flag
+-};
+-
+-static int lcd_extern_driver_update(void)
+-{
+-    struct aml_lcd_extern_driver_t* lcd_ext;
+-
+-    lcd_ext = aml_lcd_extern_get_driver();
+-    if (lcd_ext) {
+-        lcd_ext->type       = lcd_ext_config->type;
+-        lcd_ext->name       = lcd_ext_config->name;
+-        lcd_ext->init_on_cmd_8 = &mipi_init_table[0];
+-    }
+-    else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
+-    }
+-
+-    return 0;
+-}
+-
+-static int aml_LD070WX4_probe(struct platform_device *pdev)
+-{
+-    int i = 0;
+-
+-    if (lcd_extern_driver_check()) {
+-        return -1;
+-    }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
+-        printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+-        return -1;
+-    }
+-
+-    pdev->dev.platform_data = lcd_ext_config;
+-
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
+-        goto lcd_extern_probe_failed;
+-    }
+-    lcd_extern_driver_update();
+-
+-    printk("%s probe ok\n", LCD_EXTERN_NAME);
+-    return 0;
+-
+-lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
+-    return -1;
+-}
+-
+-static int aml_LD070WX4_remove(struct platform_device *pdev)
+-{
+-    if (pdev->dev.platform_data)
+-        kfree (pdev->dev.platform_data);
+-    return 0;
+-}
+-
+-#ifdef CONFIG_USE_OF
+-static const struct of_device_id aml_LD070WX4_dt_match[]={
+-    {
+-        .compatible = "amlogic,lcd_mipi_LD070WX4",
+-    },
+-    {},
+-};
+-#else
+-#define aml_LD070WX4_dt_match NULL
+-#endif
+-
+-static struct platform_driver aml_LD070WX4_driver = {
+-    .probe  = aml_LD070WX4_probe,
+-    .remove = aml_LD070WX4_remove,
+-    .driver = {
+-        .name  = LCD_EXTERN_NAME,
+-        .owner = THIS_MODULE,
+-#ifdef CONFIG_USE_OF
+-        .of_match_table = aml_LD070WX4_dt_match,
+-#endif
+-    },
+-};
+-
+-static int __init aml_LD070WX4_init(void)
+-{
+-    int ret;
+-    DBG_PRINT("%s\n", __FUNCTION__);
+-
+-    ret = platform_driver_register(&aml_LD070WX4_driver);
+-    if (ret) {
+-        printk("[error] %s failed to register lcd extern driver module\n", __FUNCTION__);
+-        return -ENODEV;
+-    }
+-
+-    return ret;
+-}
+-
+-static void __exit aml_LD070WX4_exit(void)
+-{
+-    platform_driver_unregister(&aml_LD070WX4_driver);
+-}
+-
+-//late_initcall(aml_LD070WX4_init);
+-module_init(aml_LD070WX4_init);
+-module_exit(aml_LD070WX4_exit);
+-
+-MODULE_AUTHOR("AMLOGIC");
+-MODULE_DESCRIPTION("LCD Extern driver for LD070WX4");
+-MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c b/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
+index 0308340ec2d8..253b6081a804 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
++++ b/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
+@@ -37,175 +37,177 @@ static struct lcd_extern_config_t *lcd_ext_config = NULL;
+ 
+ #define LCD_EXTERN_NAME			"lcd_mipi_N070ICN"
+ 
+-static unsigned char mipi_init_table[] = {
+-    5,0xFF,0xAA,0x55,0xA5,0x80, //========== Internal setting ==========
++static unsigned char mipi_init_on_table[] = {
++    0x39,0xFF,4,0xAA,0x55,0xA5,0x80, //========== Internal setting ==========
++
++    0x39,0x6F,2,0x11,0x00, //MIPI related Timing Setting
++    0x39,0xF7,2,0x20,0x00,
++
++    0x15,0x6F,1,0x06,      //Improve ESD option
++    0x15,0xF7,1,0xA0,
++    0x15,0x6F,1,0x19,
++    0x15,0xF7,1,0x12,
++
++    0x15,0x6F,1,0x08,     //Vcom floating
++    0x15,0xFA,1,0x40,
++    0x15,0x6F,1,0x11,
++    0x15,0xF3,1,0x01,
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x00, //========== page0 relative ==========
++    0x15,0xC8,1,0x80,
++
++    0x39,0xB1,2,0x6C,0x01, //Set WXGA resolution
++
++    0x15,0xB6,1,0x08,      //Set source output hold time
++
++    0x15,0x6F,1,0x02,      //EQ control function
++    0x15,0xB8,1,0x08,
++
++    0x39,0xBB,2,0x54,0x54, //Set bias current for GOP and SOP
++
++    0x39,0xBC,2,0x05,0x05, //Inversion setting
++
++    0x15,0xC7,1,0x01,      //zigzag setting
++
++    0x39,0xBD,5,0x02,0xB0,0x0C,0x0A,0x00, //DSP Timing Settings update for BIST
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x01, //========== page1 relative ==========
++
++    0x39,0xB0,2,0x05,0x05,                // Setting AVDD, AVEE clamp
++    0x39,0xB1,2,0x05,0x05,
++
++    0x39,0xBC,2,0x3A,0x01,                // VGMP, VGMN, VGSP, VGSN setting
++    0x39,0xBD,2,0x3E,0x01,
++
++    0x15,0xCA,1,0x00,                    // gate signal control
++
++    0x15,0xC0,1,0x04,                    // power IC control
++    0x15,0xB2,1,0x00,
++    0x15,0xBE,1,0x80,      //vcom    -1.88V
++
++    0x39,0xB3,2,0x19,0x19, // Setting VGH=15V, VGL=-11V
++    0x39,0xB4,2,0x12,0x12,
++
++    0x39,0xB9,2,0x24,0x24, // power control for VGH, VGL
++    0x39,0xBA,2,0x14,0x14,
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x02, //========== page2 relative ==========
++
++    0x15,0xEE,1,0x01,                     //Gamma setting
++    0x39,0xEF,4,0x09,0x06,0x15,0x18,      //Gradient Control for Gamma Voltage
++
++    0x39,0xB0,6,0x00,0x00,0x00,0x08,0x00,0x17, //========== GOA relative ==========
++    0x15,0x6F,1,0x06,
++    0x39,0xB0,6,0x00,0x25,0x00,0x30,0x00,0x45,
++    0x15,0x6F,1,0x0C,
++    0x39,0xB0,4,0x00,0x56,0x00,0x7A,
++    0x39,0xB1,6,0x00,0xA3,0x00,0xE7,0x01,0x20, ////////////////////////////
++    0x15,0x6F,1,0x06,
++    0x39,0xB1,6,0x01,0x7A,0x01,0xC2,0x01,0xC5,
++    0x15,0x6F,1,0x0C,
++    0x39,0xB1,4,0x02,0x06,0x02,0x5F,
++    0x39,0xB2,6,0x02,0x92,0x02,0xD0,0x02,0xFC,
++    0x15,0x6F,1,0x06,
++    0x39,0xB2,6,0x03,0x35,0x03,0x5D,0x03,0x8B,
++    0x15,0x6F,1,0x0C,
++    0x39,0xB2,4,0x03,0xA2,0x03,0xBF,
++    0x39,0xB3,4,0x03,0xD2,0x03,0xFF,
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x06,      //PAGE6 : GOUT Mapping, VGLO select
++    0x39,0xB0,2,0x00,0x17,
++    0x39,0xB1,2,0x16,0x15,
++    0x39,0xB2,2,0x14,0x13,
++    0x39,0xB3,2,0x12,0x11,
++    0x39,0xB4,2,0x10,0x2D,
++    0x39,0xB5,2,0x01,0x08,
++    0x39,0xB6,2,0x09,0x31,
++    0x39,0xB7,2,0x31,0x31,
++    0x39,0xB8,2,0x31,0x31,
++    0x39,0xB9,2,0x31,0x31,
++    0x39,0xBA,2,0x31,0x31,
++    0x39,0xBB,2,0x31,0x31,
++    0x39,0xBC,2,0x31,0x31,
++    0x39,0xBD,2,0x31,0x09,
++    0x39,0xBE,2,0x08,0x01,
++    0x39,0xBF,2,0x2D,0x10,
++    0x39,0xC0,2,0x11,0x12,
++    0x39,0xC1,2,0x13,0x14,
++    0x39,0xC2,2,0x15,0x16,
++    0x39,0xC3,2,0x17,0x00,
++    0x39,0xE5,2,0x31,0x31,
++    0x39,0xC4,2,0x00,0x17,
++    0x39,0xC5,2,0x16,0x15,
++    0x39,0xC6,2,0x14,0x13,
++    0x39,0xC7,2,0x12,0x11,
++    0x39,0xC8,2,0x10,0x2D,
++    0x39,0xC9,2,0x01,0x08,
++    0x39,0xCA,2,0x09,0x31,
++    0x39,0xCB,2,0x31,0x31,
++    0x39,0xCC,2,0x31,0x31,
++    0x39,0xCD,2,0x31,0x31,
++    0x39,0xCE,2,0x31,0x31,
++    0x39,0xCF,2,0x31,0x31,
++    0x39,0xD0,2,0x31,0x31,
++    0x39,0xD1,2,0x31,0x09,
++    0x39,0xD2,2,0x08,0x01,
++    0x39,0xD3,2,0x2D,0x10,
++    0x39,0xD4,2,0x11,0x12,
++    0x39,0xD5,2,0x13,0x14,
++    0x39,0xD6,2,0x15,0x16,
++    0x39,0xD7,2,0x17,0x00,
++    0x39,0xE6,2,0x31,0x31,
++    0x39,0xD8,5,0x00,0x00,0x00,0x00,0x00, //VGL level select;
++    0x39,0xD9,5,0x00,0x00,0x00,0x00,0x00,
++    0x15,0xE7,1,0x00,
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x03, //===page 3====//gate timing control
++    0x39,0xB0,2,0x20,0x00,
++    0x39,0xB1,2,0x20,0x00,
++    0x39,0xB2,5,0x05,0x00,0x42,0x00,0x00,
++    0x39,0xB6,5,0x05,0x00,0x42,0x00,0x00,
++    0x39,0xBA,5,0x53,0x00,0x42,0x00,0x00,
++    0x39,0xBB,5,0x53,0x00,0x42,0x00,0x00,
++    0x15,0xC4,1,0x40,
++
++    0x39,0xF0,5,0x55,0xAA,0x52,0x08,0x05, //===page 5====//
++    0x39,0xB0,2,0x17,0x06,
++    0x15,0xB8,1,0x00,
++    0x39,0xBD,5,0x03,0x01,0x01,0x00,0x01,
++    0x39,0xB1,2,0x17,0x06,
++    0x39,0xB9,2,0x00,0x01,
++    0x39,0xB2,2,0x17,0x06,
++    0x39,0xBA,2,0x00,0x01,
++    0x39,0xB3,2,0x17,0x06,
++    0x39,0xBB,2,0x0A,0x00,
++    0x39,0xB4,2,0x17,0x06,
++    0x39,0xB5,2,0x17,0x06,
++    0x39,0xB6,2,0x14,0x03,
++    0x39,0xB7,2,0x00,0x00,
++    0x39,0xBC,2,0x02,0x01,
++    0x15,0xC0,1,0x05,
++    0x15,0xC4,1,0xA5,
++    0x39,0xC8,2,0x03,0x30,
++    0x39,0xC9,2,0x03,0x51,
++    0x39,0xD1,5,0x00,0x05,0x03,0x00,0x00,
++    0x39,0xD2,5,0x00,0x05,0x09,0x00,0x00,
++    0x15,0xE5,1,0x02,
++    0x15,0xE6,1,0x02,
++    0x15,0xE7,1,0x02,
++    0x15,0xE9,1,0x02,
++    0x15,0xED,1,0x33,
++
++    0x05,0x11,0, //sleep out
++    0xff,30,     //delay 30ms
++    0x05,0x29,0, //display on
++    0xff,30,     //delay 30ms
++    0xff,0xff,   //ending flag
++};
+ 
+-    3,0x6F,0x11,0x00, //MIPI related Timing Setting
+-    3,0xF7,0x20,0x00,
+-
+-    2,0x6F,0x06,      //Improve ESD option
+-    2,0xF7,0xA0,
+-    2,0x6F,0x19,
+-    2,0xF7,0x12,
+-
+-    2,0x6F,0x08,     //Vcom floating
+-    2,0xFA,0x40,
+-    2,0x6F,0x11,
+-    2,0xF3,0x01,
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x00, //========== page0 relative ==========
+-
+-    3,0xB1,0x68,0x01, //Set WXGA resolution
+-
+-    2,0xB6,0x08,      //Set source output hold time
+-
+-    2,0x6F,0x02,      //EQ control function
+-    2,0xB8,0x08,
+-
+-    3,0xBB,0x54,0x44, //Set bias current for GOP and SOP
+-
+-    3,0xBC,0x05,0x05, //Inversion setting
+-
+-    2,0xC7,0x01,      //zigzag setting
+-
+-    6,0xBD,0x02,0xB0,0x0C,0x0A,0x00, //DSP Timing Settings update for BIST
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x01, //========== page1 relative ==========
+-
+-    3,0xB0,0x05,0x05,                // Setting AVDD, AVEE clamp
+-    3,0xB1,0x05,0x05,
+-
+-    3,0xBC,0x3A,0x01,                // VGMP, VGMN, VGSP, VGSN setting
+-    3,0xBD,0x3E,0x01,
+-
+-    2,0xCA,0x00,                    // gate signal control
+-
+-    2,0xC0,0x04,                    // power IC control
+-
+-    2,0xBE,0x80,      //vcom    -1.88V
+-
+-    3,0xB3,0x28,0x28, // Setting VGH=15V, VGL=-11V
+-    3,0xB4,0x12,0x12,
+-
+-    3,0xB9,0x34,0x34, // power control for VGH, VGL
+-    3,0xBA,0x24,0x24,
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x02, //========== page2 relative ==========
+-
+-    2,0xEE,0x02,                     //Gamma control register control
+-    5,0xEF,0x09,0x06,0x15,0x18,      //Gradient Control for Gamma Voltage
+-
+-
+-    17,0xB0,0x00,0x00,0x00,0x9D,0x00,0xAE,0x00,0xC1,0x00,0xD6,0x00,0xE9,0x01,0x09,0x01,0x3E,
+-    17,0xB1,0x01,0x64,0x01,0xA5,0x01,0xDC,0x02,0x2F,0x02,0x64,0x02,0x65,0x02,0x92,0x02,0xBA,
+-    17,0xB2,0x02,0xD1,0x02,0xFB,0x03,0x19,0x03,0x46,0x03,0x61,0x03,0x90,0x03,0xA8,0x03,0xCF,
+-    5,0xB3,0x03,0xE8,0x03,0xFF,
+-
+-    7,0xBC,0x00,0x00,0x00,0x08,0x00,0x18, //========== GOA relative ==========
+-    2,0x6F,0x06,                          //PAGE6 : GOUT Mapping, VGLO select
+-    7,0xBC,0x00,0x27,0x00,0x32,0x00,0x49,
+-    2,0x6F,0x0C,
+-    5,0xBC,0x00,0x5C,0x00,0x83,
+-    7,0xBD,0x00,0xAF,0x00,0xF3,0x01,0x2A, ////////////////////////////
+-    2,0x6F,0x06,
+-    7,0xBD,0x01,0x84,0x01,0xCA,0x01,0xCD,
+-    2,0x6F,0x0C,
+-    5,0xBD,0x02,0x0E,0x02,0x65,
+-    7,0xBE,0x02,0x98,0x02,0xD4,0x03,0x00,
+-    2,0x6F,0x06,
+-    7,0xBE,0x03,0x37,0x03,0x5F,0x03,0x8D,
+-    2,0x6F,0x0C,
+-    5,0xBE,0x03,0xA4,0x03,0xBF,
+-    5,0xBF,0x03,0xE8,0x03,0xFF,
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x06,
+-    3,0xB0,0x00,0x17,
+-    3,0xB1,0x16,0x15,
+-    3,0xB2,0x14,0x13,
+-    3,0xB3,0x12,0x11,
+-    3,0xB4,0x10,0x2D,
+-    3,0xB5,0x01,0x08,
+-    3,0xB6,0x09,0x31,
+-    3,0xB7,0x31,0x31,
+-    3,0xB8,0x31,0x31,
+-    3,0xB9,0x31,0x31,
+-    3,0xBA,0x31,0x31,
+-    3,0xBB,0x31,0x31,
+-    3,0xBC,0x31,0x31,
+-    3,0xBD,0x31,0x09,
+-    3,0xBE,0x08,0x01,
+-    3,0xBF,0x2D,0x10,
+-    3,0xC0,0x11,0x12,
+-    3,0xC1,0x13,0x14,
+-    3,0xC2,0x15,0x16,
+-    3,0xC3,0x17,0x00,
+-    3,0xE5,0x31,0x31,
+-    3,0xC4,0x00,0x17,
+-    3,0xC5,0x16,0x15,
+-    3,0xC6,0x14,0x13,
+-    3,0xC7,0x12,0x11,
+-    3,0xC8,0x10,0x2D,
+-    3,0xC9,0x01,0x08,
+-    3,0xCA,0x09,0x31,
+-    3,0xCB,0x31,0x31,
+-    3,0xCC,0x31,0x31,
+-    3,0xCD,0x31,0x31,
+-    3,0xCE,0x31,0x31,
+-    3,0xCF,0x31,0x31,
+-    3,0xD0,0x31,0x31,
+-    3,0xD1,0x31,0x09,
+-    3,0xD2,0x08,0x01,
+-    3,0xD3,0x2D,0x10,
+-    3,0xD4,0x11,0x12,
+-    3,0xD5,0x13,0x14,
+-    3,0xD6,0x15,0x16,
+-    3,0xD7,0x17,0x00,
+-    3,0xE6,0x31,0x31,
+-    6,0xD8,0x00,0x00,0x00,0x00,0x00, //VGL level select;
+-    6,0xD9,0x00,0x00,0x00,0x00,0x00,
+-    2,0xE7,0x00,
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x03, //gate timing control
+-    3,0xB0,0x20,0x00,
+-    3,0xB1,0x20,0x00,
+-    6,0xB2,0x05,0x00,0x68,0x00,0x00,
+-    6,0xB6,0x05,0x00,0x68,0x00,0x00,
+-    6,0xBA,0x53,0x00,0x68,0x00,0x00,
+-    6,0xBB,0x53,0x00,0x68,0x00,0x00,
+-    2,0xC4,0x40,
+-
+-    3,0xB0,0x01,0x01, //gate CLK EQ
+-    3,0xB1,0x01,0x01, //gate STV EQ
+-
+-    6,0xF0,0x55,0xAA,0x52,0x08,0x05,
+-    3,0xB0,0x17,0x06,
+-    2,0xB8,0x00,
+-    6,0xBD,0x03,0x01,0x01,0x00,0x01,
+-    3,0xB1,0x17,0x06,
+-    3,0xB9,0x00,0x01,
+-    3,0xB2,0x17,0x06,
+-    3,0xBA,0x00,0x01,
+-    3,0xB3,0x17,0x06,
+-    3,0xBB,0x0A,0x00,
+-    3,0xB4,0x17,0x06,
+-    3,0xB5,0x17,0x06,
+-    3,0xB6,0x14,0x03,
+-    3,0xB7,0x00,0x00,
+-    3,0xBC,0x02,0x01,
+-    2,0xC0,0x05,
+-    2,0xC4,0xA5,
+-    3,0xC8,0x03,0x30,
+-    3,0xC9,0x03,0x51,
+-    6,0xD1,0x03,0x00,0x00,0x00,0x10,
+-    6,0xD2,0x03,0x00,0x00,0x00,0x10,
+-    2,0xE5,0x02,
+-    2,0xE6,0x02,
+-    2,0xE7,0x02,
+-    2,0xE9,0x02,
+-    2,0xED,0x33,
+-
+-    2,0x6F,0x11, //reload setting
+-    2,0xF3,0x01,
++static unsigned char mipi_init_off_table[] = {
++    0x05,0x28,0, //display off
++    0xff,10,     //delay 10ms
++    0x05,0x10,0, //sleep in
++    0xff,10,     //delay 10ms
+     0xff,0xff,   //ending flag
+ };
+ 
+@@ -217,7 +219,8 @@ static int lcd_extern_driver_update(void)
+     if (lcd_ext) {
+         lcd_ext->type       = lcd_ext_config->type;
+         lcd_ext->name       = lcd_ext_config->name;
+-        lcd_ext->init_on_cmd_8 = &mipi_init_table[0];
++        lcd_ext->init_on_cmd_8  = &mipi_init_on_table[0];
++        lcd_ext->init_off_cmd_8 = &mipi_init_off_table[0];
+     }
+     else {
+         printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index bc45ad8341c3..da8b3da52d95 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -59,9 +59,7 @@
+ #include "edp_drv.h"
+ #include "mipi_dsi_util.h"
+ #endif
+-#ifdef CONFIG_AML_LCD_EXTERN
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+-#endif
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+ #include <linux/amlogic/aml_pmu_common.h>
+ #endif
+@@ -76,7 +74,7 @@
+ #else
+ #define DRV_TYPE "c8"
+ #endif
+-#define DRIVER_DATE		"20140415"
++#define DRIVER_DATE		"20140429"
+ 
+ //#define LCD_DEBUG_INFO
+ #ifdef LCD_DEBUG_INFO
+@@ -112,10 +110,9 @@ static DSI_Config_t lcd_mipi_config = {
+     .bit_rate_min = 0,
+     .bit_rate_max = 0,
+     .transfer_ctrl = 0,
+-    .init_on_flag = 0,
+-    .init_off_flag = 0,
+-    .sleep_out_delay = 10,
+-    .display_on_delay = 10,
++    .dsi_init_on = NULL,
++    .dsi_init_off = NULL,
++    .lcd_extern_init = 0,
+ };
+ 
+ static EDP_Config_t lcd_edp_config = {
+@@ -443,6 +440,7 @@ static void backlight_power_ctrl(Bool_t status)
+ 	bl_status = status;
+ }
+ 
++static void set_control_mipi(Lcd_Config_t *pConf);
+ static int set_control_edp(Lcd_Config_t *pConf);
+ static int lcd_power_ctrl_video(Bool_t status) //for special interface
+ {
+@@ -452,7 +450,7 @@ static int lcd_power_ctrl_video(Bool_t status) //for special interface
+         switch(pDev->pConf->lcd_basic.lcd_type) {
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+             case LCD_DIGITAL_MIPI:
+-                mipi_dsi_link_on(pDev->pConf);
++                set_control_mipi(pDev->pConf);
+                 break;
+             case LCD_DIGITAL_EDP:
+                 ret = set_control_edp(pDev->pConf);
+@@ -487,9 +485,7 @@ static int lcd_power_ctrl(Bool_t status)
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+ 	struct aml_pmu_driver *pmu_driver;
+ #endif
+-#ifdef CONFIG_AML_LCD_EXTERN
+ 	struct aml_lcd_extern_driver_t *lcd_extern_driver;
+-#endif
+ 
+ 	DBG_PRINT("%s(): %s\n", __FUNCTION__, (status ? "ON" : "OFF"));
+ 	if (status) {
+@@ -527,7 +523,6 @@ static int lcd_power_ctrl(Bool_t status)
+ 					lcd_ports_ctrl(ON);
+ 					break;
+ 				case LCD_POWER_TYPE_INITIAL:
+-#ifdef CONFIG_AML_LCD_EXTERN
+ 					lcd_extern_driver = aml_lcd_extern_get_driver();
+ 					if (lcd_extern_driver == NULL) {
+ 						printk("no lcd_extern driver\n");
+@@ -538,7 +533,6 @@ static int lcd_power_ctrl(Bool_t status)
+ 							printk("%s power on init\n", lcd_extern_driver->name);
+ 						}
+ 					}
+-#endif
+ 					break;
+ 				default:
+ 					printk("lcd power ctrl ON step %d is null.\n", i+1);
+@@ -586,7 +580,6 @@ static int lcd_power_ctrl(Bool_t status)
+ 					lcd_ports_ctrl(OFF);
+ 					break;
+ 				case LCD_POWER_TYPE_INITIAL:
+-#ifdef CONFIG_AML_LCD_EXTERN
+ 					lcd_extern_driver = aml_lcd_extern_get_driver();
+ 					if (lcd_extern_driver == NULL) {
+ 						printk("no lcd_extern driver\n");
+@@ -597,7 +590,6 @@ static int lcd_power_ctrl(Bool_t status)
+ 							printk("%s power off init\n", lcd_extern_driver->name);
+ 						}
+ 					}
+-#endif
+ 					break;
+ 				default:
+ 					printk("lcd power ctrl OFF step %d is null.\n", i+1);
+@@ -2734,8 +2726,8 @@ static void lcd_sync_duration(Lcd_Config_t *pConf)
+ 	
+ 	pConf->lcd_timing.sync_duration_num = sync_duration;
+ 	pConf->lcd_timing.sync_duration_den = 10;
+-	printk("lcd_clk=%u.%03uMHz, frame_rate=%u.%uHz.\n\n",
+-                (lcd_clk / 1000000), ((lcd_clk / 1000) % 1000), (sync_duration / pConf->lcd_timing.sync_duration_den), ((sync_duration * 10 / pConf->lcd_timing.sync_duration_den) % 10));
++	printk("lcd_clk=%u.%03uMHz, frame_rate=%u.%uHz.\n\n", (lcd_clk / 1000000), ((lcd_clk / 1000) % 1000), 
++			(sync_duration / pConf->lcd_timing.sync_duration_den), ((sync_duration * 10 / pConf->lcd_timing.sync_duration_den) % 10));
+ }
+ 
+ static void lcd_tcon_config(Lcd_Config_t *pConf)
+@@ -2909,7 +2901,6 @@ static void select_edp_link_config(Lcd_Config_t *pConf)
+ static void lcd_control_config_pre(Lcd_Config_t *pConf) //before generate_clk_parameter
+ {
+     unsigned vclk_sel, ss_level;
+-    unsigned int bit_rate;
+ 
+     vclk_sel = 1;
+     ss_level = (pConf->lcd_timing.clk_ctrl >> CLK_CTRL_SS) & 0xf;
+@@ -2918,16 +2909,7 @@ static void lcd_control_config_pre(Lcd_Config_t *pConf) //before generate_clk_pa
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+         case LCD_DIGITAL_MIPI:
+             ss_level = ((ss_level > 0) ? 1 : 0);
+-            if (pConf->lcd_control.mipi_config->bit_rate_max == 0) {
+-                bit_rate = ((pConf->lcd_timing.lcd_clk / 1000) * 3 * 8) / pConf->lcd_control.mipi_config->lane_num;
+-                pConf->lcd_control.mipi_config->bit_rate_min = bit_rate;
+-                pConf->lcd_control.mipi_config->bit_rate_max = bit_rate + (pConf->lcd_timing.lcd_clk / 1000) + 10000;
+-                printk("mipi dsi bit_rate min=%dMHz, max=%dMHz\n", (pConf->lcd_control.mipi_config->bit_rate_min / 1000), (pConf->lcd_control.mipi_config->bit_rate_max / 1000));
+-            }
+-            if (pConf->lcd_control.mipi_config->bit_rate_max > MIPI_PHY_MAX_CLK_IN) {
+-                pConf->lcd_control.mipi_config->bit_rate_max = MIPI_PHY_MAX_CLK_IN;
+-                printk("mipi dsi bit_rate_max is out of support, adjust to %dMHz\n", (MIPI_PHY_MAX_CLK_IN / 1000));
+-            }
++            set_mipi_dsi_control_config(pConf);
+             break;
+         case LCD_DIGITAL_EDP:
+             ss_level = ((ss_level > 0) ? 1 : 0);
+@@ -2961,35 +2943,12 @@ static void lcd_control_config_pre(Lcd_Config_t *pConf) //before generate_clk_pa
+     pConf->lcd_timing.clk_ctrl |= ((vclk_sel << CLK_CTRL_VCLK_SEL) | (ss_level << CLK_CTRL_SS));
+ }
+ 
+-static void lcd_control_config_post(Lcd_Config_t *pConf) //before generate_clk_parameter
++static void lcd_control_config_post(Lcd_Config_t *pConf) //after generate_clk_parameter
+ {
+-    unsigned pre_div, post_div, xd;
+-    unsigned pclk, lanebyteclk;
+-
+     switch (pConf->lcd_basic.lcd_type) {
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+         case LCD_DIGITAL_MIPI:
+-            post_div = 1;//(((pConf->lcd_timing.div_ctrl) >> DIV_CTRL_DIV_POST) & 0x7) + 1;
+-            pre_div = ((pConf->lcd_timing.div_ctrl) >> DIV_CTRL_DIV_PRE) & 0x7;
+-            pre_div = div_pre_table[pre_div];
+-            xd = ((pConf->lcd_timing.clk_ctrl) >> CLK_CTRL_XD) & 0xf;
+-
+-            pclk = pConf->lcd_timing.lcd_clk;
+-            pConf->lcd_control.mipi_config->bit_rate = pclk * pre_div * post_div * xd;
+-
+-            if (pConf->lcd_control.mipi_config->factor_numerator == 0) {
+-                pclk = pConf->lcd_timing.lcd_clk;
+-                lanebyteclk = pConf->lcd_control.mipi_config->bit_rate / 8;
+-                DBG_PRINT("pixel_clk = %d.%03dMHz, bit_rate = %d.%03dMHz, lanebyteclk = %d.%03dMHz\n", (pclk / 1000000), ((pclk / 1000) % 1000), 
+-                        (pConf->lcd_control.mipi_config->bit_rate / 1000000), ((pConf->lcd_control.mipi_config->bit_rate / 1000) % 1000), (lanebyteclk / 1000000), ((lanebyteclk / 1000) % 1000));
+-
+-                pConf->lcd_control.mipi_config->factor_denominator = lanebyteclk/1000;
+-                pConf->lcd_control.mipi_config->factor_numerator = pclk/1000;
+-                //cfg->factor_denominator = 10;
+-            }
+-            DBG_PRINT("d=%d, n=%d, factor=%d.%02d\n", pConf->lcd_control.mipi_config->factor_denominator, pConf->lcd_control.mipi_config->factor_numerator, 
+-                    (pConf->lcd_control.mipi_config->factor_denominator/pConf->lcd_control.mipi_config->factor_numerator), 
+-                    ((pConf->lcd_control.mipi_config->factor_denominator % pConf->lcd_control.mipi_config->factor_numerator) * 100 / pConf->lcd_control.mipi_config->factor_numerator));
++            set_mipi_dsi_control_config_post(pConf);
+             break;
+         case LCD_DIGITAL_EDP:
+             break;
+@@ -3074,8 +3033,7 @@ static void _init_lcd_driver(Lcd_Config_t *pConf)	//before power on lcd
+         case LCD_DIGITAL_MIPI:
+             set_pll_lcd(pConf);
+             set_venc_lcd(pConf);
+-            set_tcon_lcd(pConf);
+-            set_control_mipi(pConf);
++            set_tcon_lcd(pConf);
+             init_dphy(pConf);
+             break;
+         case LCD_DIGITAL_EDP:
+@@ -3373,7 +3331,7 @@ static vout_server_t lcd_vout2_server={
+ };
+ #endif
+ static void _init_vout(lcd_dev_t *pDev)
+-{	
++{
+     pDev->lcd_info.name = PANEL_NAME;
+     pDev->lcd_info.mode = VMODE_LCD;
+     pDev->lcd_info.width = pDev->pConf->lcd_basic.h_active;
+@@ -3385,7 +3343,7 @@ static void _init_vout(lcd_dev_t *pDev)
+     pDev->lcd_info.screen_real_height= pDev->pConf->lcd_basic.v_active_area;
+     pDev->lcd_info.sync_duration_num = pDev->pConf->lcd_timing.sync_duration_num;
+     pDev->lcd_info.sync_duration_den = pDev->pConf->lcd_timing.sync_duration_den;
+-	pDev->lcd_info.video_clk = pDev->pConf->lcd_timing.lcd_clk;
++    pDev->lcd_info.video_clk = pDev->pConf->lcd_timing.lcd_clk;
+        
+     //add lcd actual active area size
+     printk("lcd actual active area size: %d %d (mm).\n", pDev->pConf->lcd_basic.h_active_area, pDev->pConf->lcd_basic.v_active_area);
+@@ -3821,12 +3779,13 @@ static void read_current_lcd_config(Lcd_Config_t *pConf)
+         case LCD_DIGITAL_MIPI:
+             printk("dsi_lane_num      %u\n"
+                    "dsi_bit_rate      %u.%03uMHz\n"
+-                   "operation_mode    %u(%s)\n"
+-                   "transfer_ctrl     %u\n\n",
++                   "operation_mode    %u(%s), %u(%s)\n"
++                   "transfer_ctrl     %u, %u\n\n",
+                    pDev->pConf->lcd_control.mipi_config->lane_num,
+                    (pDev->pConf->lcd_control.mipi_config->bit_rate / 1000000), ((pDev->pConf->lcd_control.mipi_config->bit_rate % 1000000) / 1000),
+-                   pDev->pConf->lcd_control.mipi_config->operation_mode, ((pDev->pConf->lcd_control.mipi_config->operation_mode) ? "COMMAND" : "VIDEO"),
+-                   pDev->pConf->lcd_control.mipi_config->transfer_ctrl);
++                   ((pDev->pConf->lcd_control.mipi_config->operation_mode>>BIT_OPERATION_MODE_INIT) &1), (((pDev->pConf->lcd_control.mipi_config->operation_mode>>BIT_OPERATION_MODE_INIT) & 1) ? "COMMAND" : "VIDEO"),
++                   ((pDev->pConf->lcd_control.mipi_config->operation_mode>>BIT_OPERATION_MODE_DISP) & 1), (((pDev->pConf->lcd_control.mipi_config->operation_mode>>BIT_OPERATION_MODE_DISP) & 1) ? "COMMAND" : "VIDEO"),
++                   ((pDev->pConf->lcd_control.mipi_config->transfer_ctrl>>BIT_TRANS_CTRL_CLK) & 1), ((pDev->pConf->lcd_control.mipi_config->transfer_ctrl>>BIT_TRANS_CTRL_SWITCH) & 3));
+             break;
+         case LCD_DIGITAL_EDP:
+             printk("link_rate         %s\n"
+@@ -4358,8 +4317,8 @@ static inline int _get_lcd_model_timing(struct platform_device *pdev)
+ 	int ret=0;
+ 	const char *str;
+ 	unsigned int val;
+-	unsigned int lcd_para[20];
+-	int i;
++	unsigned int lcd_para[DSI_INIT_ON_MAX];
++	int i, j;
+ 	struct device_node *lcd_model_node;
+ 	phandle fhandle;
+ 	
+@@ -4485,8 +4444,8 @@ static inline int _get_lcd_model_timing(struct platform_device *pdev)
+                 lcd_para[0] = 0;
+                 lcd_para[1] = 0;
+             }
+-            pDev->pConf->lcd_control.mipi_config->bit_rate_min = lcd_para[0]*1000;
+-            pDev->pConf->lcd_control.mipi_config->bit_rate_max = lcd_para[1]*1000;
++            pDev->pConf->lcd_control.mipi_config->bit_rate_min = lcd_para[0];
++            pDev->pConf->lcd_control.mipi_config->bit_rate_max = lcd_para[1];
+             DBG_PRINT("dsi_bit_rate_min= %dMHz max=%dMHz\n", lcd_para[0], lcd_para[1]);
+             ret = of_property_read_u32(lcd_model_node,"pclk_lanebyteclk_factor",&val);
+             if(ret){
+@@ -4498,44 +4457,100 @@ static inline int _get_lcd_model_timing(struct platform_device *pdev)
+             }
+             pDev->pConf->lcd_control.mipi_config->factor_denominator = 10;
+             DBG_PRINT("pclk_lanebyteclk factor= %d\n", pDev->pConf->lcd_control.mipi_config->factor_numerator);
+-            ret = of_property_read_u32(lcd_model_node,"dsi_operation_mode",&val);
++            ret = of_property_read_u32_array(lcd_model_node,"dsi_operation_mode",&lcd_para[0], 2);
+             if(ret){
+                 printk("faild to get dsi_operation_mode\n");
+-                pDev->pConf->lcd_control.mipi_config->operation_mode = OPERATION_COMMAND_MODE;
++                pDev->pConf->lcd_control.mipi_config->operation_mode = ((OPERATION_COMMAND_MODE << BIT_OPERATION_MODE_INIT) | (OPERATION_VIDEO_MODE << BIT_OPERATION_MODE_DISP));
+             }
+             else {
+-                pDev->pConf->lcd_control.mipi_config->operation_mode = (unsigned char)val;
++                pDev->pConf->lcd_control.mipi_config->operation_mode = ((lcd_para[0] << BIT_OPERATION_MODE_INIT) | (lcd_para[1] << BIT_OPERATION_MODE_DISP));
+             }
+-            DBG_PRINT("dsi_operation_mode = %s(%d)\n", (pDev->pConf->lcd_control.mipi_config->operation_mode ? "command":"video"), pDev->pConf->lcd_control.mipi_config->operation_mode);
+-            ret = of_property_read_u32(lcd_model_node,"dsi_transfer_ctrl",&val);
++            DBG_PRINT("dsi_operation_mode init=%d, display=%d\n", (pDev->pConf->lcd_control.mipi_config->operation_mode >> BIT_OPERATION_MODE_INIT) & 1, (pDev->pConf->lcd_control.mipi_config->operation_mode >> BIT_OPERATION_MODE_DISP) & 1);
++            ret = of_property_read_u32_array(lcd_model_node,"dsi_transfer_ctrl",&lcd_para[0], 2);
+             if(ret){
+                 printk("faild to get dsi_transfer_ctrl\n");
+-                pDev->pConf->lcd_control.mipi_config->transfer_ctrl = 0;
++                pDev->pConf->lcd_control.mipi_config->transfer_ctrl = ((0 << BIT_TRANS_CTRL_CLK) | (0 << BIT_TRANS_CTRL_SWITCH));
+             }
+             else {
+-                pDev->pConf->lcd_control.mipi_config->transfer_ctrl = (unsigned char)val;
++                pDev->pConf->lcd_control.mipi_config->transfer_ctrl = ((lcd_para[0] << BIT_TRANS_CTRL_CLK) | (lcd_para[1] << BIT_TRANS_CTRL_SWITCH));
+             }
+-            DBG_PRINT("dsi_transfer_ctrl = %d\n", pDev->pConf->lcd_control.mipi_config->transfer_ctrl);
+-            ret = of_property_read_u32_array(lcd_model_node,"dsi_on_off_init",&lcd_para[0], 2);
+-            if(ret){
+-                printk("faild to get dsi_on_off_init\n");
+-                pDev->pConf->lcd_control.mipi_config->init_on_flag =0; 
+-                pDev->pConf->lcd_control.mipi_config->init_off_flag =0;
+-            } else {
+-                pDev->pConf->lcd_control.mipi_config->init_on_flag =(unsigned char)(lcd_para[0]); 
+-                pDev->pConf->lcd_control.mipi_config->init_off_flag =(unsigned char)(lcd_para[1]);
++            DBG_PRINT("dsi_transfer_ctrl clk=%d, switch=%d\n", (pDev->pConf->lcd_control.mipi_config->transfer_ctrl >> BIT_TRANS_CTRL_CLK) & 1, (pDev->pConf->lcd_control.mipi_config->transfer_ctrl >> BIT_TRANS_CTRL_SWITCH) & 3);
++            //detect dsi init on table
++            pDev->pConf->lcd_control.mipi_config->dsi_init_on = get_dsi_init_table(1);//dsi_init_on
++            ret = of_property_read_u32_index(lcd_model_node,"dsi_init_on", 0, &lcd_para[0]);
++            if (ret) {
++                printk("faild to get dsi_init_on\n");
++            }
++            else {
++                i = 0;
++                while (i < DSI_INIT_ON_MAX) {
++                    ret = of_property_read_u32_index(lcd_model_node,"dsi_init_on", i, &val);
++                    if (val == 0xff) {
++                        ret = of_property_read_u32_index(lcd_model_node,"dsi_init_on", (i+1), &val);
++                        i += 2;
++                        if (val == 0xff)
++                            break;
++                    }
++                    else {
++                        ret = of_property_read_u32_index(lcd_model_node,"dsi_init_on", (i+2), &val);
++                        i = i + 3 + val;
++                    }
++                }
++                ret = of_property_read_u32_array(lcd_model_node,"dsi_init_on", &lcd_para[0], i);
++                if(ret){
++                    printk("faild to get dsi_init_on\n");
++                }
++                else {
++                    DBG_PRINT("dsi_init_on: ");
++                    for (j=0; j<i; j++) {
++                        pDev->pConf->lcd_control.mipi_config->dsi_init_on[j] = (unsigned char)(lcd_para[j] & 0xff);
++                        DBG_PRINT("0x%02x ", pDev->pConf->lcd_control.mipi_config->dsi_init_on[j]);
++                    }
++                    DBG_PRINT("\n");
++                }
++            }
++            //detect dsi init off table
++            pDev->pConf->lcd_control.mipi_config->dsi_init_off = get_dsi_init_table(0);//dsi_init_off
++            ret = of_property_read_u32_index(lcd_model_node,"dsi_init_off", 0, &lcd_para[0]);
++            if (ret) {
++                printk("faild to get dsi_init_off\n");
++            }
++            else {
++                i = 0;
++                while (i < DSI_INIT_OFF_MAX) {
++                    ret = of_property_read_u32_index(lcd_model_node,"dsi_init_off", i, &val);
++                    if (val == 0xff) {
++                        ret = of_property_read_u32_index(lcd_model_node,"dsi_init_off", (i+1), &val);
++                        i += 2;
++                        if (val == 0xff)
++                            break;
++                    }
++                    else {
++                        ret = of_property_read_u32_index(lcd_model_node,"dsi_init_off", (i+2), &val);
++                        i = i + 3 + val;
++                    }
++                }
++                ret = of_property_read_u32_array(lcd_model_node,"dsi_init_off", &lcd_para[0], i);
++                if(ret){
++                    printk("faild to get dsi_init_off\n");
++                }
++                else {
++                    DBG_PRINT("dsi_init_off: ");
++                    for (j=0; j<i; j++) {
++                        pDev->pConf->lcd_control.mipi_config->dsi_init_off[j] = (unsigned char)(lcd_para[j] & 0xff);
++                        DBG_PRINT("0x%02x ", pDev->pConf->lcd_control.mipi_config->dsi_init_off[j]);
++                    }
++                    DBG_PRINT("\n");
++                }
+             }
+-            DBG_PRINT("dsi_on_init= %d, dsi_off_init=%d\n",  pDev->pConf->lcd_control.mipi_config->init_on_flag, pDev->pConf->lcd_control.mipi_config->init_off_flag);
+-            ret = of_property_read_u32_array(lcd_model_node,"dsi_sleep_out_display_on_delay",&lcd_para[0], 2);
++            ret = of_property_read_u32(lcd_model_node,"lcd_extern_init",&val);
+             if(ret){
+-                printk("faild to get dsi_sleep_out_display_on_delay\n");
+-                pDev->pConf->lcd_control.mipi_config->sleep_out_delay =10; 
+-                pDev->pConf->lcd_control.mipi_config->display_on_delay =10;
++                printk("faild to get lcd_extern_init\n");
++                pDev->pConf->lcd_control.mipi_config->lcd_extern_init =0;
+             } else {
+-                pDev->pConf->lcd_control.mipi_config->sleep_out_delay =lcd_para[0]; 
+-                pDev->pConf->lcd_control.mipi_config->display_on_delay =lcd_para[1];
++                pDev->pConf->lcd_control.mipi_config->lcd_extern_init =(unsigned char)(val);
+             }
+-            DBG_PRINT("sleep_out_delay= %d, display_on_delay=%d\n",  pDev->pConf->lcd_control.mipi_config->sleep_out_delay, pDev->pConf->lcd_control.mipi_config->display_on_delay);
++            DBG_PRINT("lcd_extern_init = %d\n",  pDev->pConf->lcd_control.mipi_config->lcd_extern_init);
+         }
+ #endif
+     }
+diff --git a/drivers/amlogic/display/vout/mipi_dsi_util.c b/drivers/amlogic/display/vout/mipi_dsi_util.c
+index 641bf3c92239..03a2620e320d 100755
+--- a/drivers/amlogic/display/vout/mipi_dsi_util.c
++++ b/drivers/amlogic/display/vout/mipi_dsi_util.c
+@@ -13,9 +13,7 @@
+ #include <mach/io.h>
+ #include <plat/io.h>
+ #include <linux/delay.h>
+-#ifdef CONFIG_AML_LCD_EXTERN
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+-#endif
+ 
+ //#define PRINT_DEBUG_INFO
+ #ifdef PRINT_DEBUG_INFO
+@@ -32,95 +30,147 @@
+ #define MIPI_DSI_DCS_ACK_TYPE           MIPI_DSI_DCS_NO_ACK     // Define if DSI command need ack: req_ack or no_ack
+ #define MIPI_DSI_VIDEO_MODE_TYPE        BURST_MODE              // Applicable only to video mode. Define picture data transfer method: non-burst sync pulse; non-burst sync event; or burst.
+ #define MIPI_DSI_TEAR_SWITCH            MIPI_DCS_DISABLE_TEAR
++#define CMD_TIMEOUT_CNT                 3000
+ //===============================================================================
+ 
+-static DSI_Config_t *dsi_config;
++static const char *video_mode_type_table[] = {
++    "COLOR_16BIT_CFG_1",
++    "COLOR_16BIT_CFG_2",
++    "COLOR_16BIT_CFG_3",
++    "COLOR_18BIT_CFG_1",
++    "COLOR_18BIT_CFG_2(loosely)",
++    "COLOR_24BIT",
++    "COLOR_20BIT_LOOSE",
++    "COLOR_24_BIT_YCBCR",
++    "COLOR_16BIT_YCBCR",
++    "COLOR_30BIT",
++    "COLOR_36BIT",
++    "COLOR_12BIT",
++    "COLOR_RGB_111",
++    "COLOR_RGB_332",
++    "COLOR_RGB_444",
++    "un-support type",
++};
+ 
+-#define RETRY_CNT       2000
+-#define WARNNING_CNT    100
++static DSI_Config_t *dsi_config = NULL;
++static unsigned char dsi_init_on_table[DSI_INIT_ON_MAX]={0xff,0xff};
++static unsigned char dsi_init_off_table[DSI_INIT_OFF_MAX]={0xff,0xff};
++static unsigned char dsi_init_on_table_dft[] = {
++    0x05,0x11,0,
++    0xff,50,
++    0x05,0x29,0,
++    0xff,20,
++    0xff,0xff,
++};
++
++unsigned char *get_dsi_init_table(int flag)
++{
++    if (flag > 0)
++        return &dsi_init_on_table[0];
++    else
++        return &dsi_init_off_table[0];
++}
+ 
+-static inline void print_mipi_cmd_status(int cnt)
++static inline void print_mipi_cmd_status(int cnt, unsigned status)
+ {
+-    if (cnt <= WARNNING_CNT) {
+-        printk("cmd error: status=0x%04x, int0=0x%06x, int1=0x%06x\n", READ_LCD_REG(MIPI_DSI_DWC_CMD_PKT_STATUS_OS), READ_LCD_REG(MIPI_DSI_DWC_INT_ST0_OS), READ_LCD_REG(MIPI_DSI_DWC_INT_ST1_OS));
++    if (cnt == 0) {
++        printk("cmd error: status=0x%04x, int0=0x%06x, int1=0x%06x\n", status, READ_LCD_REG(MIPI_DSI_DWC_INT_ST0_OS), READ_LCD_REG(MIPI_DSI_DWC_INT_ST1_OS));
+     }
+ }
+ 
+-static void print_info(DSI_Config_t *cfg)
++static void print_info(void)
+ {
++    int i, j, n;
++
++    if (dsi_config == NULL) {
++        printk("dsi config is NULL\n");
++        return;
++    }
+     printk("================================================\n");
+     printk("MIPI DSI Config\n");
+-    printk(" Lane Num:              %d\n", cfg->lane_num);
+-    printk(" Bit Rate min:          %dMHz\n", (cfg->bit_rate_min / 1000));
+-    printk(" Bit Rate max:          %dMHz\n", (cfg->bit_rate_max / 1000));
+-    printk(" Bit Rate:              %d.%03dMHz\n", (cfg->bit_rate / 1000000), (cfg->bit_rate % 1000000) / 1000);
+-    printk(" Pclk lanebyte factor:  %d\n", ((cfg->factor_numerator * 100 / cfg->factor_denominator) + 5) / 10);
+-    printk(" Operation mode:        %s\n", (cfg->operation_mode == OPERATION_COMMAND_MODE) ? "COMMAND":"VIDEO");
+-    printk(" Transfer control:      %d\n", cfg->transfer_ctrl);
+-    if(cfg->video_mode_type == NON_BURST_SYNC_PULSE) {
++    printk(" Lane Num:              %d\n", dsi_config->lane_num);
++    printk(" Bit Rate min:          %dMHz\n", (dsi_config->bit_rate_min / 1000));
++    printk(" Bit Rate max:          %dMHz\n", (dsi_config->bit_rate_max / 1000));
++    printk(" Bit Rate:              %d.%03dMHz\n", (dsi_config->bit_rate / 1000000), (dsi_config->bit_rate % 1000000) / 1000);
++    printk(" Pclk lanebyte factor:  %d\n", ((dsi_config->factor_numerator * 100 / dsi_config->factor_denominator) + 5) / 10);
++    printk(" Operation mode:\n");
++    printk("     init:              %s\n", ((dsi_config->operation_mode == OPERATION_COMMAND_MODE>>BIT_OPERATION_MODE_INIT) & 1) ? "COMMAND":"VIDEO");
++    printk("     display:           %s\n", ((dsi_config->operation_mode == OPERATION_COMMAND_MODE>>BIT_OPERATION_MODE_DISP) & 1) ? "COMMAND":"VIDEO");
++    printk(" Transfer control:\n");
++    printk("     clk auto stop:     %d\n", ((dsi_config->transfer_ctrl>>BIT_TRANS_CTRL_CLK) & 1));
++    printk("     transfer switch:   %d\n", ((dsi_config->transfer_ctrl>>BIT_TRANS_CTRL_SWITCH) & 3));
++    if(dsi_config->video_mode_type == NON_BURST_SYNC_PULSE) {
+         printk(" Video mode type:       NON_BURST_SYNC_PULSE\n");
+     }
+-    else if(cfg->video_mode_type == NON_BURST_SYNC_EVENT) {
++    else if(dsi_config->video_mode_type == NON_BURST_SYNC_EVENT) {
+         printk(" Video mode type:       NON_BURST_SYNC_EVENT\n");
+     }
+-    else if(cfg->video_mode_type == BURST_MODE) {
++    else if(dsi_config->video_mode_type == BURST_MODE) {
+         printk(" Video mode type:       BURST_MODE\n");
+     }
+ 
+-    printk(" Venc format:           %d\n", cfg->venc_fmt);
+-
+-    switch(cfg->dpi_data_format) {
+-        case COLOR_16BIT_CFG_1  :
+-            printk(" Data Format:           COLOR_16BIT_CFG_1\n");
+-            break;
+-        case COLOR_16BIT_CFG_2  :
+-            printk(" Data Format:           COLOR_16BIT_CFG_2\n");
+-            break;
+-        case COLOR_16BIT_CFG_3  :
+-            printk(" Data Format:           COLOR_16BIT_CFG_3\n");
+-            break;
+-        case COLOR_18BIT_CFG_1  :
+-            printk(" Data Format:           COLOR_18BIT_CFG_1\n");
+-            break;
+-        case COLOR_18BIT_CFG_2  :
+-            printk(" Data Format:           COLOR_18BIT_CFG_2\n");
+-            break;
+-        case COLOR_24BIT        :
+-            printk(" Data Format:           COLOR_24BIT\n");
+-            break;
+-        case COLOR_20BIT_LOOSE  :
+-            printk(" Data Format:           COLOR_20BIT_LOOSE\n");
+-            break;
+-        case COLOR_24_BIT_YCBCR :
+-            printk(" Data Format:           COLOR_24BIT_YCBCR\n");
+-            break;
+-        case COLOR_16BIT_YCBCR  :
+-            printk(" Data Format:           COLOR_16BIT_YCBCR\n");
+-            break;
+-        case COLOR_30BIT        :
+-            printk(" Data Format:           COLOR_30BIT\n");
+-            break;
+-        case COLOR_36BIT        :
+-            printk(" Data Format:           COLOR_36BIT\n");
+-            break;
+-        case COLOR_12BIT        :
+-            printk(" Data Format:           COLOR_12BIT\n");
+-            break;
+-        case COLOR_RGB_111      :
+-            printk(" Data Format:           COLOR_RGB_111\n");
+-            break;
+-        case COLOR_RGB_332      :
+-            printk(" Data Format:           COLOR_RGB332\n");
+-            break;
+-        case COLOR_RGB_444      :
+-            printk(" Data Format:           COLOR_RGB444\n");
+-            break;
+-        default            :
+-            printk(" Error: un-support Data Format, Please Check\n");
+-            break;
+-    }
++    //printk(" Venc format:           %d\n", dsi_config->venc_fmt);
++    printk(" Data Format:           %s\n\n", video_mode_type_table[dsi_config->dpi_data_format]);
+     //printk(" POLARITY:              HIGH ACTIVE\n");
+-    printk(" Enable CRC/ECC/BTA\n");
++    //printk(" Enable CRC/ECC/BTA\n");
++
++    if (dsi_config->dsi_init_on) {
++        printk("DSI INIT ON:\n");
++        i = 0;
++        while (i < DSI_INIT_ON_MAX) {
++            if (dsi_config->dsi_init_on[i] == 0xff) {
++                n = 2;
++                if (dsi_config->dsi_init_on[i+1] == 0xff) {
++                    printk("    0x%02x,0x%02x,\n", dsi_config->dsi_init_on[i], dsi_config->dsi_init_on[i+1]);
++                    break;
++                }
++                else {
++                    printk("    0x%02x,%d,\n", dsi_config->dsi_init_on[i], dsi_config->dsi_init_on[i+1]);
++                }
++            }
++            else {
++                n = 3 + dsi_config->dsi_init_on[i+2];
++                printk("    ");
++                for (j=0; j<n; j++) {
++                    if (j == 2)
++                        printk("%d,", dsi_config->dsi_init_on[i+j]);
++                    else
++                        printk("0x%02x,", dsi_config->dsi_init_on[i+j]);
++                }
++                printk("\n");
++            }
++            i += n;
++        }
++    }
++    if (dsi_config->dsi_init_off) {
++        printk("DSI INIT OFF:\n");
++        i = 0;
++        while (i < DSI_INIT_OFF_MAX) {
++            if (dsi_config->dsi_init_off[i] == 0xff) {
++                n = 2;
++                if (dsi_config->dsi_init_off[i+1] == 0xff) {
++                    printk("    0x%02x,0x%02x,\n", dsi_config->dsi_init_off[i], dsi_config->dsi_init_off[i+1]);
++                    break;
++                }
++                else {
++                    printk("    0x%02x,%d,\n", dsi_config->dsi_init_off[i], dsi_config->dsi_init_off[i+1]);
++                }
++            }
++            else {
++                n = 3 + dsi_config->dsi_init_off[i+2];
++                printk("    ");
++                for (j=0; j<n; j++) {
++                    if (j == 2)
++                        printk("%d,", dsi_config->dsi_init_off[i+j]);
++                    else
++                        printk("0x%02x,", dsi_config->dsi_init_off[i+j]);
++                }
++                printk("\n");
++            }
++            i += n;
++        }
++    }
++    printk("DSI INIT EXTERN:        %d\n", dsi_config->lcd_extern_init);
+     printk("================================================\n");
+ }
+ 
+@@ -198,13 +248,14 @@ static void wait_bta_ack(void)
+ static void wait_cmd_fifo_empty(void)
+ {
+     unsigned int cmd_status;
+-    int i= RETRY_CNT;
++    int i= CMD_TIMEOUT_CNT;
+ 
+     do {
++        udelay(10);
+         i--;
+-        print_mipi_cmd_status(i);
+         cmd_status = READ_LCD_REG(MIPI_DSI_DWC_CMD_PKT_STATUS_OS);
+-    } while((((cmd_status >> BIT_GEN_CMD_EMPTY) & 0x1) != 0x1) && (i!=0));
++    } while((((cmd_status >> BIT_GEN_CMD_EMPTY) & 0x1) != 0x1) && (i>0));
++    print_mipi_cmd_status(i, cmd_status);
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -269,116 +320,92 @@ static unsigned int generic_if_rd(unsigned int address)
+ }
+ 
+ // ----------------------------------------------------------------------------
+-// Function: DCS_write_short_packet_0_para
+-// DCS Write Short Packet 0 Parameter with Generic Interface
+-// Supported DCS Command: DCS_ENTER_SLEEP_MODE/DCS_EXIT_IDLE_MODE/DCS_EXIT_INVERT_MODE
+-//                        DCS_EXIT_SLEEP_MODE/DCS_SET_DISPLAY_OFF/DCS_SET_DISPLAY_ON
+-//                        DCS_SET_TEAR_OFF/DCS_SOFT_RESET/DCS_NOP
+-// ----------------------------------------------------------------------------
+-static void DCS_write_short_packet_0_para(unsigned int data_type,
+-                                          unsigned int vc_id,
+-                                          unsigned int dcs_command,
+-                                          unsigned int req_ack)
+-{
+-    generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, ((0x0 << BIT_GEN_WC_MSBYTE) |
+-                            (dcs_command << BIT_GEN_WC_LSBYTE) |
+-                            (vc_id << BIT_GEN_VC)              |
+-                            (data_type << BIT_GEN_DT)));
+-    if( req_ack == MIPI_DSI_DCS_REQ_ACK ) {
+-        wait_bta_ack();
+-    }
+-    else if( req_ack == MIPI_DSI_DCS_NO_ACK ) {
+-        wait_cmd_fifo_empty();
+-    }
+-}
+-
+-// ----------------------------------------------------------------------------
+-// Function: DCS_write_short_packet_1_para
+-// DCS Write Short Packet 1 Parameter with Generic Interface
++//                           Function: generic_read_packet_0_para
++// Generic Read Packet 0 Parameter with Generic Interface
+ // Supported DCS Command: DCS_SET_ADDRESS_MODE/DCS_SET_GAMMA_CURVE/
+ //                        DCS_SET_PIXEL_FORMAT/DCS_SET_TEAR_ON
+ // ----------------------------------------------------------------------------
+-static void DCS_write_short_packet_1_para(unsigned int data_type,
+-                                          unsigned int vc_id,
+-                                          unsigned int dcs_command,
+-                                          unsigned int para,
+-                                          unsigned int req_ack)
++static unsigned int generic_read_packet_0_para(unsigned char data_type, unsigned char vc_id, unsigned char dcs_command)
+ {
++    unsigned int read_data;
++
+     // DPRINT(" para is %x, dcs_command is %x\n", para, dcs_command);
+     // DPRINT(" vc_id %x, data_type is %x\n", vc_id, data_type);
+-    generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, ((para << BIT_GEN_WC_MSBYTE)        |
+-                            (dcs_command << BIT_GEN_WC_LSBYTE) |
+-                            (vc_id << BIT_GEN_VC)              |
+-                            (data_type << BIT_GEN_DT)));
+-    if( req_ack == MIPI_DSI_DCS_REQ_ACK ) {
+-        wait_bta_ack();
+-    }
+-    else if( req_ack == MIPI_DSI_DCS_NO_ACK ) {
+-        wait_cmd_fifo_empty();
+-    }
++    generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, ((0 << BIT_GEN_WC_MSBYTE)                           |
++                                            (((unsigned int)dcs_command) << BIT_GEN_WC_LSBYTE) |
++                                            (((unsigned int)vc_id) << BIT_GEN_VC)              |
++                                            (((unsigned int)data_type) << BIT_GEN_DT)));
++
++    read_data = wait_for_generic_read_response();
++
++    return read_data;
+ }
+ 
+ // ----------------------------------------------------------------------------
+-//                           Function: DCS_read_packet_no_para
+-// DCS Write Short Packet 1 Parameter with Generic Interface
+-// Supported DCS Command: DCS_SET_ADDRESS_MODE/DCS_SET_GAMMA_CURVE/
+-//                        DCS_SET_PIXEL_FORMAT/DCS_SET_TEAR_ON
++//                           Function: generic_write_short_packet
++// Generic Write Short Packet with Generic Interface
++// Supported Data Type: DT_GEN_SHORT_WR_0, DT_DCS_SHORT_WR_0,
++//                      DT_GEN_SHORT_WR_1, DT_DCS_SHORT_WR_1,
+ // ----------------------------------------------------------------------------
+-static unsigned int DCS_read_packet_no_para(unsigned int data_type,
+-                                            unsigned int vc_id,
+-                                            unsigned int dcs_command)
++static void dsi_generic_write_short_packet(unsigned char data_type, unsigned char vc_id, unsigned char* payload, unsigned short pld_count, unsigned int req_ack)
+ {
+-    unsigned read_data;
++    unsigned int d_command, d_para;
+ 
+-    // DPRINT(" para is %x, dcs_command is %x\n", para, dcs_command);
+-    // DPRINT(" vc_id %x, data_type is %x\n", vc_id, data_type);
+-    generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, ((0x0 << BIT_GEN_WC_MSBYTE)         |
+-                            (dcs_command << BIT_GEN_WC_LSBYTE) |
+-                            (vc_id << BIT_GEN_VC)              |
+-                            (data_type << BIT_GEN_DT)));
+-
+-    read_data = wait_for_generic_read_response();
++    vc_id &= 0x3;
++    data_type &= 0x3f;
++    d_command = ((unsigned int)payload[1]) & 0xff;
++    d_para = (pld_count == 0) ? 0 : (((unsigned int)payload[3]) & 0xff);
+ 
+-    return read_data;
++    generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, ((d_para << BIT_GEN_WC_MSBYTE)       |
++                                            (d_command << BIT_GEN_WC_LSBYTE)     |
++                                            (((unsigned int)vc_id) << BIT_GEN_VC) |
++                                            (((unsigned int)data_type) << BIT_GEN_DT)));
++    if( req_ack == MIPI_DSI_DCS_REQ_ACK ) {
++        wait_bta_ack();
++    }
++    else if( req_ack == MIPI_DSI_DCS_NO_ACK ) {
++        wait_cmd_fifo_empty();
++    }
+ }
+ 
+ // ----------------------------------------------------------------------------
+-//                           Function: DCS_long_write_packet
+-// DCS Long Write Packet
+-// Supported DCS Command: DCS_SET_COLUMN_ADDRESS/DCS_SET_PAGE_ADDRESS
+-//                        DCS_WRITE_MEMORY_START/DCS_WRITE_MEMORY_CONTINUE
++//                           Function: generic_long_write_packet
++// Generic Long Write Packet with Generic Interface
++// Supported Data Type: DT_GEN_LONG_WR, DT_DCS_LONG_WR
+ // ----------------------------------------------------------------------------
+-static void DCS_long_write_packet(unsigned int data_type,    // DSI data type, such as DCS Long Write Packet
+-                                  unsigned int vc_id,        // Virtual Channel ID
+-                                  unsigned int dcs_command,  // DCS Command, such as set_column_address/set_page_address
+-                                  unsigned char* payload,    // Payload(including dcs_cmd+payload)
+-                                  unsigned int pld_size,     // Payload size, from LSB to MSB, include dcs_cmd+payload
+-                                  unsigned int req_ack)      // if need check ack for bta
+-{
+-    unsigned int payload_data=0, header_data;
++static void dsi_generic_write_long_packet(unsigned char data_type, unsigned char vc_id, unsigned char* payload, unsigned short pld_count, unsigned int req_ack)
++{
++    unsigned int d_command, payload_data=0, header_data;
+     unsigned int cmd_status;
+-    unsigned int i;
++    unsigned int i, d_start_index;
+     int j;
+ 
++    vc_id &= 0x3;
++    data_type &= 0x3f;
++    d_command = ((unsigned int)payload[1]) & 0xff;
++    pld_count = (pld_count + 1) & 0xffff;//include command
++    d_start_index = 3;//payload[3] start (payload[0]: data_type, payload[1]: command, payload[2]: para_num)
++
+     // Write Payload Register First
+-    for(i=0; i<pld_size; i++) {
+-        if(i%4 == 0)    { payload_data = 0; }
+-        payload_data = payload_data | (payload[i] << 8*(i%4));
++    payload_data = d_command;
++    for(i=1; i<pld_count; i++) {
++        if(i%4 == 0)
++            payload_data = 0;
++        payload_data |= (((unsigned int)payload[i-1+d_start_index]) << 8*(i%4));
+ 
+-        if(i%4 == 3 || i == pld_size-1) {                                      // when last byte
++        if((i%4 == 3) || (i == (pld_count-1))) {  // when last byte  //write max 4 byte payload data once
+             // Check the pld fifo status before write to it, do not need check every word
+-            if(i == pld_size/3 || i == pld_size/2) {
+-                j = RETRY_CNT;
++            if((i == (pld_count/3)) || (i == (pld_count/2))) {
++                j = CMD_TIMEOUT_CNT;
+                 do {
++                    udelay(10);
+                     j--;
+-                    print_mipi_cmd_status(j);
+-                    cmd_status = READ_LCD_REG( MIPI_DSI_DWC_CMD_PKT_STATUS_OS);
++                    cmd_status = READ_LCD_REG(MIPI_DSI_DWC_CMD_PKT_STATUS_OS);
+                 } while((((cmd_status >> BIT_GEN_PLD_W_FULL) & 0x1) == 0x1) && (j>0));
++                print_mipi_cmd_status(j, cmd_status);
+             }
+-            if(dcs_command == DCS_WRITE_MEMORY_CONTINUE) {
+-                WRITE_LCD_REG( MIPI_DSI_DWC_GEN_PLD_DATA_OS, payload_data);               // Use direct memory write to save time when in WRITE_MEMORY_CONTINUE
+-                // (*(MIPI_DSI_DWC_GEN_PLD_DATA_OS|0xc1100000)) = payload_data;
+-                // *(volatile unsigned long *)((0xc1100000)|((MIPI_DSI_DWC_GEN_PLD_DATA_OS)<<2))=payload_data;
++            if(d_command == DCS_WRITE_MEMORY_CONTINUE) { // Use direct memory write to save time when in WRITE_MEMORY_CONTINUE
++                WRITE_LCD_REG(MIPI_DSI_DWC_GEN_PLD_DATA_OS, payload_data);
+             }
+             else {
+                 generic_if_wr(MIPI_DSI_DWC_GEN_PLD_DATA_OS, payload_data);
+@@ -387,20 +414,18 @@ static void DCS_long_write_packet(unsigned int data_type,    // DSI data type, s
+     }
+ 
+     // Check cmd fifo status before write to it
+-    j = RETRY_CNT;
++    j = CMD_TIMEOUT_CNT;
+     do {
++        udelay(10);
+         j--;
+-        print_mipi_cmd_status(j);
+-        cmd_status = READ_LCD_REG( MIPI_DSI_DWC_CMD_PKT_STATUS_OS);
++        cmd_status = READ_LCD_REG(MIPI_DSI_DWC_CMD_PKT_STATUS_OS);
+     } while((((cmd_status >> BIT_GEN_CMD_FULL) & 0x1) == 0x1) && (j>0));
++    print_mipi_cmd_status(j, cmd_status);
+     // Write Header Register
+-    header_data = (((((pld_size) & 0xff00) >> 8) << BIT_GEN_WC_MSBYTE) |
+-                    (((pld_size) & 0x00ff) << BIT_GEN_WC_LSBYTE)        |
+-                    (vc_id << BIT_GEN_VC)                               |
+-                    (data_type << BIT_GEN_DT));
++    header_data = ( (((unsigned int)pld_count) << BIT_GEN_WC_LSBYTE) |//include command
++                    (((unsigned int)vc_id) << BIT_GEN_VC)                |
++                    (((unsigned int)data_type) << BIT_GEN_DT));
+     generic_if_wr(MIPI_DSI_DWC_GEN_HDR_OS, header_data);
+-
+-    // Check BTA ACK
+     if (req_ack == MIPI_DSI_DCS_REQ_ACK) {
+         wait_bta_ack();
+     }
+@@ -409,6 +434,68 @@ static void DCS_long_write_packet(unsigned int data_type,    // DSI data type, s
+     }
+ }
+ 
++// ----------------------------------------------------------------------------
++//                           Function: dsi_generic_write_cmd
++// Generic Write Command
++// Supported Data Type: DT_GEN_SHORT_WR_0, DT_DCS_SHORT_WR_0,
++//                      DT_GEN_SHORT_WR_1, DT_DCS_SHORT_WR_1,
++//                      DT_GEN_LONG_WR, DT_DCS_LONG_WR,
++//                      DT_SET_MAX_RPS
++// ----------------------------------------------------------------------------
++void dsi_generic_write_cmd(unsigned char* payload)
++{
++    int i=0, j=0;
++    unsigned char vc_id = MIPI_DSI_VIRTUAL_CHAN_ID;
++    unsigned int req_ack = MIPI_DSI_DCS_ACK_TYPE;
++
++    //payload struct:
++    //data_type, command, para_num, parameters...
++    //data_type=0xff, command=0xff, means ending flag
++    //data_type=0xff, command<0xff, means delay time(unit ms)
++    while(i < DSI_CMD_SIZE_MAX) {
++        if(payload[i]==0xff) {
++            j = 2;
++            if(payload[i+1]==0xff)
++                break;
++            else
++                mdelay(payload[i+1]);
++        }
++        else {
++            j = 3 + payload[i+2]; //payload[i+2] is parameter num
++            switch (payload[i]) {//analysis data_type
++                case DT_DCS_SHORT_WR_0:
++                case DT_GEN_SHORT_WR_0:
++                    dsi_generic_write_short_packet(payload[i], vc_id, &payload[i], 0, req_ack);
++                    break;
++                case DT_DCS_SHORT_WR_1:
++                case DT_GEN_SHORT_WR_1:
++                    dsi_generic_write_short_packet(payload[i], vc_id, &payload[i], 1, req_ack);
++                    break;
++                case DT_DCS_LONG_WR:
++                case DT_GEN_LONG_WR:
++                    dsi_generic_write_long_packet(payload[i], vc_id, &payload[i], payload[i+2], req_ack);
++                    break;
++                case DT_SET_MAX_RPS:
++                    printk("to do data_type: 0x%2x\n", payload[i]);
++                    break;
++                case DT_TURN_ON:
++                    WRITE_LCD_REG_BITS(MIPI_DSI_TOP_CNTL, 1, 2, 1);
++                    mdelay(20); //wait for vsync trigger
++                    WRITE_LCD_REG_BITS(MIPI_DSI_TOP_CNTL, 0, 2, 1);
++                    mdelay(20); //wait for vsync trigger
++                    break;
++                case DT_SHUT_DOWN:
++                    WRITE_LCD_REG_BITS(MIPI_DSI_TOP_CNTL, 1, 2, 1);
++                    mdelay(20); //wait for vsync trigger
++                    break;
++                default:
++                    printk("un-support data_type: 0x%02x\n", payload[i]);
++            }
++        }
++        i += j;
++    }
++}
++
+ static void dsi_phy_init(unsigned char lane_num)
+ {
+     // enable phy clock.
+@@ -470,7 +557,7 @@ static void dsi_phy_init(unsigned char lane_num)
+     }
+ }
+ 
+-static void dsi_phy_config(Lcd_Config_t *pConf)
++static void mipi_dsi_phy_config(Lcd_Config_t *pConf)
+ {
+     DPRINT("%s\n", __func__);
+     //Digital
+@@ -539,10 +626,8 @@ static void set_mipi_dsi_host(int lane_num,                      // lane number,
+                               int operation_mode,                // video mode/command mode
+                               tv_enc_lcd_type_t output_type,     // video type, such as 1080x720
+                               int vid_mode_type,                 // video mode : burst/non_burst
+-                              int check_phy_status,              // enable/disable phy lock check, disable for multiple pic test
+                               Lcd_Config_t *p)
+ {
+-    int real_lane_num = lane_num+1;
+     int num_of_chunk;
+     int pixel_per_chunk = 4;
+     int byte_per_chunk=0;
+@@ -550,7 +635,7 @@ static void set_mipi_dsi_host(int lane_num,                      // lane number,
+     int chunk_overhead;
+     int vid_null_size=0;
+ 
+-    totol_bytes_per_chunk = real_lane_num*pixel_per_chunk*3/4;
++    totol_bytes_per_chunk = lane_num*pixel_per_chunk*3/4;
+ 
+     // one lene has 8 bytes for 4 pixels
+     // according to DSI spec line50
+@@ -606,9 +691,9 @@ static void set_mipi_dsi_host(int lane_num,                      // lane number,
+     // 1,    Configure Lane number and phy stop wait time
+     if ((output_type != TV_ENC_LCD240x160_dsi) && (output_type != TV_ENC_LCD1920x1200p) &&
+         (output_type != TV_ENC_LCD2560x1600) && (output_type != TV_ENC_LCD768x1024p)) {
+-        WRITE_LCD_REG( MIPI_DSI_DWC_PHY_IF_CFG_OS, (0x28 << BIT_PHY_STOP_WAIT_TIME) | (lane_num << BIT_N_LANES));
++        WRITE_LCD_REG( MIPI_DSI_DWC_PHY_IF_CFG_OS, (0x28 << BIT_PHY_STOP_WAIT_TIME) | ((lane_num-1) << BIT_N_LANES));
+     } else {
+-        WRITE_LCD_REG( MIPI_DSI_DWC_PHY_IF_CFG_OS, (1 << BIT_PHY_STOP_WAIT_TIME) | (lane_num << BIT_N_LANES));
++        WRITE_LCD_REG( MIPI_DSI_DWC_PHY_IF_CFG_OS, (1 << BIT_PHY_STOP_WAIT_TIME) | ((lane_num-1) << BIT_N_LANES));
+     }
+ 
+     // 2.1,  Configure Virtual channel settings
+@@ -636,8 +721,9 @@ static void set_mipi_dsi_host(int lane_num,                      // lane number,
+                         (1 << BIT_LP_VBP_EN)  |                  // enalbe lp
+                         (1 << BIT_LP_VSA_EN)  |                  // enalbe lp
+                         (1 << BIT_FRAME_BTA_ACK_EN) |            // enable BTA after one frame, TODO, need check
+-                        //(1 << BIT_LP_CMD_EN) |                   // enable the command transmission only in lp mode    //evoke add for test
++                        //(1 << BIT_LP_CMD_EN) |                   // enable the command transmission only in lp mode
+                         (vid_mode_type << BIT_VID_MODE_TYPE) );  // burst/non burst
++        WRITE_LCD_REG( MIPI_DSI_DWC_DPI_LP_CMD_TIM_OS, (4 << 16) | (4 << 0));  //[23:16]outvact, [7:0]invact
+ 
+         // 3.2   Configure video packet size settings
+         if( vid_mode_type == BURST_MODE ) {                                        // burst mode
+@@ -708,190 +794,141 @@ static void set_mipi_dsi_host(int lane_num,                      // lane number,
+     }
+ }
+ 
+-static void mipi_dsi_config(Lcd_Config_t *pConf)
++static void mipi_dsi_host_config(Lcd_Config_t *pConf)
+ {
+     unsigned int        dpi_data_format;
+     unsigned int        venc_data_width;
+     tv_enc_lcd_type_t   venc_format;
+     unsigned char       lane_num;
+-    unsigned char       operation_mode, video_mode_type;
++    unsigned char       operation_mode_init, video_mode_type;
+ 
+-    operation_mode  = pConf->lcd_control.mipi_config->operation_mode;
++    operation_mode_init  = ((pConf->lcd_control.mipi_config->operation_mode >> BIT_OPERATION_MODE_INIT) & 1);
+     video_mode_type = pConf->lcd_control.mipi_config->video_mode_type;
+     venc_format     = pConf->lcd_control.mipi_config->venc_fmt;
+     venc_data_width = pConf->lcd_control.mipi_config->venc_data_width;
+     dpi_data_format = pConf->lcd_control.mipi_config->dpi_data_format;
+-    lane_num        = pConf->lcd_control.mipi_config->lane_num - 1;
++    lane_num        = pConf->lcd_control.mipi_config->lane_num;
+ 
+-    DPRINT("%s, %d\n", __func__, __LINE__);
+ #ifdef PRINT_DEBUG_INFO
+-    print_info(pConf->lcd_control.mipi_config);
++    print_info();
+ #endif
+ 
+     DPRINT("Set mipi_dsi_host\n");
+-    set_mipi_dcs(MIPI_DSI_CMD_TRANS_TYPE,            //0: high speed, 1: low power
+-                 MIPI_DSI_DCS_ACK_TYPE,              // if need bta ack check
++    set_mipi_dcs(MIPI_DSI_CMD_TRANS_TYPE,              // 0: high speed, 1: low power
++                 MIPI_DSI_DCS_ACK_TYPE,                // if need bta ack check
+                  MIPI_DSI_TEAR_SWITCH);                // enable tear ack
+ 
+-    DPRINT("%s, %d\n", __func__, __LINE__);
+     set_mipi_dsi_host(lane_num,                        // Lane number
+                       MIPI_DSI_VIRTUAL_CHAN_ID,        // Virtual channel id
+                       venc_data_width,                 // MIPI dsi venc data bit width
+                       dpi_data_format,                 // MIPI dsi dpi data format
+                       0,                               // Chroma sub sample, only for YUV 422 or 420, even or odd
+-                      operation_mode,                  // DSI operation mode, video or command
++                      operation_mode_init,             // DSI operation mode, video or command
+                       venc_format,                     // Venc resolution format, eg, 240x160
+                       video_mode_type,                 // Video mode, burst or non-burst
+-                      1,                               // If check the phy status, need check when first pic
+                       pConf);
+ }
+ 
+ void mipi_dsi_link_on(Lcd_Config_t *pConf)
+ {
+-    int vcid = MIPI_DSI_VIRTUAL_CHAN_ID;
+-    int req_ack = MIPI_DSI_DCS_ACK_TYPE;
+-    unsigned int        dpi_data_format;
+-    unsigned int        venc_data_width;
+-    tv_enc_lcd_type_t   venc_format;
+-    unsigned char       lane_num;
+-    unsigned char       operation_mode, video_mode_type;
+-    int i=0, j=0, ending_flag=0;
+-#ifdef CONFIG_AML_LCD_EXTERN
++    unsigned int      dpi_data_format;
++    unsigned int      venc_data_width;
++    tv_enc_lcd_type_t venc_format;
++    unsigned char     lane_num;
++    unsigned char     operation_mode_disp, video_mode_type;
+     struct aml_lcd_extern_driver_t *lcd_extern_driver;
+-#endif
++    unsigned int init_flag = 0;
+ 
+     printk("%s\n", __FUNCTION__);
+-    operation_mode  = OPERATION_VIDEO_MODE;//pConf->lcd_control.mipi_config->operation_mode;
++    operation_mode_disp = ((pConf->lcd_control.mipi_config->operation_mode >> BIT_OPERATION_MODE_DISP) & 1);
+     video_mode_type = pConf->lcd_control.mipi_config->video_mode_type;
+     venc_format     = pConf->lcd_control.mipi_config->venc_fmt;
+     venc_data_width = pConf->lcd_control.mipi_config->venc_data_width;
+     dpi_data_format = pConf->lcd_control.mipi_config->dpi_data_format;
+-    lane_num        = pConf->lcd_control.mipi_config->lane_num - 1;
+-
+-    if(pConf->lcd_control.mipi_config->transfer_ctrl == 0)
+-        startup_transfer_video();
+-    else
+-        startup_transfer_cmd();
++    lane_num        = pConf->lcd_control.mipi_config->lane_num;
+ 
+-    if (pConf->lcd_control.mipi_config->init_on_flag ==1) {
+-#ifdef CONFIG_AML_LCD_EXTERN
++    if (pConf->lcd_control.mipi_config->lcd_extern_init > 0) {
+         lcd_extern_driver = aml_lcd_extern_get_driver();
+         if (lcd_extern_driver == NULL) {
+             printk("no lcd_extern driver\n");
+         }
+         else {
+             if (lcd_extern_driver->init_on_cmd_8) {
+-                while(ending_flag == 0) {
+-                    if(lcd_extern_driver->init_on_cmd_8[i]==0xff) {
+-                        j = 2;
+-                        if(lcd_extern_driver->init_on_cmd_8[i+1]==0xff)
+-                            ending_flag = 1;
+-                        else
+-                            mdelay(lcd_extern_driver->init_on_cmd_8[i+1]);
+-                    }
+-                    else {
+-                        j = lcd_extern_driver->init_on_cmd_8[i];
+-                        if (j == 1) {//no parameter
+-                            DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, lcd_extern_driver->init_on_cmd_8[i+1], req_ack);
+-                        }
+-                        else if (j == 2) {//1 parameter
+-                            DCS_write_short_packet_1_para(DT_DCS_SHORT_WR_1, vcid, lcd_extern_driver->init_on_cmd_8[i+1], lcd_extern_driver->init_on_cmd_8[i+2], req_ack);
+-                        }
+-                        else {//long write
+-                            DCS_long_write_packet(DT_DCS_LONG_WR, vcid, lcd_extern_driver->init_on_cmd_8[i+1], &lcd_extern_driver->init_on_cmd_8[i+1], j, req_ack);
+-                        }
+-                        j++;
+-                    }
+-                    i += j;
+-                }
+-                printk("%s power on init\n", lcd_extern_driver->name);
++                dsi_generic_write_cmd(lcd_extern_driver->init_on_cmd_8);
++                printk("[extern]%s dsi init on\n", lcd_extern_driver->name);
+             }
++            init_flag++;
+         }
+-#endif
+     }
+ 
+-    DPRINT("send sleep out\n");
+-    DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, DCS_EXIT_SLEEP_MODE, req_ack);
+-    mdelay(pConf->lcd_control.mipi_config->sleep_out_delay);
++    if (pConf->lcd_control.mipi_config->dsi_init_on) {
++        dsi_generic_write_cmd(pConf->lcd_control.mipi_config->dsi_init_on);
++        init_flag++;
++        DPRINT("dsi init on\n");
++    }
+ 
+-    DPRINT("send display on\n");
+-    DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, DCS_SET_DISPLAY_ON, req_ack);
+-    mdelay(pConf->lcd_control.mipi_config->display_on_delay);
++    if (init_flag == 0) {
++        dsi_generic_write_cmd(dsi_init_on_table_dft);
++        printk("[warning]: not init for mipi-dsi, use default command\n");
++    }
+ 
+-    if (operation_mode != pConf->lcd_control.mipi_config->operation_mode) {
++    if (operation_mode_disp != ((pConf->lcd_control.mipi_config->operation_mode >> BIT_OPERATION_MODE_INIT) & 1)) {
+         set_mipi_dsi_host(lane_num,                        // Lane number
+-                      MIPI_DSI_VIRTUAL_CHAN_ID,        // Virtual channel id
+-                      venc_data_width,                 // MIPI dsi venc RGB data bit width
+-                      dpi_data_format,                 // MIPI dsi dpi data format
+-                      0,                               // Chroma sub sample, only for YUV 422 or 420, even or odd
+-                      operation_mode,                  // DSI operation mode, video or command
+-                      venc_format,                     // Venc resolution format, eg, 240x160
+-                      video_mode_type,                 // Video mode, burst or non-burst
+-                      1,                               // If check the phy status, need check when first pic
+-                      pConf);
++                          MIPI_DSI_VIRTUAL_CHAN_ID,        // Virtual channel id
++                          venc_data_width,                 // MIPI dsi venc RGB data bit width
++                          dpi_data_format,                 // MIPI dsi dpi data format
++                          0,                               // Chroma sub sample, only for YUV 422 or 420, even or odd
++                          operation_mode_disp,             // DSI operation mode, video or command
++                          venc_format,                     // Venc resolution format, eg, 240x160
++                          video_mode_type,                 // Video mode, burst or non-burst
++                          pConf);
+     }
+ }
+ 
+ void mipi_dsi_link_off(Lcd_Config_t *pConf)
+ {
+-    int vcid = MIPI_DSI_VIRTUAL_CHAN_ID;
+-    int req_ack = 0;
+-    int i=0, j=0, ending_flag=0;
+-#ifdef CONFIG_AML_LCD_EXTERN
+     struct aml_lcd_extern_driver_t *lcd_extern_driver;
+-#endif
+-
+-    printk("%s\n", __FUNCTION__);
+-    DPRINT("send display off\n");
+-    DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, DCS_SET_DISPLAY_OFF, req_ack);
+-    mdelay(10);
+ 
+-    DPRINT("send enter sleep mode\n");
+-    DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, DCS_ENTER_SLEEP_MODE, req_ack);
+-    mdelay(20);
++    if (pConf->lcd_control.mipi_config->dsi_init_off) {
++        dsi_generic_write_cmd(pConf->lcd_control.mipi_config->dsi_init_off);
++        DPRINT("dsi init off\n");
++    }
+ 
+-    if (pConf->lcd_control.mipi_config->init_off_flag ==1) {
+-#ifdef CONFIG_AML_LCD_EXTERN
++    if (pConf->lcd_control.mipi_config->lcd_extern_init > 0) {
+         lcd_extern_driver = aml_lcd_extern_get_driver();
+         if (lcd_extern_driver == NULL) {
+             printk("no lcd_extern driver\n");
+         }
+         else {
+             if (lcd_extern_driver->init_off_cmd_8) {
+-                while(ending_flag == 0) {
+-                    if(lcd_extern_driver->init_off_cmd_8[i]==0xff) {
+-                        j = 2;
+-                        if(lcd_extern_driver->init_off_cmd_8[i+1]==0xff)
+-                            ending_flag = 1;
+-                        else
+-                            mdelay(lcd_extern_driver->init_off_cmd_8[i+1]);
+-                    }
+-                    else {
+-                        j = lcd_extern_driver->init_off_cmd_8[i];
+-                        if (j == 1) {//no parameter
+-                            DCS_write_short_packet_0_para(DT_DCS_SHORT_WR_0, vcid, lcd_extern_driver->init_off_cmd_8[i+1], req_ack);
+-                        }
+-                        else if (j == 2) {//1 parameter
+-                            DCS_write_short_packet_1_para(DT_DCS_SHORT_WR_1, vcid, lcd_extern_driver->init_off_cmd_8[i+1], lcd_extern_driver->init_off_cmd_8[i+2], req_ack);
+-                        }
+-                        else {//long write
+-                            DCS_long_write_packet(DT_DCS_LONG_WR, vcid, lcd_extern_driver->init_off_cmd_8[i+1], &lcd_extern_driver->init_off_cmd_8[i+1], j, req_ack);
+-                        }
+-                        j++;
+-                    }
+-                    i += j;
+-                }
+-                printk("%s power off init\n", lcd_extern_driver->name);
++                dsi_generic_write_cmd(lcd_extern_driver->init_off_cmd_8);
++                printk("[extern]%s dsi init off\n", lcd_extern_driver->name);
+             }
+         }
+-#endif
+     }
+ }
+ 
+-void set_mipi_dsi_control(Lcd_Config_t *pConf)
++void set_mipi_dsi_control_config(Lcd_Config_t *pConf)
+ {
++    unsigned int bit_rate;
+     DSI_Config_t *cfg= pConf->lcd_control.mipi_config;
+ 
++    dsi_config = pConf->lcd_control.mipi_config;
++    if (cfg->bit_rate_max == 0) {
++        bit_rate = ((pConf->lcd_timing.lcd_clk / 1000) * 3 * 8) / cfg->lane_num;
++        cfg->bit_rate_min = bit_rate - 20*1000;
++        cfg->bit_rate_max = bit_rate - 20*1000 + (pConf->lcd_timing.lcd_clk / 1000);
++        printk("mipi dsi bit_rate min=%dMHz, max=%dMHz\n", (cfg->bit_rate_min / 1000), (cfg->bit_rate_max / 1000));
++    }
++    else {
++        cfg->bit_rate_min *= 1000;
++        cfg->bit_rate_max *= 1000;
++    }
++    // if (cfg->bit_rate_max > MIPI_PHY_MAX_CLK_IN) {
++        // cfg->bit_rate_max = MIPI_PHY_MAX_CLK_IN;
++        // printk("mipi dsi bit_rate_max is out of support, adjust to %dMHz\n", (MIPI_PHY_MAX_CLK_IN / 1000));
++    // }
++
+     cfg->video_mode_type = MIPI_DSI_VIDEO_MODE_TYPE;
+     if(pConf->lcd_basic.lcd_bits == 6){
+         cfg->dpi_data_format = COLOR_18BIT_CFG_2;
+@@ -901,15 +938,49 @@ void set_mipi_dsi_control(Lcd_Config_t *pConf)
+         cfg->venc_data_width = MIPI_DSI_VENC_COLOR_24B;
+     }
+ 
+-    if((pConf->lcd_basic.h_active !=240)&&(pConf->lcd_basic.h_active !=768)&&(pConf->lcd_basic.h_active !=1920)&&(pConf->lcd_basic.h_active !=2560))
+-        cfg->venc_fmt=TV_ENC_LCD1280x720;
+-    else
+-        cfg->venc_fmt=TV_ENC_LCD768x1024p;
++    switch ((cfg->transfer_ctrl >> BIT_TRANS_CTRL_SWITCH) & 3) {
++        case 1: //standard
++            cfg->venc_fmt=TV_ENC_LCD768x1024p;
++            break;
++        case 2: //slow
++            cfg->venc_fmt=TV_ENC_LCD1280x720;
++            break;
++        case 0: //auto
++        default:
++            if((pConf->lcd_basic.h_active !=240)&&(pConf->lcd_basic.h_active !=768)&&(pConf->lcd_basic.h_active !=1920)&&(pConf->lcd_basic.h_active !=2560))
++                cfg->venc_fmt=TV_ENC_LCD1280x720;
++            else
++                cfg->venc_fmt=TV_ENC_LCD768x1024p;
++            break;
++    }
++}
++
++void set_mipi_dsi_control_config_post(Lcd_Config_t *pConf)
++{
++    unsigned pre_div, post_div, xd;
++    unsigned pclk, lanebyteclk;
++    DSI_Config_t *cfg= pConf->lcd_control.mipi_config;
++
++    post_div = (((pConf->lcd_timing.div_ctrl) >> DIV_CTRL_DIV_POST) & 0x7) + 1;
++    pre_div = ((pConf->lcd_timing.div_ctrl) >> DIV_CTRL_DIV_PRE) & 0x7;
++    pre_div = div_pre_table[pre_div];
++    xd = ((pConf->lcd_timing.clk_ctrl) >> CLK_CTRL_XD) & 0xf;
++
++    pclk = pConf->lcd_timing.lcd_clk;
++    cfg->bit_rate = pclk * pre_div * post_div * xd;
+ 
+     if (cfg->factor_numerator == 0) {
+-        pConf->lcd_control.mipi_config->factor_denominator = pConf->lcd_control.mipi_config->bit_rate / 8 / 1000;
+-        pConf->lcd_control.mipi_config->factor_numerator = pConf->lcd_timing.lcd_clk / 1000;
++        lanebyteclk = cfg->bit_rate / 8;
++        DPRINT("pixel_clk = %d.%03dMHz, bit_rate = %d.%03dMHz, lanebyteclk = %d.%03dMHz\n", (pclk / 1000000), ((pclk / 1000) % 1000), 
++                 (cfg->bit_rate / 1000000), ((cfg->bit_rate / 1000) % 1000), (lanebyteclk / 1000000), ((lanebyteclk / 1000) % 1000));
++
++        cfg->factor_denominator = lanebyteclk/1000;
++        cfg->factor_numerator = pclk/1000;
++        //cfg->factor_denominator = 10;
+     }
++    DPRINT("d=%d, n=%d, factor=%d.%02d\n", cfg->factor_denominator, cfg->factor_numerator, (cfg->factor_denominator/cfg->factor_numerator), 
++             ((cfg->factor_denominator % cfg->factor_numerator) * 100 / cfg->factor_numerator));
++
+     cfg->hline =(pConf->lcd_basic.h_period * cfg->factor_denominator + cfg->factor_numerator - 1) / cfg->factor_numerator;  // Rounded. Applicable for Period(pixclk)/Period(bytelaneclk)=9/16
+     cfg->hsa =(pConf->lcd_timing.hsync_width * cfg->factor_denominator + cfg->factor_numerator - 1) / cfg->factor_numerator;
+     cfg->hbp =((pConf->lcd_timing.hsync_bp-pConf->lcd_timing.hsync_width) * cfg->factor_denominator + cfg->factor_numerator - 1) / cfg->factor_numerator;
+@@ -918,10 +989,20 @@ void set_mipi_dsi_control(Lcd_Config_t *pConf)
+     cfg->vbp = pConf->lcd_timing.vsync_bp - pConf->lcd_timing.vsync_width;
+     cfg->vfp = pConf->lcd_basic.v_period - pConf->lcd_timing.vsync_bp - pConf->lcd_basic.v_active;
+     cfg->vact = pConf->lcd_basic.v_active;
++}
+ 
+-    dsi_phy_config(pConf);
++void set_mipi_dsi_control(Lcd_Config_t *pConf)
++{
++    mipi_dsi_host_config(pConf);
+ 
+-    mipi_dsi_config(pConf);
++    mipi_dsi_phy_config(pConf);
++
++    if(((pConf->lcd_control.mipi_config->transfer_ctrl >> BIT_TRANS_CTRL_CLK) & 1) == 0)
++        startup_transfer_video();
++    else
++        startup_transfer_cmd();
++
++    mipi_dsi_link_on(pConf);
+ }
+ 
+ void mipi_dsi_off(void)
+@@ -960,22 +1041,24 @@ static ssize_t dsi_debug(struct class *class, struct class_attribute *attr, cons
+     int i;
+ 
+     switch (buf[0]) {
+-        case 'r':	//read
++        case 'r': //read
+             num = 1;
++            t[0] = 0;
+             ret = sscanf(buf, "read %x %u", &t[0], &num);
+             printk("read dsi phy reg:\n");
+             for (i=0; i<num; i++) {
+                 printk("  0x%04x = 0x%08x\n", t[0]+i, READ_DSI_REG(t[0]+i));
+             }
+             break;
+-        case 'w':	//write
++        case 'w': //write
++            t[0] = 0;
++            t[1] = 0;
+             ret = sscanf(buf, "write %x %x", &t[0], &t[1]);
+             WRITE_DSI_REG(t[0], t[1]);
+             printk("write dsi phy reg 0x%04x = 0x%08x, readback 0x%08x\n", t[0], t[1], READ_DSI_REG(t[0]));
+             break;
+         case 'i':
+-            if (dsi_config)
+-                print_info(dsi_config);
++            print_info();
+             break;
+         default:
+             printk("wrong format of dsi debug command.\n");
+@@ -1005,7 +1088,6 @@ void dsi_probe(Lcd_Config_t *pConf)
+ {
+     int ret;
+ 
+-    dsi_config = pConf->lcd_control.mipi_config;
+     ret = class_register(&aml_dsi_debug_class);
+     if(ret){
+         DPRINT("class register aml_dsi_debug_class fail!\n");
+diff --git a/drivers/amlogic/display/vout/mipi_dsi_util.h b/drivers/amlogic/display/vout/mipi_dsi_util.h
+index fa0197b02b8c..fb6999abb096 100755
+--- a/drivers/amlogic/display/vout/mipi_dsi_util.h
++++ b/drivers/amlogic/display/vout/mipi_dsi_util.h
+@@ -229,61 +229,61 @@ typedef enum {DT_VSS                 = 0x01,
+ #define BIT_TEAR_FX_EN              0
+ 
+ // For MIPI_DSI_DWC_CMD_PKT_STATUS_OS
+-#define BIT_DBI_RD_CMD_BUSY        14                                          // For DBI no usefull 
+-#define BIT_DBI_PLD_R_FULL         13                                          // For DBI no usefull 
+-#define BIT_DBI_PLD_R_EMPTY        12                                          // For DBI no usefull 
+-#define BIT_DBI_PLD_W_FULL         11                                          // For DBI no usefull 
+-#define BIT_DBI_PLD_W_EMPTY        10                                          // For DBI no usefull 
+-#define BIT_DBI_CMD_FULL            9                                          // For DBI no usefull 
+-#define BIT_DBI_CMD_EMPTY           8                                          // For DBI no usefull 
+-
+-#define BIT_GEN_RD_CMD_BUSY         6                                          // For Generic interface 
+-#define BIT_GEN_PLD_R_FULL          5                                          // For Generic interface               
+-#define BIT_GEN_PLD_R_EMPTY         4                                          // For Generic interface    
+-#define BIT_GEN_PLD_W_FULL          3                                          // For Generic interface 
+-#define BIT_GEN_PLD_W_EMPTY         2                                          // For Generic interface 
+-#define BIT_GEN_CMD_FULL            1                                          // For Generic interface 
+-#define BIT_GEN_CMD_EMPTY           0                                          // For Generic interface 
++#define BIT_DBI_RD_CMD_BUSY        14    // For DBI no usefull 
++#define BIT_DBI_PLD_R_FULL         13    // For DBI no usefull 
++#define BIT_DBI_PLD_R_EMPTY        12    // For DBI no usefull 
++#define BIT_DBI_PLD_W_FULL         11    // For DBI no usefull 
++#define BIT_DBI_PLD_W_EMPTY        10    // For DBI no usefull 
++#define BIT_DBI_CMD_FULL            9    // For DBI no usefull 
++#define BIT_DBI_CMD_EMPTY           8    // For DBI no usefull 
++
++#define BIT_GEN_RD_CMD_BUSY         6    // For Generic interface 
++#define BIT_GEN_PLD_R_FULL          5    // For Generic interface               
++#define BIT_GEN_PLD_R_EMPTY         4    // For Generic interface    
++#define BIT_GEN_PLD_W_FULL          3    // For Generic interface 
++#define BIT_GEN_PLD_W_EMPTY         2    // For Generic interface 
++#define BIT_GEN_CMD_FULL            1    // For Generic interface 
++#define BIT_GEN_CMD_EMPTY           0    // For Generic interface 
+ 
+ // For MIPI_DSI_TOP_MEAS_CNTL
+-#define BIT_CNTL_MEAS_VSYNC        10                                          // measure vsync control
+-#define BIT_EDPITE_MEAS_EN          9                                          // tear measure enable
+-#define BIT_EDPITE_ACCUM_MEAS_EN    8                                          // not clear the counter
+-#define BIT_EDPITE_VSYNC_SPAN       0                                          // 
++#define BIT_CNTL_MEAS_VSYNC        10    // measure vsync control
++#define BIT_EDPITE_MEAS_EN          9    // tear measure enable
++#define BIT_EDPITE_ACCUM_MEAS_EN    8    // not clear the counter
++#define BIT_EDPITE_VSYNC_SPAN       0    // 
+ 
+ // For MIPI_DSI_TOP_STAT
+-#define BIT_STAT_EDPIHALT          31                                          // signal from halt
+-#define BIT_STAT_TE_LINE           16                                          // line number when edpite pulse
+-#define BIT_STAT_TE_PIXEL           0                                          // pixel number when edpite pulse
++#define BIT_STAT_EDPIHALT          31    // signal from halt
++#define BIT_STAT_TE_LINE           16    // line number when edpite pulse
++#define BIT_STAT_TE_PIXEL           0    // pixel number when edpite pulse
+ 
+ // For MIPI_DSI_TOP_INTR_CNTL_STAT
+-#define BIT_STAT_CLR_DWC_PIC_EOF   21                                          // State/Clear for pic_eof
+-#define BIT_STAT_CLR_DWC_DE_FALL   20                                          // State/Clear for de_fall
+-#define BIT_STAT_CLR_DWC_DE_RISE   19                                          // State/Clear for de_rise
+-#define BIT_STAT_CLR_DWC_VS_FALL   18                                          // State/Clear for vs_fall
+-#define BIT_STAT_CLR_DWC_VS_RISE   17                                          // State/Clear for vs_rise
+-#define BIT_STAT_CLR_DWC_EDPITE    16                                          // State/Clear for edpite
+-#define BIT_PIC_EOF                 5                                          // end of picture
+-#define BIT_DE_FALL                 4                                          // data enable fall
+-#define BIT_DE_RISE                 3                                          // data enable rise
+-#define BIT_VS_FALL                 2                                          // vsync fall
+-#define BIT_VS_RISE                 1                                          // vsync rise
+-#define BIT_EDPITE_INT_EN           0                                          // edpite int enable
++#define BIT_STAT_CLR_DWC_PIC_EOF   21    // State/Clear for pic_eof
++#define BIT_STAT_CLR_DWC_DE_FALL   20    // State/Clear for de_fall
++#define BIT_STAT_CLR_DWC_DE_RISE   19    // State/Clear for de_rise
++#define BIT_STAT_CLR_DWC_VS_FALL   18    // State/Clear for vs_fall
++#define BIT_STAT_CLR_DWC_VS_RISE   17    // State/Clear for vs_rise
++#define BIT_STAT_CLR_DWC_EDPITE    16    // State/Clear for edpite
++#define BIT_PIC_EOF                 5    // end of picture
++#define BIT_DE_FALL                 4    // data enable fall
++#define BIT_DE_RISE                 3    // data enable rise
++#define BIT_VS_FALL                 2    // vsync fall
++#define BIT_VS_RISE                 1    // vsync rise
++#define BIT_EDPITE_INT_EN           0    // edpite int enable
+ 
+ // For MIPI_DSI_TOP_MEAS_CNTL
+-#define BIT_VSYNC_MEAS_EN          19                                          // vsync measure enable
+-#define BIT_VSYNC_ACCUM_MEAS_EN    18                                          // vsync accumulate measure
+-#define BIT_VSYNC_SPAN             10                                          // vsync span
+-#define BIT_TE_MEAS_EN              9                                          // tearing measure enable
+-#define BIT_TE_ACCUM_MEAS_EN        8                                          // tearing accumulate measure
+-#define BIT_TE_SPAN                 0                                          // tearing span
++#define BIT_VSYNC_MEAS_EN          19    // vsync measure enable
++#define BIT_VSYNC_ACCUM_MEAS_EN    18    // vsync accumulate measure
++#define BIT_VSYNC_SPAN             10    // vsync span
++#define BIT_TE_MEAS_EN              9    // tearing measure enable
++#define BIT_TE_ACCUM_MEAS_EN        8    // tearing accumulate measure
++#define BIT_TE_SPAN                 0    // tearing span
+ 
+ // For MIPI_DSI_DWC_INT_ST0_OS
+-#define BIT_DPHY_ERR_4             20                                          // LP1 contention error from lane0
+-#define BIT_DPHY_ERR_3             19                                          // LP0 contention error from lane0
+-#define BIT_DPHY_ERR_2             18                                          // ErrControl error from lane0
+-#define BIT_DPHY_ERR_1             17                                          // ErrSyncEsc error from lane0
+-#define BIT_DPHY_ERR_0             16                                          // ErrEsc escape error lane0
++#define BIT_DPHY_ERR_4             20    // LP1 contention error from lane0
++#define BIT_DPHY_ERR_3             19    // LP0 contention error from lane0
++#define BIT_DPHY_ERR_2             18    // ErrControl error from lane0
++#define BIT_DPHY_ERR_1             17    // ErrSyncEsc error from lane0
++#define BIT_DPHY_ERR_0             16    // ErrEsc escape error lane0
+ #define BIT_ACK_ERR_15             15
+ #define BIT_ACK_ERR_14             14
+ #define BIT_ACK_ERR_13             13
+@@ -312,175 +312,6 @@ typedef enum {DT_VSS                 = 0x01,
+ #define MIPI_DSI_DCS_NO_ACK         0
+ #define MIPI_DSI_DCS_REQ_ACK        1
+ 
+-// Video mode video timing parameters
+-#define SCLK_PERIOD                   40                                       // ns
+-
+-#define MIPI_DSI_REFRESH_RATE_50HZ    50
+-#define MIPI_DSI_REFRESH_RATE_40HZ    40
+-#define MIPI_DSI_REFRESH_RATE_30HZ    30
+-#define MIPI_DSI_REFRESH_RATE_24HZ    24
+-
+-#define MIPI_DSI_REFRESH_RATE         MIPI_DSI_REFRESH_RATE_40HZ
+-
+-#define PCLK_PERIOD_BIG_50HZ          (4467/1000)    // 50Hz
+-#define PCLK_PERIOD_BIG_45HZ          (4964/1000)    // 45Hz
+-#define PCLK_PERIOD_BIG_40HZ          (5598/1000)    // 40Hz
+-#define PCLK_PERIOD_BIG_35HZ          (6382/1000)    // 35Hz
+-#define PCLK_PERIOD_BIG_30HZ          (75/10)      // 30Hz
+-
+-#define PCLK_PERIOD_SMALL             16
+-#define BYTELANECLK_PERIOD_SMALL      8
+-
+-#define PCLK_PERIOD_BIG               (                                                                               \
+-                (MIPI_DSI_REFRESH_RATE == MIPI_DSI_REFRESH_RATE_50HZ) ? PCLK_PERIOD_BIG_50HZ : \
+-                (MIPI_DSI_REFRESH_RATE == MIPI_DSI_REFRESH_RATE_40HZ) ? PCLK_PERIOD_BIG_40HZ : \
+-                (MIPI_DSI_REFRESH_RATE == MIPI_DSI_REFRESH_RATE_30HZ) ? PCLK_PERIOD_BIG_30HZ : \
+-                PCLK_PERIOD_BIG_30HZ   \
+-                )
+-#define BYTELANECLK_PERIOD_BIG        (9952/1000)
+-
+-#define PCLK_PERIOD_1920X1200         (6488/1000)    // 60Hz
+-#define BYTELANECLK_PERIOD_1920X1200  (8651/1000)   //
+-
+-// Different Resolution Settings
+-// Only 24bit color format will use the real clock setting and be overriden outside
+-
+-#define MAX_PIXCNT_240X160            367
+-#define MAX_LNCNT_240X160             187
+-#define HFP_240X160                   (MAX_PIXCNT_240X160-HSA_240X160-HBP_240X160-HACT_240X160+1)    // 91
+-#define HSA_240X160                   (31-15)                                                        // 16
+-#define HBP_240X160                   (50-31+2)   // 21 add 2 because: data path is 2 clks later than sync
+-#define HACT_240X160                  (239+50-50+1)  // 240
+-#define VFP_240X160                   (MAX_LNCNT_240X160-VSA_240X160-VBP_240X160-VACT_240X160) 
+-#define VSA_240X160                   (12-10)
+-#define VBP_240X160                   (20-12)
+-#define VACT_240X160                  (159+20-20+1)
+-#define MIPI_HLINE_240X160            ((HFP_240X160+HSA_240X160+HBP_240X160+HACT_240X160)*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HSA_240X160              (HSA_240X160*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HBP_240X160              (HBP_240X160*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-
+-#define MAX_PIXCNT_240X160_dsi        (400-1)
+-#define MAX_LNCNT_240X160_dsi         (195-1)
+-#define HFP_240X160_dsi               48
+-#define HSA_240X160_dsi               32
+-#define HBP_240X160_dsi               80
+-#define HACT_240X160_dsi              240
+-#define VFP_240X160_dsi               3
+-#define VSA_240X160_dsi               6
+-#define VBP_240X160_dsi               26
+-#define VACT_240X160_dsi              160
+-#define MIPI_HLINE_240X160_dsi        ((HFP_240X160_dsi+HSA_240X160_dsi+HBP_240X160_dsi+HACT_240X160_dsi)*3/4)
+-#define MIPI_HSA_240X160_dsi          (HSA_240X160_dsi*3/4)
+-#define MIPI_HBP_240X160_dsi          (HBP_240X160_dsi*3/4)
+-
+-#define MAX_PIXCNT_240X160_slow        (400-1)
+-#define MAX_LNCNT_240X160_slow         (195-1)
+-#define HFP_240X160_slow               48
+-#define HSA_240X160_slow               32
+-#define HBP_240X160_slow               80
+-#define HACT_240X160_slow              240
+-#define VFP_240X160_slow               3
+-#define VSA_240X160_slow               6
+-#define VBP_240X160_slow               26
+-#define VACT_240X160_slow              160
+-#define MIPI_HLINE_240X160_slow        ((HFP_240X160_slow+HSA_240X160_slow+HBP_240X160_slow+HACT_240X160_slow)*200/160)
+-#define MIPI_HSA_240X160_slow          (HSA_240X160_slow*200/160)
+-#define MIPI_HBP_240X160_slow          (HBP_240X160_slow*200/160)
+-
+-#define MAX_PIXCNT_480X234            607     
+-#define MAX_LNCNT_480X234             261     
+-#define HFP_480X234                   (MAX_PIXCNT_480X234-HSA_480X234-HBP_480X234-HACT_480X234+1)
+-#define HSA_480X234                   (31-15)
+-#define HBP_480X234                   (50-31+2)                                  // add 2 because: data path is 2 clks later than sync
+-#define HACT_480X234                  (479+50-50+1)
+-#define VFP_480X234                   (MAX_LNCNT_480X234-VSA_480X234-VBP_480X234-VACT_480X234) 
+-#define VSA_480X234                   (12-10)
+-#define VBP_480X234                   (20-12)
+-#define VACT_480X234                  (233+20-20+1)
+-#define MIPI_HLINE_480X234            ((HFP_480X234+HSA_480X234+HBP_480X234+HACT_480X234)*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HSA_480X234              (HSA_480X234*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HBP_480X234              (HBP_480X234*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-
+-#define MAX_PIXCNT_720X480            857
+-#define MAX_LNCNT_720X480             524     
+-#define HFP_720X480                   (MAX_PIXCNT_720X480-HSA_720X480-HBP_720X480-HACT_720X480+1)
+-#define HSA_720X480                   (31-15)
+-#define HBP_720X480                   (50-31+2)                                  // add 2 because: data path is 2 clks later than sync
+-#define HACT_720X480                  (479+50-50+1)
+-#define VFP_720X480                   (MAX_LNCNT_720X480-VSA_720X480-VBP_720X480-VACT_720X480) 
+-#define VSA_720X480                   (12-10)
+-#define VBP_720X480                   (20-12)
+-#define VACT_720X480                  (233+20-20+1)
+-#define MIPI_HLINE_720X480            ((HFP_720X480+HSA_720X480+HBP_720X480+HACT_720X480)*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HSA_720X480              (HSA_720X480*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HBP_720X480              (HBP_720X480*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-
+-#define MAX_PIXCNT_720X576            863
+-#define MAX_LNCNT_720X576             624
+-#define HFP_720X576                   (MAX_PIXCNT_720X576-HSA_720X576-HBP_720X576-HACT_720X576+1)
+-#define HSA_720X573                   (5-3)
+-#define HBP_720X576                   (124-5+2)                                  // add 2 because: data path is 2 clks later than sync
+-#define HACT_720X576                  (843-124+1)
+-#define VFP_720X576                   (MAX_LNCNT_720X576-VSA_720X576-VBP_720X576-VACT_720X576) 
+-#define VSA_720X576                   (16-11)
+-#define VBP_720X576                   (44-16)
+-#define VACT_720X576                  (624-44+1)
+-#define MIPI_HLINE_720X576            ((HFP_720X576+HSA_720X576+HBP_720X576+HACT_720X576)*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HSA_720X576              (HSA_720X576*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-#define MIPI_HBP_720X576              (HBP_720X576*PCLK_PERIOD_SMALL/BYTELANECLK_PERIOD_SMALL)
+-
+-#define MAX_PIXCNT_1920x1200p         (2080-1)
+-#define MAX_LNCNT_1920x1200p          (1235-1)
+-#define HFP_1920x1200p                48
+-#define HSA_1920x1200p                32
+-#define HBP_1920x1200p                80
+-#define HACT_1920x1200p               1920
+-#define VFP_1920x1200p                3
+-#define VSA_1920x1200p                6
+-#define VBP_1920x1200p                26
+-#define VACT_1920x1200p               1200
+-#define MIPI_HLINE_1920x1200p         ((HFP_1920x1200p+HSA_1920x1200p+HBP_1920x1200p+HACT_1920x1200p)*3/4)
+-#define MIPI_HSA_1920x1200p           (HSA_1920x1200p*3/4)
+-#define MIPI_HBP_1920x1200p           (HBP_1920x1200p*3/4)
+-
+-#define HFP_768X1024                60
+-#define HSA_768X1024                64
+-#define HBP_768X1024                56
+-#define HACT_768X1024               768
+-#define HLINE_768X1024              (HFP_768X1024+HSA_768X1024+HBP_768X1024+HACT_768X1024)
+-#define VFP_768X1024                36
+-#define VSA_768X1024                50
+-#define VBP_768X1024                30
+-#define VACT_768X1024               1024
+-
+-#define MAX_PIXCNT_2560X1600          2719
+-#define MAX_LNCNT_2560X1600           1645    
+-#define HFP_2560X1600                 (MAX_PIXCNT_2560X1600-HSA_2560X1600-HBP_2560X1600-HACT_2560X1600+1)
+-#define HSA_2560X1600                 (59-27)
+-#define HBP_2560X1600                 (139-59+2)                                  // add 2 because: data path is 2 clks later than sync
+-#define HACT_2560X1600                (2559+139-139+1)
+-#define VFP_2560X1600                 (MAX_LNCNT_2560X1600-VSA_2560X1600-VBP_2560X1600-VACT_2560X1600) 
+-#define VSA_2560X1600                 (7-1)
+-#define VBP_2560X1600                 (43-7)
+-#define VACT_2560X1600                (1599+43-43+1)
+-#define MIPI_HLINE_2560X1600          ((HFP_2560X1600+HSA_2560X1600+HBP_2560X1600+HACT_2560X1600)*PCLK_PERIOD_BIG/BYTELANECLK_PERIOD_BIG)
+-#define MIPI_HSA_2560X1600            (HSA_2560X1600*PCLK_PERIOD_BIG/BYTELANECLK_PERIOD_BIG)
+-#define MIPI_HBP_2560X1600            (HBP_2560X1600*PCLK_PERIOD_BIG/BYTELANECLK_PERIOD_BIG)
+-
+-#define MAX_PIXCNT_1920X1200          2079
+-#define MAX_LNCNT_1920X1200           1234  
+-#define HFP_1920X1200                 48 // (MAX_PIXCNT_1920X1200-HSA_1920X1200-HBP_1920X1200-HACT_1920X1200+1)
+-#define HSA_1920X1200                 32 // (59-27)
+-#define HBP_1920X1200                 80 // (148-59+2)                                  // add 2 because: data path is 2 clks later than sync
+-#define HACT_1920X1200                1920 // (2067-148+1)
+-#define VFP_1920X1200                 (MAX_LNCNT_1920X1200-VSA_1920X1200-VBP_1920X1200-VACT_1920X1200) 
+-#define VSA_1920X1200                 (7-1)
+-#define VBP_1920X1200                 (31-7)
+-#define VACT_1920X1200                (1230-31+1)
+-#define MIPI_HLINE_1920X1200          ((HFP_1920X1200+HSA_1920X1200+HBP_1920X1200+HACT_1920X1200)*PCLK_PERIOD_1920X1200/BYTELANECLK_PERIOD_1920X1200)
+-#define MIPI_HSA_1920X1200            (HSA_1920X1200*PCLK_PERIOD_1920X1200/BYTELANECLK_PERIOD_1920X1200)
+-#define MIPI_HBP_1920X1200            (HBP_1920X1200*PCLK_PERIOD_1920X1200/BYTELANECLK_PERIOD_1920X1200)
+-
+ // DSI Tear Defines
+ #define MIPI_DCS_SET_TEAR_ON_MODE_0   0
+ #define MIPI_DCS_SET_TEAR_ON_MODE_1   1
+@@ -488,7 +319,7 @@ typedef enum {DT_VSS                 = 0x01,
+ #define MIPI_DCS_DISABLE_TEAR         0
+ 
+ // Pixel FIFO Depth
+-#define PIXEL_FIFO_DEPTH            1440
++#define PIXEL_FIFO_DEPTH              1440
+ 
+ #define BYTE_PER_PIXEL_COLOR_16BIT_CFG_1  2
+ #define BYTE_PER_PIXEL_COLOR_16BIT_CFG_2  2
+@@ -501,28 +332,11 @@ typedef enum {DT_VSS                 = 0x01,
+ #define BYTE_PER_PIXEL_COLOR_16BIT_YCBCR  2
+ #define BYTE_PER_PIXEL_COLOR_30BIT        4
+ #define BYTE_PER_PIXEL_COLOR_36BIT        5
+-#define BYTE_PER_PIXEL_COLOR_12BIT        3                                    // in fact it should be 1.5(12bit)
++#define BYTE_PER_PIXEL_COLOR_12BIT        3    // in fact it should be 1.5(12bit)
+ 
+ // Tearing Interrupt Bit
+ #define INT_TEARING                       6
+ 
+-typedef enum tv_enc_type_e{
+-        TV_ENC_480i = 0,
+-        TV_ENC_576i,
+-        TV_ENC_480p,
+-        TV_ENCP_480p,
+-        TV_ENC_576p,
+-        TV_ENC_1080i, 
+-        TV_ENC_720p, 
+-        TV_ENC_1080p, 
+-        TV_ENC_2205p,
+-        TV_ENC_2440p, 
+-        TV_ENC_3840x2160p_vic01, 
+-        TV_ENC_3840x2160p_vic03, 
+-        TV_ENC_4096x2160p_vic04, 
+-        TV_ENC_TYPE_MAX
+-} tv_enc_type_t;   /* tv encoder output format */
+-
+ typedef enum tv_enc_lcd_type_e{
+         TV_ENC_LCD480x234 = 0,
+         TV_ENC_LCD480x234_dsi36b = 1,       // For MIPI_DSI 36-bit color: sample rate=2, 1 pixel per 2 cycle
+@@ -556,20 +370,30 @@ typedef enum tv_enc_lcd_type_e{
+ 
+ // DCS COMMAND LIST
+ #define DCS_CMD_CODE_ENTER_IDLE_MODE      0x0
+-#define DCS_CMD_CODE_ENTER_INVERT_MODE    0x1  
+-#define DCS_CMD_CODE_ENTER_NORMAL_MODE    0x2  
+-#define DCS_CMD_CODE_ENTER_PARTIAL_MODE   0x3  
+-#define DCS_CMD_CODE_ENTER_SLEEP_MODE     0x4  
+-#define DCS_CMD_CODE_EXIT_IDLE_MODE       0x5  
+-#define DCS_CMD_CODE_EXIT_INVERT_MODE     0x6  
+-#define DCS_CMD_CODE_EXIT_SLEEP_MODE      0x7  
+-#define DCS_CMD_CODE_NOP                  0x8 
+-#define DCS_CMD_CODE_SET_DISPLAY_OFF      0x9 
+-#define DCS_CMD_CODE_SET_DISPLAY_ON       0xa 
+-#define DCS_CMD_CODE_SET_TEAR_OFF         0xb 
++#define DCS_CMD_CODE_ENTER_INVERT_MODE    0x1
++#define DCS_CMD_CODE_ENTER_NORMAL_MODE    0x2
++#define DCS_CMD_CODE_ENTER_PARTIAL_MODE   0x3
++#define DCS_CMD_CODE_ENTER_SLEEP_MODE     0x4
++#define DCS_CMD_CODE_EXIT_IDLE_MODE       0x5
++#define DCS_CMD_CODE_EXIT_INVERT_MODE     0x6
++#define DCS_CMD_CODE_EXIT_SLEEP_MODE      0x7
++#define DCS_CMD_CODE_NOP                  0x8
++#define DCS_CMD_CODE_SET_DISPLAY_OFF      0x9
++#define DCS_CMD_CODE_SET_DISPLAY_ON       0xa
++#define DCS_CMD_CODE_SET_TEAR_OFF         0xb
+ #define DCS_CMD_CODE_SOFT_RESET           0xc
+ 
+-extern void mipi_dsi_link_on(Lcd_Config_t *pConf);
++extern unsigned char *get_dsi_init_table(int flag);
++
++#define DSI_CMD_SIZE_MAX		2000
++//payload struct:
++//data_type, command, para_num, parameters...
++//data_type=0xff, command=0xff, means ending flag
++//data_type=0xff, command<0xff, means delay time(unit ms)
++extern void dsi_generic_write_cmd(unsigned char* payload);
++
++extern void set_mipi_dsi_control_config(Lcd_Config_t *pConf);
++extern void set_mipi_dsi_control_config_post(Lcd_Config_t *pConf);
+ extern void mipi_dsi_link_off(Lcd_Config_t *pConf);
+ extern void set_mipi_dsi_control(Lcd_Config_t *pConf);
+ extern void mipi_dsi_off(void);
+diff --git a/include/linux/amlogic/vout/lcdoutc.h b/include/linux/amlogic/vout/lcdoutc.h
+index 780cd69ac498..f4e69c392d21 100755
+--- a/include/linux/amlogic/vout/lcdoutc.h
++++ b/include/linux/amlogic/vout/lcdoutc.h
+@@ -431,6 +431,13 @@ typedef struct {
+ #endif
+ 
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
++#define DSI_INIT_ON_MAX              100
++#define DSI_INIT_OFF_MAX             30
++
++#define BIT_OPERATION_MODE_INIT      0
++#define BIT_OPERATION_MODE_DISP      4
++#define BIT_TRANS_CTRL_CLK           0
++#define BIT_TRANS_CTRL_SWITCH        4 //[5:4]
+ typedef struct DSI_Config_s{
+     unsigned char lane_num;
+     unsigned int bit_rate_max;
+@@ -449,14 +456,13 @@ typedef struct DSI_Config_s{
+     unsigned int venc_data_width;
+     unsigned int dpi_data_format;
+     unsigned int venc_fmt;
+-    unsigned char operation_mode;  //mipi-dsi operation mode: video, command
+-    unsigned char transfer_ctrl;  //LP mode auto stop clk lane
++    unsigned int operation_mode;  //mipi-dsi operation mode: video, command. [4]display , [0]init
++    unsigned int transfer_ctrl;  //[0]LP mode auto stop clk lane, [5:4]phy switch between LP and HS
+     unsigned char video_mode_type;  //burst, non-burst(sync pulse, sync event)
+ 
+-    unsigned char init_on_flag;
+-    unsigned char init_off_flag;
+-    unsigned int sleep_out_delay;
+-    unsigned int display_on_delay;
++    unsigned char *dsi_init_on;
++    unsigned char *dsi_init_off;
++    unsigned char lcd_extern_init;
+ }DSI_Config_t;
+ 
+ typedef struct {
+-- 
+2.19.0
+

@@ -1,0 +1,231 @@
+From fd7341462c0309450eae4959e32f9f76cc1c7eec Mon Sep 17 00:00:00 2001
+From: "benjamin.zhao" <benjamin.zhao@amlogic.com>
+Date: Fri, 29 Nov 2013 18:42:35 +0800
+Subject: [PATCH 2091/5965] PD #83365: Revert PD81302 commit to fix emmc
+ platform autoreboot issue
+
+---
+ drivers/amlogic/mmc/aml_sdio.c | 20 +++-----
+ drivers/amlogic/mmc/amlsd.c    | 90 +++++++++++++++-------------------
+ drivers/amlogic/mmc/amlsd.h    |  2 +-
+ drivers/amlogic/mmc/amlsd_of.c |  2 +-
+ 4 files changed, 48 insertions(+), 66 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 57378b710e10..ec07fd7090c5 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -330,10 +330,9 @@ static void aml_sdio_print_err (struct amlsd_host *host, char *msg)
+ /*setup delayed workstruct in aml_sdio_request*/
+ static void aml_sdio_timeout(struct work_struct *data)
+ {
+-    static int timeout_cnt = 0;
+-    unsigned long flags;
+     //struct amlsd_host* host = (void*)data;
+     struct amlsd_host *host = container_of(data, struct amlsd_host, timeout);
++    unsigned long flags;
+     // struct mmc_request *mrq = host->mrq;
+     u32 virqs = readl(host->base + SDIO_IRQS);
+     struct sdio_status_irq* irqs = (void*)&virqs;
+@@ -354,18 +353,12 @@ static void aml_sdio_timeout(struct work_struct *data)
+         //mod_timer(&host->timeout_tlist, jiffies + 10);
+         schedule_delayed_work(&host->timeout, 10);
+         spin_unlock_irqrestore(&host->mrq_lock, flags);
+-        if(irqs->sdio_cmd_int) {
+-            timeout_cnt++;
+-            if (timeout_cnt > 100)
+-                goto timeout_handle;
++        if(irqs->sdio_cmd_int)
+             sdio_err("%s: irq have been occured\n", mmc_hostname(host->mmc));
+-        }
+         else
+             sdio_err("%s: isr have been run\n",  mmc_hostname(host->mmc));
+ 		return;
+ 	}
+-timeout_handle:
+-    timeout_cnt = 0;
+ 
+     if (!(irqc->arc_cmd_int_en)) {
+         sdio_err("%s: arc_cmd_int_en is not enable\n",  mmc_hostname(host->mmc));
+@@ -1054,8 +1047,10 @@ static int aml_sdio_probe(struct platform_device *pdev)
+ 		if(pdata->port_init)
+ 			pdata->port_init(pdata);
+ 
+-       //init sdio reg here
+-        aml_sdio_init_param(pdata);
++        if (i == 0) {
++            //init sdio reg here
++            aml_sdio_init_param(pdata);
++        }
+ 
+         aml_sduart_pre(pdata);
+ 
+@@ -1127,9 +1122,6 @@ int aml_sdio_remove(struct platform_device *pdev)
+ 		mmc_remove_host(mmc);
+ 		mmc_free_host(mmc);
+ 	}
+-    
+-    aml_devm_pinctrl_put(host);
+-
+     kfree(host);
+ 	return 0;
+ }
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index c5977c8b0d8e..dee67f236fa0 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -771,43 +771,33 @@ void of_amlsd_xfer_pre(struct amlsd_platform* pdata)
+     } else { // MMC_CS_HIGH
+         snprintf(p, sizeof(pinctrl)-size, "%s_clk_cmd_pins", pdata->pinname);
+     }
+-    
+-    // if pinmux setting is changed (pinctrl_name is different)
+-    if (strncmp(pdata->host->pinctrl_name, pinctrl, sizeof(pdata->host->pinctrl_name))) {
+-        if (strlcpy(pdata->host->pinctrl_name, pinctrl, sizeof(pdata->host->pinctrl_name)) 
+-                >= sizeof(pdata->host->pinctrl_name)) {
+-            sdio_err("Pinctrl name is too long!\n");
+-			return;
+-		}
+ 
+-        for (i = 0; i < 100; i++) {
+-            // ppin = devm_pinctrl_get_select(&pdata->host->pdev->dev, p);
+-            ppin = aml_devm_pinctrl_get_select(pdata->host, pinctrl);
+-            if(!IS_ERR(ppin)) {
+-                // pdata->host->pinctrl = ppin;
+-                break;
+-            }
+-            /* else -> aml_irq_cdin_thread() should be using one of the GPIO of card,
+-             * then we should wait here until the GPIO is free,
+-             * otherwise something must be wrong.
+-             */
+-            mdelay(1);
+-        }
+-        if (i == 100) {
+-            sdhc_err("CMD%d: get pinctrl fail.\n", pdata->host->opcode);
++    for (i = 0; i < 100; i++) {
++        ppin = devm_pinctrl_get_select(&pdata->host->pdev->dev, pinctrl);
++        if(!IS_ERR(ppin)) {
++            pdata->host->pinctrl = ppin;
++            break;
+         }
+-        //printk("pre pinctrl %x, %s, ppin %x\n", pdata->host->pinctrl, p, ppin);
++        /* else -> aml_irq_cdin_thread() should be using one of the GPIO of card,
++         * then we should wait here until the GPIO is free,
++         * otherwise something must be wrong.
++         */
++        mdelay(1);
+     }
++    if (i == 100) {
++        sdhc_err("CMD%d: get pinctrl fail.\n", pdata->host->opcode);
++    }
++    //printk("pre pinctrl %x, %s, ppin %x\n", pdata->host->pinctrl, p, ppin);
+ }
+ 
+ void of_amlsd_xfer_post(struct amlsd_platform* pdata)
+ {
+-    // if (pdata->host->pinctrl) {
+-        // devm_pinctrl_put(pdata->host->pinctrl);
+-        // pdata->host->pinctrl = NULL;
+-    // } else {
+-        // sdhc_err("CMD%d: pdata->host->pinctrl = NULL\n", pdata->host->opcode);
+-    // }
++    if (pdata->host->pinctrl) {
++        devm_pinctrl_put(pdata->host->pinctrl);
++        pdata->host->pinctrl = NULL;
++    } else {
++        sdhc_err("CMD%d: pdata->host->pinctrl = NULL\n", pdata->host->opcode);
++    }
+     // printk(KERN_ERR "CMD%d: put pinctrl\n", pdata->host->opcode);
+     // aml_dbg_print_pinmux(); // for debug
+ }
+@@ -861,7 +851,7 @@ void aml_cs_high (struct amlsd_platform * pdata) // chip select high
+ 	 */
+     if ((pdata->mmc->ios.chip_select == MMC_CS_HIGH) && (pdata->gpio_dat3 != 0)
+         && (pdata->jtag_pin == 0)) { // is NOT sd card
+-        aml_devm_pinctrl_put(pdata->host);
++
+         ret = amlogic_gpio_request_one(pdata->gpio_dat3, GPIOF_OUT_INIT_HIGH, MODULE_NAME);
+         CHECK_RET(ret);
+         if (ret == 0) {
+@@ -925,30 +915,30 @@ static int aml_is_sdjtag(struct amlsd_platform * pdata)
+ 
+ static int aml_is_sduart(struct amlsd_platform * pdata)
+ {
+-    int dat3;
++    int ret, dat3;
+ 
+     if(pdata->is_sduart)
+         return 1;
+ 
+-    dat3 = aml_get_reg32_bits(P_PREG_PAD_GPIO0_I,26,1);
+-    if(dat3 == 0){
+-        return 1;
+-    }
+-
+-    // if (pdata->gpio_dat3 != 0){
+-        // ret = amlogic_gpio_request_one(pdata->gpio_dat3, GPIOF_IN, MODULE_NAME);
+-        // if(ret){
+-            // printk("DAT3 pinmux used, return no uart\n");
+-            // return 0;
+-        // }
+-        // CHECK_RET(ret);
+-        // dat3 = amlogic_get_value(pdata->gpio_dat3, MODULE_NAME);
+-        // // print_tmp("sd gpio_dat3=%d\n", amlogic_get_value(pdata->gpio_dat3, MODULE_NAME));
+-        // amlogic_gpio_free(pdata->gpio_dat3, MODULE_NAME);
+-        // if(dat3 == 0){
+-            // return 1;
+-        // }
++    // dat3 = aml_get_reg32_bits(P_PREG_PAD_GPIO0_I,26,1);
++    // if(dat3 == 0){
++        // return 1;
+     // }
++
++    if (pdata->gpio_dat3 != 0){
++        ret = amlogic_gpio_request_one(pdata->gpio_dat3, GPIOF_IN, MODULE_NAME);
++        if(ret){
++            printk("DAT3 pinmux used, return no uart\n");
++            return 0;
++        }
++        CHECK_RET(ret);
++        dat3 = amlogic_get_value(pdata->gpio_dat3, MODULE_NAME);
++        // print_tmp("sd gpio_dat3=%d\n", amlogic_get_value(pdata->gpio_dat3, MODULE_NAME));
++        amlogic_gpio_free(pdata->gpio_dat3, MODULE_NAME);
++        if(dat3 == 0){
++            return 1;
++        }
++    }
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/mmc/amlsd.h b/drivers/amlogic/mmc/amlsd.h
+index 6e53716846ed..85cdf8a753ed 100755
+--- a/drivers/amlogic/mmc/amlsd.h
++++ b/drivers/amlogic/mmc/amlsd.h
+@@ -7,7 +7,7 @@
+ #define AML_MMC_MAJOR_VERSION   1
+ #define AML_MMC_MINOR_VERSION   01
+ #define AML_MMC_VERSION         ((AML_MMC_MAJOR_VERSION << 8) | AML_MMC_MINOR_VERSION)
+-#define AML_MMC_VER_MESSAGE     "2013-11-21: support write protect"
++#define AML_MMC_VER_MESSAGE     "2013-11-28: revert pinctrl modification"
+ 
+ extern unsigned sdhc_debug;
+ extern unsigned sdio_debug;
+diff --git a/drivers/amlogic/mmc/amlsd_of.c b/drivers/amlogic/mmc/amlsd_of.c
+index 4c7d7024c1e2..8d87c5d3b99c 100755
+--- a/drivers/amlogic/mmc/amlsd_of.c
++++ b/drivers/amlogic/mmc/amlsd_of.c
+@@ -175,10 +175,10 @@ int amlsd_get_platform_data(struct platform_device* pdev,
+ 		SD_PARSE_GPIO_NUM_PROP(child, "gpio_ro", str, pdata->gpio_ro);
+ 		SD_PARSE_GPIO_NUM_PROP(child, "gpio_power", str, pdata->gpio_power);
+ 
++        SD_PARSE_GPIO_NUM_PROP(child, "gpio_dat3", str, pdata->gpio_dat3);
+ 		SD_PARSE_STRING_PROP(child, "pinname", str, pdata->pinname);
+         SD_PARSE_GPIO_NUM_PROP(child, "jtag_pin", str, pdata->jtag_pin);
+ 		SD_PARSE_U32_PROP(child, "card_type", prop, pdata->card_type);
+-        SD_PARSE_GPIO_NUM_PROP(child, "gpio_dat3", str, pdata->gpio_dat3);
+ 
+ 		pdata->port_init = of_amlsd_init;
+ 		pdata->pwr_pre = of_amlsd_pwr_prepare;
+-- 
+2.19.0
+

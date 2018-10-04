@@ -1,0 +1,114 @@
+From a586d0b6280e15b652f83178d620d63cf1db63c2 Mon Sep 17 00:00:00 2001
+From: "frank.zhao" <frank.zhao@amlogic.com>
+Date: Tue, 3 Dec 2013 16:42:52 +0800
+Subject: [PATCH 2183/5965] PD #83545: isp,modify for af backup flag
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c | 6 ++++--
+ drivers/amlogic/tvin/isp/isp_drv.h | 2 +-
+ drivers/amlogic/tvin/isp/isp_sm.c  | 9 ++++++---
+ 3 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 86b22b89a9d3..ffb3a5def7f7 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -773,8 +773,8 @@ static int isp_thread(isp_dev_t *devp) {
+ 	}
+ 	if(devp->flag & ISP_AF_SM_MASK) {
+ 		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
+-			atomic_set(&devp->af_info.writeable,0);
+ 			func->set_af_new_step(devp->af_info.cur_step);
++			atomic_set(&devp->af_info.writeable,0);
+ 		}
+ 	}
+         if(kthread_should_stop())
+@@ -1003,6 +1003,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			}
+ 		        break;
+ 		case CAM_COMMAND_MWB:
++			devp->af_info.flag_bk &= (~ISP_FLAG_AWB);
+ 			devp->flag &= (~ISP_FLAG_AWB);
+ 	                devp->flag |= ISP_FLAG_MWB;
+ 		        break;
+@@ -1022,6 +1023,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			}
+ 		        break;
+                 case CAM_COMMAND_AE_OFF:
++			devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 		        devp->flag &= (~ISP_FLAG_AE);
+ 		        break;
+ 		case CAM_COMMAND_SET_AE_LEVEL:
+@@ -1041,6 +1043,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 		        break;
+                 case CAM_COMMAND_TOUCH_FOCUS:
+ 			if(!(devp->flag & ISP_FLAG_CAPTURE)){
++				devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			        //devp->isp_af_parm = &param->xml_scenes->af;
+ 			        devp->isp_af_parm->x = param->xml_scenes->af.x;
+ 			        devp->isp_af_parm->y = param->xml_scenes->af.y;
+@@ -1056,7 +1059,6 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 				        pr_info("focus win: center(%u,%u) left(%u %u) right(%u,%u).\n",devp->isp_af_parm->x,
+ 					devp->isp_af_parm->y,x0,y0,x1,y1);
+ 			        isp_set_af_scan_stat(x0,y0,x1,y1);
+-			        devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			        af_sm_init(devp);
+ 			}
+ 		        break;
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 4ef9e09f9e93..751bccf14a50 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.28a"
++#define ISP_VER					"2013.11.12a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index e2df10d83229..1923bfce625d 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -261,8 +261,8 @@ void af_sm_init(isp_dev_t *devp)
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 	/*init for af*/
+-	if(sm_state.af_state)
+-		devp->flag |= devp->af_info.flag_bk;
++	//if(sm_state.af_state)
++		//devp->flag |= devp->af_info.flag_bk;
+ 	if(devp->flag & ISP_AF_SM_MASK){
+     	        sm_state.af_state = AF_INIT;
+ 	}
+@@ -1331,7 +1331,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 		case AF_INIT:
+ 			isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+ 			af_info->last_great_step = af_alg->af_step_max_thre;
+-			if((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down)){
++			if(((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down))||!(devp->flag&ISP_FLAG_AE)){
+ 			/*awb brake,ae brake*/
+ 			af_info->flag_bk = (devp->flag&ISP_FLAG_AWB)|(devp->flag&ISP_FLAG_AE);
+ 			if(af_sm_dg&0x1)
+@@ -1531,6 +1531,8 @@ void capture_sm_init(isp_dev_t *devp)
+ 		}else{
+ 			devp->flag &= (~ISP_FLAG_AF);
+ 		}
++		devp->af_info.flag_bk &= (~ISP_FLAG_AWB);
++		devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 		devp->flag &= (~ISP_FLAG_AWB);
+ 		devp->flag &= (~ISP_FLAG_AE);
+ 	}
+@@ -1619,6 +1621,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 			break;			
+ 		case CAPTURE_LOW_GAIN:
+ 			if(sm_state.ae_down==true){
++				devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 				devp->flag &=(~ISP_FLAG_AE);
+ 				cap_sm->capture_state = CAPTURE_EYE_WAIT;
+ 				if(capture_debug)
+-- 
+2.19.0
+

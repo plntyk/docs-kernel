@@ -1,0 +1,803 @@
+From 85f2b757bd0751e2ba4f985f923194a0081789de Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Fri, 21 Feb 2014 17:32:44 +0800
+Subject: [PATCH 3425/5965] PD #87099: optimize video_on_pixel/line in lcd
+ driver
+
+---
+ arch/arm/boot/dts/amlogic/meson6_g24.dtd      |   5 +-
+ arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd   |   6 +-
+ arch/arm/boot/dts/amlogic/meson6_g33_512M.dtd |   6 +-
+ arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd  |  18 +--
+ arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd  |  16 +-
+ arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd  |  60 ++++----
+ .../arm/boot/dts/amlogic/meson8_k101_512M.dtd |  30 ++--
+ arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd  |  18 +--
+ arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd  |   4 +-
+ drivers/amlogic/display/vout/aml_lcd.dtd      |   6 +-
+ drivers/amlogic/display/vout/lcdoutc.c        | 137 ++++++++++++------
+ 11 files changed, 167 insertions(+), 139 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6_g24.dtd b/arch/arm/boot/dts/amlogic/meson6_g24.dtd
+index 364d87a2df37..25fcad091a53 100755
+--- a/arch/arm/boot/dts/amlogic/meson6_g24.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6_g24.dtd
+@@ -482,7 +482,7 @@
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<0 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -506,8 +506,7 @@
+ 		lvds_vswing=<1>;	/** lvds_vswing_level(default level=1, support level 0,1,2,3,4) */
+ 		lvds_user_repack=<0 0>;	/** lvds_repack_user(0=auto setting, 1=user define), lvds_repack(0=JEIDA mode data mapping, 1=VESA mode data mapping. only valid when lvds_repack_user=1) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;	/** video_on_pixel, video_on_line */
+-		
++
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+ 		power_on_step_1="cpu","GPIOA_27","1";	/** gpio_type(support 3 types: cpu, pmu, signal), gpio_name(upper-case, valid when gpio_type is cpu or pmu), gpio_value(0=output_low, 1=output_high, 2=input. valid when gpio_type is cpu or pmu) */
+diff --git a/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd b/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
+index bc15dfac7ed4..f9b3cb0c34f1 100755
+--- a/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
+@@ -842,7 +842,6 @@ void root_func(){
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -905,7 +904,7 @@ void root_func(){
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<0 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -929,8 +928,7 @@ void root_func(){
+ 		lvds_vswing=<1>;	/** lvds_vswing_level(default level=1, support level 0,1,2,3,4) */
+ 		lvds_user_repack=<0 0>;	/** lvds_repack_user(0=auto setting, 1=user define), lvds_repack(0=JEIDA mode data mapping, 1=VESA mode data mapping. only valid when lvds_repack_user=1) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;	/** video_on_pixel, video_on_line */
+-		
++
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="pmu","GPIO1","0";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+ 		power_on_step_1="cpu","GPIOD_8","0";	/** gpio_type(support 3 types: cpu, pmu, signal), gpio_name(upper-case, valid when gpio_type is cpu or pmu), gpio_value(0=output_low, 1=output_high, 2=input. valid when gpio_type is cpu or pmu) */
+diff --git a/arch/arm/boot/dts/amlogic/meson6_g33_512M.dtd b/arch/arm/boot/dts/amlogic/meson6_g33_512M.dtd
+index 5b4ad2cd8792..dda50ed050da 100755
+--- a/arch/arm/boot/dts/amlogic/meson6_g33_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6_g33_512M.dtd
+@@ -854,7 +854,6 @@ void root_func(){
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -917,7 +916,7 @@ void root_func(){
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<0 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -941,8 +940,7 @@ void root_func(){
+ 		lvds_vswing=<1>;	/** lvds_vswing_level(default level=1, support level 0,1,2,3,4) */
+ 		lvds_user_repack=<0 0>;	/** lvds_repack_user(0=auto setting, 1=user define), lvds_repack(0=JEIDA mode data mapping, 1=VESA mode data mapping. only valid when lvds_repack_user=1) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;	/** video_on_pixel, video_on_line */
+-		
++
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="pmu","GPIO1","0";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+ 		power_on_step_1="cpu","GPIOD_8","0";	/** gpio_type(support 3 types: cpu, pmu, signal), gpio_name(upper-case, valid when gpio_type is cpu or pmu), gpio_value(0=output_low, 1=output_high, 2=input. valid when gpio_type is cpu or pmu) */
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+index 6066dacc698f..fcedcb4aa437 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+@@ -910,7 +910,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -973,7 +972,7 @@ sdio{
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -1000,8 +999,7 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 2>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 22>;	/** video_on_pixel, video_on_line */
+-		
++
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+ 		power_on_step_1="cpu","GPIODV_29","0";	/** gpio_type(support 3 types: cpu, pmu, signal), gpio_name(upper-case, valid when gpio_type is cpu or pmu), gpio_value(0=output_low, 1=output_high, 2=input. valid when gpio_type is cpu or pmu) */
+@@ -1077,8 +1075,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1092,10 +1090,10 @@ sdio{
+ 		hsync_width_backporch=<64 56>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<50 30>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+index d893de198344..d075decf074e 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_2G.dtd
+@@ -923,7 +923,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -986,7 +985,7 @@ sdio{
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -1013,7 +1012,6 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 2>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 22>;	/** video_on_pixel, video_on_line */
+ 		
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+@@ -1090,8 +1088,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1105,10 +1103,10 @@ sdio{
+ 		hsync_width_backporch=<64 56>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<50 30>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+index 07b8a65995f3..7dd7dea01002 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_1G.dtd
+@@ -874,7 +874,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -937,7 +936,7 @@ sdio{
+ 
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for positive, 1 for negative) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 
+ 		dither_user_ctrl=<0 0x000>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -964,7 +963,6 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 4>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;  /** video_on_pixel, video_on_line */  
+ 
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+@@ -1041,8 +1039,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1056,10 +1054,10 @@ sdio{
+ 		hsync_width_backporch=<64 120>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_LD070WX4>
+@@ -1076,8 +1074,8 @@ sdio{
+ //$$ L2 PROP_U32 = "vsync_horizontal_phase"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 2 = "dsi_transfer_mode"
+-//$$ L2 PROP_U32 2 = "dsi_power_on_cmd"
++//$$ L2 PROP_U32 = "dsi_transfer_mode"
++//$$ L2 PROP_U32 18 = "dsi_power_on_cmd"
+ //$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ lcd_LD070WX4:lcd_LD070WX4{
+ 		model_name="LD070WX4";	/** lcd model name */
+@@ -1093,21 +1091,21 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		vsync_width_backporch=<2 23>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+ 		vsync_horizontal_phase=<1 4>; /** adj_sign(0=positive, 1=negative), adj_value. default is <0 0> */
+-		
+-		dsi_lane_num=<4>;/** mipi dsi data lane number */
+-		dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-		dsi_transfer_mode=<0>;/** mipi dsi transfer mode: (0=command mode, 1=video mode) */
+-		dsi_power_on_cmd =<  0x01  0x0
+-										 0xFF  0x20     
+-										 0xAE  0x0B 
+-										 0xEE  0xEA 
+-										 0xEF  0x5F 
+-										 0xF2  0x68 
+-										 0xEE  0x0 
+-										 0xEF  0x0 
+-										 0xFF  0xFF
+-           				>;/** special power on command, 2 data is a pair(reg, value), if the first valu is 0xff, second value is delay time(unit: ms), ending flag is 0xff,0xff.*/
+-   dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<400 500>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        dsi_transfer_mode=<0>;/** mipi dsi transfer mode: (0=command mode, 1=video mode) */
++        dsi_power_on_cmd =< 0x01  0x0
++                            0xFF  0x20
++                            0xAE  0x0B 
++                            0xEE  0xEA 
++                            0xEF  0x5F 
++                            0xF2  0x68 
++                            0xEE  0x0 
++                            0xEF  0x0 
++                            0xFF  0xFF
++                          >;/** special power on command, 2 data is a pair(reg, value), if the first valu is 0xff, second value is delay time(unit: ms), ending flag is 0xff,0xff.*/
++        dsi_sleep_out_display_on_delay=<200 100>; /** mipi dsi basic delay: (unit: ms) */
+ 	};
+ 
+ 
+@@ -1201,7 +1199,7 @@ lcd_LD070WX4:lcd_LD070WX4{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 2 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ 	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+@@ -1216,10 +1214,10 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		hsync_width_backporch=<32 80>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+ 	};
+ 
+ //$$ DEVICE="lcd_extern"
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+index b668196d3c1e..1e9821908a0f 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k101_512M.dtd
+@@ -876,7 +876,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -939,7 +938,7 @@ sdio{
+ 
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 
+ 		dither_user_ctrl=<0 0x000>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -966,7 +965,6 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 4>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;  /** video_on_pixel, video_on_line */  
+ 
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+@@ -1042,8 +1040,9 @@ sdio{
+ //$$ L2 PROP_U32 2 = "hsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+-//$$ L2 PROP_U32 = "lane_num"
+-//$$ L2 PROP_U32 2 = "dsi_clk_min_max"
++//$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ 	lcd_B080XAN01:lcd_B080XAN01{	//k101
+ 		model_name="B080XAN01";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1057,8 +1056,10 @@ sdio{
+ 		hsync_width_backporch=<64 120>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<50 80>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-    lane_num=<4>;//lane num
+-    dsi_clk_min_max=<500 600>;/*area of bit rate of one lane:(dsi_clk_min=500, dsi_clk_max=600)*/
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<500 600>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        dsi_sleep_out_display_on_delay=<20 20>; /** mipi dsi basic delay: (unit: ms) */
+ 	};
+ 
+ //$$ MATCH "lcd_model_config_match" = <&lcd_CLAP070NJ02>
+@@ -1150,10 +1151,10 @@ sdio{
+ //$$ L2 PROP_U32 2 = "hsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+-//$$ L2 PROP_U32 = "lane_num"
+-//$$ L2 PROP_U32 2 = "pclk_div_lanebyteclk"
+-//$$ L2 PROP_U32 2 = "dsi_clk_min_max"     	
+-lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{	//k101
++//$$ L2 PROP_U32 = "dsi_lane_num"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+ 		active_area=<216 135>;		/** lcd active_area or display_area horizontal size, vertical size : (unit in mm, you can find them on the home page of lcd spec) */
+@@ -1166,9 +1167,10 @@ lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{	//k101
+ 		hsync_width_backporch=<32 80>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-    lane_num=<4>;//lane num
+-    pclk_div_lanebyteclk =<15>;/**(pix_clk/lane_byte_clk)*10 */                                    
+-	  dsi_clk_min_max=<900 1000>;/*area of bit rate of one lane:(dsi_clk_min=900, dsi_clk_max=1000)*/  
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+ 	};
+ 
+ //$$ DEVICE="lcd_extern"
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+index 16e19ca39ce2..01603c5b813b 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k102_v1.dtd
+@@ -911,7 +911,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -974,7 +973,7 @@ sdio{
+ 
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 
+ 		dither_user_ctrl=<0 0x000>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -1001,7 +1000,6 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 4>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;  /** video_on_pixel, video_on_line */  
+ 
+ 		//lcd power ctrl	//support up to 15 steps for each sequence===============================================
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+@@ -1078,8 +1076,8 @@ sdio{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 = "dsi_bit_rate_min_max"
+-//$$ L2 PROP_U32 = "dsi_sleep_out_display_on_delay"
++//$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
++//$$ L2 PROP_U32 2 = "dsi_sleep_out_display_on_delay"
+ 	lcd_KD079D1:lcd_KD079D1{	//k102
+ 		model_name="KD079D1";	/** lcd model name */
+ 		interface="mipi";		/** lcd_interface(mipi, lvds, edp, ttl) */
+@@ -1237,7 +1235,7 @@ lcd_LD070WX4:lcd_LD070WX4{
+ //$$ L2 PROP_U32 2 = "vsync_width_backporch"
+ //$$ L2 PROP_U32 2 = "pol_hsync_vsync"
+ //$$ L2 PROP_U32 = "dsi_lane_num"
+-//$$ L2 PROP_U32 2 = "pclk_lanebyteclk_factor"
++//$$ L2 PROP_U32 = "pclk_lanebyteclk_factor"
+ //$$ L2 PROP_U32 2 = "dsi_bit_rate_min_max"
+ 	lcd_CLAA101FP05XG:lcd_CLAA101FP05XG{
+ 		model_name="CLAA101FP05XG";	/** lcd model name */
+@@ -1252,10 +1250,10 @@ lcd_LD070WX4:lcd_LD070WX4{
+ 		hsync_width_backporch=<32 80>;	/** hsync_width, hsync_backporch(include hsync_width) */
+ 		vsync_width_backporch=<6 26>;	/** vsync_width, vsync_backporch(include vsync_width) */
+ 		pol_hsync_vsync=<0 0>;	/** hsync_polarity, vsync_polarity : (0=negative, 1=positive) */
+-		
+-    dsi_lane_num=<4>;/** mipi dsi data lane number */
+-    dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
+-    pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
++
++        dsi_lane_num=<4>;/** mipi dsi data lane number */
++        dsi_bit_rate_min_max=<900 1000>;/** range of mipi dsi data lane bit rate(unit: MHz) */
++        pclk_lanebyteclk_factor =<15>;/** special adjust, default is 0 */
+ 	};
+ 
+ //$$ DEVICE="lcd_extern"
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+index 8c5343e41b16..d6829071f4de 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k150_v1.dtd
+@@ -893,7 +893,6 @@ sdio{
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -956,7 +955,7 @@ sdio{
+ 
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 
+ 		dither_user_ctrl=<0 0x000>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -983,7 +982,6 @@ sdio{
+ 		edp_user_link_rate_lane_count=<1 1 4>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 32>;  /** video_on_pixel, video_on_line */  
+ 
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+diff --git a/drivers/amlogic/display/vout/aml_lcd.dtd b/drivers/amlogic/display/vout/aml_lcd.dtd
+index e252671d9603..1776f3399a63 100755
+--- a/drivers/amlogic/display/vout/aml_lcd.dtd
++++ b/drivers/amlogic/display/vout/aml_lcd.dtd
+@@ -28,7 +28,6 @@
+ //$$ L4 PROP_U32 3 = "edp_user_link_rate_lane_count"
+ //$$ L4 PROP_U32 2 = "edp_link_adaptive_vswing"
+ //$$ L4 PROP_U32 2 = "rgb_base_coeff"
+-//$$ L4 PROP_U32 2 = "video_on_pixel_line"
+ 
+ //$$ L2 PROP_STR 3 = "power_on_uboot"
+ //$$ L2 PROP_STR 3 = "power_on_step_1"
+@@ -91,7 +90,7 @@
+ 		
+ 		/* recommend settings, you can modify them if needed. */
+ 		valid_hvsync_de=<1 1>;	/** hvsync_signal_valid, DE_signal_valid : (0=disable signal, 1=enable signal) */
+-		hsign_hoffset_vsign_voffset=<1 0 1 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0 for negative, 1 for positive) */
++		hsign_hoffset_vsign_voffset=<0 0 0 0>;	/** hsign, hoffset, vsign, voffset :("sign-offset" is a pair. sign: 0=positive, 1=negative) */
+ 		
+ 		dither_user_ctrl=<0 0x600>;	/**  dither_user(0=auto setting, 1=user define), dither_ctrl(user defined dither control, only valid when user_define=1) */
+ 		vadj_brightness_contrast_saturation=<0x0 0x80 0x100>;	/** video adjust brightness, contrast, saturation */
+@@ -118,8 +117,7 @@
+ 		edp_user_link_rate_lane_count=<1 1 2>;	/** edp_user(0=auto setting, 1=user define), link_rate(0=1.62G, 1=2.7G, only valid when edp_user=1), lane_count(support 1,2,4, only valid when edp_user=1) */
+ 		edp_link_adaptive_vswing=<0 0>;	/** adaptive(0=fixed user defined vswing, 1=auto setting vswing by training), vswing(support level 0,1,2,3, user defined vswing, only valid when adaptive=0) */
+ 		rgb_base_coeff=<0xf0 0x74a>;	/** rgb_base, rgb_coeff */
+-		video_on_pixel_line=<120 22>;	/** video_on_pixel, video_on_line */
+-		
++
+ 		//lcd power ctrl	//support up to 15 steps for each sequence
+ 		power_on_uboot="n","n","n";	/** only for uboot, ahead of lcd_power_on, no need config delay */
+ 		power_on_step_1="cpu","GPIODV_29","0";	/** gpio_type(support 3 types: cpu, pmu, signal), gpio_name(upper-case, valid when gpio_type is cpu or pmu), gpio_value(0=output_low, 1=output_high, 2=input. valid when gpio_type is cpu or pmu) */
+diff --git a/drivers/amlogic/display/vout/lcdoutc.c b/drivers/amlogic/display/vout/lcdoutc.c
+index 9c999b4e7cee..d7d3fd8ef2f8 100755
+--- a/drivers/amlogic/display/vout/lcdoutc.c
++++ b/drivers/amlogic/display/vout/lcdoutc.c
+@@ -75,8 +75,8 @@
+ #define DRV_TYPE "c8"
+ #endif
+ 
+-#define PANEL_NAME		"panel"
+-#define DRIVER_DATE		"20140106"
++#define PANEL_NAME		"panel"
++#define DRIVER_DATE		"20140212"
+ #define DRIVER_VER		"310"
+ 
+ //#define LCD_DEBUG_INFO
+@@ -2589,7 +2589,7 @@ static void lcd_tcon_config(Lcd_Config_t *pConf)
+ 			h_delay = 0;
+ 			break;
+ 	}
+-	
++#if 0
+ 	h_offset = (pConf->lcd_timing.h_offset & 0xffff);
+ 	v_offset = (pConf->lcd_timing.v_offset & 0xffff);
+ 	if ((pConf->lcd_timing.h_offset >> 31) & 1)
+@@ -2627,7 +2627,46 @@ static void lcd_tcon_config(Lcd_Config_t *pConf)
+ 	pConf->lcd_timing.oeh_he_addr = (pConf->lcd_timing.de_hstart + pConf->lcd_basic.h_active) % pConf->lcd_basic.h_period;
+ 	pConf->lcd_timing.oeh_vs_addr = pConf->lcd_timing.de_vstart;
+ 	pConf->lcd_timing.oeh_ve_addr = (pConf->lcd_timing.de_vstart + pConf->lcd_basic.v_active - 1) % pConf->lcd_basic.v_period;
+-	
++#else
++    pConf->lcd_timing.video_on_pixel = pConf->lcd_basic.h_period - pConf->lcd_basic.h_active -h_delay;
++    pConf->lcd_timing.video_on_line = pConf->lcd_basic.v_period - pConf->lcd_basic.v_active;
++
++    h_offset = (pConf->lcd_timing.h_offset & 0xffff);
++    v_offset = (pConf->lcd_timing.v_offset & 0xffff);
++    if ((pConf->lcd_timing.h_offset >> 31) & 1)
++        pConf->lcd_timing.de_hstart = (pConf->lcd_basic.h_period - pConf->lcd_basic.h_active + pConf->lcd_basic.h_period - h_offset) % pConf->lcd_basic.h_period;
++    else
++        pConf->lcd_timing.de_hstart = (pConf->lcd_basic.h_period - pConf->lcd_basic.h_active + h_offset) % pConf->lcd_basic.h_period;
++    if ((pConf->lcd_timing.v_offset >> 31) & 1)
++        pConf->lcd_timing.de_vstart = (pConf->lcd_basic.v_period - pConf->lcd_basic.v_active + pConf->lcd_basic.v_period - v_offset) % pConf->lcd_basic.v_period;
++    else
++        pConf->lcd_timing.de_vstart = (pConf->lcd_basic.v_period - pConf->lcd_basic.v_active + v_offset) % pConf->lcd_basic.v_period;
++
++    hstart = (pConf->lcd_timing.de_hstart + pConf->lcd_basic.h_period - pConf->lcd_timing.hsync_bp) % pConf->lcd_basic.h_period;
++    hend = (pConf->lcd_timing.de_hstart + pConf->lcd_basic.h_period - pConf->lcd_timing.hsync_bp + pConf->lcd_timing.hsync_width) % pConf->lcd_basic.h_period;	
++    pConf->lcd_timing.sth1_hs_addr = hstart;
++    pConf->lcd_timing.sth1_he_addr = hend;
++    pConf->lcd_timing.sth1_vs_addr = 0;
++    pConf->lcd_timing.sth1_ve_addr = pConf->lcd_basic.v_period - 1;
++
++    vsync_h_phase = (pConf->lcd_timing.vsync_h_phase & 0xffff);
++    if ((pConf->lcd_timing.vsync_h_phase >> 31) & 1) //negative
++        vsync_h_phase = (hstart + pConf->lcd_basic.h_period - vsync_h_phase) % pConf->lcd_basic.h_period;
++    else	//positive
++        vsync_h_phase = (hstart + pConf->lcd_basic.h_period + vsync_h_phase) % pConf->lcd_basic.h_period;
++    pConf->lcd_timing.stv1_hs_addr = vsync_h_phase;
++    pConf->lcd_timing.stv1_he_addr = vsync_h_phase;
++    vstart = (pConf->lcd_timing.de_vstart + pConf->lcd_basic.v_period - pConf->lcd_timing.vsync_bp) % pConf->lcd_basic.v_period;
++    vend = (pConf->lcd_timing.de_vstart + pConf->lcd_basic.v_period - pConf->lcd_timing.vsync_bp + pConf->lcd_timing.vsync_width) % pConf->lcd_basic.v_period;
++    pConf->lcd_timing.stv1_vs_addr = vstart;
++    pConf->lcd_timing.stv1_ve_addr = vend;
++
++    pConf->lcd_timing.oeh_hs_addr = pConf->lcd_timing.de_hstart;
++    pConf->lcd_timing.oeh_he_addr = (pConf->lcd_timing.de_hstart + pConf->lcd_basic.h_active) % pConf->lcd_basic.h_period;
++    pConf->lcd_timing.oeh_vs_addr = pConf->lcd_timing.de_vstart;
++    pConf->lcd_timing.oeh_ve_addr = (pConf->lcd_timing.de_vstart + pConf->lcd_basic.v_active - 1) % pConf->lcd_basic.v_period;
++#endif
++
+ 	DBG_PRINT("sth1_hs_addr=%d, sth1_he_addr=%d, sth1_vs_addr=%d, sth1_ve_addr=%d\n", pConf->lcd_timing.sth1_hs_addr, pConf->lcd_timing.sth1_he_addr, pConf->lcd_timing.sth1_vs_addr, pConf->lcd_timing.sth1_ve_addr);
+ 	DBG_PRINT("stv1_hs_addr=%d, stv1_he_addr=%d, stv1_vs_addr=%d, stv1_ve_addr=%d\n", pConf->lcd_timing.stv1_hs_addr, pConf->lcd_timing.stv1_he_addr, pConf->lcd_timing.stv1_vs_addr, pConf->lcd_timing.stv1_ve_addr);
+ 	DBG_PRINT("oeh_hs_addr=%d, oeh_he_addr=%d, oeh_vs_addr=%d, oeh_ve_addr=%d\n", pConf->lcd_timing.oeh_hs_addr, pConf->lcd_timing.oeh_he_addr, pConf->lcd_timing.oeh_vs_addr, pConf->lcd_timing.oeh_ve_addr);
+@@ -3552,9 +3591,9 @@ static struct class aml_gamma_class = {
+ static Lcd_Basic_t temp_lcd_basic;
+ static Lcd_Timing_t temp_lcd_timing;
+ static unsigned short temp_dith_user, temp_dith_ctrl;
+-static unsigned int temp_vadj_brightness, temp_vadj_contrast, temp_vadj_saturation;
+-static int temp_lvds_repack, temp_pn_swap;
+-#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
++static unsigned int temp_vadj_brightness, temp_vadj_contrast, temp_vadj_saturation;
++static int temp_lvds_repack, temp_pn_swap, temp_lvds_vswing;
++#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+ static unsigned char temp_edp_link_rate, temp_edp_lane_count, temp_edp_vswing, temp_edp_preemphasis;
+ #endif
+ static unsigned short last_h_active, last_v_active;
+@@ -3577,9 +3616,9 @@ static const char * lcd_usage_str =
+ "    echo lvds <vswing_level> <lvds_repack> <pn_swap> > debug ; write lvds config\n"
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+ "    echo edp <link_rate> <lane_count> > debug ; write edp config\n"
+-"    echo mreg register > debug ; read mipi register\n"
+-"    echo mfactor denominator numerator  > debug ; write factor to config hline hsa hbp\n"
+-"    echo mdsi dsi_clk_min dsi_clk_max > debug ; write dsi_clk to config dsi_clk_min dsi_clk_max\n"
++"    echo mreg <register> > debug ; read mipi register\n"
++"    echo mfactor <denominator> <numerator>  > debug ; write factor to config hline hsa hbp\n"
++"    echo mdsi <bit_rate_min> <bit_rate_max> > debug ; config dsi bit_rate_min dsi_bit_rate_max\n"
+ #endif
+ "\n"
+ "data format:\n"
+@@ -3592,11 +3631,10 @@ static const char * lcd_usage_str =
+ #endif
+ "\n"
+ "    echo offset <h_sign> <h_offset> <v_sign> <v_offset> > debug ; write ttl display offset\n"
+-"    echo video <video_on_pixel> <video_on_line> > debug ; write video on pixel/line config\n"
+ "    echo dither <dither_user> <dither_ctrl> > debug ; write user dither ctrl config\n"
+ "    echo vadj <brightness> <contrast> <saturation> > debug ; write video adjust config\n"
+ "data format:\n"
+-"    <xx_sign>     : 0=negative, 1=positive\n"
++"    <xx_sign>     : 0=positive, 1=negative\n"
+ "    <dither_user> : 0=disable user control, 1=enable user control\n"
+ "    <dither_ctrl> : dither ctrl in Hex, such as 0x400 or 0x600\n"
+ "    <brightness>  : negative 0x1ff~0x101, positive 0x0~0xff, signed value in Hex, default is 0x0\n"
+@@ -3635,8 +3673,7 @@ static void read_current_lcd_config(Lcd_Config_t *pConf)
+ 	printk("hs_width	%d\nhs_backporch	%d\nhs_pol		%d\n", pConf->lcd_timing.hsync_width, pConf->lcd_timing.hsync_bp, (pConf->lcd_timing.pol_cntl_addr >> LCD_HS_POL) & 1);
+ 	printk("vs_width	%d\nvs_backporch	%d\nvs_pol		%d\n", pConf->lcd_timing.vsync_width, pConf->lcd_timing.vsync_bp, (pConf->lcd_timing.pol_cntl_addr >> LCD_VS_POL) & 1);
+ 	printk("hvsync_valid	%d\nde_valid	%d\n", pConf->lcd_timing.hvsync_valid, pConf->lcd_timing.de_valid);
+-	printk("h_offset	%s%d\nv_offset	%s%d\n", (h_adj ? "" : "-"), (pConf->lcd_timing.h_offset & 0xffff), (v_adj ? "" : "-"), (pConf->lcd_timing.v_offset & 0xffff));
+-	printk("video_on_pixel	%d\nvideo_on_line	%d\n\n", pConf->lcd_timing.video_on_pixel, pConf->lcd_timing.video_on_line);
++	printk("h_offset	%s%d\nv_offset	%s%d\n\n", (h_adj ? "-" : ""), (pConf->lcd_timing.h_offset & 0xffff), (v_adj ? "-" : ""), (pConf->lcd_timing.v_offset & 0xffff));
+ 	
+ 	switch (pConf->lcd_basic.lcd_type) {
+ 		case LCD_DIGITAL_TTL:
+@@ -3677,6 +3714,8 @@ static void read_current_lcd_config(Lcd_Config_t *pConf)
+ 	
+ 	if (pConf->lcd_effect.dith_user)
+ 		printk("dither_user_ctrl	0x%x\n", pConf->lcd_effect.dith_cntl_addr);
++	
++	printk("video_on_pixel	%d\nvideo_on_line	%d\n\n", pConf->lcd_timing.video_on_pixel, pConf->lcd_timing.video_on_line);
+ }
+ 
+ static void scale_framebuffer(void)
+@@ -3731,8 +3770,10 @@ static void save_lcd_config(Lcd_Config_t *pConf)
+ 	
+ 	temp_lvds_repack = pConf->lcd_control.lvds_config->lvds_repack;
+ 	temp_pn_swap = pConf->lcd_control.lvds_config->pn_swap;
+-
+-#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)	
++	
++	temp_lvds_vswing = pConf->lcd_control.lvds_config->lvds_vswing;
++	
++#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)	
+ 	temp_edp_link_rate = pConf->lcd_control.edp_config->link_rate;
+ 	temp_edp_lane_count = pConf->lcd_control.edp_config->lane_count;
+ 	temp_edp_vswing = pConf->lcd_control.edp_config->vswing;
+@@ -3783,6 +3824,8 @@ static void reset_lcd_config(Lcd_Config_t *pConf)
+ 	
+ 	pConf->lcd_control.lvds_config->lvds_repack = temp_lvds_repack;
+ 	pConf->lcd_control.lvds_config->pn_swap = temp_pn_swap;
++
++	pConf->lcd_control.lvds_config->lvds_vswing = temp_lvds_vswing;
+ 	
+ 	pConf->lcd_effect.dith_user = temp_dith_user;
+ 	pConf->lcd_effect.dith_cntl_addr = temp_dith_ctrl;
+@@ -3790,7 +3833,6 @@ static void reset_lcd_config(Lcd_Config_t *pConf)
+ 	pConf->lcd_effect.vadj_contrast = temp_vadj_contrast;
+ 	pConf->lcd_effect.vadj_saturation = temp_vadj_saturation;
+ 	
+-	lcd_config_init(pDev->pConf);
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+ 	//restore edp link config, for they are translate from user value to reg value
+ 	pConf->lcd_control.edp_config->link_rate = temp_edp_link_rate;
+@@ -3799,6 +3841,7 @@ static void reset_lcd_config(Lcd_Config_t *pConf)
+ 	pConf->lcd_control.edp_config->preemphasis = temp_edp_preemphasis;
+ #endif
+ 	
++	lcd_config_init(pDev->pConf);
+ 	_lcd_module_enable();
+ 	
+ 	pDev->lcd_info.sync_duration_num = pDev->pConf->lcd_timing.sync_duration_num;
+@@ -3983,25 +4026,25 @@ static ssize_t lcd_debug(struct class *class, struct class_attribute *attr, cons
+ 			printk("vswing_level: %u, lvds_repack: %s, rb_swap: %s\n", t[0], ((t[1] == 1) ? "VESA mode" : "JEIDA mode"), ((t[2] == 0) ? "disable" : "enable"));
+ 			break;
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)
+-		case 'm':	//write mlvds config
+-			if (buf[1] == 'r'){
+-  			ret = sscanf(buf, "mreg %d ", &t[0]);
+-  			printk("mipi_reg%x=%x\n",t[0],READ_DSI_REG(t[0]));
+-  		}
+-  		else if (buf[1] == 'f'){
+-  			ret = sscanf(buf, "mfactor %d %d", &t[0], &t[1]);
+-  			pDev->pConf->lcd_control.mipi_config->numerator=t[0];
+-  			pDev->pConf->lcd_control.mipi_config->denominator=t[1];
+-  			dsi_probe(pDev->pConf);
+-       }
+-      else if (buf[1] == 'd'){
+-       	ret = sscanf(buf, "mdsi %d %d", &t[0],&t[1]);
+-  			pDev->pConf->lcd_control.mipi_config->dsi_clk_min = t[0];
+-  			pDev->pConf->lcd_control.mipi_config->dsi_clk_max = t[1];
+-  			lcd_config_init(pDev->pConf);
+-  			printk("dsi_clk_min_max_div=%d,%d",pDev->pConf->lcd_control.mipi_config->dsi_clk_min,pDev->pConf->lcd_control.mipi_config->dsi_clk_max);    	
+-       }
+-			break;
++        case 'm':	//write mipi config
++            if (buf[1] == 'r'){
++                ret = sscanf(buf, "mreg %x ", &t[0]);
++                printk("mipi_reg 0x%04x=0x%08x\n",t[0],READ_DSI_REG(t[0]));
++            }
++            else if (buf[1] == 'f'){
++                ret = sscanf(buf, "mfactor %d %d", &t[0], &t[1]);
++                pDev->pConf->lcd_control.mipi_config->numerator=t[0];
++                pDev->pConf->lcd_control.mipi_config->denominator=t[1];
++                dsi_probe(pDev->pConf);
++            }
++            else if (buf[1] == 'd'){
++                ret = sscanf(buf, "mdsi %d %d", &t[0],&t[1]);
++                pDev->pConf->lcd_control.mipi_config->dsi_clk_min = t[0];
++                pDev->pConf->lcd_control.mipi_config->dsi_clk_max = t[1];
++                lcd_config_init(pDev->pConf);
++                printk("dsi bit_rate min=%dMHz, max=%dMHz\n",pDev->pConf->lcd_control.mipi_config->dsi_clk_min,pDev->pConf->lcd_control.mipi_config->dsi_clk_max);
++            }
++            break;
+ #endif
+ 		case 'd':
+ 			if (buf[2] == 't') {
+@@ -4349,8 +4392,8 @@ static inline int _get_lcd_default_config(struct platform_device *pdev)
+ 		else {
+ 			pDev->pConf->lcd_timing.h_offset = ((lcd_para[0] << 31) | ((lcd_para[1] & 0xffff) << 0));
+ 			pDev->pConf->lcd_timing.v_offset = ((lcd_para[2] << 31) | ((lcd_para[3] & 0xffff) << 0));
+-			DBG_PRINT("h_offset = %s%u, ", (((pDev->pConf->lcd_timing.h_offset >> 31) & 1) ? "" : "-"), (pDev->pConf->lcd_timing.h_offset & 0xffff));
+-			DBG_PRINT("v_offset = %s%u\n", (((pDev->pConf->lcd_timing.v_offset >> 31) & 1) ? "" : "-"), (pDev->pConf->lcd_timing.v_offset & 0xffff));
++			DBG_PRINT("h_offset = %s%u, ", (((pDev->pConf->lcd_timing.h_offset >> 31) & 1) ? "-" : ""), (pDev->pConf->lcd_timing.h_offset & 0xffff));
++			DBG_PRINT("v_offset = %s%u\n", (((pDev->pConf->lcd_timing.v_offset >> 31) & 1) ? "-" : ""), (pDev->pConf->lcd_timing.v_offset & 0xffff));
+ 		}
+ 		ret = of_property_read_u32_array(pdev->dev.of_node,"dither_user_ctrl",&lcd_para[0], 2);
+ 		if(ret){
+@@ -4556,15 +4599,15 @@ static inline int _get_lcd_default_config(struct platform_device *pdev)
+ 			pDev->pConf->lcd_effect.rgb_coeff_addr = (unsigned short)(lcd_para[1]);
+ 			DBG_PRINT("rgb_base = 0x%x, rgb_coeff = 0x%x\n", pDev->pConf->lcd_effect.rgb_base_addr, pDev->pConf->lcd_effect.rgb_coeff_addr);
+ 		}
+-		ret = of_property_read_u32_array(pdev->dev.of_node,"video_on_pixel_line",&lcd_para[0], 2);
+-		if(ret){
+-			printk("don't find to match video_on_pixel_line, use default setting.\n");
+-		}
+-		else {
+-			pDev->pConf->lcd_timing.video_on_pixel = (unsigned short)(lcd_para[0]);
+-			pDev->pConf->lcd_timing.video_on_line = (unsigned short)(lcd_para[1]);
+-			DBG_PRINT("video_on_pixel = %u, video_on_line = %u\n", pDev->pConf->lcd_timing.video_on_pixel, pDev->pConf->lcd_timing.video_on_line);
+-		}
++		// ret = of_property_read_u32_array(pdev->dev.of_node,"video_on_pixel_line",&lcd_para[0], 2);
++		// if(ret){
++			// printk("don't find to match video_on_pixel_line, use default setting.\n");
++		// }
++		// else {
++			// pDev->pConf->lcd_timing.video_on_pixel = (unsigned short)(lcd_para[0]);
++			// pDev->pConf->lcd_timing.video_on_line = (unsigned short)(lcd_para[1]);
++			// DBG_PRINT("video_on_pixel = %u, video_on_line = %u\n", pDev->pConf->lcd_timing.video_on_pixel, pDev->pConf->lcd_timing.video_on_line);
++		// }
+ 	}
+ 	
+ 	return ret;
+-- 
+2.19.0
+

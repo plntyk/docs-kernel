@@ -1,0 +1,155 @@
+From 95e5a8de1613fb8a03abbb60aed8a6788ed2a4b0 Mon Sep 17 00:00:00 2001
+From: Zhi Zhou <zhi.zhou@amlogic.com>
+Date: Wed, 11 Feb 2015 05:33:07 -0500
+Subject: [PATCH 5413/5965] PD#103350: amports: fixed write may init on
+ muti-tread bug.
+
+if init on muti-thread, we call init on different thread;
+kernel flags check may have problem;
+
+Change-Id: I35e04e81a6f6ca765b3cd39d3be48ed85050dd47
+---
+ drivers/amlogic/amports/amstream.c | 20 +++++++++++++-------
+ drivers/amlogic/amports/esparser.c |  6 +++---
+ drivers/amlogic/amports/vdec.c     |  1 +
+ 3 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index fefdfb7a5da5..0a6fe0bc608c 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -641,7 +641,11 @@ static  int amstream_port_init(stream_port_t *port)
+     stream_buf_t *pabuf = &bufs[BUF_TYPE_AUDIO];
+     stream_buf_t *psbuf = &bufs[BUF_TYPE_SUBTITLE];
+     stream_buf_t *pubuf = &bufs[BUF_TYPE_USERDATA];
+-
++    mutex_lock(&amstream_mutex);
++    if (port->flag & PORT_FLAG_INITED) {
++        mutex_unlock(&amstream_mutex);
++        return 0;
++    }
+     if ((port->type & PORT_TYPE_AUDIO) && (port->flag & PORT_FLAG_AFORMAT)) {
+         r = audio_port_init(port, pabuf);
+         if (r < 0) {
+@@ -723,6 +727,7 @@ static  int amstream_port_init(stream_port_t *port)
+ 	set_vsync_pts_inc_mode(0); // clear video inc
+ 
+     port->flag |= PORT_FLAG_INITED;
++    mutex_unlock(&amstream_mutex);
+     return 0;
+     /*errors follow here*/
+ error5:
+@@ -734,7 +739,7 @@ error3:
+ error2:
+     audio_port_release(port, pabuf, 0);
+ error1:
+-
++    mutex_unlock(&amstream_mutex);
+     return r;
+ }
+ static  int amstream_port_release(stream_port_t *port)
+@@ -1123,12 +1128,12 @@ static int amstream_open(struct inode *inode, struct file *file)
+     s32 i;
+     stream_port_t *s;
+     stream_port_t *this = &ports[iminor(inode)];
+-
+     if (iminor(inode) >= amstream_port_num) {
+         return (-ENODEV);
+     }
+-
++    mutex_lock(&amstream_mutex);
+     if (this->flag & PORT_FLAG_IN_USE) {
++        mutex_unlock(&amstream_mutex);
+         return (-EBUSY);
+     }
+ 
+@@ -1136,6 +1141,7 @@ static int amstream_open(struct inode *inode, struct file *file)
+     for (s = &ports[0], i = 0; i < amstream_port_num; i++, s++) {
+         if ((s->flag & PORT_FLAG_IN_USE) &&
+             ((this->type) & (s->type) & (PORT_TYPE_VIDEO | PORT_TYPE_AUDIO))) {
++            mutex_unlock(&amstream_mutex);
+             return (-EBUSY);
+         }
+     }
+@@ -1192,17 +1198,17 @@ static int amstream_open(struct inode *inode, struct file *file)
+         debug_filp = NULL;
+     }
+ #endif
+-
++    mutex_unlock(&amstream_mutex);
+     return 0;
+ }
+ 
+ static int amstream_release(struct inode *inode, struct file *file)
+ {
+     stream_port_t *this = &ports[iminor(inode)];
+-
+     if (iminor(inode) >= amstream_port_num) {
+         return (-ENODEV);
+     }
++    mutex_lock(&amstream_mutex);
+     if (this->flag & PORT_FLAG_INITED) {
+         amstream_port_release(this);
+     }
+@@ -1257,7 +1263,7 @@ static int amstream_release(struct inode *inode, struct file *file)
+ 
+     switch_mod_gate_by_name("demux", 0);
+ #endif 
+-
++    mutex_unlock(&amstream_mutex);
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/amports/esparser.c b/drivers/amlogic/amports/esparser.c
+index b38c2a8c41b9..a6e0c9683578 100755
+--- a/drivers/amlogic/amports/esparser.c
++++ b/drivers/amlogic/amports/esparser.c
+@@ -242,7 +242,6 @@ s32 esparser_init(struct stream_buf_s *buf)
+     u32 parser_sub_end_ptr;
+     u32 parser_sub_rp;
+     bool first_use = false;
+-
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+     if (HAS_HEVC_VDEC && (buf->type == BUF_TYPE_HEVC)) {
+         pts_type = PTS_TYPE_HEVC;
+@@ -257,7 +256,7 @@ s32 esparser_init(struct stream_buf_s *buf)
+     } else {
+         return -EINVAL;
+     }
+-
++    mutex_lock(&esparser_mutex);
+     parser_sub_start_ptr = READ_MPEG_REG(PARSER_SUB_START_PTR);
+     parser_sub_end_ptr = READ_MPEG_REG(PARSER_SUB_END_PTR);
+     parser_sub_rp = READ_MPEG_REG(PARSER_SUB_RP);
+@@ -417,7 +416,7 @@ s32 esparser_init(struct stream_buf_s *buf)
+         WRITE_MPEG_REG(PARSER_INT_ENABLE,
+                        PARSER_INTSTAT_SC_FOUND << PARSER_INT_HOST_EN_BIT);
+     }
+-
++    mutex_unlock(&esparser_mutex);
+     return 0;
+ 
+ Err_2:
+@@ -426,6 +425,7 @@ Err_2:
+ Err_1:
+     atomic_dec(&esparser_use_count);
+     buf->flag &= ~BUF_FLAG_PARSER;
++    mutex_unlock(&esparser_mutex);
+     return r;
+ }
+ 
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index a3f84e7fbb48..438cad5a3c5c 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -111,6 +111,7 @@ s32 vdec_init(vformat_t vf)
+     if (IS_ERR(vdec_device)) {
+         r = PTR_ERR(vdec_device);
+         printk("vdec: Decoder device register failed (%d)\n", r);
++        inited_vcodec_num--;
+         goto error;
+     }
+ 
+-- 
+2.19.0
+

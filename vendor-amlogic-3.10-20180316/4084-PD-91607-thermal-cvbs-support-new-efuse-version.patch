@@ -1,0 +1,270 @@
+From 0ed644d7a2ca525bb62d56501ab48e40cd6731b0 Mon Sep 17 00:00:00 2001
+From: "benlong.zhou" <benlong.zhou@amlogic.com>
+Date: Thu, 8 May 2014 17:26:08 +0800
+Subject: [PATCH 4084/5965] PD #91607: thermal/cvbs support new efuse version
+
+Thermal support v2,v5
+CVBS support v1,v2,v5
+
+Conflicts:
+
+	drivers/amlogic/input/saradc/saradc.c
+---
+ drivers/amlogic/display/vout/tvconf.c     |  2 +-
+ drivers/amlogic/display/vout/tvoutc.c     | 30 ++++++++++++++++++---
+ drivers/amlogic/efuse/efuse_hw.c          | 19 +++++++++++++-
+ drivers/amlogic/input/saradc/saradc.c     | 32 +++++++++++++++++++----
+ drivers/amlogic/thermal/amlogic_thermal.c | 14 ++++++++--
+ include/linux/amlogic/saradc.h            |  7 ++++-
+ 6 files changed, 91 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 3ec4b8f6566b..53044e0131fb 100755
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -585,7 +585,7 @@ static int __init vdac_config_bootargs_setup(char* line)
+     printk("cvbs trimming line = %s\n", line);
+     cfg = simple_strtoul(line, NULL, 16);
+ 
+-    cvbs_config_vdac(cfg&0xff, (cfg&0xff00)>>8);
++    cvbs_config_vdac((cfg&0xff00)>>8, cfg&0xff);
+ 
+     return 1;
+ }
+diff --git a/drivers/amlogic/display/vout/tvoutc.c b/drivers/amlogic/display/vout/tvoutc.c
+index 023c9d6122ea..a6698e0e6bda 100755
+--- a/drivers/amlogic/display/vout/tvoutc.c
++++ b/drivers/amlogic/display/vout/tvoutc.c
+@@ -286,16 +286,38 @@ static int uboot_display_already(tvmode_t mode)
+ 
+ #if ((defined CONFIG_ARCH_MESON8) || (defined CONFIG_ARCH_MESON8B))
+ static unsigned int vdac_cfg_valid = 0, vdac_cfg_value = 0;
++static unsigned int cvbs_get_trimming_version(unsigned int flag)
++{
++	unsigned int version = 0xff;
++	
++	if( (flag&0xf0) == 0xa0 )
++		version = 5;
++	else if( (flag&0xf0) == 0x40 )
++		version = 2;
++	else if( (flag&0xc0) == 0x80 )
++		version = 1;
++	else if( (flag&0xc0) == 0x00 )
++		version = 0;
++
++	return version;
++}
++
+ void cvbs_config_vdac(unsigned int flag, unsigned int cfg)
+ {
++	unsigned char version = 0;
++
+ 	vdac_cfg_value = cfg&0x7;
+ 
++	version = cvbs_get_trimming_version(flag);
++
+ 	// flag 1/0 for validity of vdac config
+-	if( (flag&0xc0) == 0x80 )
++	if( (version==1) || (version==2) || (version==5) )
+ 		vdac_cfg_valid = 1;
+ 	else
+ 		vdac_cfg_valid = 0;
+ 
++	printk("cvbs trimming.%d.v%d: 0x%x, 0x%x\n", vdac_cfg_valid, version, flag, cfg);
++
+ 	return ;
+ }
+ static void cvbs_cntl_output(unsigned int open)
+@@ -306,7 +328,7 @@ static void cvbs_cntl_output(unsigned int open)
+ 	{
+ 		cntl0 = 0;
+ 		cntl1 = 8;
+-		printk("cvbs close = 0x%x, 0x%x\n", cntl0, cntl1);
++
+ 		WRITE_MPEG_REG(HHI_VDAC_CNTL0, cntl0);
+ 		WRITE_MPEG_REG(HHI_VDAC_CNTL1, cntl1);
+ 	}
+@@ -314,7 +336,9 @@ static void cvbs_cntl_output(unsigned int open)
+ 	{
+ 		cntl0 = 0x1;
+ 		cntl1 = (vdac_cfg_valid==0)?0:vdac_cfg_value;
+-		printk("cvbs open = 0x%x, 0x%x\n", cntl0, cntl1);
++
++		printk("vdac open.%d = 0x%x, 0x%x\n", vdac_cfg_valid, cntl0, cntl1);
++
+ 		WRITE_MPEG_REG(HHI_VDAC_CNTL1, cntl1);
+ 		WRITE_MPEG_REG(HHI_VDAC_CNTL0, cntl0);
+ 	}
+diff --git a/drivers/amlogic/efuse/efuse_hw.c b/drivers/amlogic/efuse/efuse_hw.c
+index e0ae69f83e66..7f9fab3c1606 100755
+--- a/drivers/amlogic/efuse/efuse_hw.c
++++ b/drivers/amlogic/efuse/efuse_hw.c
+@@ -1016,9 +1016,13 @@ int efuse_write_item(char *buf, size_t count, loff_t *ppos)
+ }
+ 
+ /* function: efuse_read_intlItem
+- * intl_item: item name,name is [temperature,cvbs_trimming]
++ * intl_item: item name,name is [temperature,cvbs_trimming,temper_cvbs]
++ *            [temperature: 2byte]
++ *            [cvbs_trimming: 2byte]
++ *            [temper_cvbs: 4byte]
+  * buf:  output para
+  * size: buf size
++ * return: <0 fail, >=0 ok
+  * */
+ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ {
+@@ -1069,6 +1073,19 @@ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ 				ret = __efuse_read( buf, len, &pos );
+ 				return ret;
+ 			}
++			if(strcasecmp(intl_item,"temper_cvbs") == 0){
++				pos = 502;
++				len = 4;
++				if(size <= 0){
++					printk("%s input size:%d is error\n",intl_item,size);
++					return -1;
++				}
++				if(len > size){
++					len = size;
++				}
++				ret = __efuse_read( buf, len, &pos );
++				return ret;
++			}
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6TVD:
+ 			break;
+diff --git a/drivers/amlogic/input/saradc/saradc.c b/drivers/amlogic/input/saradc/saradc.c
+index 76a835fb4679..cc00829944e6 100755
+--- a/drivers/amlogic/input/saradc/saradc.c
++++ b/drivers/amlogic/input/saradc/saradc.c
+@@ -25,6 +25,7 @@ struct saradc {
+ 	int flag;
+ 	int trimming;
+ 	int adc_efuse;
++	int efuse_flag;
+ #endif
+ };
+ 
+@@ -416,6 +417,21 @@ static struct class saradc_class = {
+     .name = "saradc",
+     .class_attrs = saradc_class_attrs,
+ };
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++int read_efuse_flag()
++{
++	if(gp_saradc)
++		return gp_saradc->efuse_flag;
++	else 
++		return -2;
++}
++#else
++int read_efuse_flag()
++{
++	printk("read_efuse_flag() function is not implement! \n");
++	return -2;
++}
++#endif
+ 
+ int get_cpu_temp(void)
+ {
+@@ -427,9 +443,6 @@ int get_cpu_temp(void)
+ 			tempa=(18*(ret-gp_saradc->adc_efuse)*10000)/1024/10/85+27;
+ 			ret=tempa;
+ 		}
+-	}else
+-		{
+-		ret=NOT_WRITE_EFUSE;
+ 	}
+ 	return ret;
+ #else
+@@ -454,9 +467,9 @@ static int saradc_probe(struct platform_device *pdev)
+   saradc_internal_cal(saradc);
+ #endif
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	char buf[2]={0};
++	char buf[4]={0};
+ 	int temp=-1,TS_C=-1,flag=0;
+-	err=efuse_read_intlItem("temperature",buf,2);
++	err=efuse_read_intlItem("temper_cvbs",buf,4);
+ 	if(err>=0){
+ 		printk("buf[0]=%x,buf[1]=%x,err=%d\n",buf[0],buf[1],err);
+ 		temp=0;TS_C=0;
+@@ -470,11 +483,20 @@ static int saradc_probe(struct platform_device *pdev)
+ 		saradc->flag=flag;
+ 		saradc->trimming=TS_C;
+ 		saradc->adc_efuse=temp;
++		saradc->efuse_flag=buf[3]>>4;
++		if(saradc->efuse_flag==EFUEE_MUST_RIGHT ||saradc->efuse_flag==EFUSE_FIXED){
++			if(saradc->flag){
++				saradc->flag=1;
++			}
++		}else{
++			saradc->flag=0;
++		}
+ 	}
+ 	else{
+ 		saradc->flag=flag;
+ 		saradc->trimming=TS_C;
+ 		saradc->adc_efuse=temp;
++		saradc->efuse_flag=-1;
+ 	}
+ 	if(gp_saradc->flag){
+ 		select_temp();
+diff --git a/drivers/amlogic/thermal/amlogic_thermal.c b/drivers/amlogic/thermal/amlogic_thermal.c
+index 07f35b7e7b09..2837bd47b4be 100755
+--- a/drivers/amlogic/thermal/amlogic_thermal.c
++++ b/drivers/amlogic/thermal/amlogic_thermal.c
+@@ -607,11 +607,21 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct amlogic_thermal_platform_data *pdata=NULL;
+ 	//pdata = amlogic_get_driver_data(pdev);
+-	ret=get_cpu_temp();
++	ret=read_efuse_flag();
++	printk("thermal efuse version 0x%x\n",ret);
++	if(ret<0){
++		printk("read efuse error or adc error ret=%d\n",ret);
++		return -1;
++	}
+ 	if(NOT_WRITE_EFUSE==ret){
+-		printk("cpu sensor not ready!!!!!!\n");
++		printk("this chip do not write efuse  so do not enable  thermal driver\n");
+ 		return -1;
+ 	}
++	if(EFUSE_MIGHT_WRONG==ret){
++		printk("this chip efuse data might wrong  so do not enable  thermal driver\n");
++		return -1;
++	}
++	
+ 	dev_info(&pdev->dev, "amlogic thermal probe start\n");
+ 	pdata = amlogic_thermal_initialize(pdev);
+ 	if (!pdata) {
+diff --git a/include/linux/amlogic/saradc.h b/include/linux/amlogic/saradc.h
+index 33b9741c7fdc..30c3a8813c25 100755
+--- a/include/linux/amlogic/saradc.h
++++ b/include/linux/amlogic/saradc.h
+@@ -1,6 +1,6 @@
+ #ifndef __LINUX_SARADC_H
+ #define __LINUX_SARADC_H
+-#define  NOT_WRITE_EFUSE 0xffff0000
++
+ enum {
+ 	CHAN_0 = 0,
+ 	CHAN_1,
+@@ -33,8 +33,13 @@ enum {
+ 	CMD_SET_PENIRQ,
+ 	CMD_CLEAR_PENIRQ,
+ };
++#define  NOT_WRITE_EFUSE 0x0
++#define EFUSE_MIGHT_WRONG 0x8
++#define EFUEE_MUST_RIGHT 0x4
++#define EFUSE_FIXED 0xa
+ 
+ extern int get_adc_sample(int chan);
+ extern int saradc_ts_service(int cmd);
+ extern int  get_cpu_temp(void);
++extern int  read_efuse_flag();
+ #endif
+-- 
+2.19.0
+

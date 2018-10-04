@@ -1,0 +1,96 @@
+From ca4fe173108c96226756bc4b705715d70553d630 Mon Sep 17 00:00:00 2001
+From: Jian Chen <jian.chen@amlogic.com>
+Date: Thu, 29 Oct 2015 11:14:16 +0800
+Subject: [PATCH 5900/5965] PD#114507: aml_fe: fix the crash in HDMI mode
+ because of atv afc timer
+
+Change-Id: I2a4921477e8bc909f6e002b9e3a5323a2f841150
+---
+ drivers/amlogic/dvb_tv/aml_dvb.h |  2 ++
+ drivers/amlogic/dvb_tv/aml_fe.c  | 32 ++++++++++++++++++++++++--------
+ 2 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_dvb.h b/drivers/amlogic/dvb_tv/aml_dvb.h
+index 2edb75af6a31..47c09e7991a2 100755
+--- a/drivers/amlogic/dvb_tv/aml_dvb.h
++++ b/drivers/amlogic/dvb_tv/aml_dvb.h
+@@ -216,6 +216,8 @@ struct aml_dvb {
+ 	struct timer_list    watchdog_timer;
+ 	int                  dmx_watchdog_disable[DMX_DEV_COUNT];
+ 	struct aml_swfilter  swfilter;
++	struct work_struct aml_fe_wq;
++	struct dvb_frontend *fe;
+ };
+ 
+ 
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index 08794e7e9ed1..54c57b2a42b7 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -208,17 +208,14 @@ struct dvb_frontend * get_tuner(void)
+ EXPORT_SYMBOL(get_tuner);
+ #if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
+ extern void retrieve_frequency_offset(int *freq_offset);
+-void aml_timer_hander(unsigned long arg)
++struct work_struct aml_fe_wq;
++static void  aml_fe_do_work(struct work_struct *work)
+ {
+-	struct dvb_frontend *fe = (struct dvb_frontend *)arg;
++	struct aml_dvb *dvb = aml_get_dvb_device();
++	struct dvb_frontend *fe = dvb->fe;
+ 	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
+ 	int afc = 100;
+ 	struct aml_fe *fee;
+-	aml_timer.expires = jiffies + AML_INTERVAL*10;//100ms timer
+-	add_timer(&aml_timer);
+-	if ((aml_timer_en == 0) || (FE_ANALOG != fe->ops.info.type)) {
+-		return;
+-	}
+ 	fee = fe->demodulator_priv;
+ 	retrieve_frequency_offset(&afc);
+ 	afc = afc*488/1000;
+@@ -241,6 +238,20 @@ void aml_timer_hander(unsigned long arg)
+ 	if (fe->ops.tuner_ops.set_params) {
+ 		fe->ops.tuner_ops.set_params(fe);
+ 	}
++
++}
++
++void aml_timer_hander(unsigned long arg)
++{
++	struct dvb_frontend *fe = (struct dvb_frontend *)arg;
++	struct aml_dvb *dvb = aml_get_dvb_device();
++	aml_timer.expires = jiffies + AML_INTERVAL*10;//100ms timer
++	add_timer(&aml_timer);
++	if ((aml_timer_en == 0) || (FE_ANALOG != fe->ops.info.type)) {
++		return;
++	}
++	dvb->fe = (struct dvb_frontend *)arg;
++	schedule_work(&dvb->aml_fe_wq);
+ }
+ #endif
+ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+@@ -1845,7 +1856,9 @@ static int aml_fe_probe(struct platform_device *pdev)
+ 		if(aml_fe_man_init(dvb, pdev, &fe_man.fe[i], i)<0)
+ 			goto probe_end;
+ 	}
+-
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++	INIT_WORK(&dvb->aml_fe_wq,(void (*)(struct work_struct *))aml_fe_do_work);
++#endif
+ probe_end:
+ 
+ #ifdef CONFIG_OF
+@@ -1887,6 +1900,9 @@ static int aml_fe_remove(struct platform_device *pdev)
+ 		if(fe_man->pinctrl)
+ 			devm_pinctrl_put(fe_man->pinctrl);
+ 	}
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++	cancel_work_sync(&dvb->aml_fe_wq);
++#endif
+ 
+ 	class_unregister(&aml_fe_class);
+ 
+-- 
+2.19.0
+

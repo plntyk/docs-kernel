@@ -1,0 +1,327 @@
+From 087514dfaa6b04bd6ba018e1d3334ae01662a6fb Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Wed, 19 Mar 2014 11:10:35 +0800
+Subject: [PATCH 3850/5965] PD#84777 support mac + micrel ksz8091&8081 phy nic
+ for system
+
+---
+ arch/arm/configs/meson8_defconfig     |   1 +
+ drivers/amlogic/ethernet/am_net8218.c |  54 ++++++++
+ drivers/net/phy/micrel.c              | 177 ++++++++++++++++++++++++++
+ 3 files changed, 232 insertions(+)
+ mode change 100644 => 100755 drivers/net/phy/micrel.c
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 7aaa9ce2b81b..781f23f1e657 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -268,6 +268,7 @@ CONFIG_NETDEVICES=y
+ CONFIG_TUN=y
+ CONFIG_SMSC_PHY=y
+ CONFIG_ICPLUS_PHY=y
++CONFIG_MICREL_PHY=y
+ CONFIG_PPP=y
+ CONFIG_PPP_BSDCOMP=y
+ CONFIG_PPP_DEFLATE=y
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index e7ddb6fe2692..08cca0697030 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -99,6 +99,7 @@ MODULE_PARM_DESC(amlog_level, "ethernet debug level\n");
+ //#define PHY_LOOPBACK_TEST
+ 
+ static int running = 0;
++static struct ethtool_wol *syswol =NULL;
+ static struct net_device *my_ndev = NULL;
+ static struct aml_eth_platdata *eth_pdata = NULL;
+ static unsigned int g_ethernet_registered = 0;
+@@ -2577,7 +2578,58 @@ static ssize_t eth_linkspeed_show(struct class *class, struct class_attribute *a
+ 
+ 	return ret;
+ }
++static const char *g_pwol_help = {
++	"Ethernet WOL:\n"
++	"    0. disable PHY WOL.\n"
++	"    1. enable PHY  WOL, Magic Packet.\n"
+ 
++};
++static void eth_pwol_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++	struct am_net_private *np = netdev_priv(my_ndev);
++	int ret;
++	struct ethtool_wolinfo syswol;
++	syswol.supported = 0;
++	syswol.wolopts = 0;
++	if (np->phydev)
++		phy_ethtool_get_wol(np->phydev, &syswol);
++	ret = sprintf(buf, "%s\n", g_pwol_help);
++	printk("Current PHY WOL: %d\n", syswol.wolopts);
++	return ret;
++}
++static int eth_pwol_store(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
++{
++	struct am_net_private *np = netdev_priv(my_ndev);
++	int err;
++	unsigned int enable = -1;
++	struct ethtool_wolinfo syswol;
++	if (np->phydev == NULL)
++		return -EOPNOTSUPP;
++	enable = simple_strtoul(buf, NULL, 0);
++	if((enable >=0) && (enable <2)){
++	switch(enable){
++		case 0:
++			// close wol funtion
++			 syswol.wolopts = WAKE_PHY;
++			 err = phy_ethtool_set_wol(np->phydev, &syswol);
++				return count;
++		case 1:
++			//open wol funtion
++			syswol.wolopts = WAKE_MAGIC;
++			printk("Set PHY i11WOL: %d\n,WAKE_MAGIC = %d\n",syswol.wolopts,WAKE_MAGIC);
++			 phy_ethtool_set_wol(np->phydev, &syswol);
++			printk("Set PHY WOL: %d\n", enable);
++				return count;
++		default:
++			return count;
++	}
++	}
++	else{
++			printk("Set Ethernet WOL Error\n");
++			return count;
++	}
++	return count;
++}
+ static struct class *eth_sys_class;
+ static CLASS_ATTR(mdcclk, S_IWUSR | S_IRUGO, eth_mdcclk_show, eth_mdcclk_store);
+ static CLASS_ATTR(debug, S_IWUSR | S_IRUGO, eth_debug_show, eth_debug_store);
+@@ -2585,6 +2637,7 @@ static CLASS_ATTR(count, S_IWUSR | S_IRUGO, eth_count_show, eth_count_store);
+ static CLASS_ATTR(phyreg, S_IWUSR | S_IRUGO, eth_phyreg_help, eth_phyreg_func);
+ static CLASS_ATTR(macreg, S_IWUSR | S_IRUGO, eth_macreg_help, eth_macreg_func);
+ static CLASS_ATTR(wol, S_IWUSR | S_IRUGO, eth_wol_show, eth_wol_store);
++static CLASS_ATTR(pwol, S_IWUSR | S_IRUGO, eth_pwol_show, eth_pwol_store);
+ static CLASS_ATTR(linkspeed, S_IWUSR | S_IRUGO, eth_linkspeed_show, NULL);
+ 
+ /* --------------------------------------------------------------------------*/
+@@ -2606,6 +2659,7 @@ static int __init am_eth_class_init(void)
+ 	ret = class_create_file(eth_sys_class, &class_attr_phyreg);
+ 	ret = class_create_file(eth_sys_class, &class_attr_macreg);
+ 	ret = class_create_file(eth_sys_class, &class_attr_wol);
++	ret = class_create_file(eth_sys_class, &class_attr_pwol);
+ 	ret = class_create_file(eth_sys_class, &class_attr_linkspeed);
+ 
+ 	return ret;
+diff --git a/drivers/net/phy/micrel.c b/drivers/net/phy/micrel.c
+old mode 100644
+new mode 100755
+index 2510435f34ed..ea53e3d86b2e
+--- a/drivers/net/phy/micrel.c
++++ b/drivers/net/phy/micrel.c
+@@ -26,6 +26,15 @@
+ #include <linux/phy.h>
+ #include <linux/micrel_phy.h>
+ 
++#include <linux/netdevice.h>
++#include <linux/etherdevice.h>
++#include <linux/skbuff.h>
++#include <linux/spinlock.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mii.h>
++#include <linux/ethtool.h>
++#include <linux/phy.h>
+ /* Operation Mode Strap Override */
+ #define MII_KSZPHY_OMSO				0x16
+ #define KSZPHY_OMSO_B_CAST_OFF			(1 << 9)
+@@ -121,6 +130,12 @@ static int ks8737_config_intr(struct phy_device *phydev)
+ 
+ static int kszphy_config_init(struct phy_device *phydev)
+ {
++	int temp;
++	temp = phy_read(phydev, 0x16);
++	//phy_write(phydev, 0x16, ((temp|(1 << 1)) & ~(0x8020)));
++	phy_write(phydev, 0x16, 0x2);
++	temp = phy_read(phydev, 0x1f);// link speed 1f bit5 4 = 01
++	phy_write(phydev, 0x1f, (temp | 1 << 4));
+ 	return 0;
+ }
+ 
+@@ -173,7 +188,165 @@ static int ksz8873mll_config_aneg(struct phy_device *phydev)
+ {
+ 	return 0;
+ }
++static int ksz8091_suspend(struct phy_device *phydev)
++{
++	int value;
++	value = phy_read(phydev, MII_BMCR);
++	phy_write(phydev, MII_BMCR, (value | BMCR_PDOWN));
++	return 0;
++}
++
++
++static int KSZ8091_resume(struct phy_device *phydev)
++{
++	int value;
++	int i;
++	value = phy_read(phydev, MII_BMCR);
++	phy_write(phydev, MII_BMCR, (value & ~BMCR_PDOWN));
++		/* Software Reset 2 time PHY  */
++	for(i = 0; i < 2; i++)
++	{
++		value = phy_read(phydev, MII_BMCR);
++		value |= BMCR_RESET;
++		value = phy_write(phydev, MII_BMCR, value);
++	do {
++		value = phy_read(phydev, MII_BMCR);
++		if (value < 0)
++			return value;
++	} while (value & BMCR_RESET);
++	}
++	return 0;
++}
++
+ 
++#define KSZ8091_MMD_CTRL			       0x0d
++#define KSZ8091_MMD_REG_DATA			0x0e
++#define KSZ8091_WOL_C			              0x00
++#define KSZ8091_WOL_CPT0M0			0x01
++#define KSZ8091_WOL_CPT0M1			0x02
++#define KSZ8091_WOL_CPT0M2			0x03
++#define KSZ8091_WOL_CPT0M3			0x04
++#define KSZ8091_WOL_CPT0E0			0x05
++#define KSZ8091_WOL_CPT0E1			0x06
++#define KSZ8091_WOL_CPT0M3			0x04
++#define KSZ8091_WOL_CPT0M3			0x04
++#define KSZ8091_WOL_MACDA0			0x19
++#define KSZ8091_WOL_MACDA1			0x1a
++#define KSZ8091_WOL_MACDA2			0x1b
++#define KSZ8091_WOL_OMSO                         0x16
++
++static void ksz8091_get_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
++{
++	int err;
++	wol->supported = WAKE_MAGIC;
++	wol->wolopts = 0;
++		// write addr 1f reg 0 bit6 0  disable Magic
++	err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++	err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_C);// select reg 0
++	err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x801f); //read
++	if (phy_read(phydev,KSZ8091_MMD_REG_DATA ) & ( 1<<6))
++		wol->wolopts |= WAKE_MAGIC;
++}
++
++
++static int ksz8091_set_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
++{
++	int err, oldpage, temp;
++
++	oldpage = phy_read(phydev, KSZ8091_MMD_CTRL);
++/*
++Magic-packet detection is enabled by writing a 1 to MMD address 1Fh,register 0h, bit [6]
++ The MAC address (for the local MAC device) is written to and stored in MMD address 1Fh, registers 19h -1Bh
++The KSZ8091MNX/RNB does not generate the magic packet. The magic packet must be provided by the external system.
++*/
++	printk("wol->wolopts = %d\nWAKE_MAGIC = %d\n",wol->wolopts,WAKE_MAGIC);
++	int i = 0;
++	if (wol->wolopts & WAKE_MAGIC) {
++	temp =  phy_read(phydev, KSZ8091_WOL_OMSO);
++
++	phy_write(phydev, KSZ8091_WOL_OMSO,temp| 1<<15);
++		/* Explicitly switch to page 0x1F, just to be sure */
++	printk("wol->wolopts = %d\nWAKE_MAGIC = %d\n",wol->wolopts,WAKE_MAGIC);
++	for(i =0;i< 6;i++){
++		printk("phydev->attached_dev->dev_addr[%d] = %x \n ",i,phydev->attached_dev->dev_addr[i]);
++	}
++
++		/* Store the device address for the magic packet */
++	/***************************************KSZ8091_WOL_MACDA2************************************************************/
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_MACDA2);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x401f); //write
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, (phydev->attached_dev->dev_addr[5] ) << 8 |(phydev->attached_dev->dev_addr[4]));
++		if (err < 0)
++			return err;
++	/***************************************KSZ8091_WOL_MACDA1*********************************************/
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_MACDA1);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x401f); //write
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, (phydev->attached_dev->dev_addr[3] ) << 8 | (phydev->attached_dev->dev_addr[2]));
++		if (err < 0)
++			return err;
++	/***************************************KSZ8091_WOL_MACDA0*****************************************************/
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_MACDA0);// select reg 0
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x401f); //write
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, (phydev->attached_dev->dev_addr[1] ) << 8 |(phydev->attached_dev->dev_addr[0]));
++		if (err < 0)
++			return err;
++	/**************************************************MACEND***************************************************/
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_C);// select reg 0
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x401f); //write
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, 1<<6| 1<<14); //link down enable
++		if (err < 0)
++			return err;
++		/* Clear WOL status and enable magic packet matching */
++	} else {
++		// write addr 1f reg 0 bit6 0  disable Magic
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x1F);
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA, KSZ8091_WOL_C);// select reg 0
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_CTRL, 0x401f); //write
++		if (err < 0)
++			return err;
++		err = phy_write(phydev, KSZ8091_MMD_REG_DATA,  ~(1<<6)); //link down enable
++		if (err < 0)
++			return err;
++	temp =  phy_read(phydev, KSZ8091_WOL_OMSO);
++
++	phy_write(phydev, KSZ8091_WOL_OMSO,temp|~( 1<<15));
++	}
++
++
++	return 0;
++}
+ static struct phy_driver ksphy_driver[] = {
+ {
+ 	.phy_id		= PHY_ID_KS8737,
+@@ -262,6 +435,10 @@ static struct phy_driver ksphy_driver[] = {
+ 	.read_status	= genphy_read_status,
+ 	.ack_interrupt	= kszphy_ack_interrupt,
+ 	.config_intr	= kszphy_config_intr,
++	.suspend   	= ksz8091_suspend,
++	.resume		= KSZ8091_resume,
++	.set_wol        = ksz8091_set_wol,
++	.get_wol         = ksz8091_get_wol,
+ 	.driver		= { .owner = THIS_MODULE,},
+ }, {
+ 	.phy_id		= PHY_ID_KSZ8061,
+-- 
+2.19.0
+

@@ -1,0 +1,68 @@
+From 6fb3ce9422b7b3389102174ade94b2adfcad80de Mon Sep 17 00:00:00 2001
+From: "ying.liu" <ying.liu@amlogic.com>
+Date: Thu, 4 Sep 2014 11:18:59 +0800
+Subject: [PATCH 4835/5965] PD #96935 Frontend async work bug.
+
+Change-Id: I313e93b2b0208ff501f6fcd807036fa11623da78
+---
+ drivers/media/dvb-core/dvb_frontend.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/dvb-core/dvb_frontend.c b/drivers/media/dvb-core/dvb_frontend.c
+index 9823f70800b7..d2216a447d35 100755
+--- a/drivers/media/dvb-core/dvb_frontend.c
++++ b/drivers/media/dvb-core/dvb_frontend.c
+@@ -1279,12 +1279,16 @@ static int dvb_frontend_asyncshouldwakeup(struct dvb_frontend *fe)
+ 
+ 	dprintk ("%s:%d\n", __func__, fepriv->setfrontendasync_wakeup);
+ 
+-	if (fepriv->setfrontendasync_wakeup) {
+-		fepriv->setfrontendasync_wakeup = 0;
+-		return 1;
+-	}
++	return fepriv->setfrontendasync_wakeup;
++}
+ 
+-	return 0;
++static int dvb_frontend_asyncnotbusy(struct dvb_frontend *fe)
++{
++	struct dvb_frontend_private *fepriv = fe->frontend_priv;
++
++	dprintk ("%s:%d\n", __func__, fepriv->setfrontendasync_needwakeup);
++
++	return !fepriv->setfrontendasync_needwakeup;
+ }
+ 
+ static void dvb_frontend_asyncwakeup(struct dvb_frontend *fe)
+@@ -1305,6 +1309,11 @@ static void dvb_frontend_asyncwakeup(struct dvb_frontend *fe)
+ 	if(fepriv->setfrontendasync_needwakeup){
+ 		fepriv->setfrontendasync_wakeup = 1;
+ 		wake_up_interruptible(&fepriv->setfrontendasync_wait_queue);
++
++		up(&fepriv->sem);
++		wait_event_interruptible(fepriv->setfrontendasync_wait_queue,
++											dvb_frontend_asyncnotbusy(fe));
++		down_interruptible (&fepriv->sem);
+ 	}
+ }
+ 
+@@ -1321,6 +1330,7 @@ static int dvb_frontend_asyncpreproc(struct dvb_frontend *fe)
+ 	}
+ 
+ 	fepriv->setfrontendasync_needwakeup = 1;
++	fepriv->setfrontendasync_wakeup = 0;
+ 
+ 	dprintk ("%s:%d\n", __func__, fepriv->setfrontendasync_needwakeup);
+ 
+@@ -1377,6 +1387,8 @@ static int dvb_frontend_asyncpostproc(struct dvb_frontend *fe, int asyncwait_ret
+ 
+ 	fepriv->setfrontendasync_needwakeup = 0;
+ 
++	wake_up_interruptible(&fepriv->setfrontendasync_wait_queue);
++
+ 	if(asyncwait_ret > 0){
+ 		fepriv->setfrontendasync_interruptwakeup = 1;
+ 	}
+-- 
+2.19.0
+

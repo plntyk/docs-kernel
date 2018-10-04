@@ -1,0 +1,262 @@
+From a85ed6ab321373578ace3d40460ab99c5d58579f Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Mon, 5 May 2014 14:55:04 +0800
+Subject: [PATCH 3993/5965] ethernet: net8218: support RGMII phy
+
+---
+ drivers/amlogic/ethernet/am_net8218.c      | 44 ++++++++--
+ drivers/amlogic/ethernet/aml.dtd           |  1 +
+ drivers/amlogic/ethernet/phy/Kconfig       |  5 ++
+ drivers/amlogic/ethernet/phy/Makefile      |  1 +
+ drivers/amlogic/ethernet/phy/am_rtl8211f.c | 94 ++++++++++++++++++++++
+ 5 files changed, 138 insertions(+), 7 deletions(-)
+ create mode 100755 drivers/amlogic/ethernet/phy/am_rtl8211f.c
+
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index 514fc38999b4..8d47c0ed9399 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -79,10 +79,11 @@ static unsigned int g_rx_cnt = 0;
+ static int g_mdcclk = 2;
+ static int g_rxnum = 64;
+ static int g_txnum = 64;
+-
++static int new_maclogic = 0;
+ static unsigned int ethbaseaddr = ETHBASE;
+ static unsigned int savepowermode = 0;
+ static int interruptnum = ETH_INTERRUPT;
++static int phy_interface = 1;
+ static int reset_delay = 0;
+ static int reset_pin_num = 0;
+ static int reset_pin_enable = 0;
+@@ -989,17 +990,20 @@ static void aml_adjust_link(struct net_device *dev)
+ 
+ 		if (phydev->speed != priv->speed) {
+ 			new_state = 1;
+-			PERIPHS_CLEAR_BITS(P_PREG_ETHERNET_ADDR0, 1);
++			if(new_maclogic ==0)
++				PERIPHS_CLEAR_BITS(P_PREG_ETHERNET_ADDR0, 1);
+ 			switch (phydev->speed) {
+ 				case 1000:
+ 					break;
+ 				case 100:
+ 					ctrl |= (1 << 14);
+-					PERIPHS_SET_BITS(P_PREG_ETHERNET_ADDR0, (1 << 1));
++					if(new_maclogic ==0)
++						PERIPHS_SET_BITS(P_PREG_ETHERNET_ADDR0, (1 << 1));
+ 					break;
+ 				case 10:
+ 					ctrl &= ~((1 << 14)|(3 << 5));//10m half backoff = 00
+-					PERIPHS_CLEAR_BITS(P_PREG_ETHERNET_ADDR0, (1 << 1));
++					if(new_maclogic ==0)
++						PERIPHS_CLEAR_BITS(P_PREG_ETHERNET_ADDR0, (1 << 1));
+ 					if(phydev->phy_id == INTERNALPHY_ID){
+ 						val =0x4100b040;
+ 						WRITE_CBUS_REG(P_PREG_ETHERNET_ADDR0, val);
+@@ -1010,7 +1014,8 @@ static void aml_adjust_link(struct net_device *dev)
+ 								" or 100!\n", dev->name, phydev->speed);
+ 					break;
+ 			}
+-			PERIPHS_SET_BITS(P_PREG_ETHERNET_ADDR0, 1);
++			if(new_maclogic ==0)
++				PERIPHS_SET_BITS(P_PREG_ETHERNET_ADDR0, 1);
+ 			priv->speed = phydev->speed;
+ 		}
+ 
+@@ -1052,7 +1057,10 @@ static int aml_phy_init(struct net_device *dev)
+         priv->oldlink = 0;
+         priv->speed = 0;
+         priv->oldduplex = -1;
+-	priv->phy_interface = PHY_INTERFACE_MODE_RMII;
++		if(phy_interface == 1)
++			priv->phy_interface = PHY_INTERFACE_MODE_RMII;
++		else
++			priv->phy_interface = PHY_INTERFACE_MODE_RGMII;
+ 
+         if (priv->phy_addr == -1) {
+                 /* We don't have a PHY, so do nothing */
+@@ -1801,6 +1809,23 @@ static int setup_net_device(struct net_device *dev)
+ 	return res;
+ }
+ 
++/*
++M6TV
++ 23
++M6TVlite
++ 24
++M8
++ 25
++M6TVd
++ 26
++M8baby
++ 27
++G9TV
++ 28
++*/
++static unsigned int get_cpuid(){
++	return READ_CBUS_REG(0x1f53)&0xff;
++}
+ /* --------------------------------------------------------------------------*/
+ /**
+  * @brief  probe_init
+@@ -1824,7 +1849,8 @@ static int probe_init(struct net_device *ndev)
+ 	if (g_debug > 0) {
+ 		printk("ethernet base addr is %x\n", (unsigned int)ndev->base_addr);
+ 	}
+-
++	if(get_cpuid() == 0x1B)
++	 	new_maclogic=1;
+ 	res = setup_net_device(ndev);
+ 	if (res != 0) {
+ 		printk("setup net device error !\n");
+@@ -2746,6 +2772,10 @@ static int ethernet_probe(struct platform_device *pdev)
+ 		printk("Please config interruptnum.\n");
+ 		return -1;
+ 	}
++	ret = of_property_read_u32(pdev->dev.of_node,"phy_interface",&phy_interface); // 0 rgmii 1: RMII
++	if (ret) {
++		printk("Please config phy  interface.\n");
++	}
+ 	ret = of_property_read_u32(pdev->dev.of_node,"savepowermode",&savepowermode);
+ 	if (ret) {
+ 		printk("Please config savepowermode.\n");
+diff --git a/drivers/amlogic/ethernet/aml.dtd b/drivers/amlogic/ethernet/aml.dtd
+index cf0e25621fcb..927a22386c51 100755
+--- a/drivers/amlogic/ethernet/aml.dtd
++++ b/drivers/amlogic/ethernet/aml.dtd
+@@ -8,6 +8,7 @@
+ 		ethbaseaddr = <0xfe0c0000>;
+ 		interruptnum = <40>;
+ 		savepowermode = <0>;
++		phy_interface = <1>;
+ 		reset_pin_enable = <0>;
+ 		reset_pin = "GPIOY_15";
+ 		reset_delay = <100>;
+diff --git a/drivers/amlogic/ethernet/phy/Kconfig b/drivers/amlogic/ethernet/phy/Kconfig
+index ce899cdc3815..4a7c2d87a0b5 100755
+--- a/drivers/amlogic/ethernet/phy/Kconfig
++++ b/drivers/amlogic/ethernet/phy/Kconfig
+@@ -31,6 +31,11 @@ config AML_KSZ8091
+ 	tristate "Driver for Micrel KSZ8091 PHYs"
+ 	---help---
+ 	  Supports the KSZ9021, VSC8201, KS8001 PHYs.
++config AML_RTL8211F
++	tristate "Drivers for RTL8211F"
++	default n
++	---help---
++	  Currently supports the RTL8211F
+ 
+ endif # PHYLIB
+ 
+diff --git a/drivers/amlogic/ethernet/phy/Makefile b/drivers/amlogic/ethernet/phy/Makefile
+index 5db8c30c4727..124137ce95d4 100755
+--- a/drivers/amlogic/ethernet/phy/Makefile
++++ b/drivers/amlogic/ethernet/phy/Makefile
+@@ -5,3 +5,4 @@ obj-$(CONFIG_AML_IP101_PHY)	+= am_ip101.o
+ obj-$(CONFIG_AML_PHY)		+= am_internal.o
+ obj-$(CONFIG_AML_KSZ8091)	+= am_micrel.o
+ obj-$(CONFIG_AML_LAN8720)	+= am_smsc8720.o
++obj-$(CONFIG_AML_RTL8211F)	+= am_rtl8211f.o
+diff --git a/drivers/amlogic/ethernet/phy/am_rtl8211f.c b/drivers/amlogic/ethernet/phy/am_rtl8211f.c
+new file mode 100755
+index 000000000000..7cb7b07bda07
+--- /dev/null
++++ b/drivers/amlogic/ethernet/phy/am_rtl8211f.c
+@@ -0,0 +1,94 @@
++
++#include <linux/phy.h>
++#include <linux/module.h>
++
++#define RTL821x_PHYSR		0x11
++#define RTL821x_PHYSR_DUPLEX	0x2000
++#define RTL821x_PHYSR_SPEED	0xc000
++#define RTL821x_INER		0x12
++#define RTL821x_INER_INIT	0x6400
++#define RTL821x_INSR		0x13
++
++#define	RTL8211E_INER_LINK_STAT	0x10
++
++MODULE_DESCRIPTION("Realtek PHY driver");
++MODULE_AUTHOR("Johnson Leung");
++MODULE_LICENSE("GPL");
++
++static int rtl821x_ack_interrupt(struct phy_device *phydev)
++{
++	int err;
++
++	err = phy_read(phydev, RTL821x_INSR);
++
++	return (err < 0) ? err : 0;
++}
++
++static int rtl8211b_config_intr(struct phy_device *phydev)
++{
++	int err;
++
++	if (phydev->interrupts == PHY_INTERRUPT_ENABLED)
++		err = phy_write(phydev, RTL821x_INER,
++				RTL821x_INER_INIT);
++	else
++		err = phy_write(phydev, RTL821x_INER, 0);
++
++	return err;
++}
++
++static int rtl8211e_config_intr(struct phy_device *phydev)
++{
++	int err;
++
++	if (phydev->interrupts == PHY_INTERRUPT_ENABLED)
++		err = phy_write(phydev, RTL821x_INER,
++				RTL8211E_INER_LINK_STAT);
++	else
++		err = phy_write(phydev, RTL821x_INER, 0);
++
++	return err;
++}
++
++
++/* RTL8211F */
++static struct phy_driver rtl8211e_driver = {
++	.phy_id		= 0x001cc915,
++	.name		= "RTL8211F Gigabit Ethernet",
++	.phy_id_mask	= 0x001fffff,
++	.features	= PHY_GBIT_FEATURES,
++	.flags		= PHY_HAS_INTERRUPT,
++	.config_aneg	= &genphy_config_aneg,
++	.read_status	= &genphy_read_status,
++	.ack_interrupt	= &rtl821x_ack_interrupt,
++	.config_intr	= &rtl8211e_config_intr,
++	.suspend	= genphy_suspend,
++	.resume		= genphy_resume,
++	.driver		= { .owner = THIS_MODULE,},
++};
++
++static int __init realtek_init(void)
++{
++	int ret;
++
++	ret = phy_driver_register(&rtl8211b_driver);
++	if (ret < 0)
++		return -ENODEV;
++	return phy_driver_register(&rtl8211e_driver);
++}
++
++static void __exit realtek_exit(void)
++{
++	phy_driver_unregister(&rtl8211b_driver);
++	phy_driver_unregister(&rtl8211e_driver);
++}
++
++module_init(realtek_init);
++module_exit(realtek_exit);
++
++static struct mdio_device_id __maybe_unused realtek_tbl[] = {
++	{ 0x001cc915, 0x001fffff },
++	{ }
++};
++
++MODULE_DEVICE_TABLE(mdio, realtek_tbl);
+-- 
+2.19.0
+

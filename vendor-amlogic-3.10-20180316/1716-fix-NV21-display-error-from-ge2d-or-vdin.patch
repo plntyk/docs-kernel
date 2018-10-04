@@ -1,0 +1,128 @@
+From e985e490d6a0e4343227f77262584cba0b0d2b95 Mon Sep 17 00:00:00 2001
+From: "brian.zhu" <brian.zhu@amlogic.com>
+Date: Tue, 5 Nov 2013 20:04:51 +0800
+Subject: [PATCH 1716/5965] fix NV21 display error from ge2d or vdin
+
+---
+ drivers/amlogic/display/ge2d/ge2d_hw.c | 48 +++++++++++++-------------
+ drivers/amlogic/tvin/vdin/vdin_ctl.c   | 37 ++++++++++----------
+ 2 files changed, 43 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/amlogic/display/ge2d/ge2d_hw.c b/drivers/amlogic/display/ge2d/ge2d_hw.c
+index 5d83ebf0264d..4cc25c2f707c 100755
+--- a/drivers/amlogic/display/ge2d/ge2d_hw.c
++++ b/drivers/amlogic/display/ge2d/ge2d_hw.c
+@@ -604,30 +604,30 @@ void ge2d_set_cmd (ge2d_cmd_t *cfg)
+     
+     x_yc_ratio = READ_MPEG_REG_BITS(GE2D_GEN_CTRL0, 11, 1);
+     y_yc_ratio = READ_MPEG_REG_BITS(GE2D_GEN_CTRL0, 10, 1);
+-    
+-	if (x_yc_ratio) {
+-		if (cfg->src1_x_rev) {
+-			x_extra_bit_start = 0;
+-			x_extra_bit_end   = 3;
+-			x_chr_phase = 0x80;
+-		} else {
+-			x_extra_bit_start = 3;
+-			x_extra_bit_end   = 0;
+-			x_chr_phase = 0x08;
+-		}
+-	}
+ 
+-	if (y_yc_ratio) {
+-		if (cfg->src1_y_rev) {
+-			y_extra_bit_start = 2;
+-			y_extra_bit_end   = 3;
+-			y_chr_phase = 0xc4;
+-		} else {
+-			y_extra_bit_start = 3;
+-			y_extra_bit_end   = 2;
+-			y_chr_phase = 0x4c;
+-		}
+-	}
++    if (x_yc_ratio) {
++        if( (cfg->src1_x_rev+cfg->dst_x_rev) == 1) {
++            x_extra_bit_start = 3;
++            x_extra_bit_end   = 2;
++            x_chr_phase = 0x08;
++        } else {
++            x_extra_bit_start = 2;
++            x_extra_bit_end   = 3;
++            x_chr_phase = 0x08;
++        }
++    }
++
++    if (y_yc_ratio) {
++        if( (cfg->src1_y_rev+cfg->dst_y_rev) == 1) {
++            y_extra_bit_start = 3;
++            y_extra_bit_end   = 2;
++            y_chr_phase = 0x4c;
++        } else {
++            y_extra_bit_start = 2;
++            y_extra_bit_end   = 3;
++            y_chr_phase = 0x4c;
++        }
++    }
+ 
+     WRITE_MPEG_REG(GE2D_SRC1_X_START_END, 
+                          (x_extra_bit_start << 30) |  //x start extra
+@@ -642,7 +642,7 @@ void ge2d_set_cmd (ge2d_cmd_t *cfg)
+                          (y_extra_bit_end << 14) |    //y end extra
+                          ((src1_y_end & 0x3fff) << 0) // Limit the range in case of the sign bit extending to the top
+                          ); 
+- 
++
+     WRITE_MPEG_REG_BITS (GE2D_SRC1_FMT_CTRL, x_chr_phase, 8, 8); 
+     WRITE_MPEG_REG_BITS (GE2D_SRC1_FMT_CTRL, y_chr_phase, 0, 8); 
+  
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index 39f9b44556a3..f2c1b8d138de 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -953,24 +953,25 @@ static inline void vdin_set_wr_ctrl(unsigned int offset, unsigned int v, unsigne
+ 	WR_BITS(VDIN_WR_H_START_END, (h -1), WR_HEND_BIT, WR_HEND_WID);
+ 	// win_ve
+ 	WR_BITS(VDIN_WR_V_START_END, (v -1), WR_VEND_BIT, WR_VEND_WID);
+-        // hconv_mode
+-        WR_BITS(VDIN_WR_CTRL, 0, HCONV_MODE_BIT, HCONV_MODE_WID);
+-        // vconv_mode
+-        WR_BITS(VDIN_WR_CTRL, 0, VCONV_MODE_BIT, VCONV_MODE_WID);
+-        if(write_format444 == 2){
+-                // swap_cbcr
+-                WR_BITS(VDIN_WR_CTRL, swap_cbcr, SWAP_CBCR_BIT, SWAP_CBCR_WID);
+-	        //output even lines's cbcr
+-	        WR_BITS(VDIN_WR_CTRL, 0, VCONV_MODE_BIT, VCONV_MODE_WID);
+-                //chroma canvas
+-                //WR_BITS(VDIN_WR_CTRL2, def_canvas_id+1, WRITE_CHROMA_CANVAS_ADDR_BIT, WRITE_CHROMA_CANVAS_ADDR_WID);
+-        }else{
+-                // swap_cbcr
+-                WR_BITS(VDIN_WR_CTRL, 0, SWAP_CBCR_BIT, SWAP_CBCR_WID);
+-                //chroma canvas
+-                //WR_BITS(VDIN_WR_CTRL2,  0, WRITE_CHROMA_CANVAS_ADDR_BIT,
+-                //WRITE_CHROMA_CANVAS_ADDR_WID);
+-        }
++	// hconv_mode
++	WR_BITS(VDIN_WR_CTRL, 0, HCONV_MODE_BIT, HCONV_MODE_WID);
++	// vconv_mode
++	WR_BITS(VDIN_WR_CTRL, 0, VCONV_MODE_BIT, VCONV_MODE_WID);
++	if(write_format444 == 2){
++		// swap_cbcr
++		WR_BITS(VDIN_WR_CTRL, swap_cbcr, SWAP_CBCR_BIT, SWAP_CBCR_WID);
++		//output even lines's cbcr
++		WR_BITS(VDIN_WR_CTRL, 0, VCONV_MODE_BIT, VCONV_MODE_WID);
++		WR_BITS(VDIN_WR_CTRL, 2, HCONV_MODE_BIT, HCONV_MODE_WID);
++		//chroma canvas
++		//WR_BITS(VDIN_WR_CTRL2, def_canvas_id+1, WRITE_CHROMA_CANVAS_ADDR_BIT, WRITE_CHROMA_CANVAS_ADDR_WID);
++	}else{
++		// swap_cbcr
++		WR_BITS(VDIN_WR_CTRL, 0, SWAP_CBCR_BIT, SWAP_CBCR_WID);
++		//chroma canvas
++		//WR_BITS(VDIN_WR_CTRL2,  0, WRITE_CHROMA_CANVAS_ADDR_BIT,
++		//WRITE_CHROMA_CANVAS_ADDR_WID);
++	}
+ 	// format444
+ 	WR_BITS(VDIN_WR_CTRL, write_format444, WR_FMT_BIT, WR_FMT_WID);
+ /*
+-- 
+2.19.0
+

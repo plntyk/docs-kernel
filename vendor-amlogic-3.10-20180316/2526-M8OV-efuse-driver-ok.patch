@@ -1,0 +1,246 @@
+From 17591b891372ae5fdb37857d5ba66e58369ea482 Mon Sep 17 00:00:00 2001
+From: "yan.wang" <yan.wang@amlogic.com>
+Date: Sat, 14 Dec 2013 15:38:28 +0800
+Subject: [PATCH 2526/5965] [M8OV]: efuse driver ok
+
+---
+ .../mach-meson8/include/mach/meson-secure.h   |  4 ++
+ arch/arm/mach-meson8/meson-secure.c           |  3 +-
+ arch/arm/mach-meson8/meson-smc.S              | 17 ++++++
+ drivers/amlogic/efuse/efuse.c                 |  5 +-
+ drivers/amlogic/efuse/efuse_hw.c              | 57 +++++++++++++++++--
+ 5 files changed, 79 insertions(+), 7 deletions(-)
+ mode change 100644 => 100755 arch/arm/mach-meson8/meson-secure.c
+
+diff --git a/arch/arm/mach-meson8/include/mach/meson-secure.h b/arch/arm/mach-meson8/include/mach/meson-secure.h
+index 0b0b06166920..1a7f6beb0d33 100755
+--- a/arch/arm/mach-meson8/include/mach/meson-secure.h
++++ b/arch/arm/mach-meson8/include/mach/meson-secure.h
+@@ -48,6 +48,8 @@
+ #define TRUSTZONE_MON_CORE_WR_STATUS1_INDEX     0x206
+ #define TRUSTZONE_MON_CORE_BOOTADDR_INDEX       0x207
+ #define TRUSTZONE_MON_CORE_DDR_INDEX            0x208
++#define TRUSTZONE_MON_CORE_RD_SOC_REV1				0x209
++#define TRUSTZONE_MON_CORE_RD_SOC_REV2				0x20A
+ 
+ #define TRUSTZONE_MON_SUSPNED_FIRMWARE          0x300
+ #define TRUSTZONE_MON_SAVE_CPU_GIC              0x400
+@@ -74,6 +76,8 @@ extern void meson_auxcoreboot_addr(u32 arg1, u32 arg2);
+ extern void meson_suspend_firmware(void);
+ extern uint32_t meson_secure_reg_read(uint32_t addr);
+ extern uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val);
++extern u32 meson_read_socrev1(void);
++extern u32 meson_read_socrev2(void);
+ 
+ // efuse HAL_API arg
+ struct efuse_hal_api_arg{
+diff --git a/arch/arm/mach-meson8/meson-secure.c b/arch/arm/mach-meson8/meson-secure.c
+old mode 100644
+new mode 100755
+index 5cdd1eb3fca1..18053f3a0210
+--- a/arch/arm/mach-meson8/meson-secure.c
++++ b/arch/arm/mach-meson8/meson-secure.c
+@@ -33,6 +33,7 @@
+ #ifdef CONFIG_MESON_TRUSTZONE
+ #include <mach/meson-secure.h>
+ #endif
++#include <linux/sched.h>
+ 
+ #define MESON_SECURE_DEBUG 1
+ #ifdef MESON_SECURE_DEBUG
+@@ -126,7 +127,7 @@ int meson_trustzone_efuse(struct efuse_hal_api_arg* arg)
+ 	if (!arg) {
+ 		return -1;
+ 	}
+-
++	set_cpus_allowed_ptr(current, cpumask_of(0));
+ 	__cpuc_flush_dcache_area(__va(arg->buffer_phy), arg->size);
+ 	outer_clean_range((arg->buffer_phy), (arg->buffer_phy + arg->size));
+ 
+diff --git a/arch/arm/mach-meson8/meson-smc.S b/arch/arm/mach-meson8/meson-smc.S
+index b97485993c24..03d9c26a5b06 100755
+--- a/arch/arm/mach-meson8/meson-smc.S
++++ b/arch/arm/mach-meson8/meson-smc.S
+@@ -132,3 +132,20 @@ ENTRY(meson_suspend_firmware)
+     ldmfd sp!, {r2-r12, pc}
+ ENDPROC(meson_suspend_firmware)
+ 
++ENTRY(meson_read_socrev1)
++    stmfd sp!, {r2-r12, lr}    
++    ldr r1, =TRUSTZONE_MON_CORE_RD_SOC_REV1
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_read_socrev1)
++
++ENTRY(meson_read_socrev2)
++    stmfd sp!, {r2-r12, lr}    
++    ldr r1, =TRUSTZONE_MON_CORE_RD_SOC_REV2
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_read_socrev2)
+\ No newline at end of file
+diff --git a/drivers/amlogic/efuse/efuse.c b/drivers/amlogic/efuse/efuse.c
+index cf35f453f160..f243499dcbea 100755
+--- a/drivers/amlogic/efuse/efuse.c
++++ b/drivers/amlogic/efuse/efuse.c
+@@ -125,6 +125,7 @@ static long efuse_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned l
+ {
+ 	switch (cmd)
+ 	{
++#ifndef CONFIG_MESON_TRUSTZONE			
+ 		case EFUSE_ENCRYPT_ENABLE:
+ 			aml_set_reg32_bits( P_EFUSE_CNTL4, CNTL4_ENCRYPT_ENABLE_ON,
+ 			CNTL4_ENCRYPT_ENABLE_BIT, CNTL4_ENCRYPT_ENABLE_SIZE);
+@@ -139,7 +140,7 @@ static long efuse_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned l
+ 			aml_set_reg32_bits( P_EFUSE_CNTL4, CNTL4_ENCRYPT_RESET_ON,
+ 			CNTL4_ENCRYPT_RESET_BIT, CNTL4_ENCRYPT_RESET_SIZE);
+ 			break;
+-
++#endif
+ 		case EFUSE_INFO_GET:
+ 			{
+ 				efuseinfo_item_t *info = (efuseinfo_item_t*)arg;		
+@@ -532,6 +533,7 @@ int usid_min,usid_max;
+ 	 else
+ 	 	devp->platform_data = NULL;
+ #endif
++#ifndef CONFIG_MESON_TRUSTZONE	 	
+ 	 /* disable efuse encryption */
+ 	 aml_set_reg32_bits( P_EFUSE_CNTL4, CNTL1_AUTO_WR_ENABLE_OFF,
+ 		 CNTL4_ENCRYPT_ENABLE_BIT, CNTL4_ENCRYPT_ENABLE_SIZE );
+@@ -546,6 +548,7 @@ int usid_min,usid_max;
+ 	aml_set_reg32_bits(P_EFUSE_CNTL1, CNTL1_PD_ENABLE_OFF, 
+ 			CNTL1_PD_ENABLE_BIT, CNTL1_PD_ENABLE_SIZE);
+ #endif		
++#endif
+ 	 return 0;
+ 
+  error4:
+diff --git a/drivers/amlogic/efuse/efuse_hw.c b/drivers/amlogic/efuse/efuse_hw.c
+index 4ed9efba0b76..796dabe0c1f0 100755
+--- a/drivers/amlogic/efuse/efuse_hw.c
++++ b/drivers/amlogic/efuse/efuse_hw.c
+@@ -12,6 +12,9 @@
+ #include <linux/amlogic/efuse.h>
+ #include "efuse_regs.h"
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
+ 
+ static void __efuse_write_byte( unsigned long addr, unsigned long data );
+ static void __efuse_read_dword( unsigned long addr, unsigned long *data);
+@@ -203,7 +206,12 @@ static ssize_t __efuse_read( char *buf, size_t count, loff_t *ppos )
+ 	unsigned pos = *ppos;
+ 	unsigned long *pdw;
+ 	char* tmp_p;
+-		
++
++#ifdef CONFIG_MESON_TRUSTZONE
++	struct efuse_hal_api_arg arg;
++	unsigned int retcnt;
++	int ret;
++#endif				
+ 	/*pos may not align to 4*/
+ 	unsigned int dwsize = (count + 3 +  pos%4) >> 2;	
+ 	
+@@ -217,7 +225,8 @@ static ssize_t __efuse_read( char *buf, size_t count, loff_t *ppos )
+ 		count = EFUSE_BYTES - pos;
+ 	if (count > EFUSE_BYTES)
+ 		return -EFAULT;
+-	
++
++#ifndef CONFIG_MESON_TRUSTZONE
+ 	aml_set_reg32_bits( P_EFUSE_CNTL1, CNTL1_AUTO_RD_ENABLE_ON,
+ 		CNTL1_AUTO_RD_ENABLE_BIT, CNTL1_AUTO_RD_ENABLE_SIZE );
+ 		
+@@ -239,6 +248,21 @@ static ssize_t __efuse_read( char *buf, size_t count, loff_t *ppos )
+ 	memcpy(buf, tmp_p, count);
+ 
+ 	*ppos += count;
++#else
++	arg.cmd=EFUSE_HAL_API_READ;
++	arg.offset=pos;
++	arg.size=count;
++	arg.buffer_phy=virt_to_phys(contents);
++	arg.retcnt_phy=virt_to_phys(&retcnt);
++	ret = meson_trustzone_efuse(&arg);
++	if(ret == 0){
++		count=retcnt;
++		*ppos += retcnt;
++		memcpy(buf, contents, retcnt);
++	}
++	else
++		count=0;
++#endif
+ 	
+ 	if (contents)
+ 		kfree(contents);
+@@ -251,13 +275,19 @@ static ssize_t __efuse_write(const char *buf, size_t count, loff_t *ppos )
+ 	//loff_t *readppos = ppos;
+ 	unsigned char *pc;	
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++	struct efuse_hal_api_arg arg;	
++	unsigned int retcnt;
++	int ret;
++#endif
++
+ 	if (pos >= EFUSE_BYTES)
+ 		return 0;       /* Past EOF */
+ 	if (count > EFUSE_BYTES - pos)
+ 		count = EFUSE_BYTES - pos;
+ 	if (count > EFUSE_BYTES)
+ 		return -EFAULT;
+-	
++#ifndef CONFIG_MESON_TRUSTZONE		
+ 	for (pc = (char*)buf; count--; ++pos, ++pc){
+ 		#ifdef EFUSE_DEBUG    
+          __efuse_write_byte_debug(pos, *pc);  
+@@ -265,10 +295,22 @@ static ssize_t __efuse_write(const char *buf, size_t count, loff_t *ppos )
+           __efuse_write_byte(pos, *pc);   
+          #endif
+     }
+-
+ 	*ppos = pos;
+-
+ 	return (const char *)pc - buf;
++#else
++	arg.cmd = EFUSE_HAL_API_WRITE;
++	arg.offset = pos;
++	arg.size=count; 
++	arg.buffer_phy=virt_to_phys(buf);
++	arg.retcnt_phy=virt_to_phys(&retcnt);
++	ret = meson_trustzone_efuse(&arg);
++	if(ret == 0){
++		*ppos = pos+retcnt;
++		return retcnt;
++	}
++	else
++		return 0;		
++#endif	
+ }
+ 
+ //=================================================================================================
+@@ -299,9 +341,14 @@ static efuse_socchip_type_e efuse_get_socchip_type(void)
+ 	//unsigned int *pID1 =(unsigned int *)0xd9040004;//phy address
+ 	//unsigned int *pID2 =(unsigned int *)0xd904002c;
+ 	unsigned int __iomem *pID1,*pID2;
++#ifdef CONFIG_MESON_TRUSTZONE
++	*pID1 = meson_read_socrev1();
++	*pID2 = meson_read_socrev2();
++#else	
+ 	bootrom_base = (void __iomem *)IO_BOOTROM_BASE;
+ 	pID1 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x4);
+ 	pID2 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x2c);
++#endif	
+ 	type = EFUSE_SOC_CHIP_UNKNOW;
+ 	if(cpu_is_before_m6()){
+ 		type = EFUSE_SOC_CHIP_M3;
+-- 
+2.19.0
+

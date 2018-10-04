@@ -1,0 +1,1570 @@
+From 9a576f612e3ace526c6cbaf906051a93ab3e169f Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Thu, 29 Jan 2015 15:40:13 +0800
+Subject: [PATCH 5407/5965] PD#102772: lcd: Add PWM_E/F support for backlight.
+
+Change-Id: I9cafdb260d10a67db1db267361c2626e8987ee02
+---
+ arch/arm/mach-meson6/lcd/lcd_config.h         |   2 +-
+ arch/arm/mach-meson8/lcd/lcd_config.h         |   2 +-
+ arch/arm/mach-meson8b/lcd/lcd_config.h        |   2 +-
+ drivers/amlogic/display/backlight/aml_bl.c    | 156 ++++++++++++++++--
+ .../backlight/aml_bl_extern/aml_bl_extern.c   |  38 ++---
+ .../backlight/aml_bl_extern/i2c_lp8556.c      |  47 ++++--
+ .../backlight/aml_bl_extern/mipi_LT070ME05.c  |  50 ++++--
+ .../backlight/aml_bl_extern/pmu_aml1218.c     |  78 +++++----
+ .../display/vout/lcd_extern/edp_anx6345.c     |  86 +++++-----
+ .../display/vout/lcd_extern/i2c_tc101.c       |  49 +++---
+ .../display/vout/lcd_extern/lcd_extern.c      |  30 +---
+ .../display/vout/lcd_extern/mipi_KD080D13.c   |  45 +++--
+ .../display/vout/lcd_extern/mipi_N070ICN.c    |  45 +++--
+ .../display/vout/lcd_extern/spi_LD070WS2.c    |  51 +++---
+ include/linux/amlogic/aml_bl_extern.h         |  18 +-
+ include/linux/amlogic/vout/aml_lcd_extern.h   |  23 ++-
+ 16 files changed, 460 insertions(+), 262 deletions(-)
+ mode change 100644 => 100755 drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+ mode change 100644 => 100755 drivers/amlogic/display/vout/lcd_extern/mipi_KD080D13.c
+
+diff --git a/arch/arm/mach-meson6/lcd/lcd_config.h b/arch/arm/mach-meson6/lcd/lcd_config.h
+index a8c3b03a005d..ede15d5eeac7 100755
+--- a/arch/arm/mach-meson6/lcd/lcd_config.h
++++ b/arch/arm/mach-meson6/lcd/lcd_config.h
+@@ -8,7 +8,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c6"
+-#define LCD_DRV_DATE      "20150112"
++#define LCD_DRV_DATE      "20150126"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8/lcd/lcd_config.h b/arch/arm/mach-meson8/lcd/lcd_config.h
+index 5a0456978a4b..7f8346433953 100755
+--- a/arch/arm/mach-meson8/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8"
+-#define LCD_DRV_DATE      "20150112"
++#define LCD_DRV_DATE      "20150126"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/arch/arm/mach-meson8b/lcd/lcd_config.h b/arch/arm/mach-meson8b/lcd/lcd_config.h
+index 3063368e340a..c7adab66eb4d 100755
+--- a/arch/arm/mach-meson8b/lcd/lcd_config.h
++++ b/arch/arm/mach-meson8b/lcd/lcd_config.h
+@@ -7,7 +7,7 @@
+ //lcd driver version
+ //**********************************
+ #define LCD_DRV_TYPE      "c8b"
+-#define LCD_DRV_DATE      "20150112"
++#define LCD_DRV_DATE      "20150126"
+ //**********************************
+ 
+ /* for GAMMA_CNTL_PORT */
+diff --git a/drivers/amlogic/display/backlight/aml_bl.c b/drivers/amlogic/display/backlight/aml_bl.c
+index 3abb19c1dd26..6689a6205ddc 100755
+--- a/drivers/amlogic/display/backlight/aml_bl.c
++++ b/drivers/amlogic/display/backlight/aml_bl.c
+@@ -88,6 +88,10 @@ typedef enum {
+     BL_PWM_B,
+     BL_PWM_C,
+     BL_PWM_D,
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++    BL_PWM_E,
++    BL_PWM_F,
++#endif
+     BL_PWM_MAX,
+ } BL_PWM_t;
+ 
+@@ -207,6 +211,20 @@ static void power_on_bl(int bl_flag)
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 23, 1);  //pwm_d_clk_en
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 1, 1);  //enable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.pwm_pre_div, 8, 7);  //pwm_c_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 4, 2);  //pwm_c_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 15, 1);  //pwm_c_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 0, 1);  //enable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.pwm_pre_div, 16, 7);  //pwm_d_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 6, 2);  //pwm_d_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 23, 1);  //pwm_d_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 1, 1);  //enable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -260,6 +278,20 @@ static void power_on_bl(int bl_flag)
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 23, 1);  //pwm_d_clk_en
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 1, 1);  //enable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.combo_high_pre_div, 8, 7);  //pwm_c_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 4, 2);  //pwm_c_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 15, 1);  //pwm_c_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 0, 1);  //enable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.combo_high_pre_div, 16, 7);  //pwm_d_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 6, 2);  //pwm_d_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 23, 1);  //pwm_d_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 1, 1);  //enable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -288,6 +320,20 @@ static void power_on_bl(int bl_flag)
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 23, 1);  //pwm_d_clk_en
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 1, 1);  //enable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.combo_low_pre_div, 8, 7);  //pwm_c_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 4, 2);  //pwm_c_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 15, 1);  //pwm_c_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 0, 1);  //enable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, bl_config.combo_low_pre_div, 16, 7);  //pwm_d_clk_div
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 6, 2);  //pwm_d_clk_sel
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 23, 1);  //pwm_d_clk_en
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 1, 1, 1);  //enable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -412,6 +458,14 @@ void bl_power_off(int bl_flag)
+                 case BL_PWM_D:
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 0, 1, 1);  //disable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 0, 1);  //disable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 1, 1);  //disable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -430,6 +484,14 @@ void bl_power_off(int bl_flag)
+                 case BL_PWM_D:
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 0, 1, 1);  //disable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 0, 1);  //disable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 1, 1);  //disable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -446,6 +508,14 @@ void bl_power_off(int bl_flag)
+                 case BL_PWM_D:
+                     aml_set_reg32_bits(P_PWM_MISC_REG_CD, 0, 1, 1);  //disable pwm_d
+                     break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                case BL_PWM_E:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 0, 1);  //disable pwm_c
++                    break;
++                case BL_PWM_F:
++                    aml_set_reg32_bits(P_PWM_MISC_REG_EF, 0, 1, 1);  //disable pwm_d
++                    break;
++#endif
+                 default:
+                     break;
+             }
+@@ -530,6 +600,14 @@ static void set_backlight_level(unsigned level)
+                     case BL_PWM_D:
+                         aml_write_reg32(P_PWM_PWM_D, (pwm_hi << 16) | (pwm_lo));
+                         break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                    case BL_PWM_E:
++                        aml_write_reg32(P_PWM_PWM_E, (pwm_hi << 16) | (pwm_lo));
++                        break;
++                    case BL_PWM_F:
++                        aml_write_reg32(P_PWM_PWM_F, (pwm_hi << 16) | (pwm_lo));
++                        break;
++#endif
+                     default:
+                         break;
+                 }
+@@ -558,6 +636,14 @@ static void set_backlight_level(unsigned level)
+                         case BL_PWM_D:
+                             aml_write_reg32(P_PWM_PWM_D, (pwm_hi << 16) | (pwm_lo));
+                             break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                        case BL_PWM_E:
++                            aml_write_reg32(P_PWM_PWM_E, (pwm_hi << 16) | (pwm_lo));
++                            break;
++                        case BL_PWM_F:
++                            aml_write_reg32(P_PWM_PWM_F, (pwm_hi << 16) | (pwm_lo));
++                            break;
++#endif
+                         default:
+                             break;
+                     }
+@@ -585,6 +671,14 @@ static void set_backlight_level(unsigned level)
+                         case BL_PWM_D:
+                             aml_write_reg32(P_PWM_PWM_D, (pwm_hi << 16) | (pwm_lo));
+                             break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                        case BL_PWM_E:
++                            aml_write_reg32(P_PWM_PWM_E, (pwm_hi << 16) | (pwm_lo));
++                            break;
++                        case BL_PWM_F:
++                            aml_write_reg32(P_PWM_PWM_F, (pwm_hi << 16) | (pwm_lo));
++                            break;
++#endif
+                         default:
+                             break;
+                     }
+@@ -612,6 +706,14 @@ static void set_backlight_level(unsigned level)
+                         case BL_PWM_D:
+                             aml_write_reg32(P_PWM_PWM_D, (pwm_hi << 16) | (pwm_lo));
+                             break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                        case BL_PWM_E:
++                            aml_write_reg32(P_PWM_PWM_E, (pwm_hi << 16) | (pwm_lo));
++                            break;
++                        case BL_PWM_F:
++                            aml_write_reg32(P_PWM_PWM_F, (pwm_hi << 16) | (pwm_lo));
++                            break;
++#endif
+                         default:
+                             break;
+                     }
+@@ -639,6 +741,14 @@ static void set_backlight_level(unsigned level)
+                         case BL_PWM_D:
+                             aml_write_reg32(P_PWM_PWM_D, (pwm_hi << 16) | (pwm_lo));
+                             break;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                        case BL_PWM_E:
++                            aml_write_reg32(P_PWM_PWM_E, (pwm_hi << 16) | (pwm_lo));
++                            break;
++                        case BL_PWM_F:
++                            aml_write_reg32(P_PWM_PWM_F, (pwm_hi << 16) | (pwm_lo));
++                            break;
++#endif
+                         default:
+                             break;
+                     }
+@@ -1061,12 +1171,12 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                 bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;
+             }
+             else {
+-								if (strcmp(str, "2") == 0)
++                if (strcmp(str, "2") == 0)
+                     bl_config.gpio_on = LCD_POWER_GPIO_INPUT;
+                 else if(strcmp(str, "0") == 0)
+-                		bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_LOW; 
++                    bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_LOW;
+                 else
+-                		bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH; 		   
++                    bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;
+             }
+             ret = of_property_read_string_index(pdev->dev.of_node, "bl_gpio_port_on_off", 2, &str);
+             if (ret) {
+@@ -1074,13 +1184,13 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                 bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;
+             }
+             else {
+-								if (strcmp(str, "2") == 0)
++                if (strcmp(str, "2") == 0)
+                     bl_config.gpio_off = LCD_POWER_GPIO_INPUT;
+                 else if(strcmp(str, "1") == 0)
+-                		bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH; 
++                    bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH;
+                 else
+-                		bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW; 		   
+-            } 	
++                    bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;
++            }
+             DPRINT("bl gpio_on=%u, bl gpio_off=%u\n", bl_config.gpio_on, bl_config.gpio_off);
+             ret = of_property_read_u32_array(pdev->dev.of_node,"bl_gpio_dim_max_min",&bl_para[0],2);
+             if (ret) {
+@@ -1135,12 +1245,12 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                 bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;
+             }
+             else {
+-								if (strcmp(str, "2") == 0)
++                if (strcmp(str, "2") == 0)
+                     bl_config.gpio_on = LCD_POWER_GPIO_INPUT;
+                 else if(strcmp(str, "0") == 0)
+-                		bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_LOW; 
++                    bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_LOW;
+                 else
+-                		bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH; 		   
++                    bl_config.gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;
+             }
+             ret = of_property_read_string_index(pdev->dev.of_node, "bl_gpio_port_on_off", 2, &str);
+             if (ret) {
+@@ -1148,13 +1258,13 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                 bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;
+             }
+             else {
+-								if (strcmp(str, "2") == 0)
++                if (strcmp(str, "2") == 0)
+                     bl_config.gpio_off = LCD_POWER_GPIO_INPUT;
+                 else if(strcmp(str, "1") == 0)
+-                		bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH; 
++                    bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH;
+                 else
+-                		bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW; 		   
+-            } 	
++                    bl_config.gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;
++            }
+             DPRINT("gpio_on=%u, gpio_off=%u\n", bl_config.gpio_on, bl_config.gpio_off);
+           }
+             ret = of_property_read_string_index(pdev->dev.of_node, "bl_pwm_port_gpio_used", 0, &str);
+@@ -1177,6 +1287,12 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                     bl_config.pwm_port = BL_PWM_C;
+                 else if (strcmp(str, "PWM_D") == 0)
+                     bl_config.pwm_port = BL_PWM_D;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                else if (strcmp(str, "PWM_E") == 0)
++                    bl_config.pwm_port = BL_PWM_E;
++                else if (strcmp(str, "PWM_F") == 0)
++                    bl_config.pwm_port = BL_PWM_F;
++#endif
+                 else
+                     bl_config.pwm_port = BL_PWM_MAX;
+                 DPRINT("bl pwm_port: %s(%u)\n", str, bl_config.pwm_port);
+@@ -1239,6 +1355,12 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                     bl_config.combo_high_port = BL_PWM_C;
+                 else if (strcmp(str, "PWM_D") == 0)
+                     bl_config.combo_high_port = BL_PWM_D;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                else if (strcmp(str, "PWM_E") == 0)
++                    bl_config.pwm_port = BL_PWM_E;
++                else if (strcmp(str, "PWM_F") == 0)
++                    bl_config.pwm_port = BL_PWM_F;
++#endif
+                 else
+                     bl_config.combo_high_port = BL_PWM_MAX;
+             }
+@@ -1271,6 +1393,12 @@ static inline int _get_backlight_config(struct platform_device *pdev)
+                     bl_config.combo_low_port = BL_PWM_C;
+                 else if (strcmp(str, "PWM_D") == 0)
+                     bl_config.combo_low_port = BL_PWM_D;
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8)
++                else if (strcmp(str, "PWM_E") == 0)
++                    bl_config.pwm_port = BL_PWM_E;
++                else if (strcmp(str, "PWM_F") == 0)
++                    bl_config.pwm_port = BL_PWM_F;
++#endif
+                 else
+                     bl_config.combo_low_port = BL_PWM_MAX;
+             }
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c b/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+old mode 100644
+new mode 100755
+index a23d2a2c49cf..c638bc07eec1
+--- a/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/aml_bl_extern.c
+@@ -79,13 +79,13 @@ int get_bl_extern_dt_data(struct device_node* of_node, struct bl_extern_config_t
+     }
+     else {
+         if (strncmp(str, "G", 1) == 0) {//"GPIO_xx"
+-                pdata->gpio_used = 1;
+-                val = amlogic_gpio_name_map_num(str);
+-                ret = bl_extern_gpio_request(val);
+-                if (ret) {
+-                    printk("%s warning: faild to alloc gpio (%s)\n", pdata->name, str);
+-                }
+-                pdata->gpio = val;
++            pdata->gpio_used = 1;
++            val = amlogic_gpio_name_map_num(str);
++            ret = bl_extern_gpio_request(val);
++            if (ret) {
++                printk("%s warning: faild to alloc gpio (%s)\n", pdata->name, str);
++            }
++            pdata->gpio = val;
+         }
+         DBG_PRINT("%s: gpio_enable %s\n", pdata->name, ((pdata->gpio_used) ? str:"none"));
+     }
+@@ -94,24 +94,24 @@ int get_bl_extern_dt_data(struct device_node* of_node, struct bl_extern_config_t
+         printk("%s warning: get gpio_enable_on failed\n", pdata->name);
+     }
+     else {
+-    		if (strncmp(str, "2", 1) == 0)
+-    				pdata->gpio_on = LCD_POWER_GPIO_INPUT;
+-    		else if (strncmp(str, "0", 1) == 0)
+-    				pdata->gpio_on = LCD_POWER_GPIO_OUTPUT_LOW;
+-    		else
+-    				pdata->gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;			
++        if (strncmp(str, "2", 1) == 0)
++            pdata->gpio_on = LCD_POWER_GPIO_INPUT;
++        else if (strncmp(str, "0", 1) == 0)
++            pdata->gpio_on = LCD_POWER_GPIO_OUTPUT_LOW;
++        else
++            pdata->gpio_on = LCD_POWER_GPIO_OUTPUT_HIGH;
+     }
+     ret = of_property_read_string_index(of_node, "gpio_enable_on_off", 2, &str);
+     if (ret) {
+         printk("%s warning: get gpio_enable_off failed\n", pdata->name);
+     }
+     else {
+-    		if (strncmp(str, "2", 1) == 0)
+-    				pdata->gpio_off = LCD_POWER_GPIO_INPUT;
+-    		else if (strncmp(str, "1", 1) == 0)
+-    				pdata->gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH;
+-    		else
+-    				pdata->gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;			
++        if (strncmp(str, "2", 1) == 0)
++            pdata->gpio_off = LCD_POWER_GPIO_INPUT;
++        else if (strncmp(str, "1", 1) == 0)
++            pdata->gpio_off = LCD_POWER_GPIO_OUTPUT_HIGH;
++        else
++            pdata->gpio_off = LCD_POWER_GPIO_OUTPUT_LOW;
+     }
+     DBG_PRINT("%s: gpio_on = %d, gpio_off = %d \n", pdata->name, pdata->gpio_on, pdata->gpio_off);
+     switch (pdata->type) {
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c b/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
+index 12aaa3b10064..5188972fd123 100755
+--- a/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/i2c_lp8556.c
+@@ -128,10 +128,10 @@ static int bl_extern_power_on(void)
+     int ret=0;
+ 
+     if (bl_ext_config->gpio_used > 0) {
+-    	if(bl_ext_config->gpio_on == 2)
+-    			bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    	else		
+-        	bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
++        if (bl_ext_config->gpio_on==2)
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
++            bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
+     }
+ 
+     while (ending_flag == 0) {
+@@ -161,9 +161,9 @@ static int bl_extern_power_off(void)
+ {
+     bl_status = 0;
+     if (bl_ext_config->gpio_used > 0) {
+-    	if(bl_ext_config->gpio_off == 2)
+-    		bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    	else
++        if (bl_ext_config->gpio_off==2)
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
+         bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_off);
+     }
+ 
+@@ -171,23 +171,37 @@ static int bl_extern_power_off(void)
+     return 0;
+ }
+ 
+-static int bl_extern_driver_update(void)
++static int get_bl_extern_config(struct device_node* of_node, struct bl_extern_config_t *bl_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_bl_extern_driver_t* bl_ext;
+ 
++    ret = get_bl_extern_dt_data(of_node, bl_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", BL_EXTERN_NAME);
++        return ret;
++    }
++
++    if (bl_ext_cfg->dim_min > 0xff)
++        bl_ext_cfg->dim_min = 0xff;
++    if (bl_ext_cfg->dim_max > 0xff)
++        bl_ext_cfg->dim_max = 0xff;
++
++    //bl extern driver update
+     bl_ext = aml_bl_extern_get_driver();
+     if (bl_ext) {
+-        bl_ext->type      = bl_ext_config->type;
+-        bl_ext->name      = bl_ext_config->name;
++        bl_ext->type      = bl_ext_cfg->type;
++        bl_ext->name      = bl_ext_cfg->name;
+         bl_ext->power_on  = bl_extern_power_on;
+         bl_ext->power_off = bl_extern_power_off;
+         bl_ext->set_level = bl_extern_set_level;
+     }
+     else {
+-        printk("[error] %s get bl_extern_driver failed\n", bl_ext_config->name);
++        printk("[error] %s get bl_extern_driver failed\n", bl_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_lp8556_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
+@@ -199,7 +213,6 @@ static int aml_lp8556_i2c_probe(struct i2c_client *client, const struct i2c_devi
+     }
+     else {
+         aml_lp8556_i2c_client = client;
+-        bl_extern_driver_update();
+     }
+ 
+     printk("%s OK\n", __FUNCTION__);
+@@ -246,8 +259,8 @@ static int aml_lp8556_probe(struct platform_device *pdev)
+ 
+     pdev->dev.platform_data = bl_ext_config;
+ 
+-    if (get_bl_extern_dt_data(pdev->dev.of_node, bl_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", BL_EXTERN_NAME);
++    ret = get_bl_extern_config(pdev->dev.of_node, bl_ext_config);
++    if (ret) {
+         goto bl_extern_probe_failed;
+     }
+ 
+@@ -286,8 +299,10 @@ static int aml_lp8556_probe(struct platform_device *pdev)
+     return ret;
+ 
+ bl_extern_probe_failed:
+-    if (bl_ext_config)
++    if (bl_ext_config) {
+         kfree(bl_ext_config);
++        bl_ext_config = NULL;
++    }
+     return -1;
+ }
+ 
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/mipi_LT070ME05.c b/drivers/amlogic/display/backlight/aml_bl_extern/mipi_LT070ME05.c
+index ac192537d789..f9bbfe4deb54 100755
+--- a/drivers/amlogic/display/backlight/aml_bl_extern/mipi_LT070ME05.c
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/mipi_LT070ME05.c
+@@ -66,9 +66,9 @@ static int bl_extern_power_on(void)
+ {
+     if (bl_ext_config->gpio_used > 0) {
+       if(bl_ext_config->gpio_on == 2)
+-    			bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    	else		
+-        	bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
++            bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
+     }
+ 
+     bl_status = 1;
+@@ -82,36 +82,52 @@ static int bl_extern_power_off(void)
+ {
+     if (bl_ext_config->gpio_used > 0) {
+       if(bl_ext_config->gpio_off == 2)
+-    			bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    	else
+-        	bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_off);
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
++            bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_off);
+     }
+ 
+     printk("%s\n", __FUNCTION__);
+     return 0;
+ }
+ 
+-static int bl_extern_driver_update(void)
++static int get_bl_extern_config(struct device_node* of_node, struct bl_extern_config_t *bl_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_bl_extern_driver_t* bl_ext;
+ 
++    ret = get_bl_extern_dt_data(of_node, bl_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", BL_EXTERN_NAME);
++        return ret;
++    }
++
++    if (bl_ext_cfg->dim_min > 0xff)
++        bl_ext_cfg->dim_min = 0xff;
++    if (bl_ext_cfg->dim_max > 0xff)
++        bl_ext_cfg->dim_max = 0xff;
++
++    //bl extern driver update
+     bl_ext = aml_bl_extern_get_driver();
+     if (bl_ext) {
+-        bl_ext->type      = bl_ext_config->type;
+-        bl_ext->name      = bl_ext_config->name;
++        bl_ext->type      = bl_ext_cfg->type;
++        bl_ext->name      = bl_ext_cfg->name;
+         bl_ext->power_on  = bl_extern_power_on;
+         bl_ext->power_off = bl_extern_power_off;
+         bl_ext->set_level = bl_extern_set_level;
+     }
+     else {
+-        printk("[error] %s get bl_extern_driver failed\n", bl_ext_config->name);
++        printk("[error] %s get bl_extern_driver failed\n", bl_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_LT070ME05_probe(struct platform_device *pdev)
+ {
++    int ret = 0;
++
+     if (bl_extern_driver_check()) {
+         return -1;
+     }
+@@ -124,19 +140,19 @@ static int aml_LT070ME05_probe(struct platform_device *pdev)
+ 
+     pdev->dev.platform_data = bl_ext_config;
+ 
+-    if (get_bl_extern_dt_data(pdev->dev.of_node, bl_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", BL_EXTERN_NAME);
++    ret = get_bl_extern_config(pdev->dev.of_node, bl_ext_config);
++    if (ret) {
+         goto bl_extern_probe_failed;
+     }
+ 
+-    bl_extern_driver_update();
+-
+     printk("%s ok\n", __FUNCTION__);
+-    return 0;
++    return ret;
+ 
+ bl_extern_probe_failed:
+-    if (bl_ext_config)
++    if (bl_ext_config) {
+         kfree(bl_ext_config);
++        bl_ext_config = NULL;
++    }
+     return -1;
+ }
+ 
+diff --git a/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+index d5a747037d0a..85ca5c4607cf 100755
+--- a/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
++++ b/drivers/amlogic/display/backlight/aml_bl_extern/pmu_aml1218.c
+@@ -102,10 +102,10 @@ static int bl_extern_power_on(void)
+     }
+ #endif
+     if (bl_ext_config->gpio_used > 0) {
+-    	  if(bl_ext_config->gpio_on == 2)
+-    				bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    		else		
+-        		bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
++        if (bl_ext_config->gpio_on==2)
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
++            bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_on);
+     }
+ 
+     printk("%s\n", __FUNCTION__);
+@@ -121,10 +121,10 @@ static int bl_extern_power_off(void)
+     int ret = 0;
+ 
+     if (bl_ext_config->gpio_used > 0) {
+-    		if(bl_ext_config->gpio_off == 2)
+-    				bl_extern_gpio_direction_input(bl_ext_config->gpio);
+-    		else		
+-        		bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_off);
++        if (bl_ext_config->gpio_off==2)
++            bl_extern_gpio_direction_input(bl_ext_config->gpio);
++        else
++            bl_extern_gpio_direction_output(bl_ext_config->gpio, bl_ext_config->gpio_off);
+     }
+ #ifdef CONFIG_AMLOGIC_BOARD_HAS_PMU
+     pmu_driver = aml_pmu_get_driver();
+@@ -149,25 +149,6 @@ static int bl_extern_power_off(void)
+     return ret;
+ }
+ 
+-static int bl_extern_driver_update(void)
+-{
+-    struct aml_bl_extern_driver_t* bl_ext;
+-
+-    bl_ext = aml_bl_extern_get_driver();
+-    if (bl_ext) {
+-        bl_ext->type      = bl_ext_config->type;
+-        bl_ext->name      = bl_ext_config->name;
+-        bl_ext->power_on  = bl_extern_power_on;
+-        bl_ext->power_off = bl_extern_power_off;
+-        bl_ext->set_level = bl_extern_set_level;
+-    }
+-    else {
+-        printk("[error] %s get bl_extern_driver failed\n", bl_ext_config->name);
+-    }
+-
+-    return 0;
+-}
+-
+ //***********************************************//
+ static ssize_t bl_extern_debug(struct class *class, struct class_attribute *attr, const char *buf, size_t count)
+ {
+@@ -224,6 +205,39 @@ static struct class bl_extern_debug_class = {
+ };
+ //*********************************************************//
+ 
++static int get_bl_extern_config(struct device_node* of_node, struct bl_extern_config_t *bl_ext_cfg)
++{
++    int ret = 0;
++    struct aml_bl_extern_driver_t* bl_ext;
++
++    ret = get_bl_extern_dt_data(of_node, bl_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", BL_EXTERN_NAME);
++        return ret;
++    }
++
++    if (bl_ext_cfg->dim_min > 0x1f)
++        bl_ext_cfg->dim_min = 0x1f;
++    if (bl_ext_cfg->dim_max > 0x1f)
++        bl_ext_cfg->dim_max = 0x1f;
++
++    //bl extern driver update
++    bl_ext = aml_bl_extern_get_driver();
++    if (bl_ext) {
++        bl_ext->type      = bl_ext_cfg->type;
++        bl_ext->name      = bl_ext_cfg->name;
++        bl_ext->power_on  = bl_extern_power_on;
++        bl_ext->power_off = bl_extern_power_off;
++        bl_ext->set_level = bl_extern_set_level;
++    }
++    else {
++        printk("[error] %s get bl_extern_driver failed\n", bl_ext_cfg->name);
++        ret = -1;
++    }
++
++    return ret;
++}
++
+ static int aml_aml1218_probe(struct platform_device *pdev)
+ {
+     int ret = 0;
+@@ -240,13 +254,11 @@ static int aml_aml1218_probe(struct platform_device *pdev)
+ 
+     pdev->dev.platform_data = bl_ext_config;
+ 
+-    if (get_bl_extern_dt_data(pdev->dev.of_node, bl_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", BL_EXTERN_NAME);
++    ret = get_bl_extern_config(pdev->dev.of_node, bl_ext_config);
++    if (ret) {
+         goto bl_extern_probe_failed;
+     }
+ 
+-    bl_extern_driver_update();
+-
+     ret = class_register(&bl_extern_debug_class);
+     if(ret){
+         printk("class register bl_extern_debug_class fail!\n");
+@@ -256,8 +268,10 @@ static int aml_aml1218_probe(struct platform_device *pdev)
+     return ret;
+ 
+ bl_extern_probe_failed:
+-    if (bl_ext_config)
++    if (bl_ext_config) {
+         kfree(bl_ext_config);
++        bl_ext_config = NULL;
++    }
+     return -1;
+ }
+ 
+diff --git a/drivers/amlogic/display/vout/lcd_extern/edp_anx6345.c b/drivers/amlogic/display/vout/lcd_extern/edp_anx6345.c
+index 4d80da837690..df5d433f13dc 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/edp_anx6345.c
++++ b/drivers/amlogic/display/vout/lcd_extern/edp_anx6345.c
+@@ -27,7 +27,7 @@
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+ #include "edp_anx6345.h"
+ 
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
++static struct lcd_extern_config_t *lcd_extern_config = NULL;
+                           
+ static struct i2c_client *aml_anx6345_70_client;
+ static struct i2c_client *aml_anx6345_72_client;
+@@ -349,51 +349,57 @@ static int lcd_extern_i2c_remove(void)
+     return ret;
+ }
+ 
+-static int lcd_extern_driver_update(void)
++static int get_lcd_extern_config(struct device_node* of_node, struct lcd_extern_config_t *lcd_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_lcd_extern_driver_t* lcd_ext;
+ 
++    ret = get_lcd_extern_dt_data(of_node, lcd_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", LCD_EXTERN_NAME);
++        return ret;
++    }
++
++    //lcd extern driver update
+     lcd_ext = aml_lcd_extern_get_driver();
+     if (lcd_ext) {
+-        lcd_ext->type      = lcd_ext_config->type;
+-        lcd_ext->name      = lcd_ext_config->name;
++        lcd_ext->type      = lcd_ext_cfg->type;
++        lcd_ext->name      = lcd_ext_cfg->name;
+         lcd_ext->reg_read  = i2c_reg_read;
+         lcd_ext->reg_write = i2c_reg_write;
+         lcd_ext->power_on  = lcd_extern_i2c_init;
+         lcd_ext->power_off = lcd_extern_i2c_remove;
+     }
+     else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
++        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_anx6345_70_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ {
+-
+     if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+         printk("[error] %s: functionality check failed\n", __FUNCTION__);
+         return -ENODEV;
+     }
+     else {
+         aml_anx6345_70_client = client;
+-        lcd_extern_driver_update();
+     }
+ 
+     printk("%s OK\n", __FUNCTION__);
+     return 0;
+ }
++
+ static int aml_anx6345_72_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ {
+-
+     if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+         printk("[error] %s: functionality check failed\n", __FUNCTION__);
+         return -ENODEV;
+     }
+     else {
+         aml_anx6345_72_client = client;
+-      //  lcd_extern_driver_update();
+     }
+ 
+     printk("%s OK\n", __FUNCTION__);
+@@ -447,55 +453,55 @@ static int aml_anx6345_probe(struct platform_device *pdev)
+     struct i2c_board_info i2c_info[2];
+     struct i2c_adapter *adapter;
+     struct i2c_client *i2c_client;
+-   // struct lcd_extern_config_t extern_config[3];
++    // struct lcd_extern_config_t extern_config[3];
+     int i = 0;
+     int ret = 0;
+ 
+     if (lcd_extern_driver_check()) {
+         return -1;
+     }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
++    if (lcd_extern_config == NULL)
++        lcd_extern_config = kzalloc(sizeof(*lcd_extern_config), GFP_KERNEL);
++    if (lcd_extern_config == NULL) {
+         printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+         return -1;
+     }
+ 
+-    pdev->dev.platform_data = lcd_ext_config;
++    pdev->dev.platform_data = lcd_extern_config;
+ 
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
++    ret = get_lcd_extern_config(pdev->dev.of_node, lcd_extern_config);
++    if (ret) {
+         goto lcd_extern_probe_failed;
+     }
+-   for(i=0; i<2; i++){
+-    	memset(&i2c_info[i], 0, sizeof(i2c_info[i]));
+-   }
+ 
+-    adapter = i2c_get_adapter(lcd_ext_config->i2c_bus);
++    for (i=0;i<2;i++) {
++        memset(&i2c_info[i], 0, sizeof(i2c_info[i]));
++    }
++
++    adapter = i2c_get_adapter(lcd_extern_config->i2c_bus);
+     if (!adapter) {
+         printk("[error] %s£ºfailed to get i2c adapter\n", LCD_EXTERN_NAME);
+         goto lcd_extern_probe_failed;
+     }
+     for(i=0; i<2; i++){
+-    	strncpy(i2c_info[i].type, anx_addr_name[i], I2C_NAME_SIZE);
++        strncpy(i2c_info[i].type, anx_addr_name[i], I2C_NAME_SIZE);
+     }
+     i2c_info[0].addr = 0x38;//0x70 >> 1;
+     i2c_info[1].addr = 0x39;//0x72 >>1;
+     for(i=0; i<2; i++){
+-    	//i2c_info[i].platform_data = extern_config[i];
+-    	i2c_info[i].flags = 0;
+-    	if(i2c_info[i].addr > 0x7f)
+-      		i2c_info[i].flags = 0x10;
+-    	i2c_client = i2c_new_device(adapter, &i2c_info[i]);
+-			if (!i2c_client) {
+-					printk("[error] %x :failed to new i2c device\n", i2c_info[i].addr);
+-					goto lcd_extern_probe_failed;
+-			}
+-			else{
+-					DBG_PRINT("[error] %x: new i2c device succeed\n",i2c_info[i].addr);
+-			}
++        //i2c_info[i].platform_data = extern_config[i];
++        i2c_info[i].flags = 0;
++        if (i2c_info[i].addr>0x7f)
++            i2c_info[i].flags = 0x10;
++        i2c_client = i2c_new_device(adapter, &i2c_info[i]);
++        if (!i2c_client) {
++            printk("[error] %x :failed to new i2c device\n", i2c_info[i].addr);
++            goto lcd_extern_probe_failed;
++        }
++        else{
++            DBG_PRINT("[error] %x: new i2c device succeed\n",i2c_info[i].addr);
++        }
+    }
+-    
+ 
+     if (!aml_anx6345_70_client) {
+         ret = i2c_add_driver(&aml_anx6345_70_driver);
+@@ -504,7 +510,7 @@ static int aml_anx6345_probe(struct platform_device *pdev)
+             goto lcd_extern_probe_failed;
+         }
+     }
+-    
++
+     if (!aml_anx6345_72_client) {
+         ret = i2c_add_driver(&aml_anx6345_72_driver);
+         if (ret) {
+@@ -512,20 +518,20 @@ static int aml_anx6345_probe(struct platform_device *pdev)
+             goto lcd_extern_probe_failed;
+         }
+     }
+-    
+ 
+     printk("%s ok\n", __FUNCTION__);
+     return ret;
+ 
+ lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
++    if (lcd_extern_config) {
++        kfree(lcd_extern_config);
++        lcd_extern_config = NULL;
++    }
+     return -1;
+ }
+ 
+ static int aml_anx6345_remove(struct platform_device *pdev)
+ {
+-    remove_lcd_extern(lcd_ext_config);
+     if (pdev->dev.platform_data)
+         kfree (pdev->dev.platform_data);
+     return 0;
+diff --git a/drivers/amlogic/display/vout/lcd_extern/i2c_tc101.c b/drivers/amlogic/display/vout/lcd_extern/i2c_tc101.c
+index fe39a4e1c8e0..e0e8146dc41f 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/i2c_tc101.c
++++ b/drivers/amlogic/display/vout/lcd_extern/i2c_tc101.c
+@@ -26,7 +26,7 @@
+ #include <mach/gpio.h>
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+ 
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
++static struct lcd_extern_config_t *lcd_extern_config = NULL;
+ 
+ static struct i2c_client *aml_tc101_i2c_client;
+ 
+@@ -142,24 +142,33 @@ static int lcd_extern_i2c_remove(void)
+     return ret;
+ }
+ 
+-static int lcd_extern_driver_update(void)
++static int get_lcd_extern_config(struct device_node* of_node, struct lcd_extern_config_t *lcd_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_lcd_extern_driver_t* lcd_ext;
+ 
++    ret = get_lcd_extern_dt_data(of_node, lcd_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", LCD_EXTERN_NAME);
++        return ret;
++    }
++
++    //lcd extern driver update
+     lcd_ext = aml_lcd_extern_get_driver();
+     if (lcd_ext) {
+-        lcd_ext->type      = lcd_ext_config->type;
+-        lcd_ext->name      = lcd_ext_config->name;
++        lcd_ext->type      = lcd_ext_cfg->type;
++        lcd_ext->name      = lcd_ext_cfg->name;
+         lcd_ext->reg_read  = i2c_reg_read;
+         lcd_ext->reg_write = i2c_reg_write;
+         lcd_ext->power_on  = lcd_extern_i2c_init;
+         lcd_ext->power_off = lcd_extern_i2c_remove;
+     }
+     else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
++        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_tc101_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
+@@ -171,7 +180,6 @@ static int aml_tc101_i2c_probe(struct i2c_client *client, const struct i2c_devic
+     }
+     else {
+         aml_tc101_i2c_client = client;
+-        lcd_extern_driver_update();
+     }
+ 
+     printk("%s OK\n", __FUNCTION__);
+@@ -210,31 +218,31 @@ static int aml_tc101_probe(struct platform_device *pdev)
+     if (lcd_extern_driver_check()) {
+         return -1;
+     }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
++    if (lcd_extern_config == NULL)
++        lcd_extern_config = kzalloc(sizeof(*lcd_extern_config), GFP_KERNEL);
++    if (lcd_extern_config == NULL) {
+         printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+         return -1;
+     }
+ 
+-    pdev->dev.platform_data = lcd_ext_config;
++    pdev->dev.platform_data = lcd_extern_config;
+ 
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
++    ret = get_lcd_extern_config(pdev->dev.of_node, lcd_extern_config);
++    if (ret) {
+         goto lcd_extern_probe_failed;
+     }
+ 
+     memset(&i2c_info, 0, sizeof(i2c_info));
+ 
+-    adapter = i2c_get_adapter(lcd_ext_config->i2c_bus);
++    adapter = i2c_get_adapter(lcd_extern_config->i2c_bus);
+     if (!adapter) {
+         printk("[error] %s£ºfailed to get i2c adapter\n", LCD_EXTERN_NAME);
+         goto lcd_extern_probe_failed;
+     }
+ 
+-    strncpy(i2c_info.type, lcd_ext_config->name, I2C_NAME_SIZE);
+-    i2c_info.addr = lcd_ext_config->i2c_addr;
+-    i2c_info.platform_data = lcd_ext_config;
++    strncpy(i2c_info.type, lcd_extern_config->name, I2C_NAME_SIZE);
++    i2c_info.addr = lcd_extern_config->i2c_addr;
++    i2c_info.platform_data = lcd_extern_config;
+     i2c_info.flags=0;
+     if(i2c_info.addr>0x7f)
+         i2c_info.flags=0x10;
+@@ -259,14 +267,15 @@ static int aml_tc101_probe(struct platform_device *pdev)
+     return ret;
+ 
+ lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
++    if (lcd_extern_config) {
++        kfree(lcd_extern_config);
++        lcd_extern_config = NULL;
++    }
+     return -1;
+ }
+ 
+ static int aml_tc101_remove(struct platform_device *pdev)
+ {
+-    remove_lcd_extern(lcd_ext_config);
+     if (pdev->dev.platform_data)
+         kfree (pdev->dev.platform_data);
+     return 0;
+diff --git a/drivers/amlogic/display/vout/lcd_extern/lcd_extern.c b/drivers/amlogic/display/vout/lcd_extern/lcd_extern.c
+index 9ddcf6087dcb..cf02627892ca 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/lcd_extern.c
++++ b/drivers/amlogic/display/vout/lcd_extern/lcd_extern.c
+@@ -53,27 +53,19 @@ int lcd_extern_driver_check(void)
+ 	return 0;
+ }
+ 
+-#define BL_EXT_NAME_LEN_MAX		50
+ int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config_t *pdata)
+ {
+ 	int err;
+ 	int val;
+ 	const char *str;
+ 	
+-	err = of_property_read_string(of_node, "dev_name", &str);
++	err = of_property_read_string(of_node, "dev_name", (const char **)&pdata->name);
+ 	if (err) {
+-		str = "aml_lcd_extern";
++		pdata->name = "aml_lcd_extern";
+ 		printk("warning: get dev_name failed\n");
+ 	}
+-	pdata->name = (char *)kmalloc(sizeof(char)*BL_EXT_NAME_LEN_MAX, GFP_KERNEL);
+-	if (pdata->name == NULL) {
+-		printk("[get_lcd_extern_dt_data]: Not enough memory\n");
+-	}
+-	else {
+-		memset(pdata->name, 0, BL_EXT_NAME_LEN_MAX);
+-		strcpy(pdata->name, str);
+-		printk("load bl_extern in dtb: %s\n", pdata->name);
+-	}
++	printk("load lcd_extern in dtb: %s\n", pdata->name);
++
+ 	err = of_property_read_u32(of_node, "type", &pdata->type);
+ 	if (err) {
+ 		pdata->type = LCD_EXTERN_MAX;
+@@ -117,7 +109,7 @@ int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config
+ 				pdata->spi_cs = -1;
+ 			}
+ 			else {
+-			    val = amlogic_gpio_name_map_num(str);
++				val = amlogic_gpio_name_map_num(str);
+ 				if (val > 0) {
+ 					err = lcd_extern_gpio_request(val);
+ 					if (err) {
+@@ -136,7 +128,7 @@ int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config
+ 				pdata->spi_clk = -1;
+ 			}
+ 			else {
+-			    val = amlogic_gpio_name_map_num(str);
++				val = amlogic_gpio_name_map_num(str);
+ 				if (val > 0) {
+ 					err = lcd_extern_gpio_request(val);
+ 					if (err) {
+@@ -155,7 +147,7 @@ int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config
+ 				pdata->spi_data = -1;
+ 			}
+ 			else {
+-			    val = amlogic_gpio_name_map_num(str);
++				val = amlogic_gpio_name_map_num(str);
+ 				if (val > 0) {
+ 					err = lcd_extern_gpio_request(val);
+ 					if (err) {
+@@ -178,11 +170,3 @@ int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config
+ 	return 0;
+ }
+ 
+-int remove_lcd_extern(struct lcd_extern_config_t *pdata)
+-{
+-	if (pdata->name)
+-		kfree(pdata->name);
+-		
+-	return 0;
+-}
+-
+diff --git a/drivers/amlogic/display/vout/lcd_extern/mipi_KD080D13.c b/drivers/amlogic/display/vout/lcd_extern/mipi_KD080D13.c
+old mode 100644
+new mode 100755
+index b3a89c07ae38..cde6ae09d72b
+--- a/drivers/amlogic/display/vout/lcd_extern/mipi_KD080D13.c
++++ b/drivers/amlogic/display/vout/lcd_extern/mipi_KD080D13.c
+@@ -26,7 +26,7 @@
+ #include <mach/gpio.h>
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+ 
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
++static struct lcd_extern_config_t *lcd_extern_config = NULL;
+ 
+ //#define LCD_EXT_DEBUG_INFO
+ #ifdef LCD_EXT_DEBUG_INFO
+@@ -92,58 +92,67 @@ static unsigned char mipi_init_off_table[] = {
+     0xff,0xff,   //ending flag
+ };
+ 
+-static int lcd_extern_driver_update(void)
++static int get_lcd_extern_config(struct device_node* of_node, struct lcd_extern_config_t *lcd_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_lcd_extern_driver_t* lcd_ext;
+ 
++    ret = get_lcd_extern_dt_data(of_node, lcd_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", LCD_EXTERN_NAME);
++        return ret;
++    }
++
++    //lcd extern driver update
+     lcd_ext = aml_lcd_extern_get_driver();
+     if (lcd_ext) {
+-        lcd_ext->type       = lcd_ext_config->type;
+-        lcd_ext->name       = lcd_ext_config->name;
++        lcd_ext->type      = lcd_ext_cfg->type;
++        lcd_ext->name      = lcd_ext_cfg->name;
+         lcd_ext->init_on_cmd_8  = &mipi_init_on_table[0];
+         lcd_ext->init_off_cmd_8 = &mipi_init_off_table[0];
+     }
+     else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
++        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_KD080D13_probe(struct platform_device *pdev)
+ {
+-    //int i = 0;
++    int ret = 0;
+ 
+     if (lcd_extern_driver_check()) {
+         return -1;
+     }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
++    if (lcd_extern_config == NULL)
++        lcd_extern_config = kzalloc(sizeof(*lcd_extern_config), GFP_KERNEL);
++    if (lcd_extern_config == NULL) {
+         printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+         return -1;
+     }
+ 
+-    pdev->dev.platform_data = lcd_ext_config;
++    pdev->dev.platform_data = lcd_extern_config;
+ 
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
++    ret = get_lcd_extern_config(pdev->dev.of_node, lcd_extern_config);
++    if (ret) {
+         goto lcd_extern_probe_failed;
+     }
+-    lcd_extern_driver_update();
+ 
+     printk("%s probe ok\n", LCD_EXTERN_NAME);
+-    return 0;
++    return ret;
+ 
+ lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
++    if (lcd_extern_config) {
++        kfree(lcd_extern_config);
++        lcd_extern_config = NULL;
++    }
+     return -1;
+ }
+ 
+ static int aml_KD080D13_remove(struct platform_device *pdev)
+ {
+-    remove_lcd_extern(lcd_ext_config);
+     if (pdev->dev.platform_data)
+         kfree (pdev->dev.platform_data);
+     return 0;
+diff --git a/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c b/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
+index 30dcd4a684a9..acd8a80b3969 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
++++ b/drivers/amlogic/display/vout/lcd_extern/mipi_N070ICN.c
+@@ -26,7 +26,7 @@
+ #include <mach/gpio.h>
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+ 
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
++static struct lcd_extern_config_t *lcd_extern_config = NULL;
+ 
+ //#define LCD_EXT_DEBUG_INFO
+ #ifdef LCD_EXT_DEBUG_INFO
+@@ -215,58 +215,67 @@ static unsigned char mipi_init_off_table[] = {
+     0xff,0xff,   //ending flag
+ };
+ 
+-static int lcd_extern_driver_update(void)
++static int get_lcd_extern_config(struct device_node* of_node, struct lcd_extern_config_t *lcd_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_lcd_extern_driver_t* lcd_ext;
+ 
++    ret = get_lcd_extern_dt_data(of_node, lcd_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", LCD_EXTERN_NAME);
++        return ret;
++    }
++
++    //lcd extern driver update
+     lcd_ext = aml_lcd_extern_get_driver();
+     if (lcd_ext) {
+-        lcd_ext->type       = lcd_ext_config->type;
+-        lcd_ext->name       = lcd_ext_config->name;
++        lcd_ext->type      = lcd_ext_cfg->type;
++        lcd_ext->name      = lcd_ext_cfg->name;
+         lcd_ext->init_on_cmd_8  = &mipi_init_on_table[0];
+         lcd_ext->init_off_cmd_8 = &mipi_init_off_table[0];
+     }
+     else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
++        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_N070ICN_probe(struct platform_device *pdev)
+ {
+-    //int i = 0;
++    int ret = 0;
+ 
+     if (lcd_extern_driver_check()) {
+         return -1;
+     }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
++    if (lcd_extern_config == NULL)
++        lcd_extern_config = kzalloc(sizeof(*lcd_extern_config), GFP_KERNEL);
++    if (lcd_extern_config == NULL) {
+         printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+         return -1;
+     }
+ 
+-    pdev->dev.platform_data = lcd_ext_config;
++    pdev->dev.platform_data = lcd_extern_config;
+ 
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
++    ret = get_lcd_extern_config(pdev->dev.of_node, lcd_extern_config);
++    if (ret) {
+         goto lcd_extern_probe_failed;
+     }
+-    lcd_extern_driver_update();
+ 
+     printk("%s probe ok\n", LCD_EXTERN_NAME);
+-    return 0;
++    return ret;
+ 
+ lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
++    if (lcd_extern_config) {
++        kfree(lcd_extern_config);
++        lcd_extern_config = NULL;
++    }
+     return -1;
+ }
+ 
+ static int aml_N070ICN_remove(struct platform_device *pdev)
+ {
+-    remove_lcd_extern(lcd_ext_config);
+     if (pdev->dev.platform_data)
+         kfree (pdev->dev.platform_data);
+     return 0;
+diff --git a/drivers/amlogic/display/vout/lcd_extern/spi_LD070WS2.c b/drivers/amlogic/display/vout/lcd_extern/spi_LD070WS2.c
+index 00b5d7324bdf..a3be011cf164 100755
+--- a/drivers/amlogic/display/vout/lcd_extern/spi_LD070WS2.c
++++ b/drivers/amlogic/display/vout/lcd_extern/spi_LD070WS2.c
+@@ -26,7 +26,7 @@
+ #include <mach/gpio.h>
+ #include <linux/amlogic/vout/aml_lcd_extern.h>
+ 
+-static struct lcd_extern_config_t *lcd_ext_config = NULL;
++static struct lcd_extern_config_t *lcd_extern_config = NULL;
+ 
+ //#define LCD_EXT_DEBUG_INFO
+ #ifdef LCD_EXT_DEBUG_INFO
+@@ -62,19 +62,19 @@ static unsigned char spi_off_table[][2] = {
+ 
+ static void set_lcd_csb(unsigned v)
+ {
+-    lcd_extern_gpio_direction_output(lcd_ext_config->spi_cs, v);
++    lcd_extern_gpio_direction_output(lcd_extern_config->spi_cs, v);
+     udelay(SPI_DELAY);
+ }
+ 
+ static void set_lcd_scl(unsigned v)
+ {
+-    lcd_extern_gpio_direction_output(lcd_ext_config->spi_clk, v);
++    lcd_extern_gpio_direction_output(lcd_extern_config->spi_clk, v);
+     udelay(SPI_DELAY);
+ }
+     
+ static void set_lcd_sda(unsigned v)
+ {
+-    lcd_extern_gpio_direction_output(lcd_ext_config->spi_data, v);
++    lcd_extern_gpio_direction_output(lcd_extern_config->spi_data, v);
+     udelay(SPI_DELAY);
+ }
+ 
+@@ -173,58 +173,67 @@ static int lcd_extern_spi_off(void)
+     return 0;
+ }
+ 
+-static int lcd_extern_driver_update(void)
++static int get_lcd_extern_config(struct device_node* of_node, struct lcd_extern_config_t *lcd_ext_cfg)
+ {
++    int ret = 0;
+     struct aml_lcd_extern_driver_t* lcd_ext;
+ 
++    ret = get_lcd_extern_dt_data(of_node, lcd_ext_cfg);
++    if (ret) {
++        printk("[error] %s: failed to get dt data\n", LCD_EXTERN_NAME);
++        return ret;
++    }
++
++    //lcd extern driver update
+     lcd_ext = aml_lcd_extern_get_driver();
+     if (lcd_ext) {
+-        lcd_ext->type       = lcd_ext_config->type;
+-        lcd_ext->name       = lcd_ext_config->name;
++        lcd_ext->type      = lcd_ext_cfg->type;
++        lcd_ext->name      = lcd_ext_cfg->name;
+         lcd_ext->power_on   = lcd_extern_spi_init;
+         lcd_ext->power_off  = lcd_extern_spi_off;
+     }
+     else {
+-        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_config->name);
++        printk("[error] %s get lcd_extern_driver failed\n", lcd_ext_cfg->name);
++        ret = -1;
+     }
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ static int aml_LD070WS2_probe(struct platform_device *pdev)
+ {
+-    //int i = 0;
++    int ret = 0;
+ 
+     if (lcd_extern_driver_check()) {
+         return -1;
+     }
+-    if (lcd_ext_config == NULL)
+-        lcd_ext_config = kzalloc(sizeof(*lcd_ext_config), GFP_KERNEL);
+-    if (lcd_ext_config == NULL) {
++    if (lcd_extern_config == NULL)
++        lcd_extern_config = kzalloc(sizeof(*lcd_extern_config), GFP_KERNEL);
++    if (lcd_extern_config == NULL) {
+         printk("[error] %s probe: failed to alloc data\n", LCD_EXTERN_NAME);
+         return -1;
+     }
+ 
+-    pdev->dev.platform_data = lcd_ext_config;
++    pdev->dev.platform_data = lcd_extern_config;
+ 
+-    if (get_lcd_extern_dt_data(pdev->dev.of_node, lcd_ext_config) != 0) {
+-        printk("[error] %s probe: failed to get dt data\n", LCD_EXTERN_NAME);
++    ret = get_lcd_extern_config(pdev->dev.of_node, lcd_extern_config);
++    if (ret) {
+         goto lcd_extern_probe_failed;
+     }
+-    lcd_extern_driver_update();
+ 
+     printk("%s probe ok\n", LCD_EXTERN_NAME);
+-    return 0;
++    return ret;
+ 
+ lcd_extern_probe_failed:
+-    if (lcd_ext_config)
+-        kfree(lcd_ext_config);
++    if (lcd_extern_config) {
++        kfree(lcd_extern_config);
++        lcd_extern_config = NULL;
++    }
+     return -1;
+ }
+ 
+ static int aml_LD070WS2_remove(struct platform_device *pdev)
+ {
+-    remove_lcd_extern(lcd_ext_config);
+     if (pdev->dev.platform_data)
+         kfree (pdev->dev.platform_data);
+     return 0;
+diff --git a/include/linux/amlogic/aml_bl_extern.h b/include/linux/amlogic/aml_bl_extern.h
+index d38f877e04ad..191606cebc1a 100755
+--- a/include/linux/amlogic/aml_bl_extern.h
++++ b/include/linux/amlogic/aml_bl_extern.h
+@@ -12,15 +12,6 @@ typedef enum {
+ 	BL_EXTERN_MAX,
+ } Bl_Extern_Type_t;
+ 
+-//global API
+-struct aml_bl_extern_driver_t {
+-	const char *name;
+-	Bl_Extern_Type_t type;
+-	int (*power_on) (void);
+-	int (*power_off)(void);
+-	int (*set_level)(unsigned int level);
+-};
+-
+ struct bl_extern_config_t {
+ 	const char *name;
+ 	Bl_Extern_Type_t type;
+@@ -39,6 +30,15 @@ struct bl_extern_config_t {
+ 	unsigned int level_max;
+ };
+ 
++//global API
++struct aml_bl_extern_driver_t {
++	const char *name;
++	Bl_Extern_Type_t type;
++	int (*power_on) (void);
++	int (*power_off)(void);
++	int (*set_level)(unsigned int level);
++};
++
+ #define BL_EXTERN_DRIVER		"bl_extern"
+ 
+ #define bl_extern_gpio_request(gpio)                amlogic_gpio_request(gpio, BL_EXTERN_DRIVER)
+diff --git a/include/linux/amlogic/vout/aml_lcd_extern.h b/include/linux/amlogic/vout/aml_lcd_extern.h
+index 05762ff77f0e..5e703ec5667e 100755
+--- a/include/linux/amlogic/vout/aml_lcd_extern.h
++++ b/include/linux/amlogic/vout/aml_lcd_extern.h
+@@ -12,6 +12,17 @@ typedef enum {
+ 	LCD_EXTERN_MAX,
+ } Lcd_Extern_Type_t;
+ 
++struct lcd_extern_config_t {
++	char *name;
++	Lcd_Extern_Type_t type;
++	int status;
++	int i2c_addr;
++	int i2c_bus;
++	int spi_cs;
++	int spi_clk;
++	int spi_data;
++};
++
+ //global API
+ struct aml_lcd_extern_driver_t {
+ 	char *name;
+@@ -26,17 +37,6 @@ struct aml_lcd_extern_driver_t {
+ 	//unsigned short *init_off_cmd_16;
+ };
+ 
+-struct lcd_extern_config_t {
+-	char *name;
+-	Lcd_Extern_Type_t type;
+-	int status;
+-	int i2c_addr;
+-	int i2c_bus;
+-	int spi_cs;
+-	int spi_clk;
+-	int spi_data;
+-};
+-
+ #define LCD_EXTERN_DRIVER		"lcd_extern"
+ 
+ #define lcd_extern_gpio_request(gpio) 				amlogic_gpio_request(gpio, LCD_EXTERN_DRIVER)
+@@ -49,7 +49,6 @@ struct lcd_extern_config_t {
+ extern struct aml_lcd_extern_driver_t* aml_lcd_extern_get_driver(void);
+ extern int lcd_extern_driver_check(void);
+ extern int get_lcd_extern_dt_data(struct device_node* of_node, struct lcd_extern_config_t *pdata);
+-extern int remove_lcd_extern(struct lcd_extern_config_t *pdata);
+ 
+ #endif
+ 
+-- 
+2.19.0
+

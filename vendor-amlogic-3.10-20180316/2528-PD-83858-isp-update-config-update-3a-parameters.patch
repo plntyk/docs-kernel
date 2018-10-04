@@ -1,0 +1,3558 @@
+From 0ec27581f25696a32145114259c14f440e4fc02b Mon Sep 17 00:00:00 2001
+From: "dezhi.kong" <dezhi.kong@amlogic.com>
+Date: Fri, 13 Dec 2013 23:09:41 +0800
+Subject: [PATCH 2528/5965] PD #83858: isp,update config, update 3a parameters.
+
+---
+ drivers/amlogic/camera/ar0543.c               |   9 +-
+ drivers/amlogic/camera/ar0833.c               |   9 +-
+ drivers/amlogic/camera/common/config_parser.c | 468 +++++++++-----
+ drivers/amlogic/camera/common/config_parser.h | 103 ++-
+ drivers/amlogic/camera/ov5647.c               | 167 +++--
+ drivers/amlogic/tvin/isp/isp_drv.c            | 230 +++----
+ drivers/amlogic/tvin/isp/isp_drv.h            |  17 +-
+ drivers/amlogic/tvin/isp/isp_hw.c             |  37 +-
+ drivers/amlogic/tvin/isp/isp_hw.h             |   1 +
+ drivers/amlogic/tvin/isp/isp_parm.c           |  20 +-
+ drivers/amlogic/tvin/isp/isp_sm.c             | 585 +++++++++---------
+ drivers/amlogic/tvin/isp/isp_sm.h             |   8 +-
+ drivers/amlogic/tvin/vdin/vdin_ctl.c          | 378 +----------
+ drivers/amlogic/tvin/vdin/vdin_ctl.h          |   2 +-
+ drivers/amlogic/tvin/vdin/vdin_drv.c          |   9 +-
+ drivers/amlogic/tvin/vdin/vdin_drv.h          |   2 +-
+ include/linux/amlogic/tvin/tvin_v4l2.h        |  41 +-
+ 17 files changed, 1001 insertions(+), 1085 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index 42d2945be3eb..cca44ad9d98f 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -3391,6 +3391,9 @@ static int ar0543_open(struct file *file)
+     dev->pindex.scenes_index = 0;
+     dev->pindex.wb_index = 0;
+     dev->pindex.capture_index = 0;
++    dev->pindex.nr_index = 0;
++    dev->pindex.peaking_index = 0;
++    dev->pindex.lens_index = 0;
+     if(generate_para(dev->cam_para,dev->pindex) != 0){
+         printk("generate para failed\n");
+         free_para(dev->cam_para);
+@@ -3467,14 +3470,8 @@ static int ar0543_close(struct file *file)
+             for(i = 0; i < cf->aet.sum; i++){
+                 kfree(cf->aet.aet[i].info);
+                 kfree(cf->aet.aet[i].aet_table);
+-                if(cf->aet.aet[i].manual != NULL)
+-                    kfree(cf->aet.aet[i].manual);
+             }
+         }
+-        if(cf->scene_valid){
+-            kfree(cf->scene.scene);
+-        }
+-
+         kfree(cf);
+     }
+     if(dev->cam_para != NULL ){
+diff --git a/drivers/amlogic/camera/ar0833.c b/drivers/amlogic/camera/ar0833.c
+index 3082a0bfa4fa..da7ef44e7286 100755
+--- a/drivers/amlogic/camera/ar0833.c
++++ b/drivers/amlogic/camera/ar0833.c
+@@ -5485,6 +5485,9 @@ static int ar0833_open(struct file *file)
+     dev->pindex.scenes_index = 0;
+     dev->pindex.wb_index = 0;
+     dev->pindex.capture_index = 0;
++    dev->pindex.nr_index = 0;
++    dev->pindex.peaking_index = 0;
++    dev->pindex.lens_index = 0;
+     if(generate_para(dev->cam_para,dev->pindex) != 0){
+         printk("generate para failed\n");
+         free_para(dev->cam_para);
+@@ -5561,14 +5564,8 @@ static int ar0833_close(struct file *file)
+             for(i = 0; i < cf->aet.sum; i++){
+                 kfree(cf->aet.aet[i].info);
+                 kfree(cf->aet.aet[i].aet_table);
+-                if(cf->aet.aet[i].manual != NULL)
+-                    kfree(cf->aet.aet[i].manual);
+             }
+         }
+-        if(cf->scene_valid){
+-            kfree(cf->scene.scene);
+-        }
+-
+         kfree(cf);
+     }
+     if(dev->cam_para != NULL ){
+diff --git a/drivers/amlogic/camera/common/config_parser.c b/drivers/amlogic/camera/common/config_parser.c
+index e881e0fd2928..bc28e60896f9 100755
+--- a/drivers/amlogic/camera/common/config_parser.c
++++ b/drivers/amlogic/camera/common/config_parser.c
+@@ -18,10 +18,13 @@ char *capture_key = "capture_start";
+ char *scenes_key = "scenes_start";
+ char *wb_key = "wb_start";
+ char *wave_key = "wave_start";
+-char *lenc_key = "lenc_start";
++char *lens_key = "lens_start";
+ char *gamma_key = "gamma_start";
+ char *wb_sensor_key = "mwb_sensor_start";
+ char *version_key = "version_start";
++char *cm_key = "cm_start";
++char *nr_key = "nr_start";
++char *peaking_key = "peaking_start";
+ 
+ typedef struct{
+ 	char *buffer;
+@@ -103,7 +106,7 @@ int camera_close_config(void)
+ 
+ static int camera_read_buff(struct i2c_adapter *adapter,unsigned short i2c_addr,char *buf, int addr_len, int data_len)
+ {
+-  int  i2c_flag = -1;
++	int  i2c_flag = -1;
+ 	struct i2c_msg msgs[] = {
+ 		{
+ 			.addr	= i2c_addr,
+@@ -336,7 +339,7 @@ char *search_key(buffer_para_t *buf_para,int *offset,int *remained){
+     return iter;	
+ }
+ 
+-int parser_head(char *buffer,int *sum){
++int parse_head(char *buffer,int *sum){
+     char *iter;
+     iter = strstr(buffer,"sum");
+     if(iter == NULL){
+@@ -367,9 +370,10 @@ int parse_body_head(char *buffer,int *no,int check,char *name){
+ int parse_aet_element_info(char **iter,sensor_aet_info_t *info){
+     *iter = strstr(*iter,"export");
+     *iter += 7;
+-    sscanf(*iter,"%x",&(info->fmt_main_fr));
+-    *iter = strstr(*iter,",");
+-    *iter += 1;
++	sscanf(*iter,"%x",&(info->fmt_main_fr));
++	*iter = strstr(*iter,",");
++	*iter += 1;
++
+     sscanf(*iter,"%x",&(info->fmt_capture)),
+     *iter = strstr(*iter,",");
+     *iter += 1;
+@@ -440,17 +444,16 @@ int parse_last_aet_element_tbl(char **iter,sensor_aet_t *tbl){
+     return 0;
+ }
+ 
+-
+ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+     int ret,sum,check,i;
+     char *iter;
+         
+-    iter = search_string(buf_para,offset,remained,"effect_start","effect");
++    iter = search_string(buf_para,offset,remained,"effect_start]","[effect]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(ret != 0){
+         return -HEAD_FAILED;
+     }
+@@ -458,7 +461,7 @@ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+     /**parser body***/
+     check = 0;
+     while(check < sum && iter != NULL){
+-        iter = search_string(buf_para,offset,remained,"effect","effect");
++        iter = search_string(buf_para,offset,remained,"[effect]","[effect");
+         if(iter == NULL){
+             return -WRONG_FORMAT;
+         }
+@@ -468,7 +471,7 @@ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+         }
+         iter = strstr(iter,"export");
+         iter += 7;
+-        for(i=0;i<18;i++){
++        for(i=0;i<EFFECT_MAX;i++){
+             sscanf(iter,"%x",&(cf->eff.eff[check].export[i]));
+             iter = strstr(iter,",");
+             if(iter == NULL)
+@@ -481,19 +484,16 @@ int parse_effect(buffer_para_t *buf_para,int *remained,int *offset){
+     return 0;
+ }
+ 
+-
+-
+ int parse_aet(buffer_para_t *buf_para,int *remained,int *offset){
+     int sum,ret,check,i;
+     char *iter,*eter;
+-    int manual;
+ 
+-    iter = search_string(buf_para,offset,remained,"aet_start","aet");
++    iter = search_string(buf_para,offset,remained,"aet_start]","[aet]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(sum <= 0){
+         return -HEAD_FAILED;
+     }
+@@ -509,7 +509,7 @@ int parse_aet(buffer_para_t *buf_para,int *remained,int *offset){
+     } //alloc head
+     check = 0;
+     while(check < sum){
+-        iter = search_string(buf_para,offset,remained,"aet","aet");
++        iter = search_string(buf_para,offset,remained,"[aet]","[aet");
+         if(iter == NULL){
+             printk("aet wrong config format\n");
+             ret = -WRONG_FORMAT;
+@@ -531,67 +531,33 @@ int parse_aet(buffer_para_t *buf_para,int *remained,int *offset){
+             goto clean;
+         }
+         if((cf->aet.aet[check].aet_table = (sensor_aet_t *)kmalloc(sizeof(sensor_aet_t) * (cf->aet.aet[check].info->tbl_max_step + 1),0)) == NULL){
+-            for(i = 0; i < check; i++){
+-                kfree(cf->aet.aet[i].aet_table);	
+-            }
+-            ret = -NO_MEM;
++    		for(i = 0; i < check; i++){
++    			kfree(cf->aet.aet[i].aet_table);	
++    		}
++    		ret = -NO_MEM;
+             goto clean;
+         } 
+         for(i = 0; i <= cf->aet.aet[check].info->tbl_max_step;i++){
+-            if(i == cf->aet.aet[check].info->tbl_max_step){
+-                ret = parse_last_aet_element_tbl(&iter,&(cf->aet.aet[check].aet_table[i]));
+-            }else
+-                ret = parse_aet_element_tbl(&iter,&(cf->aet.aet[check].aet_table[i]));
++    		if(i == cf->aet.aet[check].info->tbl_max_step){
++    			ret = parse_last_aet_element_tbl(&iter,&(cf->aet.aet[check].aet_table[i]));
++    		}else
++        		ret = parse_aet_element_tbl(&iter,&(cf->aet.aet[check].aet_table[i]));
+             if(ret != 0){          	
+-                ret = -BODY_ELEMENT_FAILED;
+-                goto clean_table;
+-            }
+-        }
+-        iter = strstr(iter,"manual");
+-        iter += 7;
+-        sscanf(iter,"%x",&manual);
+- 
+-        if(manual < 0){
+-            printk("wrong manual num\n");
+-            ret = -BODY_ELEMENT_FAILED;
+-            goto clean_table;
+-      	}else if(manual == 0){
+-      		cf->aet.aet[check].manual = NULL;
+-      		check++;
+-      		continue;	
+-      	}
+-        if((cf->aet.aet[check].manual = (int *)kmalloc(sizeof(int)*(manual + 1),0)) == NULL){
+-            ret = -NO_MEM;
+-            goto clean_all;
+-        }
+-        i = 0;
+-      	eter = strstr(iter,";");
+-        while(iter < eter){
+-            sscanf(iter,"%x",&(cf->aet.aet[check].manual[i]));
+-            //printk("manual:%x\n",cf->aet.aet[check].manual[i]);
+-            iter = strstr(iter,",");
+-            if(iter == NULL){
+-                break;
+-            }
+-            iter += 1;
+-            i++;
+-        }       
++            	ret = -BODY_ELEMENT_FAILED;
++              	goto clean_table;
++              }
++        }      
+         check++;
+     }
+     return 0;
+ 
+-clean_all:
+-    for(i = 0; i < check; i++){
+-        if(cf->aet.aet[i].manual != NULL)
+-            kfree(cf->aet.aet[i].manual);	
+-    }
+ clean_table:
+-    for(i = 0; i <= check; i++){
+-        kfree(cf->aet.aet[i].aet_table);	
++	for(i = 0; i <= check; i++){
++    	kfree(cf->aet.aet[i].aet_table);	
+     }
+ clean:
+     for(i = 0;i < sum; i++){
+-        kfree(cf->aet.aet[i].info);
++    	kfree(cf->aet.aet[i].info);
+     }
+     return ret;
+ }
+@@ -603,12 +569,12 @@ int parse_hw(buffer_para_t *buf_para,int *remained,int *offset){
+     char *iter = NULL;
+     char *eter = NULL;
+ 
+-    iter = search_string(buf_para,offset,remained,"hw_start","hw");
++    iter = search_string(buf_para,offset,remained,"hw_start]","[hw]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(ret != 0){
+         return -HEAD_FAILED;
+     }
+@@ -616,7 +582,7 @@ int parse_hw(buffer_para_t *buf_para,int *remained,int *offset){
+     /**parser body***/
+     check = 0;
+     while(check < sum){
+-        iter = search_string(buf_para,offset,remained,"hw","hw");
++        iter = search_string(buf_para,offset,remained,"[hw]","[hw");
+         if(iter == NULL){
+             return -WRONG_FORMAT;
+         }
+@@ -649,12 +615,12 @@ int parse_wb(buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+     char *iter;
+         
+-    iter = search_string(buf_para,offset,remained,"wb_start","wb");
++    iter = search_string(buf_para,offset,remained,"wb_start]","[wb]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(ret != 0){
+         return -HEAD_FAILED;
+     }
+@@ -662,7 +628,7 @@ int parse_wb(buffer_para_t *buf_para,int *remained,int *offset){
+     /**parser body***/
+     check = 0;
+     while(check < sum){
+-        iter = search_string(buf_para,offset,remained,"wb","wb");
++        iter = search_string(buf_para,offset,remained,"[wb]","[wb");
+         if(iter == NULL){
+             return -WRONG_FORMAT;
+         }
+@@ -688,12 +654,12 @@ int parse_wb(buffer_para_t *buf_para,int *remained,int *offset){
+ int parse_capture(buffer_para_t *buf_para,int *remained,int *offset){
+    	int ret,sum,check,i;
+     char *iter; 
+-    iter = search_string(buf_para,offset,remained,"capture_start","capture");
++    iter = search_string(buf_para,offset,remained,"capture_start]","[capture]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(ret != 0){
+         return -HEAD_FAILED;
+     }
+@@ -702,7 +668,7 @@ int parse_capture(buffer_para_t *buf_para,int *remained,int *offset){
+     /**parser body***/
+     check = 0;
+     while(check < sum){
+-        iter = search_string(buf_para,offset,remained,"capture","capture");
++        iter = search_string(buf_para,offset,remained,"[capture]","[capture");
+         if(iter == NULL){
+         		printk("search wrong\n");
+             return -WRONG_FORMAT;
+@@ -733,7 +699,7 @@ int parse_wave(buffer_para_t *buf_para,int *remained,int *offset){
+    	int i;
+     char *iter;
+         
+-    iter = search_string(buf_para,offset,remained,"wave_start","wave_end");
++    iter = search_string(buf_para,offset,remained,"wave_start]","[wave_end]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+@@ -755,35 +721,29 @@ int parse_scene(buffer_para_t *buf_para,int *remained,int *offset){
+     int sum,ret,check,i;
+     char *iter = NULL;
+     
+-    iter = search_string(buf_para,offset,remained,"scenes_start","scenes");
++    iter = search_string(buf_para,offset,remained,"scenes_start]","[scenes]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    ret = parser_head(iter,&sum);
++    ret = parse_head(iter,&sum);
+     if(sum <= 0){
+         return -HEAD_FAILED;
+     }
+     cf->scene.sum = sum;
+ 
+     /**parser body***/
+-    if((cf->scene.scene = (scene_type *)kmalloc(sizeof(scene_type)*sum,0)) == NULL){           
+-         return -NO_MEM;
+-    } //alloc mem
+     check = 0;
+     while(check < sum){
+-        iter = search_string(buf_para,offset,remained,"scenes","scenes");
++        iter = search_string(buf_para,offset,remained,"[scenes]","[scenes");
+         if(iter == NULL){
+             printk("scene wrong config format\n");
+-            ret = -WRONG_FORMAT;
+-            goto clean;
++            return -WRONG_FORMAT;
+         }
+         ret = parse_body_head(iter,&((cf->scene.scene[check]).num),check,(cf->scene.scene[check].name));
+         if(ret != 0){
+-            ret = -BODY_HEAD_FAILED;
+-            goto clean;
+-        } 
+-
++            return -BODY_HEAD_FAILED;
++        }
+         iter = strstr(iter,"export");
+         iter += 7;
+         for(i=0;i<SCENE_MAX;i++){
+@@ -794,44 +754,60 @@ int parse_scene(buffer_para_t *buf_para,int *remained,int *offset){
+             	break;
+             iter += 1;
+ 
+-        }
+-        
++        }        
+        check++;
+-    }    
++    }
+     return 0;
+-
+-clean:
+-    kfree(cf->scene.scene);
+-    return ret;
+ }
+ 
+-int parse_lenc(buffer_para_t *buf_para,int *remained,int *offset){
+-   	int i;
++int parse_lens(buffer_para_t *buf_para,int *remained,int *offset){
++   	int sum,ret,check,i;
+     char *iter;
+         
+-    iter = search_string(buf_para,offset,remained,"lenc_start","lenc_end");
++    iter = search_string(buf_para,offset,remained,"lens_start]","[lens]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+     /***parser head***/
+-    iter = strstr(iter,"export");
+-    iter += 7;
+-    for(i=0;i<1024;i++){
+-        sscanf(iter,"%x",&(cf->lenc.export[i]));
+-        //printk("lenc:%x\n",cf->lenc.export[i]);
+-        iter = strstr(iter,",");
+-        if(iter == NULL)
+-        	break;
+-        iter += 1;
++    ret = parse_head(iter,&sum);
++    if(sum <= 0){
++        return -HEAD_FAILED;
+     }
+-     return 0;
++    cf->lens.sum = sum;
++    
++    /**parser body***/
++    check = 0;
++    while(check < sum){
++        iter = search_string(buf_para,offset,remained,"[lens]","[lens");
++        if(iter == NULL){
++            printk("lens wrong config format\n");
++            return -WRONG_FORMAT;
++        }
++        ret = parse_body_head(iter,&((cf->lens.lens[check]).num),check,(cf->lens.lens[check].name));
++        if(ret != 0){
++            return -BODY_HEAD_FAILED;
++        }
++        iter = strstr(iter,"export");
++        iter += 7;
++        for(i=0;i<LENS_MAX;i++){
++            sscanf(iter,"%x",&(cf->lens.lens[check].export[i]));
++            //printk("scene:%x\n",(cf->lens.lens[check].export[i]));
++            iter = strstr(iter,",");
++            if(iter == NULL)
++            	break;
++            iter += 1;
++
++        }       
++       check++;
++    }
++	return 0;
+ }
+ 
+ int parse_gamma(buffer_para_t *buf_para,int *remained,int *offset){
+     int i;
+     char *iter;
+ 
+-    iter = search_string(buf_para,offset,remained,"gamma_start","gamma_end");
++    iter = search_string(buf_para,offset,remained,"gamma_start]","[gamma_end]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+@@ -867,7 +843,7 @@ int parse_wb_sensor(buffer_para_t *buf_para,int *remained,int *offset){
+     int i;
+     char *iter;
+ 
+-    iter = search_string(buf_para,offset,remained,"mwb_sensor_start","mwb_sensor_end");
++    iter = search_string(buf_para,offset,remained,"mwb_sensor_start]","[mwb_sensor_end]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+@@ -891,7 +867,7 @@ int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
+     char *iter,*end;
+     int len = 0;
+ 
+-    iter = search_string(buf_para,offset,remained,"version_start","version_end");
++    iter = search_string(buf_para,offset,remained,"version_start]","[version_end]");
+     if(iter == NULL){
+         return -WRONG_FORMAT;
+     }
+@@ -917,6 +893,114 @@ int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
+     return 0;
+ }
+ 
++int parse_cm(buffer_para_t *buf_para,int *remained,int *offset){
++   	int i;
++    char *iter;
++        
++    iter = search_string(buf_para,offset,remained,"cm_start]","[cm_end]");
++    if(iter == NULL){
++        return -WRONG_FORMAT;
++    }
++    /***parser body***/
++    iter = strstr(iter,"export");
++    iter += 7;
++    for(i=0;i<CM_MAX;i++){
++        sscanf(iter,"%x",&(cf->cm.export[i]));
++        //printk("cm:%x\n",cf->cm.export[i]);
++        iter = strstr(iter,",");
++        if(iter == NULL)
++        	break;
++        iter += 1;
++    }
++     return 0;
++}
++
++int parse_nr(buffer_para_t *buf_para,int *remained,int *offset){
++   	int ret,sum,check,i;
++    char *iter; 
++    iter = search_string(buf_para,offset,remained,"nr_start]","[nr]");
++    if(iter == NULL){
++        return -WRONG_FORMAT;
++    }
++    /***parser head***/
++    ret = parse_head(iter,&sum);
++    if(ret != 0){
++        return -HEAD_FAILED;
++    }
++    cf->nr.sum = sum;
++    //printk("nr sum:%d\n",sum);
++    /**parser body***/
++    check = 0;
++    while(check < sum){
++        iter = search_string(buf_para,offset,remained,"[nr]","[nr");
++        if(iter == NULL){
++        	printk("search wrong\n");
++            return -WRONG_FORMAT;
++        }
++        ret = parse_body_head(iter,&(cf->nr.nr[check].num),check,cf->nr.nr[check].name);
++        if(ret != 0){
++            return -BODY_HEAD_FAILED;
++        }
++        //printk("name:%s\n",cf->nr.nr[check].name);
++        iter = strstr(iter,"export");
++        iter += 7;
++        for(i=0;i<NR_MAX;i++){
++            sscanf(iter,"%x",&(cf->nr.nr[check].export[i]));
++            //printk("nr:%x\n",cf->nr.nr[check].export[i]);
++            iter = strstr(iter,",");
++            if(iter == NULL)
++            	break;
++            iter += 1;
++
++        }
++        check++;
++     }
++     return 0;
++}
++
++int parse_peaking(buffer_para_t *buf_para,int *remained,int *offset){
++   	int ret,sum,check,i;
++    char *iter; 
++    iter = search_string(buf_para,offset,remained,"peaking_start]","[peaking]");
++    if(iter == NULL){
++        return -WRONG_FORMAT;
++    }
++    /***parser head***/
++    ret = parse_head(iter,&sum);
++    if(ret != 0){
++        return -HEAD_FAILED;
++    }
++    cf->peaking.sum = sum;
++    //printk("peaking sum:%d\n",sum);
++    /**parser body***/
++    check = 0;
++    while(check < sum){
++        iter = search_string(buf_para,offset,remained,"[peaking]","[peaking");
++        if(iter == NULL){
++        	printk("search wrong\n");
++            return -WRONG_FORMAT;
++        }
++        ret = parse_body_head(iter,&(cf->peaking.peaking[check].num),check,cf->peaking.peaking[check].name);
++        if(ret != 0){
++            return -BODY_HEAD_FAILED;
++        }
++        //printk("name:%s\n",cf->peaking.peaking[check].name);
++        iter = strstr(iter,"export");
++        iter += 7;
++        for(i=0;i<PEAKING_MAX;i++){
++            sscanf(iter,"%x",&(cf->peaking.peaking[check].export[i]));
++            //printk("peaking:%x\n",cf->peaking.peaking[check].export[i]);
++            iter = strstr(iter,",");
++            if(iter == NULL)
++            	break;
++            iter += 1;
++
++        }
++        check++;
++     }
++     return 0;
++}
++
+ int parse_config(char *path){
+     char *buffer,*iter;
+     int file_size;
+@@ -1036,25 +1120,38 @@ int parse_config(char *path){
+                 }
+                 break;
+             case 'c':
+-                if(memcmp(iter,capture_key,strlen(capture_key)) == 0){
+-                    cf->capture_valid = 1;
+-                    if((ret = parse_capture(&buf_para,&remained_size,&read_offset)) != 0){
+-                        cf->capture_valid = 0;
+-                        printk("capture invalid :%d\n",ret);									
+-                    }
+-                }else{
+-                    buf_para.data_start += strlen(capture_key);
+-                }
++            	if(*(iter + 1) == 'a'){
++		            if(memcmp(iter,capture_key,strlen(capture_key)) == 0){
++		                cf->capture_valid = 1;
++		                if((ret = parse_capture(&buf_para,&remained_size,&read_offset)) != 0){
++		                    cf->capture_valid = 0;
++		                    printk("capture invalid :%d\n",ret);									
++		                }
++		            }else{
++		                buf_para.data_start += strlen(capture_key);
++		            }
++		        }else if(*(iter + 1) == 'm'){
++		        	if(memcmp(iter,cm_key,strlen(cm_key)) == 0){
++		                cf->cm_valid = 1;
++		                if((ret = parse_cm(&buf_para,&remained_size,&read_offset)) != 0){
++		                    cf->cm_valid = 0;
++		                    printk("cm invalid :%d\n",ret);									
++		                }
++		            }else{
++		                buf_para.data_start += strlen(cm_key);
++		            }	        	
++		        }else
++		        	buf_para.data_start += 1;
+                 break;		
+             case 'l':
+-                if(memcmp(iter,lenc_key,strlen(lenc_key)) == 0){
+-                    cf->lenc_valid = 1;
+-                    if((ret = parse_lenc(&buf_para,&remained_size,&read_offset)) != 0){
+-                        cf->lenc_valid = 0;
+-                        printk("lenc invalid :%d\n",ret);									
++                if(memcmp(iter,lens_key,strlen(lens_key)) == 0){
++                    cf->lens_valid = 1;
++                    if((ret = parse_lens(&buf_para,&remained_size,&read_offset)) != 0){
++                        cf->lens_valid = 0;
++                        printk("lens invalid :%d\n",ret);									
+                     }
+                 }else{
+-                    buf_para.data_start += strlen(lenc_key);
++                    buf_para.data_start += strlen(lens_key);
+                 }
+                 break;
+             case 'g':
+@@ -1089,7 +1186,29 @@ int parse_config(char *path){
+                 }else{
+                     buf_para.data_start += strlen(version_key);
+                 } 
+-                 break;                      
++                 break;
++            case 'n':
++                if(memcmp(iter,nr_key,strlen(nr_key)) == 0){
++                    cf->nr_valid = 1;
++                    if((ret = parse_nr(&buf_para,&remained_size,&read_offset)) != 0){
++                        cf->nr_valid = 0;
++                        printk("nr invalid :%d\n",ret);									
++                    }
++                }else{
++                    buf_para.data_start += strlen(nr_key);
++                } 
++                 break;
++             case 'p':
++                if(memcmp(iter,peaking_key,strlen(peaking_key)) == 0){
++                    cf->peaking_valid = 1;
++                    if((ret = parse_peaking(&buf_para,&remained_size,&read_offset)) != 0){
++                        cf->peaking_valid = 0;
++                        printk("peaking invalid :%d\n",ret);									
++                    }
++                }else{
++                    buf_para.data_start += strlen(peaking_key);
++                } 
++                 break;                                     
+             default:
+                 buf_para.data_start += 1;
+                 break;		
+@@ -1159,12 +1278,12 @@ unsigned int get_aet_max_step(void)
+     return(sensor_aet_info->tbl_max_step);
+ }
+ 
+-short  get_aet_max_gain(void)
++unsigned int get_aet_max_gain(void)
+ {
+     return(sensor_aet_info->tbl_max_gain);
+ }
+ 
+-short get_aet_min_gain(void)
++unsigned int get_aet_min_gain(void)
+ {
+     return(sensor_aet_info->tbl_min_gain);
+ }
+@@ -1174,12 +1293,12 @@ unsigned int get_aet_current_step(void)
+     return(sensor_aet_step);
+ }
+ 
+-short  get_aet_current_gain(void)
++unsigned int get_aet_current_gain(void)
+ {
+     return(sensor_aet_table[sensor_aet_step].gain);
+ }
+ 
+-short  get_aet_new_gain(unsigned int new_step)
++unsigned int get_aet_new_gain(unsigned int new_step)
+ {
+     return(sensor_aet_table[new_step].gain);
+ }
+@@ -1212,9 +1331,9 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+             return 	-ENOMEM;
+         }
+         scene = para->xml_scenes;
+-        memcpy(&(scene->ae),cf->scene.scene[pindex.scenes_index].export,97*sizeof(unsigned int));
+-        memcpy(&(scene->awb),cf->scene.scene[pindex.scenes_index].export + 97,104*sizeof(unsigned int));
+-        // memcpy(&(scene->af),cf->scene.scene[pindex.scenes_index].export + 201,1*sizeof(unsigned int));
++        memcpy(&(scene->ae),cf->scene.scene[pindex.scenes_index].export,AE_LEN * sizeof(unsigned int));
++        memcpy(&(scene->awb),cf->scene.scene[pindex.scenes_index].export + AE_LEN,AWB_LEN * sizeof(unsigned int));
++        memcpy(&(scene->af),cf->scene.scene[pindex.scenes_index].export + (AE_LEN + AWB_LEN),AF_LEN * sizeof(unsigned int));
+     }else{
+         para->xml_scenes = NULL;
+     }
+@@ -1238,8 +1357,8 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+     }else{
+         para->xml_regs_map = NULL;
+     }
+-    /** init lenc **/
+-    if(cf->lenc_valid == 1){
++    /** init lens **/
++    if(cf->lens_valid == 1){
+         if(para->xml_regs_map == NULL){
+             if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
+                 printk("alloc mem failed\n");
+@@ -1247,8 +1366,7 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+             }
+         }
+         reg = para->xml_regs_map;
+-        memcpy(reg->lnsd.reg_map,cf->lenc.export,1024*sizeof(unsigned int));
+-
++        memcpy(reg->lnsd.reg_map,cf->lens.lens[pindex.lens_index].export + 2,(LENS_MAX - 2)*sizeof(unsigned int));
+     }
+ 
+     /** init gamma **/
+@@ -1271,7 +1389,7 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+             return 	-ENOMEM;
+         }
+         effect = para->xml_effect_manual;
+-        memcpy(effect->csc.reg_map,cf->eff.eff[pindex.effect_index].export,18*sizeof(unsigned int));
++        memcpy(effect->csc.reg_map,cf->eff.eff[pindex.effect_index].export,EFFECT_MAX*sizeof(unsigned int));
+     }else{
+         para->xml_effect_manual = NULL;
+     }
+@@ -1312,10 +1430,32 @@ int generate_para(cam_parameter_t *para,para_index_t pindex){
+             return 	-ENOMEM;
+         }
+         wave = para->xml_wave;
+-        memcpy(wave,cf->wave.export,12*sizeof(unsigned int));
++        memcpy(wave,cf->wave.export,WAVE_MAX*sizeof(unsigned int));
+     }else{
+         para->xml_wave = NULL;
+-    }  
++    }
++    /** init nr **/
++    if(cf->nr_valid == 1){
++		if(para->xml_regs_map == NULL){
++			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
++				printk("alloc mem failed\n");
++				return 	-ENOMEM;
++			}
++        }
++        reg = para->xml_regs_map;
++        memcpy(reg->nr.reg_map,cf->nr.nr[pindex.nr_index].export + 2,(NR_MAX - 2)*sizeof(unsigned int));
++    }
++    /** init sharp **/
++    if(cf->peaking_valid == 1){
++		if(para->xml_regs_map == NULL){
++			if((para->xml_regs_map = kmalloc(sizeof(xml_default_regs_t),0)) == NULL){
++				printk("alloc mem failed\n");
++				return 	-ENOMEM;
++			}
++        }
++        reg = para->xml_regs_map;
++        memcpy(reg->sharp.reg_map,cf->peaking.peaking[pindex.peaking_index].export + 2,(PEAKING_MAX - 2)*sizeof(unsigned int));
++    }
+     return 0;
+ }
+ 
+@@ -1349,3 +1489,49 @@ void free_para(cam_parameter_t *para){
+ 		para->xml_wave = NULL;	
+ 	}
+ }
++
++void update_index(int width,int height,para_index_t *pindex){
++	int i = 0;
++	if(cf->lens_valid == 1){
++		while(i < cf->lens.sum){
++			if(cf->lens.lens[i].export[0] == width && cf->lens.lens[i].export[1] == height)
++				break;
++			i++;
++		}
++		if(i < cf->lens.sum)
++			pindex->lens_index = i;
++		else{
++			printk("width:%x,height:%x no match lens param\n");
++			pindex->lens_index = 0;	
++		}						
++	}
++	i = 0;
++	if(cf->nr_valid == 1){
++		while(i < cf->nr.sum){
++			if(cf->nr.nr[i].export[0] == width && cf->nr.nr[i].export[1] == height)
++				break;
++			i++;
++		}
++		if(i < cf->nr.sum)
++			pindex->nr_index = i;
++		else{
++			printk("width:%x,height:%x no match nr param\n");
++			pindex->nr_index = 0;	
++		}						
++	}
++	i = 0;
++	if(cf->peaking_valid == 1){
++		while(i < cf->peaking.sum){
++			if(cf->peaking.peaking[i].export[0] == width && cf->peaking.peaking[i].export[1] == height)
++				break;
++			i++;
++		}
++		if(i < cf->peaking.sum)
++			pindex->peaking_index = i;
++		else{
++			printk("width:%x,height:%x no match peaking param\n");
++			pindex->peaking_index = 0;	
++		}						
++	}
++	return;	
++}
+diff --git a/drivers/amlogic/camera/common/config_parser.h b/drivers/amlogic/camera/common/config_parser.h
+index 611dfd6bd03e..e8e252bf5a7a 100755
+--- a/drivers/amlogic/camera/common/config_parser.h
++++ b/drivers/amlogic/camera/common/config_parser.h
+@@ -8,17 +8,29 @@
+ #include <linux/string.h>
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
+ 
+-#define EFFECT_MAX 16
+-#define AET_MAX 32
+-#define HW_MAX 16
+-#define WB_MAX 10
++#define EFFECT_ITEM_MAX 16
++#define AET_ITEM_MAX 32
++#define HW_ITEM_MAX 16
++#define WB_ITEM_MAX 10
+ #define CAPTURE_ITEM_MAX 5
++#define NR_ITEM_MAX 5
++#define PEAKING_ITEM_MAX 5
++#define LENS_ITEM_MAX 5
++#define SCENE_ITEM_MAX 1
++#define EFFECT_MAX 18
++#define HW_MAX 64
+ #define GAMMA_MAX 257
+-#define SCENE_MAX 202
++#define SCENE_MAX 281
+ #define WB_SENSOR_MAX 4
+ #define CAPTURE_MAX 8
+-#define LENC_MAX 1024
++#define LENS_MAX 1027
+ #define WAVE_MAX 12
++#define CM_MAX 188
++#define NR_MAX 15
++#define PEAKING_MAX 35
++#define AE_LEN 119
++#define AWB_LEN 120
++#define AF_LEN	42
+ #define BUFFER_SIZE 1024
+ 
+ enum error_code {
+@@ -31,31 +43,26 @@ enum error_code {
+ 	BODY_ELEMENT_FAILED,
+ };
+ 
+-typedef union{
+-    int i_val;
+-    float f_val;
+-}import_type;
+-
+ typedef struct{
+     int num;
+     char name[40];
+-    unsigned int export[18];
++    unsigned int export[EFFECT_MAX];
+ }effect_type;
+ 
+ typedef struct{
+     int sum;
+-    effect_type eff[EFFECT_MAX];
++    effect_type eff[EFFECT_ITEM_MAX];
+ }effect_struct;
+ 
+ typedef struct{
+     int num;
+     char name[40];
+-    int export[64];
++    int export[HW_MAX];
+ }hw_type;
+ 
+ typedef struct{
+     int sum;
+-    hw_type hw[HW_MAX];
++    hw_type hw[HW_ITEM_MAX];
+ }hw_struct;
+ 
+ typedef struct{
+@@ -66,7 +73,7 @@ typedef struct{
+ 
+ typedef struct{
+     int sum;
+-    wb_type wb[WB_MAX];
++    wb_type wb[WB_ITEM_MAX];
+ }wb_struct;
+ 
+ 
+@@ -78,7 +85,7 @@ typedef struct{
+ 
+ typedef struct{
+     int sum;
+-    scene_type *scene;
++    scene_type scene[SCENE_ITEM_MAX];
+ }scene_struct;
+ 
+ typedef struct{
+@@ -120,12 +127,11 @@ typedef struct{
+     char name[40];
+     sensor_aet_info_t *info;
+     sensor_aet_t *aet_table;
+-    int *manual;
+ }aet_type;
+ 
+ typedef struct{
+     int sum;
+-    aet_type aet[AET_MAX];
++    aet_type aet[AET_ITEM_MAX];
+ }aet_struct;
+ 
+ typedef struct{
+@@ -133,8 +139,15 @@ typedef struct{
+ }wave_struct;
+ 
+ typedef struct{
+-	int export[LENC_MAX];
+-}lenc_struct;
++	int num;
++	char name[40];
++	int export[LENS_MAX];
++}lens_type;
++
++typedef struct{
++	int sum;
++	lens_type lens[LENS_ITEM_MAX];	
++}lens_struct;
+ 
+ typedef struct{
+ 	unsigned short gamma_r[GAMMA_MAX];
+@@ -152,6 +165,32 @@ typedef struct{
+     char version[30];		
+ }version_struct;
+ 
++typedef struct{
++	int export[CM_MAX];	
++}cm_struct;
++
++typedef struct{
++	int num;
++	char name[40];
++	int export[NR_MAX];	
++}nr_type;
++
++typedef struct{
++	int sum;
++	nr_type nr[NR_ITEM_MAX];	
++}nr_struct;
++
++typedef struct{
++	int num;
++	char name[40];
++	int export[PEAKING_MAX];	
++}peaking_type;
++
++typedef struct{
++	int sum;
++	peaking_type peaking[PEAKING_ITEM_MAX];
++}peaking_struct;
++
+ typedef struct{
+     effect_struct eff;
+     int effect_valid;
+@@ -167,14 +206,20 @@ typedef struct{
+     int wb_valid;
+     wave_struct wave;
+     int wave_valid;
+-    lenc_struct lenc;
+-    int lenc_valid;
++    lens_struct lens;
++    int lens_valid;
+     gamma_struct gamma;
+     int gamma_valid;
+     wb_sensor_struct wb_sensor_data;
+     int wb_sensor_data_valid;
+     version_struct version;
+     int version_info_valid;
++    cm_struct cm;
++    int cm_valid;
++    nr_struct nr;
++    int nr_valid;
++    peaking_struct peaking;
++    int peaking_valid;
+ }configure;
+ 
+ typedef struct{
+@@ -182,6 +227,9 @@ typedef struct{
+ 	unsigned int scenes_index;
+ 	unsigned int wb_index;
+ 	unsigned int capture_index;
++	unsigned int nr_index;
++	unsigned int peaking_index;
++	unsigned int lens_index;
+ }para_index_t;
+ 
+ typedef struct{
+@@ -204,13 +252,14 @@ typedef struct sensor_dg_s {
+ int parse_config(char *path);
+ int generate_para(cam_parameter_t *para,para_index_t pindex);
+ void free_para(cam_parameter_t *para);
++void update_index(int width,int height,para_index_t *pindex);
+ 
+ unsigned int get_aet_current_step(void);
+-short get_aet_current_gain(void);
+-short get_aet_min_gain(void);
+-short get_aet_max_gain(void);
++unsigned int get_aet_current_gain(void);
++unsigned int get_aet_min_gain(void);
++unsigned int get_aet_max_gain(void);
+ unsigned int get_aet_max_step(void);
+-short get_aet_gain_by_step(unsigned int new_step);
++unsigned int get_aet_gain_by_step(unsigned int new_step);
+ 
+ 
+ int my_i2c_put_byte(struct i2c_adapter *adapter,unsigned short i2c_addr,unsigned short addr,unsigned char data);
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 2d1e75cea205..c90fba5aa70a 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -121,6 +121,7 @@ static int t_index = -1;
+ static int dest_hactive = 640;
+ static int dest_vactive = 480;
+ static bool bDoingAutoFocusMode = false;
++unsigned char last_exp_h = 0, last_exp_m = 0, last_exp_l = 0, last_ag_h = 0, last_ag_l = 0, last_vts_h = 0, last_vts_l = 0;
+ /* supported controls */
+ static struct v4l2_queryctrl ov5647_qctrl[] = {
+ 	{
+@@ -632,6 +633,8 @@ struct ov5647_device {
+ 	struct vdin_v4l2_ops_s *vops;
+ 	
+ 	fe_arg_t fe_arg;
++	
++	vdin_arg_t vdin_arg;
+ 	/* wake lock */
+ 	struct wake_lock	wake_lock;
+ 	/* ae status */
+@@ -703,6 +706,9 @@ struct aml_camera_i2c_fig_s OV5647_VGA_script_mipi[] = {
+           {0x3a19, 0xf8},
+           {0x3c01, 0x80},
+           {0x3b07, 0x0c},
++          {0x3500, 0x00},
++          {0x3501, 0x1c},
++          {0x3502, 0x60},		  	
+           {0x380c, 0x07},
+           {0x380d, 0x3c},
+           {0x380e, 0x03},
+@@ -863,6 +869,9 @@ struct aml_camera_i2c_fig_s OV5647_preview_VGA_script[] = {
+ 	{0x3a19,0xf8},
+ 	{0x3c01,0x80},
+ 	{0x3b07,0x0c},
++	{0x3500, 0x00},
++	{0x3501, 0x1c},
++	{0x3502, 0x60},
+ 	{0x380c,0x07},
+ 	{0x380d,0x3c},
+ 	{0x380e,0x01},
+@@ -959,6 +968,9 @@ struct aml_camera_i2c_fig_s OV5647_720P_script_mipi[] = {
+           {0x3a19, 0xf8},
+           {0x3c01, 0x80},
+           {0x3b07, 0x0c},
++		  {0x3500, 0x00},
++		  {0x3501, 0x29},
++		  {0x3502, 0xe0},
+           {0x380c, 0x07},
+           {0x380d, 0x00},
+           {0x380e, 0x05},
+@@ -1119,6 +1131,9 @@ struct aml_camera_i2c_fig_s OV5647_preview_720P_script[] = {
+ 	{0x3a19,0xf8},
+ 	{0x3c01,0x80},
+ 	{0x3b07,0x0c},
++	{0x3500, 0x00},
++	{0x3501, 0x29},
++	{0x3502, 0xe0},
+ 	{0x380c,0x07},
+ 	{0x380d,0x00},
+ 	{0x380e,0x02},
+@@ -1278,7 +1293,10 @@ struct aml_camera_i2c_fig_s OV5647_preview_960P_script[] = {
+ 	{0x3a18,0x00},  
+ 	{0x3a19,0xf8},  
+ 	{0x3c01,0x80},  
+-	{0x3b07,0x0c},  
++	{0x3b07,0x0c}, 
++	{0x3500,0x00},
++	{0x3501,0x37},
++	{0x3502,0x60},
+ 	{0x380c,0x07},  
+ 	{0x380d,0x68},  
+ 	{0x380e,0x03},  
+@@ -1527,6 +1545,9 @@ struct aml_camera_i2c_fig_s OV5647_preview_1080P_script[] = {
+ 	{0x3a19,0xf8},
+ 	{0x3c01,0x80},
+ 	{0x3b07,0x0c},
++	{0x3500,0x00},
++	{0x3501,0x3e},
++	{0x3502,0x10},
+ 	{0x380c,0x09},
+ 	{0x380d,0x70},
+ 	{0x380e,0x04},
+@@ -1854,9 +1875,9 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ {0x3001, 0xff},
+ {0x3002, 0xe4},
+ //{0x300a, 0x0,
+-              
++
+ //{0x300b, 0x0,
+-              
++
+ {0x0100, 0x00},
+ {0x0103, 0x01},
+ {0x3013, 0x08},
+@@ -1898,7 +1919,7 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ {0x4002, 0xc5},
+ {0x4004, 0x06},
+ {0x4005, 0x1a},
+-{0x3503, 0x03},
++{0x3503, 0x13},
+ {0x3501, 0x10},
+ {0x3502, 0x80},
+ {0x350a, 0x00},
+@@ -1906,7 +1927,7 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ {0x350c, 0x00},
+ {0x350d, 0x00},
+ {0x3011, 0x22},
+-              
++
+ {0x3000, 0x00},
+ {0x3001, 0x00},
+ {0x3002, 0x00},
+@@ -1920,6 +1941,9 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ {0x3708, 0x24},
+ {0x3709, 0x12},
+ {0x370c, 0x00},
++{0x3500, 0x00},
++{0x3501, 0x6e},
++{0x3502, 0xb0},
+ {0x380c, 0x0a},
+ {0x380d, 0x96},
+ {0x380e, 0x07},
+@@ -2082,27 +2106,59 @@ static void parse_param(const char *buf,char **parm){
+ 	//kfree(buf_orig);
+ }
+ 
+-void OV5647_manual_set_aet(unsigned int exp,unsigned int ag,unsigned int vts){
++void OV5647_manual_set_aet(int exp, int ag, int vts){
+ 	unsigned char exp_h = 0, exp_m = 0, exp_l = 0, ag_h = 0, ag_l = 0, vts_h = 0, vts_l = 0;
+ 	struct i2c_adapter *adapter;
+-	
+-	exp_h = (unsigned char)((exp >> 12) & 0x0000000f);
+-	exp_m = (unsigned char)((exp >>  4) & 0x000000ff);
+-	exp_l = (unsigned char)((exp <<  4) & 0x000000f0);
+-	ag_h = (unsigned char)((ag >> 8) & 0x00000003);
+-	ag_l = (unsigned char)(ag & 0x000000ff);
+-	vts_h = (unsigned char)((vts >> 8) & 0x000000ff);
+-	vts_l = (unsigned char)(vts & 0x000000ff);
++	if(exp != -1){
++		exp_h = (unsigned char)((exp >> 12) & 0x0000000f);
++		exp_m = (unsigned char)((exp >>  4) & 0x000000ff);
++		exp_l = (unsigned char)((exp <<  4) & 0x000000f0);
++	}
++	if(ag != -1){
++		ag_h = (unsigned char)((ag >> 8) & 0x00000003);
++		ag_l = (unsigned char)(ag & 0x000000ff);
++	}
++	if(vts != -1){
++		vts_h = (unsigned char)((vts >> 8) & 0x000000ff);
++		vts_l = (unsigned char)(vts & 0x000000ff);
++	}
+ 	
+ 	adapter = i2c_get_adapter(4);
+ 	my_i2c_put_byte(adapter,0x36,0x3208, 0x00 );
+-	my_i2c_put_byte(adapter,0x36,0x3500, exp_h);
+-	my_i2c_put_byte(adapter,0x36,0x3501, exp_m);
+-	my_i2c_put_byte(adapter,0x36,0x3502, exp_l);
+-	my_i2c_put_byte(adapter,0x36,0x350a, ag_h );
+-	my_i2c_put_byte(adapter,0x36,0x350b, ag_l );
+-	my_i2c_put_byte(adapter,0x36,0x380e, vts_h);
+-	my_i2c_put_byte(adapter,0x36,0x380f, vts_l);
++	if(exp != -1)
++	{
++		if(exp_h != last_exp_h){
++			my_i2c_put_byte(adapter,0x36,0x3500, exp_h);
++			last_exp_h = exp_h;
++		}
++		if(exp_m != last_exp_m){
++			my_i2c_put_byte(adapter,0x36,0x3501, exp_m);
++			last_exp_m = exp_m;
++		}
++		if(exp_m != last_exp_m){
++			my_i2c_put_byte(adapter,0x36,0x3502, exp_l);
++			last_exp_l = exp_l;
++		}
++		if(vts_h != last_vts_h){
++			my_i2c_put_byte(adapter,0x36,0x380e, vts_h);
++			last_vts_h = vts_h;
++		}
++		if(vts_l != last_vts_l){
++			my_i2c_put_byte(adapter,0x36,0x380f, vts_l);
++			last_vts_l = vts_l;
++		}
++	}
++	if(ag != -1)
++	{
++		if(ag_h != last_ag_h){
++			my_i2c_put_byte(adapter,0x36,0x350a, ag_h );
++			last_ag_h = ag_h;
++		}
++		if(ag_l != last_ag_l){
++			my_i2c_put_byte(adapter,0x36,0x350b, ag_l );
++			last_ag_l = ag_l;
++		}
++	}
+ 	my_i2c_put_byte(adapter,0x36,0x3208, 0x10 );
+ 	my_i2c_put_byte(adapter,0x36,0x3208, 0xa0 );
+ }
+@@ -2137,7 +2193,7 @@ static CLASS_ATTR(aet_debug, 0664, aet_manual_show, aet_manual_store);
+ static bool OV5647_set_aet_new_step(unsigned int new_step, bool exp_mode, bool ag_mode){
+   unsigned int exp = 0, ag = 0, vts = 0;
+ 
+-  if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
++  if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[aet_index].tbl_max_step))
+ 		return(false);
+ 	else
+ 	{
+@@ -2145,8 +2201,13 @@ static bool OV5647_set_aet_new_step(unsigned int new_step, bool exp_mode, bool a
+ 		exp = sensor_aet_table[sensor_aet_step].exp;
+ 		ag = sensor_aet_table[sensor_aet_step].ag;
+ 		vts = sensor_aet_table[sensor_aet_step].vts;
+-		
+-		OV5647_manual_set_aet(exp,ag,vts);
++		if(exp_mode == 1 && ag_mode == 1){
++			OV5647_manual_set_aet(exp,ag,vts);
++		}else if(exp_mode == 1 && ag_mode == 0){
++			OV5647_manual_set_aet(exp,-1,vts);
++		}else if(exp_mode == 0 && ag_mode == 1){
++			OV5647_manual_set_aet(-1,ag,-1);
++		}
+ 		return true;
+ 	}
+ }
+@@ -2228,7 +2289,7 @@ void OV5647_set_new_format(int width,int height,int fr){
+     sensor_aet_info = cf->aet.aet[index].info;
+     sensor_aet_table = cf->aet.aet[index].aet_table;
+     sensor_aet_step = sensor_aet_info->tbl_rated_step;
+-    OV5647_set_aet_new_step(sensor_aet_step,1,1);
++    //OV5647_set_aet_new_step(sensor_aet_step,1,1);
+ }
+ 
+ 
+@@ -2634,7 +2695,7 @@ void OV5647_set_param_exposure(struct ov5647_device *dev,enum camera_exposure_e
+     dev->fe_arg.index = 0;
+     dev->fe_arg.arg = (void *)(dev->cam_para);
+     dev->vops->tvin_fe_func(0,&dev->fe_arg);	
+-    OV5647_set_aet_new_step(sensor_aet_step,1,1);//need to change the new exp and ag mode
++    //OV5647_set_aet_new_step(sensor_aet_step,1,1);//need to change the new exp and ag mode
+ 
+ } /* ov5647_set_param_exposure */
+ /*************************************************************************
+@@ -2910,6 +2971,8 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+             printk("fail in setting resolution param. i=%d\n",i);
+             break;
+         }
++        if(res_param->reg_script[t][i].addr == 0x0103) //soft reset,need 5ms delay
++        	msleep(5);
+         i++;
+     }
+ 
+@@ -3728,6 +3791,17 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     current_fmt = 0;
+     if(dev->cam_para == NULL)
+     	return -EINVAL;
++   	update_index(ov5647_h_active,ov5647_v_active,&dev->pindex);
++   	if(generate_para(dev->cam_para,dev->pindex) != 0){
++        printk("generate para failed\n");
++        free_para(dev->cam_para);
++        kfree(dev->cam_para);
++        return -EINVAL;
++    }
++    dev->cam_para->cam_function.set_aet_new_step = OV5647_set_aet_new_step;
++    dev->cam_para->cam_function.check_mains_freq = OV5647_check_mains_freq;
++    dev->cam_para->cam_function.set_af_new_step = OV5647_set_af_new_step;  
++    dev->ae_on = false;
+     para.reserved = (int)(dev->cam_para);
+     if (CAM_MIPI == dev->cam_info.interface)
+     {
+@@ -3746,7 +3820,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+         dev->cam_para->xml_scenes->ae.aet_fmt_gain = sensor_aet_info->format_transfer_parameter;        	
+     }
+     else
+-        dev->cam_para->xml_scenes->ae.aet_fmt_gain = 0;
++        dev->cam_para->xml_scenes->ae.aet_fmt_gain = 100;
+     printk("aet_fmt_gain:%d\n",dev->cam_para->xml_scenes->ae.aet_fmt_gain);
+     printk("ov5647,h=%d, v=%d, dest_h:%d, dest_v:%d,frame_rate=%d,\n", 
+             ov5647_h_active, ov5647_v_active, para.dest_hactive,para.dest_vactive,ov5647_frmintervals_active.denominator);
+@@ -3755,6 +3829,11 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+         dev->vops->start_tvin_service(0,&para);
+         fh->stream_on        = 1;
+     }
++    /*** 		set cm2 		***/
++	dev->vdin_arg.cmd = VDIN_CMD_SET_CM2;
++	dev->vdin_arg.cm2 = cf->cm.export;
++	dev->vops->tvin_vdin_func(0,&dev->vdin_arg);
++	printk("call set cm2\n");
+     OV5647_set_param_wb(fh->dev,ov5647_qctrl[4].default_value);
+     OV5647_set_param_exposure(fh->dev,ov5647_qctrl[5].default_value);
+     OV5647_set_param_effect(fh->dev,ov5647_qctrl[6].default_value);
+@@ -3767,6 +3846,13 @@ static int vidioc_streamoff(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	struct ov5647_device *dev = fh->dev;
+ 	int ret = 0 ;
+ 	printk(KERN_INFO " vidioc_streamoff+++ \n ");
++	last_exp_h = 0;
++	last_exp_m = 0;
++	last_exp_l = 0; 
++	last_ag_h = 0; 
++	last_ag_l = 0;
++	last_vts_h = 0; 
++	last_vts_l = 0;
+ 	if (fh->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+ 		return -EINVAL;
+ 	if (i != fh->type)
+@@ -4074,7 +4160,7 @@ static int ov5647_open(struct file *file)
+         }else{
+             printk("malloc failed");
+             return -ENOMEM;
+-        }      
++        }
+     }
+     if((dev->cam_para = kzalloc(sizeof(cam_parameter_t),0)) == NULL){
+         printk("memalloc failed\n");
+@@ -4141,16 +4227,9 @@ static int ov5647_open(struct file *file)
+     dev->pindex.scenes_index = 0;
+     dev->pindex.wb_index = 0;
+     dev->pindex.capture_index = 0;
+-    if(generate_para(dev->cam_para,dev->pindex) != 0){
+-        printk("generate para failed\n");
+-        free_para(dev->cam_para);
+-        kfree(dev->cam_para);
+-        return -EINVAL;
+-    }
+-    dev->cam_para->cam_function.set_aet_new_step = OV5647_set_aet_new_step;
+-    dev->cam_para->cam_function.check_mains_freq = OV5647_check_mains_freq;
+-    dev->cam_para->cam_function.set_af_new_step = OV5647_set_af_new_step;  
+-    dev->ae_on = false;
++    dev->pindex.nr_index = 0;
++    dev->pindex.peaking_index = 0;
++    dev->pindex.lens_index = 0;
+     /**creat class file**/		
+     cam_class = class_create(THIS_MODULE,"camera"); 
+     if(IS_ERR(cam_class)){
+@@ -4166,7 +4245,7 @@ static int ov5647_open(struct file *file)
+     retval = class_create_file(cam_class,&class_attr_version_debug);
+     printk("open successfully\n");
+     dev->vops = get_vdin_v4l2_ops();
+-		bDoingAutoFocusMode=false;
++	bDoingAutoFocusMode=false;
+     dev->dev = fh;
+     return 0;
+ }
+@@ -4219,20 +4298,18 @@ static int ov5647_close(struct file *file)
+         if(cf->aet_valid){
+             for(i = 0; i < cf->aet.sum; i++){
+                 kfree(cf->aet.aet[i].info);
++                cf->aet.aet[i].info = NULL;
+                 kfree(cf->aet.aet[i].aet_table);
+-                if(cf->aet.aet[i].manual != NULL)
+-                    kfree(cf->aet.aet[i].manual);
++                cf->aet.aet[i].aet_table = NULL;
+             }
+         }
+-        if(cf->scene_valid){
+-            kfree(cf->scene.scene);
+-        }
+-
+         kfree(cf);
++        cf = NULL;
+     }
+     if(dev->cam_para != NULL ){
+         free_para(dev->cam_para);
+         kfree(dev->cam_para);
++        dev->cam_para = NULL;
+     }
+ 
+     mutex_lock(&dev->mutex);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 2349d8e86aea..5505cea292d9 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -50,13 +50,13 @@ static unsigned int isp_debug = 0;
+ static unsigned int ae_enable = 1;
+ static unsigned int ae_adjust_enable = 1;
+ static unsigned int awb_enable = 1;
++static unsigned int af_enable = 1;
+ static unsigned int af_pr = 0;
+ static unsigned int ioctl_debug = 0;
+ static unsigned int isr_debug = 0;
+ static volatile unsigned int ae_flag = 0;
+ static volatile unsigned int ae_new_step = 60;
+ extern struct isp_ae_to_sensor_s ae_sens;
+-static unsigned int af_ave_step_en = 1;
+ static unsigned int def_config = 0;
+ static void parse_param(char *buf_orig,char **parm)
+ {
+@@ -123,15 +123,15 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 		for(i=0;i<16;i++)
+ 		pr_info("ae->luma_win[%d]=%d.\n",i,ae->luma_win[i]);
+ 		for(i=0;i<3;i++)
+-		pr_info("ae->bayer_over_info[%d]=%d.\n",i,ae->bayer_over_info[i]);		
++		pr_info("ae->bayer_over_info[%d]=%d.\n",i,ae->bayer_over_info[i]);
+ 	}else if(!strcmp(parm[0],"read_awb")){
+ 	    int i;
+ 		struct isp_awb_stat_s *awb = &devp->isp_awb;
+ 		for(i=0;i<3;i++)
+ 		pr_info("awb->rgb.rgb_sum[%d]=%d.\n",i,awb->rgb.rgb_sum[i]);
+-		pr_info("awb->rgb.rgb_count=%d.\n",awb->rgb.rgb_count);	
++		pr_info("awb->rgb.rgb_count=%d.\n",awb->rgb.rgb_count);
+ 		for(i=0;i<4;i++)
+-		pr_info("awb->yuv_low[%d].sum=%d,count=%d\n",i,awb->yuv_low[i].sum,awb->yuv_low[i].count);	
++		pr_info("awb->yuv_low[%d].sum=%d,count=%d\n",i,awb->yuv_low[i].sum,awb->yuv_low[i].count);
+ 		for(i=0;i<4;i++)
+ 		pr_info("awb->yuv_mid[%d].sum=%d,count=%d\n",i,awb->yuv_mid[i].sum,awb->yuv_mid[i].count);
+ 		for(i=0;i<4;i++)
+@@ -236,18 +236,19 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		if(IS_ERR_OR_NULL(af))
+ 			return len;
+ 		devp->flag &=(~ISP_FLAG_AF_DBG);
+-		pr_info("ac[0]   ac[1]    ac[2]   ac[3]   dc[0]   dc[1]   dc[2]   dc[3]\n");
++		pr_info("ac[0]   ac[1]    ac[2]   ac[3]   dc[0]   dc[1]   dc[2]   dc[3]   af0_ac   af1_ac\n");
+ 		if(af->dir){
+ 			for (i=af->min_step; i <= af->max_step;i+=af->mid_step){
+ 				cursor = i;
+ 				while((af->data[cursor].ac[0]==0)&&(cursor!=0)){
+ 					cursor--;
+ 				}
+-				pr_info("step[%4u]:%u %u %u %u %u %u %u %u\n",
++				pr_info("step[%4u]:%u %u %u %u %u %u %u %u %u %u\n",
+ 					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
+ 					af->data[cursor].ac[2],af->data[cursor].ac[3],
+ 					af->data[cursor].dc[0],af->data[cursor].dc[1],
+-					af->data[cursor].dc[2],af->data[cursor].dc[3]);
++					af->data[cursor].dc[2],af->data[cursor].dc[3],
++					af->data[cursor].af_ac[0],af->data[cursor].af_ac[1]);
+ 				msleep(10);
+ 			}
+ 		}else{
+@@ -256,11 +257,12 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 				while((af->data[cursor].ac[0]==0)&&(cursor!=0)){
+ 					cursor--;
+ 				}
+-				pr_info("step[%4u]:%u %u %u %u %u %u %u %u\n",
++				pr_info("step[%4u]:%u %u %u %u %u %u %u %u %u %u\n",
+ 					i,af->data[cursor].ac[0],af->data[cursor].ac[1],
+ 					af->data[cursor].ac[2],af->data[cursor].ac[3],
+ 					af->data[cursor].dc[0],af->data[cursor].dc[1],
+-					af->data[cursor].dc[2],af->data[cursor].dc[3]);
++					af->data[cursor].dc[2],af->data[cursor].dc[3],
++					af->data[cursor].af_ac[0],af->data[cursor].af_ac[1]);
+ 				msleep(10);
+ 			}
+ 		}
+@@ -279,17 +281,27 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 			kfree(devp->af_test.af_win);
+ 		if(devp->af_test.af_bl)
+ 			kfree(devp->af_test.af_bl);
+-		if(devp->af_test.ae_win)
+-			kfree(devp->af_test.ae_win);
+ 		devp->af_test.af_win = kmalloc(sizeof(isp_af_stat_t)*devp->af_test.max,GFP_KERNEL);
+ 		devp->af_test.af_bl = kmalloc(sizeof(isp_blnr_stat_t)*devp->af_test.max,GFP_KERNEL);
+-		devp->af_test.ae_win = kmalloc(sizeof(isp_ae_stat_t)*devp->af_test.max,GFP_KERNEL);
+ 		devp->af_test.cnt = 0;
+ 		devp->flag |= ISP_TEST_FOR_AF_WIN;
+ 	}else if(!strcmp(parm[0],"af_print")){
+ 		int i = 0;
+ 		unsigned long long sum_ac,sum_dc;
+-		pr_info("ac0 ac1 ac2 ac3 dc0 dc1 dc2 dc3\n");
++		pr_info("af:f0_win0 f1_win0 f0_win1 f1_win1 f0_win2 f1_win2 f0_win3 f1_win3 f0_win4 f1_win4 f0_win5 f1_win5 f0_win6 f1_win6 f0_win7 f1_win7\n");
++		for(i=0;i<devp->af_test.cnt;i++){
++			pr_info("%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
++				devp->af_test.af_win[i].luma_win[0],devp->af_test.af_win[i].luma_win[1],
++				devp->af_test.af_win[i].luma_win[2],devp->af_test.af_win[i].luma_win[3],
++				devp->af_test.af_win[i].luma_win[4],devp->af_test.af_win[i].luma_win[5],
++				devp->af_test.af_win[i].luma_win[6],devp->af_test.af_win[i].luma_win[7],
++				devp->af_test.af_win[i].luma_win[8],devp->af_test.af_win[i].luma_win[9],
++				devp->af_test.af_win[i].luma_win[10],devp->af_test.af_win[i].luma_win[11],
++				devp->af_test.af_win[i].luma_win[12],devp->af_test.af_win[i].luma_win[13],
++				devp->af_test.af_win[i].luma_win[14],devp->af_test.af_win[i].luma_win[15]);
++			msleep(1);
++		}
++		pr_info("blnr:ac0 ac1 ac2 ac3 dc0 dc1 dc2 dc3\n");
+ 		for(i=0;i<devp->af_test.cnt;i++){
+ 			pr_info("%u %u %u %u %u %u %u %u\n", devp->af_test.af_bl[i].ac[0],
+ 				devp->af_test.af_bl[i].ac[1],devp->af_test.af_bl[i].ac[2],
+@@ -297,25 +309,10 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 				devp->af_test.af_bl[i].dc[1],devp->af_test.af_bl[i].dc[2],
+ 				devp->af_test.af_bl[i].dc[3]);
+ 		}
+-		pr_info("win0 win1 win2 win3 win4 win5 win6 win7 win8 win9 win10 win11 win12 win13 win14 win15\n");
+-		for(i=0;i<devp->af_test.cnt;i++){
+-			pr_info("%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+-				devp->af_test.ae_win[i].luma_win[0],devp->af_test.ae_win[i].luma_win[1],
+-				devp->af_test.ae_win[i].luma_win[2],devp->af_test.ae_win[i].luma_win[3],
+-				devp->af_test.ae_win[i].luma_win[4],devp->af_test.ae_win[i].luma_win[5],
+-				devp->af_test.ae_win[i].luma_win[6],devp->af_test.ae_win[i].luma_win[7],
+-				devp->af_test.ae_win[i].luma_win[8],devp->af_test.ae_win[i].luma_win[9],
+-				devp->af_test.ae_win[i].luma_win[10],devp->af_test.ae_win[i].luma_win[11],
+-				devp->af_test.ae_win[i].luma_win[12],devp->af_test.ae_win[i].luma_win[13],
+-				devp->af_test.ae_win[i].luma_win[14],devp->af_test.ae_win[i].luma_win[15]);
+-			msleep(1);
+-		}
+ 		kfree(devp->af_test.af_bl);
+ 		kfree(devp->af_test.af_win);
+-		kfree(devp->af_test.ae_win);
+ 		devp->af_test.af_bl = NULL;
+ 		devp->af_test.af_win = NULL;
+-		devp->af_test.ae_win = NULL;
+ 	}
+ 
+ 	kfree(buf_orig);
+@@ -758,14 +755,14 @@ static int isp_thread(isp_dev_t *devp) {
+ 		newstep = isp_tune_exposure(devp);
+ 		printk("set new step2 %d \n",newstep);
+ 		if(func&&func->set_aet_new_step)
+-		func->set_aet_new_step(newstep,true,true);		
++		func->set_aet_new_step(newstep,true,true);
+ 	}
+ 	if(atomic_read(&devp->ae_info.writeable)&&func&&func->set_aet_new_step)
+ 	{
+ 		if(isp_debug)
+ 			printk("[isp] set new step:%d \n",ae_sens.new_step);
+ 		if(ae_adjust_enable)
+-			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);	
++			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
+ 		atomic_set(&devp->ae_info.writeable,0);
+ 	}
+ 	if(devp->flag&ISP_FLAG_AF_DBG){
+@@ -840,7 +837,12 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 	} else {
+ 		devp->isp_ae_parm = &devp->cam_param->xml_scenes->ae;
+ 		devp->isp_awb_parm = &devp->cam_param->xml_scenes->awb;
+-		//devp->isp_af_parm = &devp->cam_param->xml_scenes->af;
++		unsigned int i;
++		devp->isp_af_parm = &devp->cam_param->xml_scenes->af;
++		devp->isp_af_parm->valid_step_cnt = 0;
++		for(i = 0;devp->isp_af_parm->step[i] != 0;i++){
++			devp->isp_af_parm->valid_step_cnt++;
++		}
+ 		devp->capture_parm = devp->cam_param->xml_capture;
+ 		devp->wave = devp->cam_param->xml_wave;
+ 		isp_hw_enable(false);
+@@ -851,55 +853,12 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 			disable_gc_lns(false);
+ 		/*enable isp hw*/
+ 		isp_hw_enable(true);
+-		
+-		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_af_t),GFP_KERNEL);
+-		memset(devp->isp_af_parm,0,sizeof(xml_algorithm_af_t));
+-		devp->isp_af_parm->valid_step_cnt = 8;
+-		devp->isp_af_parm->af_fail_ratio = 120;
+-		devp->isp_af_parm->af_step_mid_thre= 250;
+-		devp->isp_af_parm->af_step_max_thre = 550;
+-		devp->isp_af_parm->af_retry_max = 3;
+-		devp->isp_af_parm->step[0] = 100;
+-		devp->isp_af_parm->step[1] = 150;
+-		devp->isp_af_parm->step[2] = 200;
+-		devp->isp_af_parm->step[3] = 250;
+-		devp->isp_af_parm->step[4] = 290;
+-		devp->isp_af_parm->step[5] = 330;
+-		devp->isp_af_parm->step[6] = 370;
+-		devp->isp_af_parm->step[7] = 400;
+-		devp->isp_af_parm->step[8] = 430;
+-		devp->isp_af_parm->step[9] = 460;
+-		devp->isp_af_parm->step[10] = 480;
+-		devp->isp_af_parm->step[11] = 500;
+-                devp->isp_af_parm->step[12] = 520;
+-                devp->isp_af_parm->step[13] = 530;
+-                devp->isp_af_parm->step[14] = 540;
+-		devp->isp_af_parm->step[15] = 550;
+-		if(af_ave_step_en){
+-			int temp;
+-			for(temp=0;temp<8;temp++)
+-				devp->isp_af_parm->step[temp] = 100+60*temp;
+-		}
+-		devp->isp_af_parm->jump_offset = 100;
+-		devp->isp_af_parm->field_delay = 2;
+-
+-		/*init for auto lose focus tell*/
+-		devp->isp_af_parm->detect_step_cnt = 16;
+-		devp->isp_af_parm->enter_move_ratio = 55;
+-		devp->isp_af_parm->enter_static_ratio = 35;
+-		devp->isp_af_parm->ave_vdc_thr = 200;
+-		devp->isp_af_parm->delta_fv_ratio = 0;
+-		devp->isp_af_parm->af_duration_time = 1;//0.5s
+-		/*window for full scan & detect*/
+-		devp->isp_af_parm->radius_ratio = 8;
+-		devp->isp_af_parm->win_ratio = 4;
+ 		devp->af_info.x0 = info->h_active/devp->isp_af_parm->win_ratio;
+ 		devp->af_info.y0 = info->v_active/devp->isp_af_parm->win_ratio;
+ 		devp->af_info.x1 = info->h_active - devp->af_info.x0;
+ 		devp->af_info.y1 = info->v_active - devp->af_info.y0;
+ 		devp->af_info.radius = info->h_active/devp->isp_af_parm->radius_ratio;
+ 		devp->af_info.af_detect = kmalloc(sizeof(isp_blnr_stat_t)*devp->isp_af_parm->detect_step_cnt,GFP_KERNEL);
+-		devp->af_info.fv = kmalloc(sizeof(unsigned long long)*devp->isp_af_parm->detect_step_cnt,GFP_KERNEL);
+ 		devp->af_info.v_dc = kmalloc(sizeof(unsigned long long)*devp->isp_af_parm->detect_step_cnt,GFP_KERNEL);
+ 	}
+         return 0;
+@@ -910,8 +869,6 @@ static void isp_fe_close(struct tvin_frontend_s *fe)
+         isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 		if(devp->af_info.af_detect)
+ 			kfree(devp->af_info.af_detect);
+-		if(devp->af_info.fv)
+-			kfree(devp->af_info.fv);
+ 		if(devp->af_info.v_dc)
+ 			kfree(devp->af_info.v_dc);
+ 		if(devp->isp_af_parm)
+@@ -1001,7 +958,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+                 case CAM_COMMAND_SCENES:
+ 		        devp->isp_ae_parm = &param->xml_scenes->ae;
+ 		        devp->isp_awb_parm = &param->xml_scenes->awb;
+-		        //devp->isp_af_parm = &param->xml_scenes->af;
++		        devp->isp_af_parm = &param->xml_scenes->af;
+ 		        devp->capture_parm = param->xml_capture;
+ 		        devp->flag |= ISP_FLAG_SET_SCENES;
+ 		        break;
+@@ -1014,7 +971,6 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			}
+ 		        break;
+ 		case CAM_COMMAND_MWB:
+-			devp->af_info.flag_bk &= (~ISP_FLAG_AWB);
+ 			devp->flag &= (~ISP_FLAG_AWB);
+ 	                devp->flag |= ISP_FLAG_MWB;
+ 		        break;
+@@ -1034,7 +990,6 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			}
+ 		        break;
+                 case CAM_COMMAND_AE_OFF:
+-			devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 		        devp->flag &= (~ISP_FLAG_AE);
+ 		        break;
+ 		case CAM_COMMAND_SET_AE_LEVEL:
+@@ -1044,10 +999,10 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+                 // af related
+                 case CAM_COMMAND_AF:
+ 			devp->flag |= ISP_FLAG_AF;
++			af_sm_init(devp);
+ 		        break;
+                 case CAM_COMMAND_FULLSCAN:
+-				//isp_set_af_scan_stat(0,0,devp->info.h_active-1,devp->info.v_active-1);
+-				isp_set_af_scan_stat(devp->af_info.x0,devp->af_info.y0,devp->af_info.x1,devp->af_info.y1);
++			isp_set_af_scan_stat(devp->af_info.x0,devp->af_info.y0,devp->af_info.x1,devp->af_info.y1);
+ 			devp->flag |= ISP_FLAG_TOUCH_AF;
+ 			devp->cmd_state = CAM_STATE_DOING;
+ 			af_sm_init(devp);
+@@ -1076,6 +1031,7 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+                 case CAM_COMMAND_CONTINUOUS_FOCUS_ON:
+ 			if(!(devp->flag & ISP_FLAG_CAPTURE)){
+ 			        devp->flag |= ISP_FLAG_AF;
++				af_sm_init(devp);
+ 			}
+ 		        break;
+                 case CAM_COMMAND_CONTINUOUS_FOCUS_OFF:
+@@ -1112,15 +1068,14 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	}
+ 	if(devp->flag & ISP_FLAG_RECONFIG)
+ 		return ret;
+-	
++
+ 	if(awb_enable){
+                 isp_get_awb_stat(&devp->isp_awb);
+ 	}
+-	if(ae_enable){
+-        if(devp->flag & ISP_FLAG_AE)
++	if((devp->flag&ISP_FLAG_AE)&&(ae_enable)){
+ 	        isp_get_ae_stat(&devp->isp_ae);
+ 	}
+-	if(devp->flag & ISP_AF_SM_MASK){
++	if((devp->flag&ISP_AF_SM_MASK)&&(af_enable)){
+ 	        isp_get_blnr_stat(&af_info->isr_af_data);
+ 		isp_get_af_scan_stat(&af_info->isr_af_data);
+ 	}
+@@ -1149,10 +1104,11 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	}
+ 	if(devp->flag & ISP_TEST_FOR_AF_WIN){
+ 		isp_get_blnr_stat(&devp->af_test.af_bl[devp->af_test.cnt]);
+-		isp_get_af_scan_stat(&devp->af_test.af_bl[devp->af_test.cnt]);
++		//isp_get_af_scan_stat(&devp->af_test.af_bl[devp->af_test.cnt]);
+ 		isp_get_af_stat(&devp->af_test.af_win[devp->af_test.cnt]);
+-		isp_get_ae_stat(&devp->af_test.ae_win[devp->af_test.cnt]);
+-		if(devp->af_test.cnt++ > devp->af_test.max){
++		//isp_get_ae_stat(&devp->af_test.ae_win[devp->af_test.cnt]);
++		devp->af_test.cnt+=1;
++		if(devp->af_test.cnt >= devp->af_test.max){
+ 			devp->flag &=(~ISP_TEST_FOR_AF_WIN);
+ 			pr_info("get af win,ae win&blnr info end.\n");
+ 		}
+@@ -1168,7 +1124,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	}
+ 	if(devp->isp_fe)
+ 		ret = devp->isp_fe->dec_ops->decode_isr(devp->isp_fe,0);
+-	
++
+ 	if(devp->flag & ISP_FLAG_CAPTURE)
+ 		ret = max(isp_capture_sm(devp),ret);
+ 	if(isr_debug&&ret)
+@@ -1186,15 +1142,13 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ static void isp_tasklet(unsigned long arg)
+ {
+ 	isp_dev_t *devp = (isp_dev_t *)arg;
+-        if(ae_enable){
+-                if(devp->flag & ISP_FLAG_AE)
+-	                isp_ae_sm(devp);
++        if((devp->flag & ISP_FLAG_AE)&&(ae_enable)){
++	    	isp_ae_sm(devp);
+         }
+-	if(awb_enable){
+-		if(devp->flag & ISP_FLAG_AWB)
+-                        isp_awb_sm(devp);
++	if((devp->flag&ISP_FLAG_AWB)&&(awb_enable)){
++    		isp_awb_sm(devp);
+ 	}
+-	if(devp->flag & ISP_AF_SM_MASK){
++	if((devp->flag&ISP_AF_SM_MASK)&&(af_enable)){
+ 		isp_af_detect(devp);
+ 	}
+ }
+@@ -1203,55 +1157,55 @@ static void isp_tasklet(unsigned long arg)
+ 
+ static void  isp_do_work(struct work_struct *work)
+ {
+-    isp_dev_t *devp = container_of(work, isp_dev_t, isp_wq);
+ 
+-    unsigned newstep = 0;
+-    struct cam_function_s *func = &devp->cam_param->cam_function;
++	isp_dev_t *devp = container_of(work, isp_dev_t, isp_wq);
+ 
+-        if(ae_enable){
+-                if(devp->flag & ISP_FLAG_AE)
+-                    isp_ae_sm(devp);
+-        }
+-    if(awb_enable){
+-        if(devp->flag & ISP_FLAG_AWB)
+-                        isp_awb_sm(devp);
+-    }
+-    if(devp->flag & ISP_AF_SM_MASK){
+-        isp_af_detect(devp);
+-    }
++	unsigned newstep = 0;
++	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 
+-    if(ae_flag&0x1)
+-    {
+-        ae_flag &= (~0x1);
+-        printk("set new step %d \n",ae_new_step);
+-        if(func&&func->set_aet_new_step)
+-        func->set_aet_new_step(ae_new_step,true,true);
+-    }
+-    if(ae_flag&0x2)
+-    {
+-        ae_flag &= (~0x2);
+-        newstep = isp_tune_exposure(devp);
+-        printk("wq:set new step2 %d \n",newstep);
+-        if(func&&func->set_aet_new_step)
+-        func->set_aet_new_step(newstep,true,true);
+-    }
++	if((devp->flag & ISP_FLAG_AE)&&(ae_enable)){
++		isp_ae_sm(devp);
++	}
++	if((devp->flag&ISP_FLAG_AWB)&&(awb_enable)){
++		isp_awb_sm(devp);
++	}
++	if((devp->flag&ISP_AF_SM_MASK)&&(af_enable)){
++		isp_af_detect(devp);
++	}
++
++	if(ae_flag&0x1)
++	{
++		ae_flag &= (~0x1);
++		printk("set new step %d \n",ae_new_step);
++		if(func&&func->set_aet_new_step)
++			func->set_aet_new_step(ae_new_step,true,true);
++	}
++	if(ae_flag&0x2)
++	{
++		ae_flag &= (~0x2);
++		newstep = isp_tune_exposure(devp);
++		printk("wq:set new step2 %d \n",newstep);
++		if(func&&func->set_aet_new_step)
++			func->set_aet_new_step(newstep,true,true);
++	}
+ 	if(atomic_read(&devp->ae_info.writeable)&&func&&func->set_aet_new_step)
+ 	{
+ 		if(isp_debug)
+-			printk("[isp] wq:set new step:%d \n",ae_sens.new_step);
++		printk("[isp] wq:set new step:%d \n",ae_sens.new_step);
+ 		if(ae_adjust_enable)
+-			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);	
++			func->set_aet_new_step(ae_sens.new_step,ae_sens.shutter,ae_sens.gain);
+ 		atomic_set(&devp->ae_info.writeable,0);
+ 	}
+-    if(devp->flag&ISP_FLAG_AF_DBG){
+-        af_stat(devp->af_dbg,func);
+-    }
+-    if(devp->flag & ISP_AF_SM_MASK) {
+-        if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
+-            func->set_af_new_step(devp->af_info.cur_step);
++	if(devp->flag&ISP_FLAG_AF_DBG){
++		af_stat(devp->af_dbg,func);
++	}
++	if(devp->flag & ISP_AF_SM_MASK) {
++		if(atomic_read(&devp->af_info.writeable)&&func&&func->set_af_new_step){
++			func->set_af_new_step(devp->af_info.cur_step);
+ 			atomic_set(&devp->af_info.writeable,0);
+-        }
+-    }
++		}
++	}
++
+ }
+ #endif
+ 
+@@ -1463,6 +1417,9 @@ MODULE_PARM_DESC(ae_adjust_enable,"\n ae_adjust_enable.\n");
+ module_param(awb_enable,uint,0664);
+ MODULE_PARM_DESC(awb_enable,"\n awb_enable.\n");
+ 
++module_param(af_enable,uint,0664);
++MODULE_PARM_DESC(af_enable,"\n af enable flag.\n");
++
+ module_param(ae_flag,uint,0664);
+ MODULE_PARM_DESC(ae_flag,"\n debug flag for ae_flag.\n");
+ 
+@@ -1478,9 +1435,6 @@ MODULE_PARM_DESC(ioctl_debug,"\n debug ioctl function.\n");
+ module_param(isr_debug,uint,0664);
+ MODULE_PARM_DESC(isr_debug,"\n debug isr function.\n");
+ 
+-module_param(af_ave_step_en,uint,0664);
+-MODULE_PARM_DESC(af_ave_step_en,"\n debug flag for af function.\n");
+-
+ MODULE_VERSION(ISP_VER);
+ module_init(isp_init_module);
+ module_exit(isp_exit_module);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index d3d3bb924477..ce9d9cf034f1 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.11.12a"
++#define ISP_VER					"2013.12.11a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -111,25 +111,24 @@ typedef struct af_debug_test_s {
+ 	struct isp_af_stat_s *af_win;
+ 	struct isp_blnr_stat_s *af_bl;
+ 	struct isp_ae_stat_s  *ae_win;
++	struct isp_awb_stat_s  *awb_stat;
+ } af_debug_test_t;
++/*for af fine tune*/
++typedef struct isp_af_fine_tune_s {
++	unsigned int cur_step;
++	isp_blnr_stat_t af_data;
++} isp_af_fine_tune_t;
+ 
+ typedef struct isp_af_info_s {
+ 	unsigned int cur_index;
+ 	/*for lose focus*/
+-	unsigned int *fv;
+ 	unsigned int *v_dc;
+-	unsigned int adj_duration_cnt;//fields count
+         bool	     last_move;
+ 	isp_blnr_stat_t last_blnr;
+ 	/*for climbing algorithm*/
+-	unsigned int flag_bk;
+ 	unsigned int great_step;
+-	unsigned int last_great_step;
+ 	unsigned int cur_step;
+ 	unsigned int capture_step;
+-	unsigned int af_retry_cnt;
+-	unsigned long long fv_aft_af;
+-	unsigned long long fv_bf_af;
+ 	isp_blnr_stat_t *af_detect;
+ 	isp_blnr_stat_t af_data[FOCUS_GRIDS];
+ 	//unsigned char af_delay;
+@@ -143,6 +142,8 @@ typedef struct isp_af_info_s {
+ 	unsigned int radius;
+ 	/* blnr tmp for isr*/
+ 	isp_blnr_stat_t isr_af_data;
++	unsigned int valid_step_cnt;
++	isp_af_fine_tune_t af_fine_data[FOCUS_GRIDS];
+ }isp_af_info_t;
+ 
+ /*for debug cmd*/
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 80d6afcac1ec..33dea63d82f1 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -23,6 +23,18 @@ static unsigned int gamma_enable = 1;
+ module_param(gamma_enable,uint,0664);
+ MODULE_PARM_DESC(gamma_enable,"\n enable/disable for gamma.\n");
+ 
++static unsigned int af_filter0 = 7;
++module_param(af_filter0,uint,0664);
++MODULE_PARM_DESC(af_filter0,"\n filter for af hist.\n");
++
++static unsigned int af_filter1 = 2;
++module_param(af_filter1,uint,0664);
++MODULE_PARM_DESC(af_filter1,"\n filter for af hist.\n");
++
++static unsigned int af_limit = 0;
++module_param(af_limit,uint,0664);
++MODULE_PARM_DESC(af_filter0,"\n filter for af hist.\n");
++
+ /*
+ *reg 0x00~0x07
+ *reg 0xaf
+@@ -445,7 +457,12 @@ void isp_set_af_scan_stat(unsigned int x0,unsigned int y0,unsigned int x1,unsign
+ {
+ 	WR(ISP_AFC_WIND0_LR,x1|x0<<16);
+ 	WR(ISP_AFC_WIND0_TB,y1|y0<<16);
+-	WR(ISP_AFC_FILTER_SEL,0x000170f0);
++	//WR(ISP_AFC_FILTER_SEL,0x000170f0);
++	WR_BITS(ISP_AFC_FILTER_SEL,af_limit,AFC_F1_CORING_BIT,AFC_F1_CORING_WID);
++	WR_BITS(ISP_AFC_FILTER_SEL,af_limit,AFC_F0_CORING_BIT,AFC_F0_CORING_WID);
++	WR_BITS(ISP_AFC_FILTER_SEL,af_filter1,AFC_F1_SELECT_BIT,AFC_F1_SELECT_WID);
++	WR_BITS(ISP_AFC_FILTER_SEL,af_filter0,AFC_F0_SELECT_BIT,AFC_F0_SELECT_WID);
++	WR_BITS(ISP_AFC_FILTER_SEL,1,AFC_RO_UPDATE_BIT,AFC_RO_UPDATE_WID);
+ }
+ /*
+ *reg 0xac~0xae
+@@ -488,8 +505,10 @@ static void isp_set_lnsd(xml_lut_ls_t *lnsd)
+ {
+ 	int i = 0;
+ 	if(lnsd){
+-		for(i=0;i<XML_LUT_LS;i++){
+-			WR(ISP_LNSD_LUT_ADDR,i);
++		pr_info("%s\n",__func__);
++		WRITE_VCBUS_REG(ISP_LNS_XYSCAL, lnsd->reg_map[i]);
++		for(i=1;i<XML_LUT_LS;i++){
++			WR(ISP_LNSD_LUT_ADDR,i-1);
+ 			WR(ISP_LNSD_LUT_DATA,lnsd->reg_map[i]);
+ 		}
+ 	}
+@@ -639,7 +658,7 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ 	isp_set_af_stat(&regs->af_reg,w,h);
+ 	//isp_set_dbg(&regs->dbg);
+ 	isp_set_lnsd(&regs->lnsd);
+-	isp_set_lnsd_test(w,h);
++	//isp_set_lnsd_test(w,h);
+ 	isp_set_gamma_table(&regs->lut_gc);
+ 	//enable isp
+ 	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);
+@@ -1007,15 +1026,15 @@ void isp_get_af_stat(isp_af_stat_t * af_stat)
+ 		pr_info("%s null pointer error.\n",__func__);
+ 	} else {
+ 	for(i=0;i<16;i++)
+-		af_stat->luma_win[i]=isp_rd(0xbc + i);
++		af_stat->luma_win[i]=isp_rd(ISP_RO_AFC_WIND0_F0 + i);
+ 	}
+ 	return;
+ }
+ void isp_get_af_scan_stat(isp_blnr_stat_t *blnr_stat)
+ {
+-	int i = 0, af = isp_rd(ISP_RO_AFC_WIND0_F0);
+-	for(i=0;i<4;i++){
+-		blnr_stat->ac[i] = af;
++	int i = 0;
++	for(i=0;i<16;i++){
++		blnr_stat->af_ac[i] = isp_rd(ISP_RO_AFC_WIND0_F0 + i);
+ 	}
+ }
+ void isp_get_blnr_stat(isp_blnr_stat_t *blnr_stat)
+@@ -1024,7 +1043,7 @@ void isp_get_blnr_stat(isp_blnr_stat_t *blnr_stat)
+ 
+ 	for(i=0;i<4;i++){
+ 		blnr_stat->dc[i] = isp_rd(ISP_RO_BLNR_GRBG_DCSUM0+i);
+-		//blnr_stat->ac[i] = isp_rd(ISP_RO_BLNR_GRBG_ACSUM0+i);
++		blnr_stat->ac[i] = isp_rd(ISP_RO_BLNR_GRBG_ACSUM0+i);
+ 	}
+ 
+ 	return;
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index 1d14c91b9001..631771618ceb 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -71,6 +71,7 @@ typedef struct isp_awb_gain_s {
+ typedef struct isp_blnr_stat_s {
+ 	unsigned int ac[4];//G0 R1 B2 G3
+ 	unsigned int dc[4];//G0 R1 B2 G3
++	unsigned int af_ac[16];
+ } isp_blnr_stat_t;
+ 
+ extern void isp_wr(unsigned int addr,unsigned int value);
+diff --git a/drivers/amlogic/tvin/isp/isp_parm.c b/drivers/amlogic/tvin/isp/isp_parm.c
+index ec6ac117bb27..0902c30a7d7e 100755
+--- a/drivers/amlogic/tvin/isp/isp_parm.c
++++ b/drivers/amlogic/tvin/isp/isp_parm.c
+@@ -132,8 +132,14 @@ void set_ae_parm(xml_algorithm_ae_t *ae_sw,char **parm)
+ 		{"slow_lpfcoef_enh",  &ae_sw->slow_lpfcoef_enh,  1,  ISP_U32},
+ 		{"fast_lpfcoef_enh",  &ae_sw->fast_lpfcoef_enh,  1,  ISP_U32},
+ 		{"flash_thr_enh",     &ae_sw->flash_thr_enh,     1,  ISP_U32},
+-		{"aet_fmt_gain",      &ae_sw->aet_fmt_gain,      1,  ISP_U32},	
+-
++		{"ae_ratio_low",	  &ae_sw->ae_ratio_low, 	 1,  ISP_U32},
++		{"ae_ratio_low2mid",  &ae_sw->ae_ratio_low2mid,  1,  ISP_U32},
++		{"ae_ratio_mid2high", &ae_sw->ae_ratio_mid2high, 1,  ISP_U32},
++		{"ae_ratio_high",	  &ae_sw->ae_ratio_high, 	 1,  ISP_U32},
++		{"ae_min_diff",	      &ae_sw->ae_min_diff, 	     1,  ISP_U32},
++		{"ae_max_diff",	      &ae_sw->ae_max_diff, 	     1,  ISP_U32},
++		{"reserve",	          &ae_sw->reserve[0], 	     16, ISP_U32},
++		{"aet_fmt_gain",	  &ae_sw->aet_fmt_gain, 	 1,  ISP_U32},
+ 	};
+ 
+ 	if(!strcmp(parm[0],"show")){
+@@ -205,6 +211,7 @@ void set_awb_parm(xml_algorithm_awb_t *awb_sw,char **parm)
+ 		{"bw_limitl",      &awb_sw->bw_limitl,       1,  ISP_U32},
+ 		{"thr_u",          &awb_sw->thr_u[0],        20, ISP_U32},
+ 		{"thr_v",          &awb_sw->thr_v[0],        20, ISP_U32},
++		{"reserve",        &awb_sw->reserve[0],      16, ISP_U32},
+ 	};
+ 
+ 	if(!strcmp(parm[0],"show")){
+@@ -218,25 +225,18 @@ void set_af_parm(xml_algorithm_af_t *af_sw,char **parm)
+ {
+ 	int len = AF_PARM_NUM;
+ 	isp_param_t af[AF_PARM_NUM]={
+-		{"enter_move_ratio",      &af_sw->enter_move_ratio,        1, ISP_U32},
+ 		{"enter_static_ratio",    &af_sw->enter_static_ratio,      1, ISP_U32},
+ 		{"detect_step_cnt",       &af_sw->detect_step_cnt,         1, ISP_U32},
+ 		{"ave_vdc_thr",		  &af_sw->ave_vdc_thr,		   		   1, ISP_U32},
+-		{"delta_fv_ratio",        &af_sw->delta_fv_ratio,          1, ISP_U32},
+-		{"af_duration_time",	  &af_sw->af_duration_time, 	   1, ISP_U32},
+-		{"af_duration_cnt",	  &af_sw->af_duration_cnt,	       1, ISP_U32},
+ 		{"win_ratio", 	  	  &af_sw->win_ratio,		   1, ISP_U32},
+ 		{"step",      		  &af_sw->step,           FOCUS_GRIDS, ISP_U32},
+ 		{"valid_step_cnt",        &af_sw->valid_step_cnt,          1, ISP_U32},
+-		{"af_retry_max",          &af_sw->af_retry_max,            1, ISP_U32},
+ 		{"jump_offset",           &af_sw->jump_offset,             1, ISP_U32},
+ 		{"field_delay",           &af_sw->field_delay,             1, ISP_U32},
+-		{"af_fail_ratio",         &af_sw->af_fail_ratio,           1, ISP_U32},
+ 		{"x",                     &af_sw->x,      			       1, ISP_U32},
+ 		{"y",                     &af_sw->y,      			       1, ISP_U32},
+ 		{"radius_ratio",          &af_sw->radius_ratio,     		       1, ISP_U32},
+-		{"af_step_mid_thre",          &af_sw->af_step_mid_thre,     	1, ISP_U32},
+-		{"af_step_max_thre",          &af_sw->af_step_max_thre,     	1, ISP_U32},
++		{"radius_ratio",          &af_sw->hillside_fall,     		       1, ISP_U32},
+ 	};
+ 
+ 	if(!strcmp(parm[0],"show")){
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 3ee0596d4ce4..b67f01867487 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -129,12 +129,11 @@ MODULE_PARM_DESC(exposure_extra,"\n debug exposure for ae.\n");
+ #define P2DB 1289
+ #define N2DB  813
+ 
+-
+-static unsigned int best_step_debug = 0;
+-
++#define AF_DETECT			0x00000001
++#define AF_FINE_TUNE			0x00000002
++#define AF_BEST_STEP			0x00000004
+ static unsigned int af_sm_dg = 0;
+ 
+-
+ volatile struct isp_ae_to_sensor_s ae_sens;
+ 
+ 
+@@ -262,30 +261,21 @@ void isp_set_manual_exposure(isp_dev_t *devp)
+     if(aepa->targ > aep->targethigh)
+ 		aepa->targ = aep->targethigh;
+     if(aepa->targ < aep->targetlow)
+-		aepa->targ = aep->targetlow;	
++		aepa->targ = aep->targetlow;
+ }
+ 
+ void af_sm_init(isp_dev_t *devp)
+ {
+-	unsigned int tmp = 0 ;
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 	/*init for af*/
+-	//if(sm_state.af_state)
+-		//devp->flag |= devp->af_info.flag_bk;
+ 	if(devp->flag & ISP_AF_SM_MASK){
+-    	        sm_state.af_state = AF_INIT;
++    	        sm_state.af_state = AF_SCAN_INIT;
+ 	}
+ 	if(devp->flag & ISP_FLAG_CAPTURE){
+ 		af_info->cur_step = af_info->capture_step;
+ 		func->set_af_new_step(devp->af_info.cur_step);
+ 	}
+-	devp->af_info.fv_aft_af = 0;
+-	devp->af_info.fv_bf_af = 0;
+-	devp->af_info.adj_duration_cnt = 0;
+-	/*calc duration for detect lose focus*/
+-	tmp = devp->isp_af_parm->af_duration_time*devp->info.frame_rate;
+-	devp->isp_af_parm->af_duration_cnt = tmp/10;
+ }
+ void isp_ae_low_gain()
+ {
+@@ -315,12 +305,11 @@ unsigned int isp_tune_exposure(isp_dev_t *devp)
+ 	unsigned int gain_cur = 0;
+ 	unsigned int gain_target = 0;
+ 	if(func&&func->get_aet_current_gain)
+-	gain_cur = func->get_aet_current_gain();	
++	gain_cur = func->get_aet_current_gain();
+ 	gain_target = (gain_cur*exposure_extra + 512) >> 10;
+ 	new_step = find_step(func, 0, aepa->max_step, gain_target);
+ 	return new_step;
+ }
+-
+ void isp_ae_base_sm(isp_dev_t *devp)
+ {
+ 	struct isp_ae_stat_s *ae = &devp->isp_ae;
+@@ -343,7 +332,7 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 	static int sum = 0;
+ 	int step = 0;
+ 	unsigned short targrate;
+-	unsigned int targstep; 
++	unsigned int targstep;
+ 	static unsigned int newstep;
+ 	u8 lpfcoef;
+ 	u8 radium_outer;
+@@ -366,10 +355,10 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);
+ 			aepa->pixel_sum = parm->h_active * parm->v_active;
+ 			aepa->sub_pixel_sum = aepa->pixel_sum >> 4;
+-			aepa->max_lumasum1 = ((aepa->pixel_sum >> 4) * ae_ratio1) >> 10;
+-			aepa->max_lumasum2 = ((aepa->pixel_sum >> 4) * ae_ratio2) >> 10;
+-			aepa->max_lumasum3 = ((aepa->pixel_sum >> 4) * ae_ratio3) >> 10;
+-			aepa->max_lumasum4 = ((aepa->pixel_sum >> 4) * ae_ratio4) >> 10;
++			aepa->max_lumasum1 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low) >> 10;
++			aepa->max_lumasum2 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low2mid) >> 10;
++			aepa->max_lumasum3 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_mid2high) >> 10;
++			aepa->max_lumasum4 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_high) >> 10;
+ 			aepa->pre_gain = 400;
+ 			aepa->targ = aep->targetmid;
+ 			temp = 1;
+@@ -397,7 +386,23 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_ORI_SET:
+ 			newstep = find_step(func,0,aepa->max_step,aepa->pre_gain);
+-			if(aep->ae_skip[1] == 0x1)
++			if(aep->ae_skip[0] == 0x1)
++			{
++				if(atomic_read(&ae_info->writeable) <= 0)
++				{
++					ae_sens.new_step = newstep;
++					ae_sens.shutter = 0;
++					ae_sens.gain = 1;
++					atomic_set(&ae_info->writeable,1);
++					//printk("ae_sens.send \n");
++					sm_state.status = ISP_AE_STATUS_UNSTABLE;
++					if(ae_debug&0x10)
++					printk("ISP_AE_STATUS_UNSTABLE1\n");
++					sm_state.ae_down = false;
++				}
++				sm_state.isp_ae_parm.isp_ae_state = AE_SHUTTER_ADJUST;
++			}
++			else if(aep->ae_skip[1] == 0x1)
+ 			{
+ 				//ae_sens.send = 1;
+ 				ae_sens.new_step = newstep;
+@@ -449,10 +454,10 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			aepa->pre_gain = aepa->cur_gain;
+ 			if(func&&func->get_aet_current_gain)
+ 			aepa->cur_step = func->get_aet_current_step();
+-			if(aepa->cur_gain == 0)
+-				break;
+ 			if(ae_debug1)
+ 			printk("cur_gain = %d,cur_step = %d\n",aepa->cur_gain,aepa->cur_step);
++			if(aepa->cur_gain == 0)
++				break;
+ 			while(step != AE_SUCCESS)
+ 			{
+ 				switch(step){
+@@ -548,17 +553,17 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							{
+ 								temp = 2;
+ 								aepa->targ--;
+-								if(aepa->targ<(aep->targetmid-ae_min_diff))
+-									aepa->targ = aep->targetmid-ae_min_diff;
++								if(aepa->targ<(aep->targetmid-aep->ae_min_diff))
++									aepa->targ = aep->targetmid-aep->ae_min_diff;
+ 							}
+ 							else if((sum < aepa->max_lumasum1)||((sum < aepa->max_lumasum2)&&(temp==0)))
+ 							{
+ 								temp = 0;
+ 								aepa->targ++;
+-								if(aepa->targ>(aep->targetmid+ae_max_diff))
+-									aepa->targ = aep->targetmid+ae_max_diff;
++								if(aepa->targ>(aep->targetmid+aep->ae_max_diff))
++									aepa->targ = aep->targetmid+aep->ae_max_diff;
+ 							}
+-							else 
++							else
+ 							{
+ 								temp = 1;
+ 								//targ = 80;
+@@ -645,7 +650,27 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							step = AE_SET_NEWSTEP;
+ 						break;
+ 					case AE_SET_NEWSTEP:
+-						if(aep->ae_skip[1] == 0x1)
++						if(aep->ae_skip[0] == 0x1)
++						{
++							if(atomic_read(&ae_info->writeable) <= 0)
++							{
++								ae_sens.new_step = newstep;
++								ae_sens.shutter = 0;
++								ae_sens.gain = 1;
++								atomic_set(&ae_info->writeable,1);
++								//printk("ae_sens.send \n");
++								sm_state.status = ISP_AE_STATUS_UNSTABLE;
++								if(ae_debug&0x10)
++								printk("ISP_AE_STATUS_UNSTABLE1\n");
++								sm_state.ae_down = false;
++							}
++							if(ae_debug&0x20)
++							sm_state.isp_ae_parm.isp_ae_state = AE_GAIN_ADJUST;
++							else
++							sm_state.isp_ae_parm.isp_ae_state = AE_SHUTTER_ADJUST;
++							step = AE_SUCCESS;
++						}
++						else if(aep->ae_skip[1] == 0x1)
+ 						{
+ 							ae_sens.new_step = newstep;
+ 							ae_sens.shutter = 1;
+@@ -1103,88 +1128,11 @@ static unsigned long long get_fv_base_blnr(isp_blnr_stat_t *blnr)
+ 	sum_dc += (unsigned long long)blnr->dc[3];
+ 
+ 	mul_ac = (sum_ac > 0x00000000ffffffff) ? 0xffffffffffffffff : sum_ac*sum_ac;
++	sum_ac = (unsigned long long)blnr->af_ac[0];
+ 	return sum_ac;
+ 	//return div64(mul_ac,sum_dc);
+ 
+ }
+-static unsigned int max_vibrate = 2000;
+-module_param(max_vibrate,uint,0664);
+-MODULE_PARM_DESC(max_vibrate,"\n threshold for vibrate sum.\n");
+-
+-static unsigned int get_best_step(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+-{
+-        unsigned int i = 0, j = 0,cur_grid = 0, max_grid = 0, best_step = 0;
+-        unsigned long long sum_ac = 0, sum_pixel=0,sum_dc = 0, ave_dc = 0,mul_ac = 0, fv[FOCUS_GRIDS], max_fv = 0, min_fv = 0xffffffffffffffff, sum_fv = 0,moment = 0;
+-		unsigned long long fv_diff_sum=0,fv_ave=0,fv_sum=0,diff_fv_parm;
+-		if(best_step_debug&0x2)
+-			pr_info("%s ac[0] ac[1] ac[2] ac[3] dc[0] dc[1] dc[2] dc[3]\n", __func__);
+-        for (i = 0; i < af_alg->valid_step_cnt; i++){
+-                if (i && (af_alg->step[i]==0)){
+-                        break;
+-                }
+-                max_grid = i;
+-                fv[i] = get_fv_base_blnr(&af_info->af_data[i]);
+-	        if(best_step_debug&0x2)
+-                        pr_info("%s %u %u %u %u %u %u %u %u\n", __func__, af_info->af_data[i].ac[0], af_info->af_data[i].ac[1], af_info->af_data[i].ac[2],
+-                        af_info->af_data[i].ac[3], af_info->af_data[i].dc[0], af_info->af_data[i].dc[1], af_info->af_data[i].dc[2], af_info->af_data[i].dc[3]);
+-                if (max_fv < fv[i]){
+-		        max_fv = fv[i];
+-		        cur_grid = i;
+-	        }
+-		if(min_fv > fv[i])
+-			min_fv = fv[i];
+-		if(i>=1)
+-			fv_diff_sum += isp_abs64(fv[i-1],fv[i]);
+-		for(j=0;j<4;j++)
+-			sum_dc += af_info->af_data[i].dc[j];
+-        }
+-		sum_pixel = (af_info->radius*af_info->radius)<<2;
+-		ave_dc = div64(sum_dc,sum_pixel);
+-		diff_fv_parm = div64((fv_diff_sum*1024),(max_fv-min_fv));
+-		if(best_step_debug)
+-			pr_info("%s ave_dc=%llu,sum_pixel=%u,sum_dc=%llu.\n",__func__,ave_dc,sum_pixel,sum_dc);
+-		#if 0
+-		if(diff_fv_parm > max_vibrate){
+-			pr_info("%s diff_fv_parm %llu>%u, return 0.\n",__func__,diff_fv_parm,max_vibrate);
+-			return 0;
+-		}
+-		#endif
+-	// too less stroke, for power saving
+-        if (!cur_grid) {
+-	        best_step = 0;
+-        }
+-        // too much stroke
+-        else if (cur_grid == max_grid){
+-	        best_step = af_alg->step[max_grid];
+-	}
+-	// work out best step with 3 grids
+-	else if ((cur_grid == 1) || (cur_grid == max_grid - 1)){
+-                moment += fv[cur_grid - 1]*(unsigned long long)af_alg->step[cur_grid - 1];
+-                moment += fv[cur_grid    ]*(unsigned long long)af_alg->step[cur_grid    ];
+-                moment += fv[cur_grid + 1]*(unsigned long long)af_alg->step[cur_grid + 1];
+-                sum_fv += fv[cur_grid - 1];
+-                sum_fv += fv[cur_grid    ];
+-                sum_fv += fv[cur_grid + 1];
+-                best_step = (unsigned int)div64(moment,sum_fv);
+-	}
+-	// work out best step with 5 grids
+-        else {
+-                moment += (unsigned long long)fv[cur_grid - 2]*(unsigned long long)af_alg->step[cur_grid - 2];
+-                moment += (unsigned long long)fv[cur_grid - 1]*(unsigned long long)af_alg->step[cur_grid - 1];
+-                moment += (unsigned long long)fv[cur_grid    ]*(unsigned long long)af_alg->step[cur_grid    ];
+-                moment += (unsigned long long)fv[cur_grid + 1]*(unsigned long long)af_alg->step[cur_grid + 1];
+-                moment += (unsigned long long)fv[cur_grid + 2]*(unsigned long long)af_alg->step[cur_grid + 2];
+-                sum_fv += fv[cur_grid - 2];
+-                sum_fv += fv[cur_grid - 1];
+-                sum_fv += fv[cur_grid    ];
+-                sum_fv += fv[cur_grid + 1];
+-                sum_fv += fv[cur_grid + 2];
+-                best_step = (unsigned int)div64(moment,sum_fv);
+-	}
+-	if(best_step_debug)
+-		pr_info("%s:get best step %u.\n",__func__,best_step);
+-	return best_step;
+-}
+ static unsigned int jitter = 5;
+ module_param(jitter,uint,0664);
+ MODULE_PARM_DESC(jitter,"\n debug flag for ae.\n");
+@@ -1195,11 +1143,9 @@ MODULE_PARM_DESC(delta,"\n debug flag for ae.\n");
+ 
+ static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+ {
+-	unsigned long long *fv,sum_fv=0,ave_fv=0,delta_fv=0;
+-	unsigned long long *v_dc,sum_vdc=0,ave_vdc=0,delta_dc=0,tmp_vdc1=0,tmp_vdc2=0;
++	unsigned long long *v_dc,sum_vdc=0,ave_vdc=0,delta_dc=0,tmp_vdc=0;
+ 	unsigned int i=0,dc0,dc1,dc2,dc3,static_cnt;
+ 	bool ret=false,is_move=false,is_static=false;
+-	fv = af_info->fv;
+ 	v_dc = af_info->v_dc;
+ 	/*calc v dc*/
+ 	dc0 = af_info->last_blnr.dc[0];
+@@ -1216,77 +1162,40 @@ static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+ 		delta_dc = isp_abs64(dc3,af_info->af_detect[i].dc[3]);
+ 		v_dc[i] += div64((delta_dc*1024),(unsigned long long)dc3);
+ 		sum_vdc += v_dc[i];
+-		if(af_sm_dg&0x2)
+-			pr_info("v_dc[%u]=%llu.\n",i,v_dc[i]);
+ 	}
+ 	ave_vdc = div64(sum_vdc,af_alg->detect_step_cnt);
+ 
+ 	static_cnt = 0;
+ 	for(i=0;i<af_alg->detect_step_cnt;i++){
+ 		delta_dc = isp_abs64(v_dc[i],ave_vdc);
+-		tmp_vdc1 = div64(delta_dc*1024,af_alg->enter_move_ratio);
+-		tmp_vdc2 = div64(delta_dc*1024,af_alg->enter_static_ratio);
++		tmp_vdc = div64(delta_dc*1024,af_alg->enter_static_ratio);
+ 		if(!af_info->last_move){
+-			if(ave_vdc > af_alg->ave_vdc_thr){
++			if((ave_vdc > af_alg->ave_vdc_thr)||(v_dc[i] > af_alg->ave_vdc_thr)){
+ 			        is_move = true;
+ 				break;
+-			} else{
+-                                if(af_sm_dg&0x1)
+-				        pr_info("static ave_vdc=%llu.\n",ave_vdc);
+ 			}
+-		}else if(tmp_vdc2 < ave_vdc){
++		}else if(tmp_vdc < ave_vdc){
+ 			if(++static_cnt >= af_alg->detect_step_cnt)
+ 				is_static = true;
+ 		}
+ 	}
+ 	/* enter move from static */
+ 	if(is_move){
+-		if(af_sm_dg&0x1)
++		if(af_sm_dg&AF_DETECT)
+ 			pr_info("0->1\n");
+ 		af_info->last_move = true;
+ 		return false;
+ 	/* during hysteresis ,still last state*/
+ 	}else if((!is_static&&!is_move)||!af_info->last_move){
+-		if(af_sm_dg&0x1){
+-			pr_info("v_dc %llu is between %llu~%llu keep last state.\n",ave_vdc,tmp_vdc2,tmp_vdc1);
++		if(af_sm_dg&AF_DETECT){
++			pr_info("ave_vdc:%llu,af_info->last_move:%d keep last state.\n",ave_vdc,af_info->last_move);
+ 		}
+ 		return false;
+ 	}
+-	if(af_sm_dg&0x1)
++	if(af_sm_dg&AF_DETECT)
+ 		pr_info("1->0\n");
+-	/*enter static from move,calc fv to telll if trigger full scan*/
+-	if(af_alg->delta_fv_ratio == 0)
+-		return true;
+-	sum_fv = 0;
+-	for(i=0;i<af_alg->detect_step_cnt;i++){
+-		fv[i] = get_fv_base_blnr(&af_info->af_detect[i]);
+-		sum_fv += fv[i];
+-		if(af_sm_dg&0x4){
+-			pr_info("step[%u]:ac0=%u ac1=%u ac2=%u ac3=%u ",i,
+-					af_info->af_detect[i].ac[0],af_info->af_detect[i].ac[1],af_info->af_detect[i].ac[2],
+-					af_info->af_detect[i].ac[3]);
+-			pr_info("dc0=%u dc1=%u dc2=%u dc3=%u  ",af_info->af_detect[i].dc[0],af_info->af_detect[i].dc[1],
+-					af_info->af_detect[i].dc[2],af_info->af_detect[i].dc[3]);
+-			pr_info("fv=%llu.\n",fv[i]);
+-		}
+-	}
+-	ave_fv = div64(sum_fv,af_alg->valid_step_cnt);
+-	if(af_sm_dg&0x1)
+-		pr_info("ave_fv %llu.\n",ave_fv);
+-	delta_fv = af_info->fv_aft_af*af_alg->delta_fv_ratio;
+-	delta_fv = div64(delta_fv,100);
+-	if(ave_fv < delta_fv){
+-		pr_info("true: delta_fv=%llu,last_fv=%llu.\n",delta_fv,af_info->fv_aft_af);
+-		ret = true;
+-	}else{
+-		ret = false;
+-		if(af_sm_dg&0x1)
+-			pr_info("false: delta_fv=%llu,last_fv=%llu.\n",delta_fv,af_info->fv_aft_af);
+-	}
+-
+-
+-	return ret;
+-
++	/*enter static from move,trigger full scan*/
++	return true;
+ }
+ void isp_af_detect(isp_dev_t *devp)
+ {
+@@ -1296,85 +1205,204 @@ void isp_af_detect(isp_dev_t *devp)
+ 	switch(sm_state.af_state){
+ 		case AF_DETECT_INIT:
+ 			isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+-			//af_info->f = af_info->af_detect;
+ 			af_info->cur_index = 0;
+ 			sm_state.af_state = AF_GET_STEPS_INFO;
+ 			break;
+ 		case AF_GET_STEPS_INFO:
+-			if(++af_info->adj_duration_cnt >= af_alg->af_duration_cnt){
+-				af_info->adj_duration_cnt = af_alg->af_duration_cnt;
+-				memcpy(&af_info->af_detect[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+-				if(++af_info->cur_index >= af_alg->detect_step_cnt){
+-					pr_info("%s get info end index=%u duration cnt=%u.\n",__func__,af_info->cur_index,af_info->adj_duration_cnt);
+-					af_info->cur_index = 0;
+-					sm_state.af_state = AF_GET_STATUS;
+-				}
++			memcpy(&af_info->af_detect[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
++			if(++af_info->cur_index >= af_alg->detect_step_cnt){
++				if(af_sm_dg&AF_DETECT)
++					pr_info("%s get info end index=%u .\n",__func__,af_info->cur_index);
++				af_info->cur_index = 0;
++				sm_state.af_state = AF_GET_STATUS;
+ 			}
+ 			break;
+ 		case AF_GET_STATUS:
+ 			if(is_lost_focus(af_info,af_alg)){
+-				sm_state.af_state = AF_INIT;
+-				if(af_sm_dg)
++				sm_state.af_state = AF_SCAN_INIT;
++				if(af_sm_dg&AF_DETECT)
+ 					pr_info("[af_sm]:lost focus.\n");
+ 			}else if(af_info->cur_index < af_alg->detect_step_cnt){
+ 				memcpy(&af_info->af_detect[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+ 				af_info->cur_index++;
+-			}else{/*af_info->cur_index >= af_alg->detect_step_cnt*/
++			}else{
+ 				af_info->cur_index = 0;
+ 			}
+ 			break;
+ 		default:
+-			isp_af_sm(devp);
++			isp_af_fine_tune(devp);
+ 			break;
+ 	}
+ }
+-void isp_af_sm(isp_dev_t *devp)
++static unsigned int check_hillside(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
++{
++	unsigned int cur_ac,last_ac,delta_ac,delta_ac_ratio,ret;
++	if(af_info->valid_step_cnt < 2)
++		return 0;//avoid first step
++	cur_ac = af_info->af_fine_data[af_info->valid_step_cnt - 1].af_data.af_ac[0];
++	last_ac = af_info->af_fine_data[af_info->valid_step_cnt - 2].af_data.af_ac[0];
++	delta_ac = isp_abs64(cur_ac,last_ac);
++	delta_ac_ratio = delta_ac*100/((last_ac < cur_ac)?cur_ac:last_ac);
++	if(af_sm_dg&AF_FINE_TUNE)
++		pr_info("[check hillside]delta_ac_ratio:%d,cur_ac:%d,last_ac:%d .\n",delta_ac_ratio,cur_ac,last_ac);
++	if((last_ac > cur_ac)&&(delta_ac_ratio > af_alg->hillside_fall)){
++		ret = 1;//fall fillside
++	}
++	else if((last_ac < cur_ac)&&(delta_ac_ratio > af_alg->hillside_fall)){
++		return 2;//up fillside
++	}
++	else
++		ret = 0;//platform
++	return ret;
++
++}
++static unsigned int get_fine_step(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
++{
++        unsigned int i = 0, j = 0,cur_grid = 0, max_grid = 0, best_step = 0;
++        unsigned long long delta_fv,sum_ac = 0, mul_ac = 0, fv[FOCUS_GRIDS], max_fv = 0, min_fv = 0xffffffffffffffff, sum_fv = 0,moment = 0;
++	unsigned long long fv_ave=0,fv_sum=0,diff_fv_parm;
++	isp_af_fine_tune_t af_fine_data_ex;
++	for(i = 0; i < af_info->valid_step_cnt; i++){
++		for(j = i+1; j < af_info->valid_step_cnt; j++ ){
++			if(af_info->af_fine_data[j].cur_step < af_info->af_fine_data[i].cur_step){
++				memcpy(&af_fine_data_ex,&af_info->af_fine_data[i],sizeof(isp_af_fine_tune_t));
++				memcpy(&af_info->af_fine_data[i],&af_info->af_fine_data[j],sizeof(isp_af_fine_tune_t));
++				memcpy(&af_info->af_fine_data[j],&af_fine_data_ex,sizeof(isp_af_fine_tune_t));
++			}
++		}
++	}
++	if(af_sm_dg&AF_BEST_STEP)
++		pr_info("%s ac[0] ac[1] ac[2] ac[3] dc[0] dc[1] dc[2] dc[3] af0_ac af1_ac\n", __func__);
++        for (i = 0; i < af_info->valid_step_cnt; i++){
++                if (i && (af_info->af_fine_data[i].cur_step==0))
++                        break;
++                max_grid = i;
++                fv[i] = get_fv_base_blnr(&af_info->af_fine_data[i].af_data);
++	        if(af_sm_dg&AF_BEST_STEP)
++                        pr_info("%s %u %u %u %u %u %u %u %u %u %u\n", __func__, af_info->af_fine_data[i].af_data.ac[0], af_info->af_fine_data[i].af_data.ac[1], af_info->af_fine_data[i].af_data.ac[2],
++                        af_info->af_fine_data[i].af_data.ac[3], af_info->af_fine_data[i].af_data.dc[0], af_info->af_fine_data[i].af_data.dc[1], af_info->af_fine_data[i].af_data.dc[2], af_info->af_fine_data[i].af_data.dc[3],
++                        af_info->af_fine_data[i].af_data.af_ac[0],af_info->af_fine_data[i].af_data.af_ac[1]);
++                if (max_fv < fv[i]){
++		        max_fv = fv[i];
++		        cur_grid = i;
++	        }
++		if(min_fv > fv[i])
++			min_fv = fv[i];
++        }
++	// too less stroke, for power saving
++        if (!cur_grid) {
++	        best_step = af_info->af_fine_data[0].cur_step;
++        }
++        // too much stroke
++        else if (cur_grid == max_grid){
++	        best_step = af_info->af_fine_data[max_grid].cur_step;
++	}
++	// work out best step with 3 grids
++	else if ((cur_grid == 1) || (cur_grid == max_grid - 1)){
++                moment += fv[cur_grid - 1]*(unsigned long long)af_info->af_fine_data[cur_grid - 1].cur_step;
++                moment += fv[cur_grid    ]*(unsigned long long)af_info->af_fine_data[cur_grid    ].cur_step;
++                moment += fv[cur_grid + 1]*(unsigned long long)af_info->af_fine_data[cur_grid + 1].cur_step;
++                sum_fv += fv[cur_grid - 1];
++                sum_fv += fv[cur_grid    ];
++                sum_fv += fv[cur_grid + 1];
++                best_step = (unsigned int)div64(moment,sum_fv);
++	}
++	// work out best step with 5 grids
++        else {
++                moment += (unsigned long long)fv[cur_grid - 2]*(unsigned long long)af_info->af_fine_data[cur_grid - 2].cur_step;
++                moment += (unsigned long long)fv[cur_grid - 1]*(unsigned long long)af_info->af_fine_data[cur_grid - 1].cur_step;
++                moment += (unsigned long long)fv[cur_grid    ]*(unsigned long long)af_info->af_fine_data[cur_grid    ].cur_step;
++                moment += (unsigned long long)fv[cur_grid + 1]*(unsigned long long)af_info->af_fine_data[cur_grid + 1].cur_step;
++                moment += (unsigned long long)fv[cur_grid + 2]*(unsigned long long)af_info->af_fine_data[cur_grid + 2].cur_step;
++                sum_fv += fv[cur_grid - 2];
++                sum_fv += fv[cur_grid - 1];
++                sum_fv += fv[cur_grid    ];
++                sum_fv += fv[cur_grid + 1];
++                sum_fv += fv[cur_grid + 2];
++                best_step = (unsigned int)div64(moment,sum_fv);
++	}
++	delta_fv = div64(100*(max_fv-min_fv),max_fv);
++	if(af_sm_dg&AF_BEST_STEP)
++		pr_info("%s:get best step %u,delta_fv:%lld.\n",__func__,best_step,delta_fv);
++	return best_step;
++}
++void isp_af_fine_tune(isp_dev_t *devp)
+ {
+-	static unsigned int start_jf,af_delay=0;
++	static unsigned int af_delay=0;
+ 	struct xml_algorithm_af_s *af_alg = devp->isp_af_parm;
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+ 	struct isp_af_sm_s *sm = &sm_state.af_sm;
+-	unsigned long long fv_delta;
+ 	af_delay++;
+ 
+ 	switch(sm_state.af_state){
+-		case AF_INIT:
++		case AF_SCAN_INIT:
+ 			isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+-			af_info->last_great_step = af_alg->af_step_max_thre;
+-			if(((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down))||!(devp->flag&ISP_FLAG_AE)){
+-			/*awb brake,ae brake*/
+-			af_info->flag_bk = (devp->flag&ISP_FLAG_AWB)|(devp->flag&ISP_FLAG_AE);
+-			if(af_sm_dg&0x1)
+-				pr_info("%s:ae,awb flag status 0x%x.\n",__func__,af_info->flag_bk);
+-			devp->flag &=(~ISP_FLAG_AWB);
+-			devp->flag &=(~ISP_FLAG_AE);
+-			//af_info->f = af_info->af_data;
+-			af_info->cur_index = 0;
+-			start_jf = jiffies;
+-			sm_state.af_state = AF_GET_OLD_FV;
+-		}else{
+-			if(af_sm_dg&0x1)
+-				pr_info("%s:ae isn't down.\n",__func__);
+-		}
++			af_delay = 0;
++			af_info->valid_step_cnt = 0;
++			memset(af_info->af_fine_data,0,FOCUS_GRIDS*sizeof(isp_af_fine_tune_t));
++			if(af_info->cur_step < (af_alg->step[af_alg->valid_step_cnt - 1] + af_alg->step[0])/2){
++				af_info->cur_index = 0;
++				sm_state.af_state = AF_GET_COARSE_INFO_L;
++			}
++			else{
++				af_info->cur_index = af_alg->valid_step_cnt - 1;
++				sm_state.af_state = AF_GET_COARSE_INFO_H;
++			}
+ 			break;
+-		case AF_GET_OLD_FV:
+-			memcpy(&af_info->af_data[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+-			af_info->fv_bf_af = get_fv_base_blnr(&af_info->af_data[af_info->cur_index]);
+-			if(af_sm_dg&0x1){
+-				pr_info("[af_sm..]:fv_bf_af %llu.\n",af_info->fv_bf_af);
++		case AF_GET_COARSE_INFO_H://from H step --> L step
++			/*return to max step*/
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_info->cur_index == (af_alg->valid_step_cnt - 1))&&(af_info->cur_step != af_alg->step[af_alg->valid_step_cnt - 1])){
++				if(af_info->cur_step < af_alg->step[af_alg->valid_step_cnt - 1]){
++					if((af_alg->step[af_alg->valid_step_cnt - 1] - af_info->cur_step) > af_alg->jump_offset)
++						af_info->cur_step = af_info->cur_step + af_alg->jump_offset;
++					else
++						af_info->cur_step = af_alg->step[af_info->cur_index];
++				}
++				else
++					af_info->cur_step = af_alg->step[af_info->cur_index];
++				atomic_set(&af_info->writeable,1);
++				af_delay = 0;
++				break;
++			}
++			/*get isp af info*/
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
++				af_info->valid_step_cnt++;
++				af_info->af_fine_data[af_info->valid_step_cnt - 1].cur_step = af_info->cur_step;
++				memcpy(&af_info->af_fine_data[af_info->valid_step_cnt - 1].af_data,&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
++				if((af_info->cur_index == 0)||(check_hillside(af_info,af_alg) == 1)){
++				        sm_state.af_state = AF_GET_FINE_INFO;
++					af_info->great_step = get_fine_step(af_info,af_alg);
++				}else{
++					af_info->cur_index--;
++					af_info->cur_step = af_alg->step[af_info->cur_index];
++				        atomic_set(&af_info->writeable,1);
++				        af_delay = 0;
++				}
+ 			}
+-			af_info->cur_index = 0;
+-			af_info->cur_step = af_alg->step[af_info->cur_index];
+-			atomic_set(&af_info->writeable,1);
+-			af_delay = 0;
+-			sm_state.af_state = AF_GET_COARSE_INFO;
+ 			break;
+-		case AF_GET_COARSE_INFO:
++		case AF_GET_COARSE_INFO_L://from L step --> H step
++			/*return to min step*/
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_info->cur_index == 0)&&(af_info->cur_step != af_alg->step[0])){
++				if(af_info->cur_step > af_alg->step[0]){
++					if((af_info->cur_step - af_alg->step[0]) > af_alg->jump_offset)
++						af_info->cur_step = af_info->cur_step - af_alg->jump_offset;
++					else
++						af_info->cur_step = af_alg->step[af_info->cur_index];
++				}
++				else
++					af_info->cur_step = af_alg->step[af_info->cur_index];
++				atomic_set(&af_info->writeable,1);
++				af_delay = 0;
++				break;
++			}
++			/*get isp af info*/
+ 			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+-				memcpy(&af_info->af_data[af_info->cur_index],&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+-				if(++af_info->cur_index >= af_alg->valid_step_cnt){
+-				        sm_state.af_state = AF_CALC_GREAT;
+-				        af_info->cur_index = 0;
++				af_info->valid_step_cnt++;
++				af_info->af_fine_data[af_info->valid_step_cnt - 1].cur_step = af_info->cur_step;
++				memcpy(&af_info->af_fine_data[af_info->valid_step_cnt - 1].af_data,&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
++				if((++af_info->cur_index >= af_alg->valid_step_cnt)||(check_hillside(af_info,af_alg) == 1)){
++				        sm_state.af_state = AF_GET_FINE_INFO;
++					af_info->great_step = get_fine_step(af_info,af_alg);
+ 				}else{
+ 					af_info->cur_step = af_alg->step[af_info->cur_index];
+ 				        atomic_set(&af_info->writeable,1);
+@@ -1383,97 +1411,59 @@ void isp_af_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AF_CALC_GREAT:
+-			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+-			af_info->great_step = get_best_step(af_info,af_alg);
+-			af_info->cur_step = (af_info->great_step > af_alg->jump_offset) ? (af_info->great_step - af_alg->jump_offset) : 0;
+-			if(af_sm_dg&1)
+-				pr_info("[af_sm..]:af_info->cur_step:%d,af_info->great_step:%d.\n",af_info->cur_step,af_info->great_step);
+-			atomic_set(&af_info->writeable,1);
+-			af_delay = 0;
+-			sm_state.af_state = AF_GET_FINE_INFO;
++			if(atomic_read(&af_info->writeable) <= 0){
++				af_info->great_step = get_fine_step(af_info,af_alg);
++				if((af_info->cur_step - af_alg->jump_offset) > af_info->great_step){
++					af_info->cur_step = af_info->cur_step - af_alg->jump_offset;
++					sm_state.af_state = AF_GET_FINE_INFO;
++				}
++				else{
++					af_info->cur_step = af_info->great_step;
++					sm_state.af_state = AF_SUCCESS;
++				}
++				atomic_set(&af_info->writeable,1);
++				af_delay = 0;
+ 			}
+ 			break;
+ 		case AF_GET_FINE_INFO:
+-			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+-				af_info->cur_step = af_info->great_step;
+-				if(af_sm_dg&1)
+-					pr_info("[af_sm..]:af_info->cur_step:%d.\n",af_info->cur_step);
++			if(atomic_read(&af_info->writeable) <= 0){
++				if(af_sm_dg&AF_FINE_TUNE)
++					pr_info("[af_sm..]:af_info->cur_step:%d,af_alg->jump_offset:%d,af_info->great_step:%d.\n",
++					af_info->cur_step,af_alg->jump_offset,af_info->great_step);
++				if((af_info->cur_step - af_alg->jump_offset) > af_info->great_step){
++					af_info->cur_step = af_info->cur_step - af_alg->jump_offset;
++				}
++				else{
++					af_info->cur_step = af_info->great_step;
++					sm_state.af_state = AF_SUCCESS;
++				}
+ 				atomic_set(&af_info->writeable,1);
+ 				af_delay = 0;
+-				sm_state.af_state = AF_SUCCESS;
+ 			}
+ 			break;
+ 		case AF_SUCCESS:
+-			//if(af_delay >= 2){
+-			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= 5)){
++			if((atomic_read(&af_info->writeable) <= 0)&&(af_delay >= af_alg->field_delay)){
+ 				/*get last blnr*/
+ 				memcpy(&af_info->last_blnr,&af_info->isr_af_data,sizeof(isp_blnr_stat_t));
+-		                /* get last fv */
+-		                af_info->fv_aft_af = get_fv_base_blnr(&af_info->last_blnr);
+-			        if(af_sm_dg&0x2){
+-				        pr_info("[af] last blnr:ac0=%u ac1=%u ac2=%u ac3=%u dc0=%u dc1=%u dc2=%u dc3=%u fv=%llu.\n",
+-				                af_info->af_data[af_info->cur_index].ac[0],af_info->af_data[af_info->cur_index].ac[1],
+-				                af_info->af_data[af_info->cur_index].ac[2],af_info->af_data[af_info->cur_index].ac[3],
+-					        af_info->af_data[af_info->cur_index].dc[0],af_info->af_data[af_info->cur_index].dc[1],
+-					        af_info->af_data[af_info->cur_index].dc[2],af_info->af_data[af_info->cur_index].dc[3],af_info->fv_aft_af);
+-				}
+-				fv_delta = af_info->fv_aft_af*100;
+-				fv_delta = div64(fv_delta,af_alg->af_fail_ratio);
+-				/*af failed return to af init,retry*/
+-				if(af_sm_dg&0x1){
+-					pr_info("[af_sm..]:fv_delta:%llu,af_info->fv_bf_af %llu,fv_aft_af %llu.\n",
+-						fv_delta,af_info->fv_bf_af,af_info->fv_aft_af);
+-				}
+-				if(af_info->great_step < af_info->last_great_step)
+-				{
+-					af_info->last_great_step = af_info->great_step;
+-				}
+-				if((fv_delta < af_info->fv_bf_af)&&(++af_info->af_retry_cnt < af_alg->af_retry_max)&&(af_info->cur_step > af_alg->af_step_mid_thre)){
+-					sm_state.af_state = AF_GET_OLD_FV;
+-					if(af_sm_dg&0x1)
+-						pr_info("[af_sm..]:fail ratio %u,%u times,return to af init retry.\n",af_alg->af_fail_ratio,af_info->af_retry_cnt);
+-				} else if((fv_delta < af_info->fv_bf_af)&&(af_info->af_retry_cnt > af_alg->af_retry_max)){
+-		        	/*af failed over max times,force to step 0*/
+-		                        /*enable awb,enable af*/
+-				        devp->flag |= af_info->flag_bk;
+-					af_info->cur_step = af_info->last_great_step;
+-					atomic_set(&af_info->writeable,1);
+-					if(af_sm_dg&0x1)
+-						pr_info("[af_sm..]:fail ratio %u over,af_info->cur_step:%d.\n",af_alg->af_fail_ratio,af_info->cur_step);
+-					af_info->af_retry_cnt = 0;
+-					af_info->adj_duration_cnt = 0;
+-					af_info->last_move = false;
+-					af_delay = 0;
+-					if(devp->flag & ISP_FLAG_TOUCH_AF)
+-						devp->flag &= (~ISP_FLAG_TOUCH_AF);
+-					if(devp->flag & ISP_FLAG_AF)
+-						sm_state.af_state = AF_DETECT_INIT;
+-					else
+-						sm_state.af_state = AF_NULL;
+-					devp->cmd_state = CAM_STATE_SUCCESS;
+-					isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+-					isp_set_af_scan_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+-				} else {/*af success*/
+-					/*enable awb,enable af*/
+-				        devp->flag |= af_info->flag_bk;
+-					af_info->af_retry_cnt = 0;
+-					af_info->adj_duration_cnt = 0;
+-					af_info->last_move = false;
+-					af_delay = 0;
+-					af_info->cur_step= af_info->last_great_step;
+-					if(af_sm_dg&0x1)
+-						pr_info("[af_sm..]:af_info->final_step:%d.\n",af_info->cur_step);
+-					atomic_set(&af_info->writeable,1);
+-					if(devp->flag & ISP_FLAG_TOUCH_AF)
+-						devp->flag &= (~ISP_FLAG_TOUCH_AF);
+-					if(devp->flag & ISP_FLAG_AF)
+-						sm_state.af_state = AF_DETECT_INIT;
+-					else
+-						sm_state.af_state = AF_NULL;
+-					devp->cmd_state = CAM_STATE_SUCCESS;
+-					isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+-					isp_set_af_scan_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
++			        if(af_sm_dg&AF_FINE_TUNE){
++				        pr_info("[af] last blnr:ac0=%u ac1=%u ac2=%u ac3=%u dc0=%u dc1=%u dc2=%u dc3=%u af0_ac=%u af1_ac=%u.\n",
++				                af_info->last_blnr.ac[0],af_info->last_blnr.ac[1],
++				                af_info->last_blnr.ac[2],af_info->last_blnr.ac[3],
++					        af_info->last_blnr.dc[0],af_info->last_blnr.dc[1],
++					        af_info->last_blnr.dc[2],af_info->last_blnr.dc[3],
++					        af_info->last_blnr.af_ac[0],af_info->last_blnr.af_ac[1]);
+ 				}
++				af_info->last_move = false;
++				af_delay = 0;
++				if(devp->flag & ISP_FLAG_TOUCH_AF)
++					devp->flag &= (~ISP_FLAG_TOUCH_AF);
++				if(devp->flag & ISP_FLAG_AF)
++					sm_state.af_state = AF_DETECT_INIT;
++				else
++					sm_state.af_state = AF_NULL;
++				devp->cmd_state = CAM_STATE_SUCCESS;
++				isp_set_blenr_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
++				isp_set_af_scan_stat(af_info->x0,af_info->y0,af_info->x1,af_info->y1);
+ 			}
+ 			break;
+ 		default:
+@@ -1483,14 +1473,13 @@ void isp_af_sm(isp_dev_t *devp)
+ void isp_af_save_current_para(isp_dev_t *devp)
+ {
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+-	af_info->af_retry_cnt = 0;
+-	af_info->adj_duration_cnt = 0;
++	struct xml_algorithm_af_s *af_alg = devp->isp_af_parm;
+ 	af_info->last_move = false;
+ 	sm_state.af_state = AF_NULL;
+ 	if(sm_state.af_state == AF_SUCCESS)
+ 		af_info->capture_step = af_info->cur_step;
+ 	else
+-		af_info->capture_step = 0;
++		af_info->capture_step = af_alg->step[0];
+ 	pr_info("[isp]%s:save step:%d\n",__func__,af_info->capture_step);
+ }
+ #define FLASH_OFF         0
+@@ -1518,7 +1507,7 @@ void capture_sm_init(isp_dev_t *devp)
+ {
+ 	struct isp_capture_sm_s *cap_sm = &sm_state.cap_sm;
+ 	xml_capture_t *parm = devp->capture_parm;
+-	
++
+ 	devp->capture_parm->ae_try_max_cnt = 3;
+ 	devp->capture_parm->sigle_count = 0;
+ 	devp->capture_parm->skip_step = 0;
+@@ -1526,12 +1515,12 @@ void capture_sm_init(isp_dev_t *devp)
+ 	devp->capture_parm->af_mode = CAM_SCANMODE_FULL;
+ 	devp->capture_parm->eyetime = 0;
+ 	devp->capture_parm->pretime = 0;
+-	devp->capture_parm->postime = 0;		
++	devp->capture_parm->postime = 0;
+ 	cap_sm->adj_cnt = 0;
+ 	cap_sm->flash_mode = FLASH_MODE_NULL;
+ 	cap_sm->fr_time = 0;
+ 	cap_sm->tr_time = 0;
+-	
++
+ 	if(cap_sm->flash_mode) {
+ 		cap_sm->capture_state = CAPTURE_INIT;
+ 	} else {
+@@ -1541,8 +1530,6 @@ void capture_sm_init(isp_dev_t *devp)
+ 		}else{
+ 			devp->flag &= (~ISP_FLAG_AF);
+ 		}
+-		devp->af_info.flag_bk &= (~ISP_FLAG_AWB);
+-		devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 		devp->flag &= (~ISP_FLAG_AWB);
+ 		devp->flag &= (~ISP_FLAG_AE);
+ 	}
+@@ -1628,10 +1615,9 @@ int isp_capture_sm(isp_dev_t *devp)
+ 							cap_sm->adj_cnt>=parm->ae_try_max_cnt?"timeout":"stable");
+ 				}
+ 			}
+-			break;			
++			break;
+ 		case CAPTURE_LOW_GAIN:
+ 			if(sm_state.ae_down==true){
+-				devp->af_info.flag_bk &= (~ISP_FLAG_AE);
+ 				devp->flag &=(~ISP_FLAG_AE);
+ 				cap_sm->capture_state = CAPTURE_EYE_WAIT;
+ 				if(capture_debug)
+@@ -1692,7 +1678,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 						pr_info("[cap_sm]%u:single->capture end.\n",__LINE__);
+ 				}
+ 			}
+-			
++
+ 			break;
+ 		case CAPTURE_MULTI:
+ 			if(cap_sm->adj_cnt % parm->skip_step == 0) {
+@@ -2014,12 +2000,9 @@ void isp_sm_uninit(isp_dev_t *devp)
+     isp_af_save_current_para(devp);
+ }
+ 
+-module_param(best_step_debug,uint,0664);
+-MODULE_PARM_DESC(best_step_debug,"\n debug flag for calc best focus position.\n");
+-
+ module_param(af_sm_dg,uint,0664);
+ MODULE_PARM_DESC(af_sm_dg,"\n debug flag for auto focus.\n");
+ 
+ module_param(capture_debug,uint,0664);
+-MODULE_PARM_DESC(af_sm_dg,"\n debug flag for isp capture function.\n");
++MODULE_PARM_DESC(capture_debug,"\n debug flag for isp capture function.\n");
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.h b/drivers/amlogic/tvin/isp/isp_sm.h
+index 043826f42093..b0b505fcb639 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.h
++++ b/drivers/amlogic/tvin/isp/isp_sm.h
+@@ -83,9 +83,9 @@ typedef enum af_state_e {
+ 	AF_DETECT_INIT,
+ 	AF_GET_STEPS_INFO,
+ 	AF_GET_STATUS,
+-	AF_INIT,
+-	AF_GET_OLD_FV,
+-	AF_GET_COARSE_INFO,
++	AF_SCAN_INIT,
++	AF_GET_COARSE_INFO_H,
++	AF_GET_COARSE_INFO_L,
+ 	AF_CALC_GREAT,
+ 	AF_GET_FINE_INFO,
+ 	AF_CLIMBING,
+@@ -225,7 +225,7 @@ extern void capture_sm_init(isp_dev_t *devp);
+ extern void isp_set_flash_mode(isp_dev_t *devp);
+ extern void isp_ae_sm(isp_dev_t *devp);
+ extern void isp_awb_sm(isp_dev_t *devp);
+-extern void isp_af_sm(isp_dev_t *devp);
++extern void isp_af_fine_tune(isp_dev_t *devp);
+ extern void isp_af_detect(isp_dev_t *devp);
+ extern int isp_capture_sm(isp_dev_t *devp);
+ extern unsigned long long div64(unsigned long long n, unsigned long long d);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index a063c561d88a..ea257a142216 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -2052,373 +2052,21 @@ void set_chroma_regs(unsigned int offset, unsigned int h_active,unsigned int v_a
+ 	pr_info("%s cm2 init ok.\n",__func__);
+ #endif
+ }
+-#define CM2_REG_NUM 174
+-static struct vdin_cm2_s vdin_cm2_table[CM2_REG_NUM] = {
+-	/* enhancement */
+-	{0x200,    0xffffffff,		 0x0	  },
+-	{0x201,    0xffffffff,		 0x0	  },
+-	{0x202,    0xffffffff,		 0x0	  },
+-	{0x203,    0xffffffff,		 0x8000400},
+-	{0x204,    0xffffffff,		 0x90	  },
+-	{0x206,    0xffffffff,		 0x0	  },
+-	{0x207,    0xffffffff,		 0x2640000},
+-	{0x208,    0xffffffff,		 0x7a	  },
+-	{0x209,    0xffffffff,		 0x0	  },
+-	{0x20a,    0xffffffff,		 0x0	  },
+-	{0x20f,    0xf, 			 0x0,	  },
+-	{0x205,    0xffffffff,		 0x437077f},
+-	{0x1da1,   0xc000,			 0x0,	  },
+-	{0x1da2,   0xffffffff,		 0xfff	  },
+-	{0x100,    0xffffffff,		 0x2b5600 },
+-	{0x101,    0xffffffff,		 0xc	  },
+-	{0x102,    0xffffffff,		 0x0	  },
+-	{0x103,    0xffffffff,		 0x0	  },
+-	{0x104,    0xffffffff,		 0x0	  },
+-	{0x108,    0xffffffff,		 0x295600 },
+-	{0x109,    0xffffffff,		 0x1f	  },
+-	{0x10a,    0xffffffff,		 0x0	  },
+-	{0x10b,    0xffffffff,		 0x0	  },
+-	{0x10c,    0xffffffff,		 0x0	  },
+-	{0x110,    0xffffffff,		 0x295600 },
+-	{0x111,    0xffffffff,		 0x33	  },
+-	{0x112,    0xffffffff,		 0x0	  },
+-	{0x113,    0xffffffff,		 0x0	  },
+-	{0x114,    0xffffffff,		 0x0	  },
+-	{0x118,    0xffffffff,		 0x2b5600 },
+-	{0x119,    0xffffffff,		 0x3f	  },
+-	{0x11a,    0xffffffff,		 0x0	  },
+-	{0x11b,    0xffffffff,		 0x0	  },
+-	{0x11c,    0xffffffff,		 0x0	  },
+-	{0x120,    0xffffffff,		 0x2b5600 },
+-	{0x121,    0xffffffff,		 0x3f	  },
+-	{0x122,    0xffffffff,		 0x0	  },
+-	{0x123,    0xffffffff,		 0x0	  },
+-	{0x124,    0xffffffff,		 0x0	  },
+-	{0x128,    0xffffffff,		 0x295600 },
+-	{0x129,    0xffffffff,		 0x3f	  },
+-	{0x12a,    0xffffffff,		 0x0	  },
+-	{0x12b,    0xffffffff,		 0x0	  },
+-	{0x12c,    0xffffffff,		 0x0	  },
+-	{0x130,    0xffffffff,		 0x295400 },
+-	{0x131,    0xffffffff,		 0x3f	  },
+-	{0x132,    0xffffffff,		 0x0	  },
+-	{0x133,    0xffffffff,		 0x0	  },
+-	{0x134,    0xffffffff,		 0x0	  },
+-	{0x138,    0xffffffff,		 0x295400 },
+-	{0x139,    0xffffffff,		 0x33	  },
+-	{0x13a,    0xffffffff,		 0x0	  },
+-	{0x13b,    0xffffffff,		 0x0	  },
+-	{0x13c,    0xffffffff,		 0x0	  },
+-	{0x140,    0xffffffff,		 0x295400 },
+-	{0x141,    0xffffffff,		 0x9	  },
+-	{0x142,    0xffffffff,		 0x0	  },
+-	{0x143,    0xffffffff,		 0x0	  },
+-	{0x144,    0xffffffff,		 0x0	  },
+-	{0x148,    0xffffffff,		 0x295400 },
+-	{0x149,    0xffffffff,		 0xea	  },
+-	{0x14a,    0xffffffff,		 0x0	  },
+-	{0x14b,    0xffffffff,		 0x0	  },
+-	{0x14c,    0xffffffff,		 0x0	  },
+-	{0x150,    0xffffffff,		 0x295400 },
+-	{0x151,    0xffffffff,		 0xd4	  },
+-	{0x152,    0xffffffff,		 0x0	  },
+-	{0x153,    0xffffffff,		 0x0	  },
+-	{0x154,    0xffffffff,		 0x0	  },
+-	{0x158,    0xffffffff,		 0x295400 },
+-	{0x159,    0xffffffff,		 0xc5	  },
+-	{0x15a,    0xffffffff,		 0x0	  },
+-	{0x15b,    0xffffffff,		 0x0	  },
+-	{0x15c,    0xffffffff,		 0x0	  },
+-	{0x160,    0xffffffff,		 0x295400 },
+-	{0x161,    0xffffffff,		 0xc1	  },
+-	{0x162,    0xffffffff,		 0x0	  },
+-	{0x163,    0xffffffff,		 0x0	  },
+-	{0x164,    0xffffffff,		 0x0	  },
+-	{0x168,    0xffffffff,		 0x295400 },
+-	{0x169,    0xffffffff,		 0xcb	  },
+-	{0x16a,    0xffffffff,		 0x0	  },
+-	{0x16b,    0xffffffff,		 0x0	  },
+-	{0x16c,    0xffffffff,		 0x0	  },
+-	{0x170,    0xffffffff,		 0x295400 },
+-	{0x171,    0xffffffff,		 0xd6	  },
+-	{0x172,    0xffffffff,		 0x0	  },
+-	{0x173,    0xffffffff,		 0x0	  },
+-	{0x174,    0xffffffff,		 0x0	  },
+-	{0x178,    0xffffffff,		 0x295600 },
+-	{0x179,    0xffffffff,		 0xdb	  },
+-	{0x17a,    0xffffffff,		 0x0	  },
+-	{0x17b,    0xffffffff,		 0x0	  },
+-	{0x17c,    0xffffffff,		 0x0	  },
+-	{0x180,    0xffffffff,		 0x295400 },
+-	{0x181,    0xffffffff,		 0xec	  },
+-	{0x182,    0xffffffff,		 0x0	  },
+-	{0x183,    0xffffffff,		 0x0	  },
+-	{0x184,    0xffffffff,		 0x0	  },
+-	{0x188,    0xffffffff,		 0x295600 },
+-	{0x189,    0xffffffff,		 0xf9	  },
+-	{0x18a,    0xffffffff,		 0x0	  },
+-	{0x18b,    0xffffffff,		 0x0	  },
+-	{0x18c,    0xffffffff,		 0x0	  },
+-	{0x190,    0xffffffff,		 0x295600 },
+-	{0x191,    0xffffffff,		 0x3	  },
+-	{0x192,    0xffffffff,		 0x0	  },
+-	{0x193,    0xffffffff,		 0x0	  },
+-	{0x194,    0xffffffff,		 0x0	  },
+-	{0x198,    0xffffffff,		 0x295600 },
+-	{0x199,    0xffffffff,		 0x9	  },
+-	{0x19a,    0xffffffff,		 0x0	  },
+-	{0x19b,    0xffffffff,		 0x0	  },
+-	{0x19c,    0xffffffff,		 0x0	  },
+-	{0x1a0,    0xffffffff,		 0x295400 },
+-	{0x1a1,    0xffffffff,		 0xc	  },
+-	{0x1a2,    0xffffffff,		 0x0	  },
+-	{0x1a3,    0xffffffff,		 0x0	  },
+-	{0x1a4,    0xffffffff,		 0x0	  },
+-	{0x1a8,    0xffffffff,		 0x295400 },
+-	{0x1a9,    0xffffffff,		 0xe	  },
+-	{0x1aa,    0xffffffff,		 0x0	  },
+-	{0x1ab,    0xffffffff,		 0x0	  },
+-	{0x1ac,    0xffffffff,		 0x0	  },
+-	{0x1b0,    0xffffffff,		 0x295400 },
+-	{0x1b1,    0xffffffff,		 0xc	  },
+-	{0x1b2,    0xffffffff,		 0x0	  },
+-	{0x1b3,    0xffffffff,		 0x0	  },
+-	{0x1b4,    0xffffffff,		 0x0	  },
+-	{0x1b8,    0xffffffff,		 0x295400 },
+-	{0x1b9,    0xffffffff,		 0x7	  },
+-	{0x1ba,    0xffffffff,		 0x0	  },
+-	{0x1bb,    0xffffffff,		 0x0	  },
+-	{0x1bc,    0xffffffff,		 0x0	  },
+-	{0x1c0,    0xffffffff,		 0x295400 },
+-	{0x1c1,    0xffffffff,		 0xfb	  },
+-	{0x1c2,    0xffffffff,		 0x0	  },
+-	{0x1c3,    0xffffffff,		 0x0	  },
+-	{0x1c4,    0xffffffff,		 0x0	  },
+-	{0x1c8,    0xffffffff,		 0x295400 },
+-	{0x1c9,    0xffffffff,		 0xf2	  },
+-	{0x1ca,    0xffffffff,		 0x0	  },
+-	{0x1cb,    0xffffffff,		 0x0	  },
+-	{0x1cc,    0xffffffff,		 0x0	  },
+-	{0x1d0,    0xffffffff,		 0x2295400},
+-	{0x1d1,    0xffffffff,		 0xee	  },
+-	{0x1d2,    0xffffffff,		 0x0	  },
+-	{0x1d3,    0xffffffff,		 0x0	  },
+-	{0x1d4,    0xffffffff,		 0x0	  },
+-	{0x1d8,    0xffffffff,		 0x4295400},
+-	{0x1d9,    0xffffffff,		 0xf5	  },
+-	{0x1da,    0xffffffff,		 0x0	  },
+-	{0x1db,    0xffffffff,		 0x0	  },
+-	{0x1dc,    0xffffffff,		 0x0	  },
+-	{0x1e0,    0xffffffff,		 0x8295400},
+-	{0x1e1,    0xffffffff,		 0x1	  },
+-	{0x1e2,    0xffffffff,		 0x0	  },
+-	{0x1e3,    0xffffffff,		 0x0	  },
+-	{0x1e4,    0xffffffff,		 0x0	  },
+-	{0x1e8,    0xffffffff,		 0x8295400},
+-	{0x1e9,    0xffffffff,		 0x5	  },
+-	{0x1ea,    0xffffffff,		 0x0	  },
+-	{0x1eb,    0xffffffff,		 0x0	  },
+-	{0x1ec,    0xffffffff,		 0x0	  },
+-	{0x1f0,    0xffffffff,		 0x8295400},
+-	{0x1f1,    0xffffffff,		 0x5	  },
+-	{0x1f2,    0xffffffff,		 0x0	  },
+-	{0x1f3,    0xffffffff,		 0x0	  },
+-	{0x1f4,    0xffffffff,		 0x0	  },
+-	{0x1f8,    0xffffffff,		 0x4295400},
+-	{0x1f9,    0xffffffff,		 0x7	  },
+-	{0x1fa,    0xffffffff,		 0x0	  },
+-	{0x1fb,    0xffffffff,		 0x0	  },
+-	{0x1fc,    0xffffffff,		 0x0	  },
+-	/* optimize */ 
+-	{0x200,    0xffffffff,		 0x0	  },
+-	{0x201,    0xffffffff,		 0x0	  },
+-	{0x202,    0xffffffff,		 0x0	  },
+-	{0x203,    0xffffffff,		 0x8000400},
+-	{0x204,    0xffffffff,		 0x90	  },
+-	{0x206,    0xffffffff,		 0x0	  },
+-	{0x207,    0xffffffff,		 0x1f60000},
+-	{0x208,    0xffffffff,		 0x76	  },
+-	{0x209,    0xffffffff,		 0x0	  },
+-	{0x20a,    0xffffffff,		 0x0	  },
+-	{0x20f,    0xf, 			 0x0,	  },
+-	{0x205,    0xffffffff,		 0x437077f},
+-	{0x1da1,   0xc000,			 0x0,	  },
+-	{0x1da2,   0xffffffff,		 0xfff	  },
+-	{0x100,    0xffffffff,		 0xa1100  },
+-	{0x101,    0xffffffff,		 0xc	  },
+-	{0x102,    0xffffffff,		 0x0	  },
+-	{0x103,    0xffffffff,		 0x0	  },
+-	{0x104,    0xffffffff,		 0x0	  },
+-	{0x108,    0xffffffff,		 0xd1100  },
+-	{0x109,    0xffffffff,		 0x1f	  },
+-	{0x10a,    0xffffffff,		 0x0	  },
+-	{0x10b,    0xffffffff,		 0x0	  },
+-	{0x10c,    0xffffffff,		 0x0	  },
+-	{0x110,    0xffffffff,		 0xf1300  },
+-	{0x111,    0xffffffff,		 0x33	  },
+-	{0x112,    0xffffffff,		 0x0	  },
+-	{0x113,    0xffffffff,		 0x0	  },
+-	{0x114,    0xffffffff,		 0x0	  },
+-	{0x118,    0xffffffff,		 0xf1300  },
+-	{0x119,    0xffffffff,		 0x3f	  },
+-	{0x11a,    0xffffffff,		 0x0	  },
+-	{0x11b,    0xffffffff,		 0x0	  },
+-	{0x11c,    0xffffffff,		 0x0	  },
+-	{0x120,    0xffffffff,		 0xf1300  },
+-	{0x121,    0xffffffff,		 0x40	  },
+-	{0x122,    0xffffffff,		 0x0	  },
+-	{0x123,    0xffffffff,		 0x0	  },
+-	{0x124,    0xffffffff,		 0x0	  },
+-	{0x128,    0xffffffff,		 0xf1100  },
+-	{0x129,    0xffffffff,		 0x40	  },
+-	{0x12a,    0xffffffff,		 0x0	  },
+-	{0x12b,    0xffffffff,		 0x0	  },
+-	{0x12c,    0xffffffff,		 0x0	  },
+-	{0x130,    0xffffffff,		 0xd0f00  },
+-	{0x131,    0xffffffff,		 0x3f	  },
+-	{0x132,    0xffffffff,		 0x0	  },
+-	{0x133,    0xffffffff,		 0x0	  },
+-	{0x134,    0xffffffff,		 0x0	  },
+-	{0x138,    0xffffffff,		 0xa0d00  },
+-	{0x139,    0xffffffff,		 0x32	  },
+-	{0x13a,    0xffffffff,		 0x0	  },
+-	{0x13b,    0xffffffff,		 0x0	  },
+-	{0x13c,    0xffffffff,		 0x0	  },
+-	{0x140,    0xffffffff,		 0x80a00  },
+-	{0x141,    0xffffffff,		 0x9	  },
+-	{0x142,    0xffffffff,		 0x0	  },
+-	{0x143,    0xffffffff,		 0x0	  },
+-	{0x144,    0xffffffff,		 0x0	  },
+-	{0x148,    0xffffffff,		 0x80a00  },
+-	{0x149,    0xffffffff,		 0xea	  },
+-	{0x14a,    0xffffffff,		 0x0	  },
+-	{0x14b,    0xffffffff,		 0x0	  },
+-	{0x14c,    0xffffffff,		 0x0	  },
+-	{0x150,    0xffffffff,		 0xa0a00  },
+-	{0x151,    0xffffffff,		 0xd4	  },
+-	{0x152,    0xffffffff,		 0x0	  },
+-	{0x153,    0xffffffff,		 0x0	  },
+-	{0x154,    0xffffffff,		 0x0	  },
+-	{0x158,    0xffffffff,		 0xa0800  },
+-	{0x159,    0xffffffff,		 0xc3	  },
+-	{0x15a,    0xffffffff,		 0x0	  },
+-	{0x15b,    0xffffffff,		 0x0	  },
+-	{0x15c,    0xffffffff,		 0x0	  },
+-	{0x160,    0xffffffff,		 0xa0800  },
+-	{0x161,    0xffffffff,		 0xc0	  },
+-	{0x162,    0xffffffff,		 0x0	  },
+-	{0x163,    0xffffffff,		 0x0	  },
+-	{0x164,    0xffffffff,		 0x0	  },
+-	{0x168,    0xffffffff,		 0x80800  },
+-	{0x169,    0xffffffff,		 0xcb	  },
+-	{0x16a,    0xffffffff,		 0x0	  },
+-	{0x16b,    0xffffffff,		 0x0	  },
+-	{0x16c,    0xffffffff,		 0x0	  },
+-	{0x170,    0xffffffff,		 0x60800  },
+-	{0x171,    0xffffffff,		 0xd4	  },
+-	{0x172,    0xffffffff,		 0x0	  },
+-	{0x173,    0xffffffff,		 0x0	  },
+-	{0x174,    0xffffffff,		 0x0	  },
+-	{0x178,    0xffffffff,		 0x40600  },
+-	{0x179,    0xffffffff,		 0xdb	  },
+-	{0x17a,    0xffffffff,		 0x0	  },
+-	{0x17b,    0xffffffff,		 0x0	  },
+-	{0x17c,    0xffffffff,		 0x0	  },
+-	{0x180,    0xffffffff,		 0x60600  },
+-	{0x181,    0xffffffff,		 0xea	  },
+-	{0x182,    0xffffffff,		 0x0	  },
+-	{0x183,    0xffffffff,		 0x0	  },
+-	{0x184,    0xffffffff,		 0x0	  },
+-	{0x188,    0xffffffff,		 0x60600  },
+-	{0x189,    0xffffffff,		 0xf7	  },
+-	{0x18a,    0xffffffff,		 0x0	  },
+-	{0x18b,    0xffffffff,		 0x0	  },
+-	{0x18c,    0xffffffff,		 0x0	  },
+-	{0x190,    0xffffffff,		 0x60600  },
+-	{0x191,    0xffffffff,		 0x3	  },
+-	{0x192,    0xffffffff,		 0x0	  },
+-	{0x193,    0xffffffff,		 0x0	  },
+-	{0x194,    0xffffffff,		 0x0	  },
+-	{0x198,    0xffffffff,		 0x80800  },
+-	{0x199,    0xffffffff,		 0x9	  },
+-	{0x19a,    0xffffffff,		 0x0	  },
+-	{0x19b,    0xffffffff,		 0x0	  },
+-	{0x19c,    0xffffffff,		 0x0	  },
+-	{0x1a0,    0xffffffff,		 0x60a00  },
+-	{0x1a1,    0xffffffff,		 0xc	  },
+-	{0x1a2,    0xffffffff,		 0x0	  },
+-	{0x1a3,    0xffffffff,		 0x0	  },
+-	{0x1a4,    0xffffffff,		 0x0	  },
+-	{0x1a8,    0xffffffff,		 0x60d00  },
+-	{0x1a9,    0xffffffff,		 0xe	  },
+-	{0x1aa,    0xffffffff,		 0x0	  },
+-	{0x1ab,    0xffffffff,		 0x0	  },
+-	{0x1ac,    0xffffffff,		 0x0	  },
+-	{0x1b0,    0xffffffff,		 0x80d00  },
+-	{0x1b1,    0xffffffff,		 0xc	  },
+-	{0x1b2,    0xffffffff,		 0x0	  },
+-	{0x1b3,    0xffffffff,		 0x0	  },
+-	{0x1b4,    0xffffffff,		 0x0	  },
+-	{0x1b8,    0xffffffff,		 0xa0d00  },
+-	{0x1b9,    0xffffffff,		 0x7	  },
+-	{0x1ba,    0xffffffff,		 0x0	  },
+-	{0x1bb,    0xffffffff,		 0x0	  },
+-	{0x1bc,    0xffffffff,		 0x0	  },
+-	{0x1c0,    0xffffffff,		 0xf0f00  },
+-	{0x1c1,    0xffffffff,		 0xfb	  },
+-	{0x1c2,    0xffffffff,		 0x0	  },
+-	{0x1c3,    0xffffffff,		 0x0	  },
+-	{0x1c4,    0xffffffff,		 0x0	  },
+-	{0x1c8,    0xffffffff,		 0x110f00 },
+-	{0x1c9,    0xffffffff,		 0xf2	  },
+-	{0x1ca,    0xffffffff,		 0x0	  },
+-	{0x1cb,    0xffffffff,		 0x0	  },
+-	{0x1cc,    0xffffffff,		 0x0	  },
+-	{0x1d0,    0xffffffff,		 0x131100 },
+-	{0x1d1,    0xffffffff,		 0xee	  },
+-	{0x1d2,    0xffffffff,		 0x0	  },
+-	{0x1d3,    0xffffffff,		 0x0	  },
+-	{0x1d4,    0xffffffff,		 0x0	  },
+-	{0x1d8,    0xffffffff,		 0x131500 },
+-	{0x1d9,    0xffffffff,		 0xf5	  },
+-	{0x1da,    0xffffffff,		 0x0	  },
+-	{0x1db,    0xffffffff,		 0x0	  },
+-	{0x1dc,    0xffffffff,		 0x0	  },
+-	{0x1e0,    0xffffffff,		 0x151a00 },
+-	{0x1e1,    0xffffffff,		 0x1	  },
+-	{0x1e2,    0xffffffff,		 0x0	  },
+-	{0x1e3,    0xffffffff,		 0x0	  },
+-	{0x1e4,    0xffffffff,		 0x0	  },
+-	{0x1e8,    0xffffffff,		 0x171c00 },
+-	{0x1e9,    0xffffffff,		 0x5	  },
+-	{0x1ea,    0xffffffff,		 0x0	  },
+-	{0x1eb,    0xffffffff,		 0x0	  },
+-	{0x1ec,    0xffffffff,		 0x0	  },
+-	{0x1f0,    0xffffffff,		 0x171a00 },
+-	{0x1f1,    0xffffffff,		 0x5	  },
+-	{0x1f2,    0xffffffff,		 0x0	  },
+-	{0x1f3,    0xffffffff,		 0x0	  },
+-	{0x1f4,    0xffffffff,		 0x0	  },
+-	{0x1f8,    0xffffffff,		 0x131500 },
+-	{0x1f9,    0xffffffff,		 0x7	  },
+-	{0x1fa,    0xffffffff,		 0x0	  },
+-	{0x1fb,    0xffffffff,		 0x0	  },
+-	{0x1fc,    0xffffffff,		 0x0	  },
+-
+-};
+-void vdin_set_cm2(unsigned int offset,unsigned int index)
++void vdin_set_cm2(unsigned int offset,unsigned int *cm2)
+ {
+-	unsigned int i=0,cursor=0;
++	unsigned int i=0,j=0,start_addr=0x100;
+ 
+-        if(!cm_enable)
+-		return;
+-	
+-        pr_info("%s:vdin.%u cm2 use %s configuration.\n",__func__,offset,index?"optimize":"enhancement");
++    if(!cm_enable)
++	return;
+ 	WR_BITS(VDIN_CM_BRI_CON_CTRL,0,CM_TOP_EN_BIT,CM_TOP_EN_WID);
+-	for(i=0;i<CM2_REG_NUM;i++){
+-		cursor = i+index*CM2_REG_NUM;
+-		WR(VDIN_CHROMA_ADDR_PORT,vdin_cm2_table[cursor].addr);
+-		WR(VDIN_CHROMA_DATA_PORT,(vdin_cm2_table[cursor].mask & vdin_cm2_table[cursor].value));
++	for(i=0;i<160;i++){
++		j=i/5;
++		WR(VDIN_CHROMA_ADDR_PORT,start_addr+(j<<3)+(i%5));
++		WR(VDIN_CHROMA_DATA_PORT,cm2[i]);
+ 	}
+-        WR_BITS(VDIN_CM_BRI_CON_CTRL, 1, CM_TOP_EN_BIT,CM_TOP_EN_WID);
++	for(i=0;i<28;i++){
++		WR(VDIN_CHROMA_ADDR_PORT,0x200+i);
++		WR(VDIN_CHROMA_DATA_PORT,cm2[160+i]);
++	}	
++    WR_BITS(VDIN_CM_BRI_CON_CTRL, 1, CM_TOP_EN_BIT,CM_TOP_EN_WID);
+ }
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.h b/drivers/amlogic/tvin/vdin/vdin_ctl.h
+index fac817392cb9..8f0e50f128f2 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.h
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.h
+@@ -168,6 +168,6 @@ extern void vdin_output_ctl(unsigned int offset, unsigned int output_flag);
+ extern void vdin_wr_reverse(unsigned int offset, bool hreverse, bool vreverse);
+ extern void vdin_set_hvscale(struct vdin_dev_s *devp);
+ extern void set_chroma_regs(unsigned int offset, unsigned int h_active,unsigned int v_active);
+-extern void vdin_set_cm2(unsigned int offset,unsigned int index);
++extern void vdin_set_cm2(unsigned int offset,unsigned int *data);
+ extern void vdin_bypass_isp(unsigned int offset);
+ #endif
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 4bc094e3ebb7..80c400e5f7ff 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -541,8 +541,6 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	vdin_set_decimation(devp);
+ 	vdin_set_cutwin(devp);
+ 	vdin_set_hvscale(devp);
+-	if(devp->parm.port == TVIN_PORT_ISP)
+-	        vdin_set_cm2(devp->addr_offset,0);
+         /*reverse / disable reverse write buffer*/
+         vdin_wr_reverse(devp->addr_offset,reverse_flag,reverse_flag);
+ 
+@@ -806,6 +804,8 @@ static int vdin_func(int no, vdin_arg_t *arg)
+ 		case VDIN_CMD_SET_CSC:
+ 			vdin_set_matrixs(devp,parm->matrix_id,parm->color_convert);
+ 			break;
++		case VDIN_CMD_SET_CM2:
++			vdin_set_cm2(devp->addr_offset,parm->cm2);
+ 		default:
+ 			break;
+ 	}
+@@ -2592,10 +2592,7 @@ static ssize_t vdin_cm2_store(struct device *dev,
+ 		data[4] = aml_read_reg32(VCBUS_REG_ADDR(data_port));
+ 
+ 		pr_info("rm:[0x%x]-->[0x%x][0x%x][0x%x][0x%x][0x%x] \n",addr, data[0],data[1],data[2],data[3],data[4]);
+-	}else if(!strcmp(parm[0],"config")){
+-		val = simple_strtol(parm[1],NULL,10);
+-		vdin_set_cm2(devp->addr_offset,val);
+-	} else if (!strcmp(parm[0],"enable")){
++	}else if (!strcmp(parm[0],"enable")){
+ 		WRITE_VCBUS_REG_BITS(VDIN_CM_BRI_CON_CTRL+devp->addr_offset,1,CM_TOP_EN_BIT,CM_TOP_EN_WID);
+ 	}else if (!strcmp(parm[0],"disable")){
+ 		WRITE_VCBUS_REG_BITS(VDIN_CM_BRI_CON_CTRL+devp->addr_offset,0,CM_TOP_EN_BIT,CM_TOP_EN_WID);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.h b/drivers/amlogic/tvin/vdin/vdin_drv.h
+index ca5cdcd64e88..19d929dfaaf5 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.h
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.h
+@@ -34,7 +34,7 @@
+ #include "../tvin_frontend.h"
+ #include "vdin_vf.h"
+ 
+-#define VDIN_VER "Ref.2013/11/25b"
++#define VDIN_VER "Ref.2013/12/10a"
+ 
+ /*the counter of vdin*/
+ #define VDIN_MAX_DEVS			2
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index 2f2f197eb064..632af048bd44 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -226,7 +226,7 @@ typedef enum cam_cmd_state_e {
+ 
+ typedef enum cam_command_e {
+         // common
+-        CAM_COMMAND_INIT = 0,        
++        CAM_COMMAND_INIT = 0,
+         CAM_COMMAND_GET_STATE,
+         CAM_COMMAND_SCENES,
+         CAM_COMMAND_EFFECT,
+@@ -294,7 +294,7 @@ typedef struct xml_window_s {
+         unsigned char ratio_y1; // 0 ~ 255, y1 = (format.v * ratio_y1) >> 8
+ } xml_window_t;
+ 
+-#define AE_PARM_NUM			60
++#define AE_PARM_NUM			67
+ typedef struct xml_algorithm_ae_s {
+         unsigned int  ae_algorithm;       //0:basic;    1:enhanced
+         unsigned int  ae_statistics[3];   //0: false, 1: true
+@@ -358,10 +358,20 @@ typedef struct xml_algorithm_ae_s {
+         unsigned int           slow_lpfcoef_enh;     // 0 ~ 255
+         unsigned int           fast_lpfcoef_enh;     // 0 ~ 255
+         unsigned int           flash_thr_enh;	     // 0 ~ 255
++    /***********************AE_ADD********************************/
++        unsigned int ae_ratio_low;				//0 ~ 1024			0x00000005
++        unsigned int ae_ratio_low2mid;			//0 ~ 1024			0x0000000f
++        unsigned int ae_ratio_mid2high; 		//0 ~ 1024			0x0000001e
++        unsigned int ae_ratio_high; 			//0 ~ 1024			0x00000028
++        unsigned int ae_min_diff;				//0 ~ 255			0x00000032
++        unsigned int ae_max_diff;				//0 ~ 255			0x0000000f
++
++        unsigned int reserve[16];
+         unsigned int 	       aet_fmt_gain;         //0db for each fmt
++
+ } xml_algorithm_ae_t;
+ 
+-#define AWB_PARM_NUM			57
++#define AWB_PARM_NUM			58
+ typedef struct xml_algorithm_awb_s {
+         unsigned int           awb_algorithm;       //0:basic;    1:enhanced
+         unsigned int           ratio_winl;            //0 ~ 1024
+@@ -421,39 +431,34 @@ typedef struct xml_algorithm_awb_s {
+         unsigned int           bw_limitl;       // 0 ~ 4095
+         unsigned int           thr_u[20];       // 0 ~ 255
+         unsigned int           thr_v[20];       // 0 ~ 255
++        unsigned int           reserve[16];
+ } xml_algorithm_awb_t;
+ 
+-#define AF_PARM_NUM			19
++#define AF_PARM_NUM			12
+ 
+ #define FOCUS_GRIDS 16
+ 
+ typedef struct xml_algorithm_af_s {
+ 	/*for lose focus*/
+-	unsigned int	       enter_move_ratio;//10bit/1024
+ 	unsigned int	       enter_static_ratio;//10bit/1024
+ 	unsigned int	       detect_step_cnt;
+ 	unsigned int           ave_vdc_thr;//the threshold of enter move
+-	unsigned int           delta_fv_ratio;//100
+-	unsigned int	       af_duration_time;// 0.1s
+-	unsigned int	       af_duration_cnt;// calc base on duration time
+ 	/*full scan & detect window ratio*/
+ 	unsigned int	       win_ratio;//cut 4 border in top bottom left right widht=1/ratio
+     /*for climbing algorithm*/
+ 	unsigned int           step[FOCUS_GRIDS];
+ 	unsigned int	       valid_step_cnt;
+-	unsigned int	       af_retry_max;
+ 	unsigned int 	       jump_offset;
+ 	unsigned int	       field_delay;
+-	unsigned int           af_fail_ratio;//x/100
+ 	/*window for touch focus*/
+ 	unsigned int	       x;//x coord of touch focus win
+ 	unsigned int	       y;//y coord of touch focus win
+ 	unsigned int           radius_ratio;//radius of touch focus win
+-	unsigned int           af_step_mid_thre;
+-	unsigned int           af_step_max_thre;
++	unsigned int	       hillside_fall;
++	unsigned int	       reserve[15];
+ } xml_algorithm_af_t;
+ 
+-#define XML_LUT_LS 1024 // 32*32 32-bit
++#define XML_LUT_LS 1025 // 32*32 32-bit
+ typedef struct xml_lut_ls_s {
+         unsigned int reg_map[XML_LUT_LS];
+ } xml_lut_ls_t;
+@@ -597,11 +602,11 @@ typedef struct xml_effect_manual_s {
+ typedef struct cam_function_s {
+ 	bool (*set_af_new_step)(unsigned int af_debug_control);
+ 	unsigned int (*get_aet_current_step)(void);
+-	short (*get_aet_current_gain)(void);
+-	short (*get_aet_min_gain)(void);
+-	short (*get_aet_max_gain)(void);
++	unsigned int (*get_aet_current_gain)(void);
++	unsigned int (*get_aet_min_gain)(void);
++	unsigned int (*get_aet_max_gain)(void);
+ 	unsigned int (*get_aet_max_step)(void);
+-	short (*get_aet_gain_by_step)(unsigned int new_step);
++	unsigned int (*get_aet_gain_by_step)(unsigned int new_step);
+ 	bool (*set_aet_new_step)(unsigned int new_step, bool exp_mode, bool ag_mode);
+ 	bool (*check_mains_freq)(void);
+ } cam_function_t;
+@@ -684,12 +689,14 @@ typedef enum vdin_format_convert_e {
+ typedef enum vdin_cmd_e {
+ 	VDIN_CMD_NULL = 0,
+ 	VDIN_CMD_SET_CSC,
++	VDIN_CMD_SET_CM2,
+ } vdin_cmd_t;
+ 
+ typedef struct vdin_arg_s {
+ 	vdin_cmd_t cmd;
+ 	unsigned char matrix_id;
+ 	vdin_format_convert_t color_convert;
++	unsigned int *cm2;
+ 	unsigned int  private;
+ } vdin_arg_t;
+ 
+-- 
+2.19.0
+

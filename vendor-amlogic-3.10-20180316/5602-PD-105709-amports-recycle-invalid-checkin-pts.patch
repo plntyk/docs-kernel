@@ -1,0 +1,63 @@
+From d27543750ead468a4f4ac0582b4c1f6f93e06ef4 Mon Sep 17 00:00:00 2001
+From: Ruifeng Li <ruifeng.li@amlogic.com>
+Date: Mon, 4 May 2015 14:39:55 +0800
+Subject: [PATCH 5602/5965] PD#105709: amports: recycle invalid checkin pts
+
+Change-Id: If3e50101a2ebfa33ed12da166a4560dc253929b7
+---
+ drivers/amlogic/amports/ptsserv.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 10e7dfaa82c7..00f8e76be768 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -20,6 +20,8 @@
+ #define INTERPOLATE_AUDIO_PTS
+ #define INTERPOLATE_AUDIO_RESOLUTION 9000
+ 
++#define PTS_VALID_OFFSET_TO_CHECK      0x08000000
++
+ #define OFFSET_DIFF(x, y)  ((int)(x - y))
+ #define OFFSET_LATER(x, y) (OFFSET_DIFF(x, y) > 0)
+ #define OFFSET_EQLATER(x, y) (OFFSET_DIFF(x, y) >= 0)
+@@ -610,7 +612,7 @@ static int _pts_lookup_offset_inline(
+     spin_lock_irqsave(&lock, flags);
+ 
+     if (likely(pTable->status == PTS_RUNNING)) {
+-        pts_rec_t *p, *p2 = NULL;
++        pts_rec_t *p = NULL, *p2 = NULL;
+ 
+         if ((pTable->lookup_cache_valid) &&
+             (offset == pTable->lookup_cache_offset)) {
+@@ -620,6 +622,27 @@ static int _pts_lookup_offset_inline(
+             return 0;
+         }
+ 
++        if ((type == PTS_TYPE_VIDEO) && !list_empty(&pTable->valid_list)) {
++            pts_rec_t *rec = NULL, *next = NULL;
++            int look_cnt1 = 0;
++            list_for_each_entry_safe(rec, next, &pTable->valid_list, list) {
++                if (OFFSET_DIFF(offset, rec->offset) > PTS_VALID_OFFSET_TO_CHECK) {
++                    if (pTable->pts_search == &rec->list) {
++                        pTable->pts_search = rec->list.next;
++                    }
++
++                    if (tsync_get_debug_vpts()) {
++                        printk("remove node  offset: 0x%x cnt:%d\n", rec->offset, look_cnt1);
++                    }
++
++                    list_move_tail(&rec->list, &pTable->free_list);
++                    look_cnt1 ++;
++                }else {
++                    break;
++                }
++            }
++        }
++
+         if (list_empty(&pTable->valid_list)) {
+             spin_unlock_irqrestore(&lock, flags);
+ 
+-- 
+2.19.0
+

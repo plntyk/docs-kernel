@@ -1,0 +1,139 @@
+From 1fbb16946ca71c14067aca8bbeaf8aa29044fe2b Mon Sep 17 00:00:00 2001
+From: Yukang Zhong <yukang.zhong@amlogic.com>
+Date: Fri, 12 Jun 2015 17:27:26 +0800
+Subject: [PATCH 5653/5965] PD#107808: eeprom: add support at24c32
+
+1. add dtd support
+2. add write protect gpio control
+
+Change-Id: Idda6a451344ea7492abedd6d1b7468b31ed8d63d
+---
+ drivers/misc/eeprom/at24.c | 66 +++++++++++++++++++++++++++++++++++++-
+ include/linux/i2c/at24.h   |  2 ++
+ 2 files changed, 67 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/eeprom/at24.c b/drivers/misc/eeprom/at24.c
+index 2baeec56edfe..7e769215b8b6 100644
+--- a/drivers/misc/eeprom/at24.c
++++ b/drivers/misc/eeprom/at24.c
+@@ -23,6 +23,7 @@
+ #include <linux/of.h>
+ #include <linux/i2c.h>
+ #include <linux/i2c/at24.h>
++#include <linux/amlogic/aml_gpio_consumer.h>
+ 
+ /*
+  * I2C EEPROMs from most vendors are inexpensive and mostly interchangeable.
+@@ -130,6 +131,7 @@ static const struct i2c_device_id at24_ids[] = {
+ };
+ MODULE_DEVICE_TABLE(i2c, at24_ids);
+ 
++#define MODULE_NAME  "at24"
+ /*-------------------------------------------------------------------------*/
+ 
+ /*
+@@ -479,6 +481,53 @@ static void at24_get_ofdata(struct i2c_client *client,
+ { }
+ #endif /* CONFIG_OF */
+ 
++/*eeprom protect gpio enable*/
++void at24_wp_enable(struct at24_platform_data *chip)
++{
++	int ret;
++	if (chip->wp_port> 0) {
++		ret = amlogic_gpio_request(chip->wp_port,MODULE_NAME);
++		if (ret) {
++			printk("faild to alloc write protect control gpio (%d)!\n", chip->wp_port);
++		}
++		else {
++			amlogic_gpio_direction_output(chip->wp_port,chip->wp_port_level,MODULE_NAME);
++		}
++	}
++	else {
++		printk("wrong wp port\n");
++	}
++}
++void at24_dt_parse(struct i2c_client *client,struct at24_platform_data *chip)
++{
++	const char *str;
++	int ret;
++	struct device_node *node = client->dev.of_node;
++
++	ret = of_property_read_string_index(node, "wp_gpio_port_on_off", 0, &str);
++	if (ret) {
++		printk("faild to get write protect control port!\n");
++	}
++	chip->wp_port = amlogic_gpio_name_map_num(str);
++
++	ret = of_property_read_string_index(node, "wp_gpio_port_on_off", 1, &str);
++	if (ret) {
++		printk("faild to get write protect control port level!\n");
++	}
++	if (!strcmp(str,"0")) {
++		chip->wp_port_level = 0;
++		at24_wp_enable(chip);
++		printk("err set  0 wp_port :%d\n",chip->wp_port);
++	}
++	else {
++		chip->wp_port_level = 1;
++		at24_wp_enable(chip);
++		printk("err set 1 wp_port :%d\n",chip->wp_port);
++	}
++	printk("EEPROM_AT24C32 write protect port level is %d,wp_port=%d\n",amlogic_get_value(chip->wp_port,"at24"),chip->wp_port);
++}
++
++
+ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ {
+ 	struct at24_platform_data chip;
+@@ -578,7 +627,9 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ 	at24->macc.read = at24_macc_read;
+ 
+ 	writable = !(chip.flags & AT24_FLAG_READONLY);
+-	if (writable) {
++	if  (writable)   {
++		at24_dt_parse(client,&at24->chip);
++
+ 		if (!use_smbus || i2c_check_functionality(client->adapter,
+ 				I2C_FUNC_SMBUS_WRITE_I2C_BLOCK)) {
+ 
+@@ -674,10 +725,23 @@ static int at24_remove(struct i2c_client *client)
+ 
+ /*-------------------------------------------------------------------------*/
+ 
++#ifdef CONFIG_OF
++static const struct of_device_id at24_dt_match[]={
++	{	.compatible = "at24,24c32",
++	},
++	{},
++};
++//MODULE_DEVICE_TABLE(of,meson6_rtc_dt_match);
++#else
++#define at24_dt_match NULL
++#endif
+ static struct i2c_driver at24_driver = {
+ 	.driver = {
+ 		.name = "at24",
+ 		.owner = THIS_MODULE,
++#ifdef CONFIG_USE_OF
++		.of_match_table = at24_dt_match,
++#endif
+ 	},
+ 	.probe = at24_probe,
+ 	.remove = at24_remove,
+diff --git a/include/linux/i2c/at24.h b/include/linux/i2c/at24.h
+index 285025a9cdc9..84e277406300 100644
+--- a/include/linux/i2c/at24.h
++++ b/include/linux/i2c/at24.h
+@@ -47,6 +47,8 @@ struct at24_platform_data {
+ #define AT24_FLAG_READONLY	0x40	/* sysfs-entry will be read-only */
+ #define AT24_FLAG_IRUGO		0x20	/* sysfs-entry will be world-readable */
+ #define AT24_FLAG_TAKE8ADDR	0x10	/* take always 8 addresses (24c00) */
++	unsigned int wp_port;
++	unsigned int wp_port_level;
+ 
+ 	void		(*setup)(struct memory_accessor *, void *context);
+ 	void		*context;
+-- 
+2.19.0
+

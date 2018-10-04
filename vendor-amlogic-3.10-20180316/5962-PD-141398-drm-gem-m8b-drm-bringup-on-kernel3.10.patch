@@ -1,0 +1,449 @@
+From 14fe59ee870ec5023418f501f8cfb0b38afc3b71 Mon Sep 17 00:00:00 2001
+From: Jiyu Yang <jiyu.yang@amlogic.com>
+Date: Thu, 18 May 2017 17:25:21 +0800
+Subject: [PATCH 5962/5965] PD#141398 drm/gem: m8b drm bringup on kernel3.10
+
+DONOT merge this on the 3.14 and latest kernel version
+1. add load/unload on kernel3.10
+2. use the old hashtable instead of new unified vma manager
+
+Change-Id: I35072a81a90b68eb1d10fe4048608e7f15994203
+Signed-off-by: Jiyu Yang <jiyu.yang@amlogic.com>
+---
+ arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd |  3 +
+ arch/arm/boot/dts/amlogic/meson_drm.dtsi      | 56 +++++++++++++++++++
+ drivers/amlogic/Kconfig                       |  2 -
+ drivers/amlogic/drm/meson_dmabuf.c            |  2 +-
+ drivers/amlogic/drm/meson_drv.c               | 36 ++++++++----
+ drivers/amlogic/drm/meson_gem.c               | 20 ++++---
+ drivers/amlogic/ion_dev/Makefile              | 11 +++-
+ drivers/amlogic/ion_dev/dev_ion.c             | 49 ++++++++++++++++
+ drivers/amlogic/ion_dev/meson_ion.h           | 56 +++++++++++++++++++
+ drivers/gpu/drm/drm_gem_cma_helper.c          |  2 +-
+ 10 files changed, 211 insertions(+), 26 deletions(-)
+ create mode 100644 arch/arm/boot/dts/amlogic/meson_drm.dtsi
+ create mode 100644 drivers/amlogic/ion_dev/meson_ion.h
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
+index cc9c934a9304..9ee8c91d1081 100644
+--- a/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m201_1G.dtd
+@@ -1,4 +1,7 @@
+ /dts-v1/;
++
++#include "meson_drm.dtsi"
++
+ /// ***************************************************************************************\n
+ //$$ PROJECT="meson8b"
+ //$$ REMOVE 1
+diff --git a/arch/arm/boot/dts/amlogic/meson_drm.dtsi b/arch/arm/boot/dts/amlogic/meson_drm.dtsi
+new file mode 100644
+index 000000000000..866e155fb325
+--- /dev/null
++++ b/arch/arm/boot/dts/amlogic/meson_drm.dtsi
+@@ -0,0 +1,56 @@
++/*
++ * Amlogic Platform drm
++ *
++ * Copyright (c) 2015-2015 Amlogic Ltd
++ *
++ * This file is licensed under a dual GPLv2 or BSD license.
++ *
++ */
++/ {
++	venc-cvbs {
++		status = "disabled";
++		compatible = "amlogic,meson-gxbb-cvbs";
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			enc_cvbs_in: port@0 {
++				 #address-cells = <1>;
++				 #size-cells = <0>;
++				 reg = <0>;
++
++				 venc_cvbs_in_vpu: endpoint@0 {
++					 reg = <0>;
++					 remote-endpoint = <&vpu_out_venc_cvbs>;
++				};
++			};
++		};
++	};
++
++	vpu_drm@d0100000 {
++		status = "disabled";
++		compatible = "amlogic,meson-m8b-vpu";
++		reg = <0xd0100000 0x100000>,
++			  <0xc883c000 0x1000>,
++			  <0xc8838000 0x1000>;
++		reg-names = "base", "hhi", "dmc";
++		interrupts = <0 3 1>;
++		dma-coherent;
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			vpu_out: port@1 {
++				 #address-cells = <1>;
++				 #size-cells = <0>;
++				 reg = <1>;
++
++				 vpu_out_venc_cvbs: endpoint@0 {
++					 reg = <0>;
++					 remote-endpoint = <&venc_cvbs_in_vpu>;
++				 };
++			 };
++		};
++	};
++};/* end of / */
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+index bcc2b3dd84a8..5ecb77b788ae 100644
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -104,8 +104,6 @@ comment "GPU (ARM Mali)"
+ #isource "drivers/amlogic/ump/Kconfig"
+ #isource "drivers/amlogic/mali/Kconfig"
+ #comment "GPU (ARM Mali (external))"
+-isource "../hardware/arm/gpu/ump/Kconfig"
+-isource "../hardware/arm/gpu/mali/Kconfig"
+ source "drivers/amlogic/ion_dev/Kconfig"
+ 
+ #
+diff --git a/drivers/amlogic/drm/meson_dmabuf.c b/drivers/amlogic/drm/meson_dmabuf.c
+index e8d3d59e418c..6ff01c61093e 100644
+--- a/drivers/amlogic/drm/meson_dmabuf.c
++++ b/drivers/amlogic/drm/meson_dmabuf.c
+@@ -19,7 +19,7 @@
+ 
+ #include <drm/drmP.h>
+ #include <linux/dma-buf.h>
+-#include <ion/ion.h>
++#include <linux/ion.h>
+ 
+ #include "meson_gem.h"
+ #include "meson_dmabuf.h"
+diff --git a/drivers/amlogic/drm/meson_drv.c b/drivers/amlogic/drm/meson_drv.c
+index b8e58dba63e2..83ab030e806a 100644
+--- a/drivers/amlogic/drm/meson_drv.c
++++ b/drivers/amlogic/drm/meson_drv.c
+@@ -24,7 +24,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/platform_device.h>
+-#include <linux/of_graph.h>
++//#include <linux/of_graph.h>
+ 
+ #include <drm/drmP.h>
+ 
+@@ -129,9 +129,12 @@ static const struct file_operations fops = {
+ 	.mmap		= drm_gem_cma_mmap,
+ };
+ 
++static int meson_drm_load(struct drm_device *drm, unsigned long flags);
++static int meson_drm_unload(struct drm_device *drm);
+ static struct drm_driver meson_driver = {
+ 	.driver_features	=  DRIVER_GEM | DRIVER_PRIME,
+-
++	.load               = meson_drm_load,
++	.unload             = meson_drm_unload,
+ #ifdef MUSE
+ 	.driver_features	= DRIVER_HAVE_IRQ | DRIVER_GEM |
+ 				  DRIVER_MODESET | DRIVER_PRIME |
+@@ -196,9 +199,14 @@ static struct regmap_config meson_regmap_config = {
+ 
+ static int meson_drv_probe(struct platform_device *pdev)
+ {
+-	struct device *dev = &pdev->dev;
++	return drm_platform_init(&meson_driver, pdev);
++}
++
++static int meson_drm_load(struct drm_device *drm, unsigned long flags)
++{
++	struct device *dev = drm->dev;
++	struct platform_device *pdev = to_platform_device(dev);
+ 	struct meson_drm *priv;
+-	struct drm_device *drm;
+ 	int ret;
+ 
+ #ifdef MUSE
+@@ -212,10 +220,6 @@ static int meson_drv_probe(struct platform_device *pdev)
+ 	}
+ #endif
+ 
+-	drm = drm_dev_alloc(&meson_driver, dev);
+-	if (IS_ERR(drm))
+-		return PTR_ERR(drm);
+-
+ 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv) {
+ 		ret = -ENOMEM;
+@@ -302,13 +306,12 @@ static int meson_drv_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	drm_kms_helper_poll_init(drm);
+-#endif
+ 
+ 	platform_set_drvdata(pdev, priv);
+-
+ 	ret = drm_dev_register(drm, 0);
+ 	if (ret)
+ 		goto free_drm;
++#endif
+ 
+ 	return 0;
+ 
+@@ -322,15 +325,23 @@ free_drm:
+ 	return ret;
+ }
+ 
++static int meson_drm_unload(struct drm_device *drm)
++{
++	struct meson_drm *priv = drm->dev_private;
++
++	priv = NULL;
++	return 0;
++}
++
+ static int meson_drv_remove(struct platform_device *pdev)
+ {
+-	struct drm_device *drm = dev_get_drvdata(&pdev->dev);
+ #ifdef MUSE
++	struct drm_device *drm = dev_get_drvdata(&pdev->dev);
+ 	struct meson_drm *priv = drm->dev_private;
+ #endif
+ 
+-	drm_dev_unregister(drm);
+ #ifdef MUSE
++	drm_dev_unregister(drm);
+ 	drm_kms_helper_poll_fini(drm);
+ 	drm_fbdev_cma_fini(priv->fbdev);
+ 	drm_mode_config_cleanup(drm);
+@@ -342,6 +353,7 @@ static int meson_drv_remove(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id dt_match[] = {
++	{ .compatible = "amlogic,meson-m8b-vpu" },
+ 	{ .compatible = "amlogic,meson-gxbb-vpu" },
+ 	{ .compatible = "amlogic,meson-gxl-vpu" },
+ 	{ .compatible = "amlogic,meson-gxm-vpu" },
+diff --git a/drivers/amlogic/drm/meson_gem.c b/drivers/amlogic/drm/meson_gem.c
+index 9afd95e3fa6a..fb90930944c5 100644
+--- a/drivers/amlogic/drm/meson_gem.c
++++ b/drivers/amlogic/drm/meson_gem.c
+@@ -21,11 +21,10 @@
+  */
+ 
+ #include <drm/drmP.h>
+-#include <drm/drm_vma_manager.h>
+ 
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+-#include <ion/ion.h>
++#include <linux/ion.h>
+ #include <meson_ion.h>
+ 
+ #include "meson_drv.h"
+@@ -151,7 +150,7 @@ void meson_drm_gem_destroy(struct meson_gem_object *meson_gem_obj)
+ 
+ 	obj = &meson_gem_obj->base;
+ 
+-	DRM_DEBUG("handle count = %d\n", obj->handle_count);
++	DRM_DEBUG("handle count = %d\n", atomic_read(&obj->handle_count));
+ 
+ 	/*
+ 	 * do not release memory region from exporter.
+@@ -166,7 +165,8 @@ void meson_drm_gem_destroy(struct meson_gem_object *meson_gem_obj)
+ 
+ out:
+ 
+-	drm_gem_free_mmap_offset(obj);
++	if (obj->map_list.map)
++		drm_gem_free_mmap_offset(obj);
+ 
+ 	/* release file pointer to gem object. */
+ 	drm_gem_object_release(obj);
+@@ -225,11 +225,13 @@ int meson_drm_gem_dumb_map_offset(struct drm_file *file_priv,
+ 		goto unlock;
+ 	}
+ 
+-	ret = drm_gem_create_mmap_offset(obj);
+-	if (ret)
+-		goto out;
++	if (!obj->map_list.map) {
++		ret = drm_gem_create_mmap_offset(obj);
++		if (ret)
++			goto out;
++	}
+ 
+-	*offset = drm_vma_node_offset_addr(&obj->vma_node);
++	*offset = (u64)obj->map_list.hash.key << PAGE_SHIFT;
+ 	DRM_DEBUG("offset = 0x%lx\n", (unsigned long)*offset);
+ 
+ out:
+@@ -274,7 +276,7 @@ int meson_drm_gem_dumb_destroy(struct drm_file *file,
+ 	 * drop the reference on the export fd holds
+ 	 */
+ 
+-	if (obj->handle_count == 0 &&
++	if (atomic_read(&obj->handle_count) == 0 &&
+ 			atomic_read(&obj->refcount.refcount) == 1)
+ 		drm_gem_object_unreference_unlocked(obj);
+ 
+diff --git a/drivers/amlogic/ion_dev/Makefile b/drivers/amlogic/ion_dev/Makefile
+index 6b56a794cd94..3e32632fdb82 100644
+--- a/drivers/amlogic/ion_dev/Makefile
++++ b/drivers/amlogic/ion_dev/Makefile
+@@ -1,3 +1,12 @@
+-EXTRA_CFLAGS += -Idrivers/gpu/ion/
++#
++# Makefile for the amlogic ion device drivers.
++#
++
++#
++# include driver/staging for header files
++#
++ccflags-y += -I$(srctree)/drivers/gpu/ion/
++
+ amlIonDr-objs := dev_ion.o
++
+ obj-$(CONFIG_AMLOGIC_ION) += amlIonDr.o
+diff --git a/drivers/amlogic/ion_dev/dev_ion.c b/drivers/amlogic/ion_dev/dev_ion.c
+index 2a6a244f9463..bae588a95cf5 100755
+--- a/drivers/amlogic/ion_dev/dev_ion.c
++++ b/drivers/amlogic/ion_dev/dev_ion.c
+@@ -42,6 +42,55 @@ static int num_heaps;
+ static struct ion_heap **heaps;
+ static struct ion_platform_heap my_ion_heap[MAX_HEAP];
+ 
++struct ion_client *meson_ion_client_create(unsigned int heap_mask,
++		const char *name) {
++
++	/*
++	 *	  * The assumption is that if there is a NULL device, the ion
++	 *		   * driver has not yet probed.
++	 *				*/
++	if (idev == NULL) {
++		dprintk(0, "create error");
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	if (IS_ERR(idev)) {
++		dprintk(0, "idev error");
++		return (struct ion_client *)idev;
++	}
++
++	return ion_client_create(idev, name);
++}
++EXPORT_SYMBOL(meson_ion_client_create);
++
++int meson_ion_share_fd_to_phys(
++	struct ion_client *client, int share_fd,
++	ion_phys_addr_t *addr, size_t *len)
++{
++	struct ion_handle *handle;
++	int ret;
++
++	handle = ion_import_dma_buf(client, share_fd);
++	if (IS_ERR_OR_NULL(handle)) {
++		/* pr_err("%s,EINVAL, client=%p, share_fd=%d\n",
++		 *	 __func__, client, share_fd);
++		*/
++		return PTR_ERR(handle);
++	}
++
++	ret = ion_phys(client, handle, addr, (size_t *)len);
++	pr_debug("ion_phys ret=%d, phys=0x%lx\n", ret, *addr);
++	if (ret < 0) {
++		pr_err("ion_get_phys error, ret=%d\n", ret);
++		return ret;
++	}
++
++	ion_free(client, handle);
++
++	return 0;
++}
++EXPORT_SYMBOL(meson_ion_share_fd_to_phys);
++
+ static struct resource memobj;
+ int dev_ion_probe(struct platform_device *pdev) {
+     int err;
+diff --git a/drivers/amlogic/ion_dev/meson_ion.h b/drivers/amlogic/ion_dev/meson_ion.h
+new file mode 100644
+index 000000000000..adf72500de93
+--- /dev/null
++++ b/drivers/amlogic/ion_dev/meson_ion.h
+@@ -0,0 +1,56 @@
++/*
++ * include/linux/amlogic/dev_ion.h
++ *
++ * Copyright (C) 2014 Amlogic, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef __LINUX_AMLOGIC_ION_H__
++#define __LINUX_AMLOGIC_ION_H__
++
++#include <linux/types.h>
++#include <linux/ion.h>
++
++/**
++* CUSTOM IOCTL - CMD
++*/
++
++#define ION_IOC_MESON_PHYS_ADDR             8
++
++struct meson_phys_data {
++	int handle;
++	unsigned int phys_addr;
++	unsigned int size;
++};
++
++
++/**
++ * meson_ion_client_create() -  allocate a client and returns it
++ * @heap_type_mask:	mask of heaps this client can allocate from
++ * @name:		used for debugging
++ */
++struct ion_client *meson_ion_client_create(unsigned int heap_mask,
++		const char *name);
++
++/**
++ * meson_ion_share_fd_to_phys -
++ * associate with a share fd
++ * @client:	the client
++ * @share_fd: passed from the user space
++ * @addr point to the physical address
++ * @size point to the size of this ion buffer
++ */
++
++int meson_ion_share_fd_to_phys(
++	struct ion_client *client, int share_fd,
++	ion_phys_addr_t *addr, size_t *len);
++#endif
+diff --git a/drivers/gpu/drm/drm_gem_cma_helper.c b/drivers/gpu/drm/drm_gem_cma_helper.c
+index babd8ffa0d6f..f975e95ffb0f 100644
+--- a/drivers/gpu/drm/drm_gem_cma_helper.c
++++ b/drivers/gpu/drm/drm_gem_cma_helper.c
+@@ -266,7 +266,7 @@ void drm_gem_cma_describe(struct drm_gem_cma_object *cma_obj, struct seq_file *m
+ 	if (obj->map_list.map)
+ 		off = (uint64_t)obj->map_list.hash.key;
+ 
+-	seq_printf(m, "%2d (%2d) %08llx %llx %p %Zx",
++	seq_printf(m, "%2d (%2d) %08llx %08Zx %p %d",
+ 			obj->name, obj->refcount.refcount.counter,
+ 			off, cma_obj->paddr, cma_obj->vaddr, obj->size);
+ 
+-- 
+2.19.0
+

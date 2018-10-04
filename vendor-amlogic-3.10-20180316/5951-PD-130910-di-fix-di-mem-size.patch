@@ -1,0 +1,136 @@
+From d5455bf81666e65242f268b671b9b9a85aee7c07 Mon Sep 17 00:00:00 2001
+From: Dezhi Kong <dezhi.kong@amlogic.com>
+Date: Wed, 21 Sep 2016 10:25:21 +0800
+Subject: [PATCH 5951/5965] PD#130910: di: fix di mem size
+
+Change-Id: Ibdf3530da4dd5fb7c6d87cab8ded1a6a27799a98
+---
+ arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd |  5 ++---
+ drivers/amlogic/deinterlace/deinterlace.c    | 12 +++++++++++-
+ drivers/amlogic/deinterlace/deinterlace.h    |  3 ++-
+ drivers/amlogic/deinterlace/deinterlace_hw.c | 14 +++++++++-----
+ 4 files changed, 24 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+index 555e0bc14bcd..2aa1343c8f4e 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+@@ -766,9 +766,8 @@
+ 		compatible = "amlogic,deinterlace";
+ 		dev_name = "deinterlace";
+ 		status = "ok";
+-		share-memory-name = "continuemem0";
+-		share-memory-offset = <0>;
+-		reserve-memory = <0x02100000>; //10x1920x1088x3/2=33M
++		hw-version = <1>;
++		reserve-memory = <0x02200000>; //10x1920x1088x3/2=34M
+ 	};
+ 
+ 
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+index 74352eb42a6a..0fe5e63948ea 100644
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -3927,7 +3927,7 @@ static void di_set_para_by_tvinfo(vframe_t* vframe)
+ 		ei_ctrl3 = 0x80000013;
+ #endif
+ 	if (di_device.hw_version == 1)
+-		Wr(DI_PRE_HOLD, (1<<31)|(8<<16)|2);
++		Wr(DI_PRE_HOLD, (1<<31)|(31<<16)|31);
+ 	if (kdeint1 == 0x10) {
+ 			  kdeint2 = 25;
+ 		mtn_ctrl= 0xe228c440 ;
+@@ -3940,6 +3940,16 @@ static void di_set_para_by_tvinfo(vframe_t* vframe)
+ 		pr_info("%s: tvinfo change, reset di Reg in tuner source \n", __FUNCTION__);
+ 	   }
+ 	}
++#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB)
++	/* not do mc for g9bb,decrease bandwidth */
++	if (vframe_source_type == VFRAME_SOURCE_TYPE_TUNER) {
++		mcpre_en = 0;
++		mcen_mode = 0;
++	} else {
++		mcpre_en = 1;
++		mcen_mode = 1;
++	}
++#endif
+ 	/* modify for fulldown 3:2 cave subtitle pattern */
+ 	if(vframe_source_type == VFRAME_SOURCE_TYPE_TUNER ||
+ 			vframe_source_type == VFRAME_SOURCE_TYPE_CVBS)
+diff --git a/drivers/amlogic/deinterlace/deinterlace.h b/drivers/amlogic/deinterlace/deinterlace.h
+index 68a395e02b75..d28bfc754b99 100644
+--- a/drivers/amlogic/deinterlace/deinterlace.h
++++ b/drivers/amlogic/deinterlace/deinterlace.h
+@@ -283,6 +283,7 @@ extern void di_hw_init(void);
+ extern void di_hw_uninit(void);
+ 
+ extern int di_vscale_skip_count;
++extern unsigned short mcen_mode;
+ /*
+ di hardware internal
+ */
+@@ -421,7 +422,7 @@ void di_post_switch_buffer (
+    int ei_en, int blend_en, int blend_mtn_en, int blend_mode, int di_vpp_en, int di_ddr_en,
+    int post_field_num, int hold_line, int urgent
+    #ifndef NEW_DI_V1
+-   , unsigned long * reg_mtn_info 
++   , unsigned long * reg_mtn_info
+    #endif
+ );
+ #if 0
+diff --git a/drivers/amlogic/deinterlace/deinterlace_hw.c b/drivers/amlogic/deinterlace/deinterlace_hw.c
+index 01ca4d480c28..53d5440591ed 100644
+--- a/drivers/amlogic/deinterlace/deinterlace_hw.c
++++ b/drivers/amlogic/deinterlace/deinterlace_hw.c
+@@ -97,7 +97,7 @@ module_param(frame_dynamic_level, int, 0664);
+ MODULE_PARM_DESC(cue_enable, "\n cue_enable\n");
+ module_param(cue_enable, bool, 0664);
+ #ifdef NEW_DI_V3
+-static unsigned short mcen_mode = 1;
++unsigned short mcen_mode = 1;
+ MODULE_PARM_DESC(mcen_mode, "\n blend mc enable\n");
+ module_param(mcen_mode, ushort, 0664);
+ #endif
+@@ -238,6 +238,10 @@ void reset_di_para(void)
+ 	di_pre_ctrl__di_pre_repeat=0xff;
+ 
+ 	init_pd_para();
++#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB)
++	/* not do mc for g9bb,decrease bandwidth */
++	mcen_mode = 0;
++#endif
+ }
+ 
+ static int vdin_en = 0;
+@@ -541,7 +545,7 @@ void enable_mc_di_pre(DI_MC_MIF_t *di_mcinford_mif,DI_MC_MIF_t *di_mcinfowr_mif,
+ 						 (0<<14) |	 // sync latch en
+ 			 (urgent<<8 ) |   //urgent
+ 			 (1<<12) |	 // enable reset by frame rst
+-			 (0x4031<<16));   
++			 (0x4031<<16));
+    Wr(MCDI_MCINFOWR_CTRL,di_mcinfowr_mif->canvas_num |
+ 						(0<<14) |	 // sync latch en
+ 						(urgent<<8 ) |	 //urgent
+@@ -1477,8 +1481,8 @@ void di_post_switch_buffer (
+    int post_field_num, int hold_line, int urgent
+ #ifndef NEW_DI_V1
+    , unsigned long * reg_mtn_info
+-   
+-#endif 
++
++#endif
+ )
+ {
+ 	int ei_only, buf1_en;
+@@ -1590,7 +1594,7 @@ void enable_di_post_2 (
+    int post_field_num, int hold_line, int urgent
+ #ifndef NEW_DI_V1
+    , unsigned long * reg_mtn_info
+-#endif 
++#endif
+ )
+ {
+ 	int ei_only;
+-- 
+2.19.0
+

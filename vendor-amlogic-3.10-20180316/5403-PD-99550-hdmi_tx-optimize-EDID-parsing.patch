@@ -1,0 +1,78 @@
+From cfe8e0adc864b34c36b0a435eff18b5c9a001e38 Mon Sep 17 00:00:00 2001
+From: Hang Cheng <hang.cheng@amlogic.com>
+Date: Fri, 6 Feb 2015 21:25:42 +0800
+Subject: [PATCH 5403/5965] PD#99550: hdmi_tx: optimize EDID parsing
+
+before parsing EDID, check EDID which got in the second time first,
+if it's invalid, then use the one gotin the first time.
+
+Change-Id: I1b5b0b4a31b8deee8808cfc87b99163f9462531c
+---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c | 43 ++++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+index 49aa4fe25d18..286548a1895c 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_edid.c
+@@ -1169,15 +1169,56 @@ static int edid_check_valid(unsigned char *buf)
+     return 1;
+ }
+ 
++static int check_dvi_hdmi_edid_valid(unsigned char *buf)
++{
++    unsigned int chksum = 0;
++    unsigned int i = 0;
++
++    // check block 0 first 8 bytes
++    if ((buf[0] != 0) && (buf[7] != 0))
++        return 0;
++    for (i = 1; i < 7; i ++) {
++        if (buf[i] != 0xff)
++            return 0;
++    }
++
++    // check block 0 checksum
++    for (chksum = 0, i = 0; i < 0x80; i++) {
++        chksum += buf[i];
++    }
++    if ((chksum & 0xff) != 0)
++        return 0;
++
++    if (buf[0x7e] == 0)// check Extension flag at block 0
++        return 1;
++    else if (buf[0x80] != 0x2)// check block 1 extension tag
++        return 0;
++
++    // check block 1 checksum
++    for (chksum = 0, i = 0x80; i < 0x100; i++) {
++        chksum += buf[i];
++    }
++    if ((chksum & 0xff) != 0)
++        return 0;
++
++    return 1;
++}
++
+ int hdmitx_edid_parse(hdmitx_dev_t* hdmitx_device)
+ {
+     unsigned char CheckSum ;
+     unsigned char zero_numbers;
+     unsigned char BlockCount ;
+-    unsigned char* EDID_buf = hdmitx_device->EDID_buf;
++    unsigned char* EDID_buf ;
+     int i, j, ret_val ;
+     int idx[4];
+     rx_cap_t* pRXCap = &(hdmitx_device->RXCap);
++    if (check_dvi_hdmi_edid_valid(hdmitx_device->EDID_buf)) {
++        EDID_buf = hdmitx_device->EDID_buf;
++    }
++    else {
++        EDID_buf = hdmitx_device->EDID_buf1;
++    }
+     hdmi_print(0, "EDID Parser:\n");
+ 
+     // Calculate the EDID hash for special use
+-- 
+2.19.0
+

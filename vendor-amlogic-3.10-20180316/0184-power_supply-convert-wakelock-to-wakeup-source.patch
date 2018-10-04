@@ -1,0 +1,87 @@
+From 7df159a58eea374cda7a989901a12fb7e81896a4 Mon Sep 17 00:00:00 2001
+From: Todd Poynor <toddpoynor@google.com>
+Date: Tue, 19 Jun 2012 18:04:30 -0700
+Subject: [PATCH 0184/5965] power_supply: convert wakelock to wakeup source
+
+And supply name will be used as wakeup source name.
+
+Change-Id: I53075491c6e1a4c66755afe8a40b7166cd8d6cb2
+Signed-off-by: Todd Poynor <toddpoynor@google.com>
+---
+ drivers/power/power_supply_core.c | 11 ++++++-----
+ include/linux/power_supply.h      |  2 --
+ 2 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/power/power_supply_core.c b/drivers/power/power_supply_core.c
+index 0e210abad70b..082d3c2714e9 100644
+--- a/drivers/power/power_supply_core.c
++++ b/drivers/power/power_supply_core.c
+@@ -87,7 +87,7 @@ static void power_supply_changed_work(struct work_struct *work)
+ 		spin_lock_irqsave(&psy->changed_lock, flags);
+ 	}
+ 	if (!psy->changed)
+-		wake_unlock(&psy->work_wake_lock);
++		pm_relax(psy->dev);
+ 	spin_unlock_irqrestore(&psy->changed_lock, flags);
+ }
+ 
+@@ -99,7 +99,7 @@ void power_supply_changed(struct power_supply *psy)
+ 
+ 	spin_lock_irqsave(&psy->changed_lock, flags);
+ 	psy->changed = true;
+-	wake_lock(&psy->work_wake_lock);
++	pm_stay_awake(psy->dev);
+ 	spin_unlock_irqrestore(&psy->changed_lock, flags);
+ 	schedule_work(&psy->changed_work);
+ }
+@@ -522,7 +522,9 @@ int power_supply_register(struct device *parent, struct power_supply *psy)
+ 		goto device_add_failed;
+ 
+ 	spin_lock_init(&psy->changed_lock);
+-	wake_lock_init(&psy->work_wake_lock, WAKE_LOCK_SUSPEND, "power-supply");
++	rc = device_init_wakeup(dev, true);
++	if (rc)
++		goto wakeup_init_failed;
+ 
+ 	rc = psy_register_thermal(psy);
+ 	if (rc)
+@@ -545,7 +547,7 @@ create_triggers_failed:
+ register_cooler_failed:
+ 	psy_unregister_thermal(psy);
+ register_thermal_failed:
+-	wake_lock_destroy(&psy->work_wake_lock);
++wakeup_init_failed:
+ 	device_del(dev);
+ kobject_set_name_failed:
+ device_add_failed:
+@@ -563,7 +565,6 @@ void power_supply_unregister(struct power_supply *psy)
+ 	power_supply_remove_triggers(psy);
+ 	psy_unregister_cooler(psy);
+ 	psy_unregister_thermal(psy);
+-	wake_lock_destroy(&psy->work_wake_lock);
+ 	device_unregister(psy->dev);
+ }
+ EXPORT_SYMBOL_GPL(power_supply_unregister);
+diff --git a/include/linux/power_supply.h b/include/linux/power_supply.h
+index 0b925bf03756..de207ebb9170 100644
+--- a/include/linux/power_supply.h
++++ b/include/linux/power_supply.h
+@@ -13,7 +13,6 @@
+ #ifndef __LINUX_POWER_SUPPLY_H__
+ #define __LINUX_POWER_SUPPLY_H__
+ 
+-#include <linux/wakelock.h>
+ #include <linux/workqueue.h>
+ #include <linux/leds.h>
+ 
+@@ -197,7 +196,6 @@ struct power_supply {
+ 	struct work_struct changed_work;
+ 	spinlock_t changed_lock;
+ 	bool changed;
+-	struct wake_lock work_wake_lock;
+ #ifdef CONFIG_THERMAL
+ 	struct thermal_zone_device *tzd;
+ 	struct thermal_cooling_device *tcd;
+-- 
+2.19.0
+

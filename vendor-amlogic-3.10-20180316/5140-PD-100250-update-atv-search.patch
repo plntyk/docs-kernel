@@ -1,0 +1,108 @@
+From c74779879866b2952b60ae98ef4cecfbbc8ded43 Mon Sep 17 00:00:00 2001
+From: "dezhi.kong" <dezhi.kong@amlogic.com>
+Date: Thu, 27 Nov 2014 20:50:04 +0800
+Subject: [PATCH 5140/5965] PD#100250: update atv search.
+
+Change-Id: Ic5c6a64811083392f289a50b5dc9abd1ef9f169b
+---
+ drivers/amlogic/dvb_tv/aml_fe.c               | 30 ++++++++++++-------
+ .../dvb_tv/amlatvdemod/atvdemod_frontend.c    |  2 +-
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        |  2 +-
+ 3 files changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index ae0d6c425162..23ab44856db4 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -36,6 +36,7 @@
+ //#include <linux/videodev2.h>
+ //s#include <linux/pinctrl/consumer.h>
+ //#include <linux/amlogic/aml_gpio_consumer.h>
++#include <mach/am_regs.h>//for g9tv cpu type
+ 
+ #include "aml_fe.h"
+ 
+@@ -50,7 +51,7 @@ MODULE_PARM_DESC(debug_fe, "\n\t\t Enable frontend debug information");
+ static int debug_fe = 0;
+ module_param(debug_fe, int, 0644);
+ 
+-#define AFC_BEST_LOCK      100//50
++#define AFC_BEST_LOCK      50
+ #define ATV_AFC_1_0MHZ   1000000
+ #define ATV_AFC_2_0MHZ	 2000000
+ 
+@@ -387,20 +388,28 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 					mdelay(delay_cnt);
+ 				}while(1);
+ 			}
+-			tuner_status_cnt_local = tuner_status_cnt;
+-			if( fe->ops.set_frontend(fe)){
+-				printk("[%s] the func of set_frontend err.\n",__func__);
+-				return	DVBFE_ALGO_SEARCH_FAILED;
++			if(tuner_status_cnt_local != 0){
++				if( fe->ops.set_frontend(fe)){
++					printk("[%s] the func of set_frontend err.\n",__func__);
++					return	DVBFE_ALGO_SEARCH_FAILED;
++				}
+ 			}
++			tuner_status_cnt_local = tuner_status_cnt;
+ 			do{
+-			fe->ops.tuner_ops.get_status(fe, &tuner_state);
+-			fe->ops.analog_ops.get_status(fe, &ade_state);
+-			tuner_status_cnt_local--;
+-			if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state || tuner_status_cnt_local == 0)
+-				break;
++				#if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV)
++				fe->ops.tuner_ops.get_pll_status(fe, &tuner_state);
++				fe->ops.analog_ops.get_pll_status(fe, &ade_state);
++				#else
++				fe->ops.tuner_ops.get_status(fe, &tuner_state);
++				fe->ops.analog_ops.get_status(fe, &ade_state);
++				#endif
++				tuner_status_cnt_local--;
++				if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state || tuner_status_cnt_local == 0)
++					break;
+ 			}while(1);
+ 			tuner_status_cnt_local = tuner_status_cnt;
+ 			if(FE_HAS_LOCK==ade_state || FE_HAS_LOCK==tuner_state){
++				pr_dbg("[%s][%d] pll lock success \n",__func__,__LINE__);
+ 				if(aml_fe_afc_closer(fe,minafcfreq,maxafcfreq)==0){
+ 					printk("[%s] afc end  :p->frequency=[%d] has lock,search success.\n",__func__,p->frequency);
+ 					if(std_bk != 0){/*avoid sound format is not match after search over*/
+@@ -427,6 +436,7 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 				fe->ops.set_frontend(fe);
+ 				return DVBFE_ALGO_SEARCH_FAILED;
+ 			}
++			fe->ops.set_frontend(fe);
+ 		}
+ 	}
+ 
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+index 6bb9c3719074..7011344eafa3 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+@@ -176,7 +176,7 @@ static int aml_atvdemod_get_snr(struct dvb_frontend *fe)
+ 	unsigned int snr_val;
+ 	int ret;
+ 	snr_val = atv_dmd_rd_long(APB_BLOCK_ADDR_VDAGC,0x50)>>8;
+-	if(snr_val > 700000)
++	if(snr_val > 900000)
+ 		ret = 5;
+ 	else if(snr_val > 158000)
+ 		ret = 15;
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index f31387cbf259..9dbada23213b 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -218,7 +218,7 @@ void atv_dmd_misc(void)
+     atv_dmd_wr_long(0x0f,0x44,0x5c8808c1);//zhuangwei
+     atv_dmd_wr_long(0x0f,0x3c,0x88188832);//zhuangwei
+     atv_dmd_wr_long(0x18,0x08,0x46170200);//zhuangwei
+-    atv_dmd_wr_long(0x0c,0x04,0xdafa0000);//zhuangwei
++    atv_dmd_wr_long(0x0c,0x04,0xd0fa0000);//zhuangwei//0xdafa0000
+     atv_dmd_wr_long(0x0c,0x00,0x584000);//zhuangwei
+     atv_dmd_wr_long(0x19,0x04,0xdafa0000);//zhuangwei
+     atv_dmd_wr_long(0x19,0x00,0x4a4000);//zhuangwei
+-- 
+2.19.0
+

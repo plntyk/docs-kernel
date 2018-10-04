@@ -1,0 +1,116 @@
+From 34a24b3fe7ee2234682e3abcad906c8c9c6de9aa Mon Sep 17 00:00:00 2001
+From: Jussi Kivilinna <jussi.kivilinna@iki.fi>
+Date: Tue, 6 Aug 2013 14:53:24 +0300
+Subject: [PATCH 0892/5965] ALSA: 6fire: fix DMA issues with URB
+ transfer_buffer usage
+
+commit ddb6b5a964371e8e52e696b2b258bda144c8bd3f upstream.
+
+Patch fixes 6fire not to use stack as URB transfer_buffer. URB buffers need to
+be DMA-able, which stack is not. Furthermore, transfer_buffer should not be
+allocated as part of larger device structure because DMA coherency issues and
+patch fixes this issue too.
+
+Signed-off-by: Jussi Kivilinna <jussi.kivilinna@iki.fi>
+Tested-by: Torsten Schenk <torsten.schenk@zoho.com>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ sound/usb/6fire/comm.c | 38 +++++++++++++++++++++++++++++++++-----
+ sound/usb/6fire/comm.h |  2 +-
+ 2 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/sound/usb/6fire/comm.c b/sound/usb/6fire/comm.c
+index 9e6e3ffd86bb..23452ee617e1 100644
+--- a/sound/usb/6fire/comm.c
++++ b/sound/usb/6fire/comm.c
+@@ -110,19 +110,37 @@ static int usb6fire_comm_send_buffer(u8 *buffer, struct usb_device *dev)
+ static int usb6fire_comm_write8(struct comm_runtime *rt, u8 request,
+ 		u8 reg, u8 value)
+ {
+-	u8 buffer[13]; /* 13: maximum length of message */
++	u8 *buffer;
++	int ret;
++
++	/* 13: maximum length of message */
++	buffer = kmalloc(13, GFP_KERNEL);
++	if (!buffer)
++		return -ENOMEM;
+ 
+ 	usb6fire_comm_init_buffer(buffer, 0x00, request, reg, value, 0x00);
+-	return usb6fire_comm_send_buffer(buffer, rt->chip->dev);
++	ret = usb6fire_comm_send_buffer(buffer, rt->chip->dev);
++
++	kfree(buffer);
++	return ret;
+ }
+ 
+ static int usb6fire_comm_write16(struct comm_runtime *rt, u8 request,
+ 		u8 reg, u8 vl, u8 vh)
+ {
+-	u8 buffer[13]; /* 13: maximum length of message */
++	u8 *buffer;
++	int ret;
++
++	/* 13: maximum length of message */
++	buffer = kmalloc(13, GFP_KERNEL);
++	if (!buffer)
++		return -ENOMEM;
+ 
+ 	usb6fire_comm_init_buffer(buffer, 0x00, request, reg, vl, vh);
+-	return usb6fire_comm_send_buffer(buffer, rt->chip->dev);
++	ret = usb6fire_comm_send_buffer(buffer, rt->chip->dev);
++
++	kfree(buffer);
++	return ret;
+ }
+ 
+ int usb6fire_comm_init(struct sfire_chip *chip)
+@@ -135,6 +153,12 @@ int usb6fire_comm_init(struct sfire_chip *chip)
+ 	if (!rt)
+ 		return -ENOMEM;
+ 
++	rt->receiver_buffer = kzalloc(COMM_RECEIVER_BUFSIZE, GFP_KERNEL);
++	if (!rt->receiver_buffer) {
++		kfree(rt);
++		return -ENOMEM;
++	}
++
+ 	urb = &rt->receiver;
+ 	rt->serial = 1;
+ 	rt->chip = chip;
+@@ -153,6 +177,7 @@ int usb6fire_comm_init(struct sfire_chip *chip)
+ 	urb->interval = 1;
+ 	ret = usb_submit_urb(urb, GFP_KERNEL);
+ 	if (ret < 0) {
++		kfree(rt->receiver_buffer);
+ 		kfree(rt);
+ 		snd_printk(KERN_ERR PREFIX "cannot create comm data receiver.");
+ 		return ret;
+@@ -171,6 +196,9 @@ void usb6fire_comm_abort(struct sfire_chip *chip)
+ 
+ void usb6fire_comm_destroy(struct sfire_chip *chip)
+ {
+-	kfree(chip->comm);
++	struct comm_runtime *rt = chip->comm;
++
++	kfree(rt->receiver_buffer);
++	kfree(rt);
+ 	chip->comm = NULL;
+ }
+diff --git a/sound/usb/6fire/comm.h b/sound/usb/6fire/comm.h
+index 6a0840b0dcff..780d5ed8e5d8 100644
+--- a/sound/usb/6fire/comm.h
++++ b/sound/usb/6fire/comm.h
+@@ -24,7 +24,7 @@ struct comm_runtime {
+ 	struct sfire_chip *chip;
+ 
+ 	struct urb receiver;
+-	u8 receiver_buffer[COMM_RECEIVER_BUFSIZE];
++	u8 *receiver_buffer;
+ 
+ 	u8 serial; /* urb serial */
+ 
+-- 
+2.19.0
+

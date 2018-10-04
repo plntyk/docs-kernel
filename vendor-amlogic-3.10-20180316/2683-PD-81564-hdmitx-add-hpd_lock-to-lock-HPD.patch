@@ -1,0 +1,81 @@
+From 3c596789ef41ee7d73fec7df568ddc3737e9ea8f Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Fri, 20 Dec 2013 18:32:33 +0800
+Subject: [PATCH 2683/5965] PD #81564: hdmitx: add hpd_lock to lock HPD
+
+---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c        | 12 +++++++-----
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h |  1 +
+ drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c  | 14 ++++++++++++++
+ 3 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index cbd3c7f39bda..a7a189c52d85 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -1192,11 +1192,13 @@ static int hdmi_task_handle(void *data)
+         if(hdmitx_device->HWOp.Cntl) {
+             static int st = 0;
+             st = hdmitx_device->HWOp.Cntl(hdmitx_device, HDMITX_HWCMD_HPD_GPI_TEST, 0);
+-            if((st == 0) && (hdmitx_device->hpd_state == 1)) {
+-                hdmitx_device->hpd_event = 2;
+-            }
+-            if((st == 1) && (hdmitx_device->hpd_state == 0)) {
+-                hdmitx_device->hpd_event = 1;
++            if(hdmitx_device->hpd_lock != 1) {
++                if((st == 0) && (hdmitx_device->hpd_state == 1)) {
++                    hdmitx_device->hpd_event = 2;
++                }
++                if((st == 1) && (hdmitx_device->hpd_state == 0)) {
++                    hdmitx_device->hpd_event = 1;
++                }
+             }
+         }
+         
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
+index 4087672b7676..3afdadb1ecbb 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_module.h
+@@ -109,6 +109,7 @@ typedef struct hdmi_tx_dev_s {
+     unsigned int  cec_init_ready;
+     unsigned int  tv_cec_support;
+     unsigned int  tv_no_edid;           // For some un-well-known TVs, no edid at all
++    unsigned int  hpd_lock;
+ #ifdef CONFIG_AM_HDMI_REPEATER
+     unsigned int  hdcp_repeater_mode;
+     unsigned int  repeater_hdcp_cmd; /* 1, start; 2, stop */
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c b/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
+index 8e20e3feff22..d39f163b0a0f 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
+@@ -153,6 +153,11 @@ static irqreturn_t intr_handler(int irq, void *dev_instance)
+     hdmitx_dev_t* hdmitx_device = (hdmitx_dev_t*)dev_instance;
+     data32 = hdmi_rd_reg(OTHER_BASE_ADDR + HDMI_OTHER_INTR_STAT); 
+     hdmi_print(1, "HDMI irq %x\n", data32);
++    if(hdmitx_device->hpd_lock == 1) {
++        hdmi_wr_reg(OTHER_BASE_ADDR + HDMI_OTHER_INTR_STAT_CLR, 0xf);
++        printk("hdmitx: hpd locked\n");
++        return IRQ_HANDLED;
++    }
+     if(hdmitx_device->internal_mode_change == 1){     // if the irq from the internal mode change, just do nothing and return
+         hdmi_wr_reg(OTHER_BASE_ADDR + HDMI_OTHER_INTR_STAT_CLR, 0x7);
+         printk("hdmitx: ignore irq\n");
+@@ -3368,6 +3373,15 @@ static void hdmitx_debug(hdmitx_dev_t* hdmitx_device, const char* buf)
+         hdmitx_dump_tvenc_reg(hdmitx_device->cur_VIC, 1);
+         return;
+     }
++    else if(strncmp(tmpbuf, "hpd_lock", 8) == 0) {
++        if(tmpbuf[8] == '1') {
++            hdmitx_device->hpd_lock = 1;
++        }
++        else {
++            hdmitx_device->hpd_lock = 0;
++        }
++        return;
++    }
+     else if(strncmp(tmpbuf, "vic", 3)==0) {
+         printk("hdmi vic count = %d\n", hdmitx_device->vic_count);
+         if((tmpbuf[3] >= '0') && (tmpbuf[3] <= '9')){
+-- 
+2.19.0
+

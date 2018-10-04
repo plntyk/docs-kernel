@@ -1,0 +1,206 @@
+From 1782ba1ff937dee82c04411a9acfdbb4dba5d05a Mon Sep 17 00:00:00 2001
+From: "zhe.wang" <zhe.wang@amlogic.com>
+Date: Tue, 9 Dec 2014 09:24:22 +0800
+Subject: [PATCH 5169/5965] PD #100750: audio: fix bugs of audio for g9tv
+
+1. open pmu4 pinmux for REVB chip in dtd file.
+2. correct PMU4 codec driver error.
+3. correct G9TV hardware resample control error.
+
+Change-Id: Ie0fd393c836eb71509b7b5740eb4794ff955c577
+---
+ arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd | 14 ++++++------
+ sound/soc/aml/m8/aml_g9tv.c                  | 16 ++++++++++----
+ sound/soc/codecs/aml_pmu4_codec.c            | 23 ++++++++++----------
+ sound/soc/codecs/aml_pmu4_codec.h            |  3 ---
+ 4 files changed, 31 insertions(+), 25 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+index f5659f1da901..7aa4f66fd2b4 100755
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_n300.dtd
+@@ -1051,7 +1051,7 @@
+ 			"LINEIN","Linein left 1",
+ 			"LINEIN","Linein right 1";
+ 		pinctrl-names = "aml_snd_g9tv";
+-//		pinctrl-0 = <&audio_pins>;
++		pinctrl-0 = <&audio_pins>;
+ 		status = "okay";
+ 	};
+ 
+@@ -1355,12 +1355,12 @@
+ 		//$$ L2 PROP_U32 4 = "amlogic,setmask"
+ 		//$$ L2 PROP_U32 10 = "amlogic,clrmask"
+ 		//$$ L2 PROP_STR 6 = "amlogic,pins"
+-//		audio_pins:audio_pins {
+-//			amlogic,setmask = <2 0x6B0000>; /* I2S */
+-//			amlogic,clrmask = <2 0x140000
+-//			                   3 0x80000>;
+-//			amlogic,pins = "GPIOZ_1", "GPIOZ_2", "GPIOZ_3", "GPIOZ_4", "GPIOZ_5";
+-//		};
++		audio_pins:audio_pins {
++			amlogic,setmask = <2 0x6B0000>; /* I2S */
++			amlogic,clrmask = <2 0x140000
++			                   3 0x80000>;
++			amlogic,pins = "GPIOZ_1", "GPIOZ_2", "GPIOZ_3", "GPIOZ_4", "GPIOZ_5";
++		};
+ 
+ 		//$$ MATCH "dvb_p_ts0_pins_match" = "&dvb_p_ts0_pins"
+ 		//$$ L2 PROP_U32 2 = "amlogic,setmask"
+diff --git a/sound/soc/aml/m8/aml_g9tv.c b/sound/soc/aml/m8/aml_g9tv.c
+index b6dc4ef636da..ea5eb336b9b7 100755
+--- a/sound/soc/aml/m8/aml_g9tv.c
++++ b/sound/soc/aml/m8/aml_g9tv.c
+@@ -111,6 +111,7 @@ static struct snd_soc_ops aml_asoc_ops = {
+ struct aml_audio_private_data *p_audio;
+ static bool aml_audio_i2s_mute_flag = 0;
+ static bool aml_audio_spdif_mute_flag = 0;
++static int aml_audio_Hardware_resample = 0;
+ 
+ 
+ static int aml_audio_set_i2s_mute(struct snd_kcontrol *kcontrol,
+@@ -272,6 +273,8 @@ static int hardware_resample_enable(int input_sr){
+     clk_rate = clk_get_rate(clk_src);
+     Avg_cnt_init = (unsigned short)(clk_rate*4/input_sr);
+ 
++    printk(KERN_INFO "clk_rate = %ld,input_sr = %d,Avg_cnt_init = %d\n",clk_rate,input_sr,Avg_cnt_init);
++	
+     WRITE_MPEG_REG(AUD_RESAMPLE_CTRL0, 0);
+     WRITE_MPEG_REG(AUD_RESAMPLE_CTRL0,  (0<<29)    //select the source [30:29]
+                                         |(1<<28)   //enable the resample [28]
+@@ -289,7 +292,7 @@ static int hardware_resample_disable(void){
+ }
+ 
+ static const char *hardware_resample_texts[] = {
+-    "Disable", "Enable:32K", "Enable:44.1K","Enable:48K"
++    "Disable", "Enable:48K", "Enable:44K","Enable:32K"
+ };
+ 
+ static const struct soc_enum hardware_resample_enum =
+@@ -300,20 +303,25 @@ static const struct soc_enum hardware_resample_enum =
+ static int aml_hardware_resample_get_enum(struct snd_kcontrol *kcontrol,
+     struct snd_ctl_elem_value *ucontrol)
+ {
++    ucontrol->value.enumerated.item[0] = aml_audio_Hardware_resample;
+     return 0;
+ }
+ 
+ static int aml_hardware_resample_set_enum(struct snd_kcontrol *kcontrol,
+     struct snd_ctl_elem_value *ucontrol)
+ {
+-	if (ucontrol->value.enumerated.item[0] == 0){
++    if (ucontrol->value.enumerated.item[0] == 0){
+         hardware_resample_disable();
++        aml_audio_Hardware_resample = 0;
+     }else if (ucontrol->value.enumerated.item[0] == 1){
+-        hardware_resample_enable(32000);
++        hardware_resample_enable(48000);
++        aml_audio_Hardware_resample = 1;
+     }else if (ucontrol->value.enumerated.item[0] == 2){
+         hardware_resample_enable(44100);
++        aml_audio_Hardware_resample = 2;
+     }else if (ucontrol->value.enumerated.item[0] == 3){
+-        hardware_resample_enable(48000);
++        hardware_resample_enable(32000);
++        aml_audio_Hardware_resample = 3;
+     }
+     return 0;
+ }
+diff --git a/sound/soc/codecs/aml_pmu4_codec.c b/sound/soc/codecs/aml_pmu4_codec.c
+index dd033763d4e3..1bcf4875e2d9 100755
+--- a/sound/soc/codecs/aml_pmu4_codec.c
++++ b/sound/soc/codecs/aml_pmu4_codec.c
+@@ -41,7 +41,7 @@ static struct pmu4_audio_init_reg init_list[] = {
+     {PMU4_AUDIO_CONFIG    , 0x3c00}, //
+     {PMU4_PGA_IN_CONFIG   , 0x3535}, // ALI1,20dB;AR1,20dB
+     {PMU4_ADC_VOL_CTR     , 0x5050}, // 0dB
+-    {PMU4_DAC_SOFT_MUTE   , 0xF080}, //
++    {PMU4_DAC_SOFT_MUTE   , 0x0000}, //
+     {PMU4_DAC_VOL_CTR     , 0xFFFF}, // 0dB
+     {PMU4_LINE_OUT_CONFIG , 0x4242}, 
+     
+@@ -76,6 +76,7 @@ static int aml_pmu4_audio_write(struct snd_soc_codec *codec, unsigned int reg,
+ 
+ 	pmu4_audio_reg = PMU4_AUDIO_BASE + reg;
+ 	aml1220_write16(pmu4_audio_reg, val);
++
+ 	return 0;
+ }
+ 
+@@ -196,8 +197,8 @@ static const struct snd_soc_dapm_widget pmu4_audio_dapm_widgets[] = {
+     	0, 0, &pgain_rn_mux),
+     
+ 	/*ADC capture stream*/
+-	SND_SOC_DAPM_ADC("Left ADC", "HIFI Capture", SND_SOC_NOPM, PMU4_ADCL_EN, 0),
+-	SND_SOC_DAPM_ADC("Right ADC", "HIFI Capture", SND_SOC_NOPM, PMU4_ADCR_EN, 0),
++	SND_SOC_DAPM_ADC("Left ADC", "HIFI Capture", PMU4_BLOCK_ENABLE, PMU4_ADCL_EN, 0),
++	SND_SOC_DAPM_ADC("Right ADC", "HIFI Capture", PMU4_BLOCK_ENABLE, PMU4_ADCR_EN, 0),
+ 
+ 	/*Output*/
+     SND_SOC_DAPM_OUTPUT("Lineout left N"),
+@@ -206,8 +207,8 @@ static const struct snd_soc_dapm_widget pmu4_audio_dapm_widgets[] = {
+     SND_SOC_DAPM_OUTPUT("Lineout right P"),
+ 
+ 	/*DAC playback stream*/
+-	SND_SOC_DAPM_DAC("Left DAC", "HIFI Playback", SND_SOC_NOPM, PMU4_DACL_EN, 0),
+-	SND_SOC_DAPM_DAC("Right DAC", "HIFI Playback", SND_SOC_NOPM, PMU4_DACR_EN, 0),
++	SND_SOC_DAPM_DAC("Left DAC", "HIFI Playback", PMU4_BLOCK_ENABLE, PMU4_DACL_EN, 0),
++	SND_SOC_DAPM_DAC("Right DAC", "HIFI Playback", PMU4_BLOCK_ENABLE, PMU4_DACR_EN, 0),
+ 
+ 	/*DRV output*/
+ 	SND_SOC_DAPM_OUT_DRV("LOLP_OUT_EN", PMU4_BLOCK_ENABLE,
+@@ -282,12 +283,12 @@ static int aml_pmu4_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+   
+     switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+     case SND_SOC_DAIFMT_CBM_CFM:
+-		snd_soc_update_bits(codec,PMU4_I2S_MODE,
+-			PMU4_I2S_MODE_MASK,PMU4_I2S_MODE_MASK);
++		snd_soc_update_bits(codec,PMU4_AUDIO_CONFIG,
++			PMU4_I2S_MODE,PMU4_I2S_MODE);
+         break;
+     case SND_SOC_DAIFMT_CBS_CFS:
+-		snd_soc_update_bits(codec,PMU4_I2S_MODE,
+-			PMU4_I2S_MODE_MASK,0);
++		snd_soc_update_bits(codec,PMU4_AUDIO_CONFIG,
++			PMU4_I2S_MODE,0);
+         break;
+     default:
+         return -EINVAL;
+@@ -309,10 +310,10 @@ static int aml_pmu4_set_dai_sysclk(struct snd_soc_dai *dai,
+ 
+ 	if(256 == ps){
+ 		snd_soc_update_bits( codec,PMU4_AUDIO_CONFIG,
+-			PMU4_MCLK_FREQ_MASK,0);
++			PMU4_MCLK_FREQ,0);
+ 	}else if(512 == ps){
+ 		snd_soc_update_bits( codec,PMU4_AUDIO_CONFIG,
+-			PMU4_MCLK_FREQ_MASK,PMU4_MCLK_FREQ_MASK);
++			PMU4_MCLK_FREQ,PMU4_MCLK_FREQ);
+ 	}  
+     return 0;
+ #endif
+diff --git a/sound/soc/codecs/aml_pmu4_codec.h b/sound/soc/codecs/aml_pmu4_codec.h
+index 8fec1f2dfe69..48761ee4dfd9 100755
+--- a/sound/soc/codecs/aml_pmu4_codec.h
++++ b/sound/soc/codecs/aml_pmu4_codec.h
+@@ -14,7 +14,6 @@
+ 
+ 
+ /*Block Enable , Reg 0x02h*/
+-#define PMU4_BIAS_CURRENT_MASK    (0x1<<13)
+ #define PMU4_BIAS_CURRENT_EN    0xD
+ #define PMU4_PGAL_IN_EN         0xB
+ #define PMU4_PGAR_IN_EN         0xA
+@@ -31,9 +30,7 @@
+ 
+ 
+ /*Audio Config,Reg 0x04h*/
+-#define PMU4_MCLK_FREQ_MASK               (0x1<<15)
+ #define PMU4_MCLK_FREQ          0xF
+-#define PMU4_I2S_MODE_MASK                (0x1<<14)
+ #define PMU4_I2S_MODE           0xE
+ #define PMU4_ADC_HPF_MODE       0xC
+ #define PMU4_ADC_DEM_EN         0xA
+-- 
+2.19.0
+

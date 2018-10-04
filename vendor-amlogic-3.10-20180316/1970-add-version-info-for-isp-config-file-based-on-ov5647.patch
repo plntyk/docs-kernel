@@ -1,0 +1,192 @@
+From c8e18eb71f655ddaa498a8ecda6cd77bc2963c83 Mon Sep 17 00:00:00 2001
+From: "xiaoyu.yuan" <xiaoyu.yuan@droid05.amlogic.com>
+Date: Mon, 18 Nov 2013 17:15:01 +0800
+Subject: [PATCH 1970/5965] add version info for isp config file based on
+ ov5647
+
+---
+ drivers/amlogic/camera/common/config_parser.c | 46 ++++++++++++++++++-
+ drivers/amlogic/camera/common/config_parser.h | 10 +++-
+ drivers/amlogic/camera/ov5647.c               | 35 +++++++++++---
+ 3 files changed, 82 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/config_parser.c b/drivers/amlogic/camera/common/config_parser.c
+index d145c30eda93..1557c3dde90d 100755
+--- a/drivers/amlogic/camera/common/config_parser.c
++++ b/drivers/amlogic/camera/common/config_parser.c
+@@ -21,6 +21,7 @@ char *wave_key = "wave_start";
+ char *lenc_key = "lenc_start";
+ char *gamma_key = "gamma_start";
+ char *wb_sensor_key = "mwb_sensor_start";
++char *version_key = "version_start";
+ 
+ typedef struct{
+ 	char *buffer;
+@@ -883,6 +884,38 @@ int parse_wb_sensor(buffer_para_t *buf_para,int *remained,int *offset){
+     return 0;
+ }
+ 
++
++int parse_version(buffer_para_t *buf_para,int *remained,int *offset){
++    int i;
++    char *iter,*end;
++    int len = 0;
++
++    iter = search_string(buf_para,offset,remained,"version_start","version_end");
++    if(iter == NULL){
++        return -WRONG_FORMAT;
++    }
++    iter = strstr(iter,"Date");
++    iter += 5;
++    end = strstr(iter,"Module");
++    len = end - iter;
++    memcpy(cf->version.date,iter,len);
++    cf->version.date[len] = '\0';
++    
++    iter = end + 7;
++    end = strstr(iter,"Version");
++    len = end - iter;    
++    memcpy(cf->version.module,iter,len);
++    cf->version.module[len] = '\0';    
++
++    iter = end + 8;
++    end = strstr(iter,"[version");
++    len = end - iter;
++    memcpy(cf->version.version,iter,len);
++    cf->version.version[len] = '\0';  
++    printk("version:%s",cf->version.version);    
++    return 0;
++}
++
+ int parse_config(char *path){
+     char *buffer,*iter;
+     int file_size;
+@@ -1043,7 +1076,18 @@ int parse_config(char *path){
+                 }else{
+                     buf_para.data_start += strlen(wb_sensor_key);
+                 } 
+-                 break;          
++                 break;
++            case 'v':
++                if(memcmp(iter,version_key,strlen(version_key)) == 0){
++                    cf->version_info_valid = 1;
++                    if((ret = parse_version(&buf_para,&remained_size,&read_offset)) != 0){
++                        cf->version_info_valid = 0;
++                        printk("version info invalid :%d\n",ret);									
++                    }
++                }else{
++                    buf_para.data_start += strlen(version_key);
++                } 
++                 break;                      
+             default:
+                 buf_para.data_start += 1;
+                 break;		
+diff --git a/drivers/amlogic/camera/common/config_parser.h b/drivers/amlogic/camera/common/config_parser.h
+index 8831638a6125..cad53f6a86b0 100755
+--- a/drivers/amlogic/camera/common/config_parser.h
++++ b/drivers/amlogic/camera/common/config_parser.h
+@@ -14,7 +14,7 @@
+ #define WB_MAX 9
+ #define CAPTURE_MAX 5
+ #define GAMMA_MAX 257
+-#define SCENE_MAX 202
++#define SCENE_MAX 203
+ #define WB_SENSOR_MAX 4
+ #define BUFFER_SIZE 1024
+ 
+@@ -142,6 +142,12 @@ typedef struct{
+     int export[WB_SENSOR_MAX];
+ }wb_sensor_struct;
+ 
++typedef struct{
++    char date[40];
++    char module[30];
++    char version[20];		
++}version_struct;
++
+ typedef struct{
+     effect_struct eff;
+     int effect_valid;
+@@ -163,6 +169,8 @@ typedef struct{
+     int gamma_valid;
+     wb_sensor_struct wb_sensor_data;
+     int wb_sensor_data_valid;
++    version_struct version;
++    int version_info_valid;
+ }configure;
+ 
+ typedef struct{
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 4667b01fd46d..e5ad552e0401 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -122,8 +122,6 @@ static int i_index = 3;
+ static int t_index = -1;
+ static int dest_hactive = 640;
+ static int dest_vactive = 480;
+-static int capture_delay = 3500;
+-module_param(capture_delay,int,0664);
+ /* supported controls */
+ static struct v4l2_queryctrl ov5647_qctrl[] = {
+ 	{
+@@ -2308,13 +2306,35 @@ static void dw9714_init(unsigned char mode)
+ /* power down for dw9714*/
+ static void dw9714_uninit(void)
+ {
+-        char buf[3];
+-	struct i2c_adapter *adapter;
++    char buf[3];
++    struct i2c_adapter *adapter;
+ 	buf[0] = 0x80;
+ 	buf[1] = 0x0;
+ 	adapter = i2c_get_adapter(4);
+-	my_i2c_put_byte_add8(adapter,0x0c,buf,2);
++	my_i2c_put_byte_add8(adapter,0x0c,buf,2);	
++}
++
++
++
++static ssize_t version_info_store(struct class *cls,struct class_attribute *attr, const char* buf, size_t len)
++{
++	return len;
+ }
++
++static ssize_t version_info_show(struct class *cls,struct class_attribute *attr, char* buf)
++{
++	size_t len = 0;
++    if(cf->version_info_valid == 0)
++        printk("verion info envalid\n");
++    else{
++        printk("Date %s\n",cf->version.date);
++        printk("Module %s\n",cf->version.module);
++        printk("Version %s\n",cf->version.version);	
++    }
++    return len;
++}
++
++static CLASS_ATTR(version_debug, 0664, version_info_show, version_info_store);
+ /*************************************************************************
+ * FUNCTION
+ *    OV5647_set_param_wb
+@@ -3766,6 +3786,7 @@ static int ov5647_open(struct file *file)
+     retval = class_create_file(cam_class,&class_attr_vcm_debug);
+     retval = class_create_file(cam_class,&class_attr_resolution_debug);
+     retval = class_create_file(cam_class,&class_attr_light_source_debug);
++    retval = class_create_file(cam_class,&class_attr_version_debug);
+     printk("open successfully\n");
+     dev->vops = get_vdin_v4l2_ops();
+ 
+@@ -3874,8 +3895,8 @@ static int ov5647_close(struct file *file)
+     class_remove_file(cam_class,&class_attr_aet_debug);
+     class_remove_file(cam_class,&class_attr_dg_debug);
+     class_remove_file(cam_class,&class_attr_vcm_debug);
+-    class_remove_file(cam_class,&class_attr_resolution_debug);
+-    class_remove_file(cam_class,&class_attr_light_source_debug);
++    class_remove_file(cam_class,&class_attr_resolution_debug);   
++    class_remove_file(cam_class,&class_attr_version_debug);
+     class_destroy(cam_class);
+     printk("close success\n");
+ #ifdef CONFIG_CMA
+-- 
+2.19.0
+

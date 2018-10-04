@@ -1,0 +1,79 @@
+From c8e63e376fa0c61273f4d66f5c42e8c47b6fe8b7 Mon Sep 17 00:00:00 2001
+From: Larson Jiang <larson.jiang@amlogic.com>
+Date: Fri, 14 Nov 2014 16:54:38 +0800
+Subject: [PATCH 5052/5965] PD#99850:PD #99314: fix sd read/write problem when
+ sdio data1 interrupt enabled. Need disable data1 interrupt when send CMD.
+ Change init time
+
+Change-Id: I63ff7e4b5f0338a1ae098a0b39d5e5b486aaadfe
+---
+ drivers/amlogic/mmc/aml_sdio.c | 18 +++++++++++++++---
+ drivers/amlogic/mmc/amlsd.c    | 10 ++++++++--
+ 2 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 5033b1114ea0..ea5115baf415 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -705,18 +705,30 @@ void aml_sdio_request(struct mmc_host *mmc, struct mmc_request *mrq)
+     struct amlsd_host *host;
+     unsigned long flags;
+     unsigned int timeout;
++    u32 virqc ;
++    struct sdio_irq_config* irqc ;
++
+ 
+     BUG_ON(!mmc);
+     BUG_ON(!mrq);
+-
++    
+     pdata = mmc_priv(mmc);
+     host = (void*)pdata->host;
+-
++    
++    virqc = readl(host->base + SDIO_IRQC);
++    irqc = (void*)&virqc;
++    
++		if(aml_card_type_non_sdio(pdata)){
++			irqc->arc_if_int_en = 0;
++    	writel(virqc, host->base + SDIO_IRQC);
++		}
++			
++		
+     if (aml_check_unsupport_cmd(mmc, mrq))
+         return;
+ 
+     //only for SDCARD hotplag
+-    if(!pdata->is_in || (!host->init_flag && aml_card_type_sd(pdata))){
++    if(!pdata->is_in || (!host->init_flag && aml_card_type_non_sdio(pdata))&& (mrq->cmd->opcode != 0)){
+         spin_lock_irqsave(&host->mrq_lock, flags);
+         mrq->cmd->error = -ENOMEDIUM;
+         mrq->cmd->retries = 0;
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index 5389e01bb4a6..01f93ab14d39 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -1156,12 +1156,18 @@ irqreturn_t aml_irq_cd_thread(int irq, void *data)
+     mdelay(20);
+     aml_sd_uart_detect(pdata);
+ 
+-    if((pdata->is_in == 0) && aml_card_type_sd(pdata)) {
++    if((pdata->is_in == 0) && aml_card_type_non_sdio(pdata)) {
+         pdata->host->init_flag = 0;
+     }
+ 
+     //mdelay(500);
+-    mmc_detect_change(pdata->mmc, msecs_to_jiffies(200));
++    if(pdata->is_in == 0){
++    	mmc_detect_change(pdata->mmc, msecs_to_jiffies(2));
++    	
++    }
++    else{
++    	mmc_detect_change(pdata->mmc, msecs_to_jiffies(500));
++    }
+ 
+ 	return IRQ_HANDLED;
+ }
+-- 
+2.19.0
+

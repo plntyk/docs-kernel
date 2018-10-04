@@ -1,0 +1,91 @@
+From 98a26f1bab759427a25ccd52b59cc266ab2060a9 Mon Sep 17 00:00:00 2001
+From: "Chris.Sun" <qiuwei.sun@amlogic.com>
+Date: Mon, 25 Nov 2013 19:16:03 +0800
+Subject: [PATCH 2066/5965] PD #82679: Solve CMA allocation failure.
+
+---
+ drivers/amlogic/camera/common/vm.c |  2 +-
+ fs/buffer.c                        | 32 ++++++++++++++++++++++++++++++
+ mm/page_alloc.c                    |  3 ++-
+ 3 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/vm.c b/drivers/amlogic/camera/common/vm.c
+index 234c05b65450..9dccd7f90457 100755
+--- a/drivers/amlogic/camera/common/vm.c
++++ b/drivers/amlogic/camera/common/vm.c
+@@ -1790,7 +1790,7 @@ EXPORT_SYMBOL(vm_deinit_buf);
+ 
+ void __init vm_reserve_cma(void)
+ {
+-    int ret = dma_declare_contiguous(&vm_plat_dev.dev, 68 * SZ_1M, 0, 0);
++    int ret = dma_declare_contiguous(&vm_plat_dev.dev, 36 * SZ_1M, 0, 0);
+     if(ret)
+         pr_err("%s : dma_declare_contiguous failed\n", __func__);
+ }
+diff --git a/fs/buffer.c b/fs/buffer.c
+index d2a4d1bb2d57..f2a0194dbf43 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -1419,6 +1419,35 @@ void invalidate_bh_lrus(void)
+ }
+ EXPORT_SYMBOL_GPL(invalidate_bh_lrus);
+ 
++
++
++static void __evict_bh_lru(void *arg)
++{
++    struct buffer_head *bh = arg;
++	struct bh_lru *b = &get_cpu_var(bh_lrus);
++	int i;
++
++	for (i = 0; i < BH_LRU_SIZE; i++) {
++        if(b->bhs[i] == bh)
++        {
++            brelse(b->bhs[i]);
++            memcpy(&b->bhs[i], &b->bhs[i+1], BH_LRU_SIZE - i - 1);
++            b->bhs[BH_LRU_SIZE] = NULL;
++            break;
++        }
++	}
++
++	put_cpu_var(bh_lrus);
++}
++
++
++void evict_bh_lru(struct buffer_head *bh)
++{
++	on_each_cpu(__evict_bh_lru, bh, 1);
++}
++EXPORT_SYMBOL_GPL(evict_bh_lru);
++
++
+ void set_bh_page(struct buffer_head *bh,
+ 		struct page *page, unsigned long offset)
+ {
+@@ -3140,6 +3169,9 @@ drop_buffers(struct page *page, struct buffer_head **buffers_to_free)
+ 
+ 	bh = head;
+ 	do {
++        /* Evict buffer_head from lru for page of CMA migrate type */
++        evict_bh_lru(bh); 
++
+ 		if (buffer_write_io_error(bh) && page->mapping)
+ 			set_bit(AS_EIO, &page->mapping->flags);
+ 		if (buffer_busy(bh))
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 63858c4522b3..0f4923daf5a0 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -1337,7 +1337,8 @@ void free_hot_cold_page(struct page *page, int cold)
+ 	 * excessively into the page allocator
+ 	 */
+ 	if (migratetype >= MIGRATE_PCPTYPES) {
+-		if (unlikely(is_migrate_isolate(migratetype))) {
++		if (unlikely(is_migrate_isolate(migratetype)
++            || is_migrate_cma(migratetype))) {
+ 			free_one_page(zone, page, 0, migratetype);
+ 			goto out;
+ 		}
+-- 
+2.19.0
+

@@ -1,0 +1,227 @@
+From 9af77b1f05d2865931021dce830947fd1a556780 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Thu, 12 Jun 2014 19:13:15 -0700
+Subject: [PATCH 4345/5965] PD #92649. Fix delay calculation for HEVC video
+ format.
+
+---
+ drivers/amlogic/amports/amstream.c      | 22 +++++---
+ drivers/amlogic/amports/ptsserv.c       | 67 +++++++++++++++++--------
+ drivers/amlogic/amports/vh265.c         |  3 --
+ include/linux/amlogic/amports/ptsserv.h |  2 +-
+ 4 files changed, 61 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 492f496fd9f8..624df2f3d37d 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -335,10 +335,18 @@ static stream_buf_t bufs[BUF_MAX_NUM] = {
+ 
+ stream_buf_t *get_buf_by_type(u32  type)
+ {
+-   if(type<BUF_MAX_NUM)
+-       return &bufs[type];
+-   else 
+-       return NULL;
++    switch (type) {
++        case PTS_TYPE_VIDEO:
++            return &bufs[BUF_TYPE_VIDEO];
++        case PTS_TYPE_AUDIO:
++            return &bufs[BUF_TYPE_AUDIO];
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        case PTS_TYPE_HEVC:
++            return &bufs[BUF_TYPE_HEVC];
++#endif
++        default:
++            return NULL;
++    }
+ }
+ 
+ void set_sample_rate_info(int arg)
+@@ -1851,14 +1859,14 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+             int calc_delayms=0;
+             u32 bitrate=0,avg_bitrate=0;
+ 
+-            calc_delayms = calculation_stream_delayed_ms(p->type, &bitrate, &avg_bitrate);
++            calc_delayms = calculation_stream_delayed_ms((p->type == BUF_TYPE_AUDIO) ? PTS_TYPE_AUDIO : PTS_TYPE_VIDEO,
++                               &bitrate, &avg_bitrate);
+ 
+             if (calc_delayms>=0) {
+                 pbuf += sprintf(pbuf, "\tbuf current delay:%dms\n",calc_delayms);
+                 pbuf += sprintf(pbuf, "\tbuf bitrate latest:%dbps,avg:%dbps\n",bitrate,avg_bitrate);
+                 pbuf += sprintf(pbuf, "\tbuf time after last pts:%d ms\n",
+-
+-                calculation_stream_ext_delayed_ms(p->type));
++                                calculation_stream_ext_delayed_ms((p->type == BUF_TYPE_AUDIO) ? PTS_TYPE_AUDIO : PTS_TYPE_VIDEO));
+ 
+                 pbuf += sprintf(pbuf, "\tbuf time after last write data :%d ms\n",
+                                 (int)(jiffies_64 - p->last_write_jiffies64)*1000/HZ);
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index a5420248a9c6..4125871832b4 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -67,6 +67,9 @@ typedef struct pts_table_s {
+     u32 last_bitrate;
+     u32 last_avg_bitrate;
+ #endif
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    u32 hevc;
++#endif
+ } pts_table_t;
+ 
+ static DEFINE_SPINLOCK(lock);
+@@ -173,7 +176,7 @@ int pts_cached_time(u8 type)
+ 
+ EXPORT_SYMBOL(pts_cached_time);
+ 
+-int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
++int calculation_stream_delayed_ms(u8 type, u32 *latestbitrate, u32 *avg_bitare)
+ {
+     pts_table_t *pTable;
+     u32 timestampe_delayed=0;
+@@ -211,7 +214,14 @@ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ 
+     if ((timestampe_delayed<0 ||timestampe_delayed>5*1000) && pTable->last_avg_bitrate>0) {
+         int diff = pTable->last_checkin_offset-pTable->last_checkout_offset;
+-        int diff2 = stbuf_level(get_buf_by_type(type));
++        int diff2;
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        if (pTable->hevc) {
++            diff2 = stbuf_level(get_buf_by_type(PTS_TYPE_HEVC));
++        } else
++#endif
++        diff2 = stbuf_level(get_buf_by_type(type));
+ 
+         if ((diff-diff2) > (pTable->last_avg_bitrate/8/10) || (diff-diff2*10)) {
+             int delay_ms;
+@@ -238,25 +248,27 @@ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ EXPORT_SYMBOL(calculation_stream_delayed_ms);
+ 
+ // return the 1/90000 unit time
+-int calculation_vcached_delayed(){
+-	pts_table_t *pTable;
+-	u32 delay=0;
++int calculation_vcached_delayed(void)
++{
++    pts_table_t *pTable;
++    u32 delay=0;
+ 
+-	pTable = &pts_table[PTS_TYPE_VIDEO];
++    pTable = &pts_table[PTS_TYPE_VIDEO];
+ 
+-	delay = pTable->last_checkin_pts-timestamp_vpts_get();
++    delay = pTable->last_checkin_pts - timestamp_vpts_get();
+ 
+-	if (0<delay && delay<5*90000) 
+-		return delay;
++    if ((0 < delay) && (delay < 5*90000)) {
++        return delay;
++    }
+ 
+-	if(pTable->last_avg_bitrate>0){
+-		int diff = pTable->last_checkin_offset-pTable->last_checkout_offset;
+-      		delay=diff*90000/(1+pTable->last_avg_bitrate/8);
++    if(pTable->last_avg_bitrate>0){
++        int diff = pTable->last_checkin_offset-pTable->last_checkout_offset;
++        delay=diff*90000/(1+pTable->last_avg_bitrate/8);
+ 
+-		return delay;
+-	}
++        return delay;
++    }
+ 
+-	return -1;
++    return -1;
+ }
+ EXPORT_SYMBOL(calculation_vcached_delayed);
+ 
+@@ -269,14 +281,20 @@ int calculation_stream_ext_delayed_ms(u8 type)
+          return 0;
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == PTS_TYPE_HEVC) {
++        pTable = &pts_table[PTS_TYPE_VIDEO];
++    } else
++#endif
+     pTable = &pts_table[type];
+-    extdelay_ms = jiffies-pTable->last_checkin_jiffies;
++
++    extdelay_ms = jiffies - pTable->last_checkin_jiffies;
+ 
+     if (extdelay_ms < 0) {
+-        extdelay_ms=0;
++        extdelay_ms = 0;
+     }
+ 
+-    return extdelay_ms*1000/HZ;
++    return extdelay_ms * 1000 / HZ;
+ }
+ #endif
+ 
+@@ -629,9 +647,8 @@ static int pts_lookup_offset_inline(
+             *uS64 = p2->pts_uS64;
+ 
+ #ifdef CALC_CACHED_TIME
+-	    pTable->last_checkout_pts = p2->val;
+-		pTable->last_checkout_offset = offset;
+-
++            pTable->last_checkout_pts = p2->val;
++            pTable->last_checkout_offset = offset;
+ #endif
+ 
+             pTable->lookup_cache_pts = *val;
+@@ -872,9 +889,15 @@ int pts_start(u8 type)
+ #if HAS_HEVC_VDEC
+     if (type == PTS_TYPE_HEVC) {
+         pTable = &pts_table[PTS_TYPE_VIDEO];
++        pTable->hevc = 1;
+     } else
+ #endif
+-    pTable = &pts_table[type];
++    {
++        pTable = &pts_table[type];
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++        pTable->hevc = 0;
++#endif
++    }
+ 
+     spin_lock_irqsave(&lock, flags);
+ 
+diff --git a/drivers/amlogic/amports/vh265.c b/drivers/amlogic/amports/vh265.c
+index 161f6f77f855..e46cd3df0a97 100755
+--- a/drivers/amlogic/amports/vh265.c
++++ b/drivers/amlogic/amports/vh265.c
+@@ -37,7 +37,6 @@
+ #include <linux/dma-contiguous.h>
+ 
+ #include <mach/am_regs.h>
+-#include <mach/vpu.h>
+ #include "vdec_reg.h"
+ 
+ #include "vdec.h"
+@@ -3320,8 +3319,6 @@ static int amvdec_h265_probe(struct platform_device *pdev)
+         return -ENODEV;
+     }
+ 
+-    request_vpu_clk_vmod(360000000, VPU_VIU_VD1);
+-
+     mutex_unlock(&vh265_mutex);
+     return 0;
+ }
+diff --git a/include/linux/amlogic/amports/ptsserv.h b/include/linux/amlogic/amports/ptsserv.h
+index 2f4cc7cb51ab..8a51fdfd78a6 100755
+--- a/include/linux/amlogic/amports/ptsserv.h
++++ b/include/linux/amlogic/amports/ptsserv.h
+@@ -72,6 +72,6 @@ extern int first_lookup_pts_failed(u8 type);
+ extern int first_pts_checkin_complete(u8 type);
+ extern int calculation_stream_delayed_ms(u8 type,u32 *latestbirate,u32*avg_bitare);
+ 
+-extern int calculation_vcached_delayed();
++extern int calculation_vcached_delayed(void);
+ 
+ #endif /* PTSSERV_H */
+-- 
+2.19.0
+

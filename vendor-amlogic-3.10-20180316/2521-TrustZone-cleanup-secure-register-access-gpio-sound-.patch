@@ -1,0 +1,200 @@
+From e33047c2a5db1e8e41d18b4929d0055f754bd8d3 Mon Sep 17 00:00:00 2001
+From: Peifu Jiang <peifu.jiang@amlogic.com>
+Date: Fri, 13 Dec 2013 00:00:02 +0800
+Subject: [PATCH 2521/5965] TrustZone: cleanup secure register access
+ (gpio/sound/sd), enable sound card.
+
+---
+ .../boot/dts/amlogic/meson8_k200_v1_tee.dtd   |  2 +-
+ arch/arm/mach-meson8/gpio.c                   | 13 +++++++++++
+ arch/arm/mach-meson8/include/mach/sd.h        |  4 ++--
+ arch/arm/mach-meson8/meson-secure.c           | 23 +++++++++++++------
+ sound/soc/aml/aml_m8.c                        | 13 +++++++++--
+ sound/soc/aml/aml_m8_rt5616.c                 | 13 +++++++++--
+ 6 files changed, 54 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
+index 0c63e46d8068..3154feefa209 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
+@@ -866,7 +866,7 @@ sdio{
+ //$$ L2 PROP_CHOICE "Audio_pin_0_match" = "pinctrl-0"
+ //$$ L2 PROP_STR = "status"
+     aml_m8_sound_card{
+-        compatible = "sound_card, aml_snd_m8-disable";
++        compatible = "sound_card, aml_snd_m8";
+         aml,sound_card = "AML-M8AUDIO";
+         aml,codec_dai = "AML-M8","dit-hifi";
+         aml,audio-routing =
+diff --git a/arch/arm/mach-meson8/gpio.c b/arch/arm/mach-meson8/gpio.c
+index 8128a8c8dc50..c17bd4c9610b 100755
+--- a/arch/arm/mach-meson8/gpio.c
++++ b/arch/arm/mach-meson8/gpio.c
+@@ -33,6 +33,11 @@
+ #include <linux/gpio.h>
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ #include <linux/amlogic/gpio-amlogic.h>
++
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
++
+ unsigned p_gpio_oen_addr[]={
+ 	P_PREG_PAD_GPIO0_EN_N,
+ 	P_PREG_PAD_GPIO1_EN_N,
+@@ -452,7 +457,11 @@ int gpio_amlogic_direction_output(struct gpio_chip *chip,unsigned offset, int va
+ 	unsigned int reg,bit;
+ 	if(offset==GPIO_BSD_EN){
+ 		aml_clr_reg32_mask(P_PREG_PAD_GPIO0_O,1<<29);
++#ifndef CONFIG_MESON_TRUSTZONE
+ 		aml_set_reg32_mask(P_AO_SECURE_REG0,1<<0);
++#else
++		meson_secure_reg_write(P_AO_SECURE_REG0, meson_secure_reg_read(P_AO_SECURE_REG0) | (1<<0));
++#endif
+ 		if(value)
+ 			aml_set_reg32_mask(P_PREG_PAD_GPIO0_O,1<<31);//out put high
+ 		else
+@@ -465,7 +474,11 @@ int gpio_amlogic_direction_output(struct gpio_chip *chip,unsigned offset, int va
+ 			aml_set_reg32_mask(P_AO_GPIO_O_EN_N,1<<31);//out put high
+ 		else
+ 			aml_clr_reg32_mask(P_AO_GPIO_O_EN_N,1<<31);//out put low
++#ifndef CONFIG_MESON_TRUSTZONE
+ 		aml_set_reg32_mask(P_AO_SECURE_REG0,1);// out put enable
++#else
++		meson_secure_reg_write(P_AO_SECURE_REG0, meson_secure_reg_read(P_AO_SECURE_REG0) | (1<<0));
++#endif
+ 		return 0;
+ 	}
+ 	if(value){
+diff --git a/arch/arm/mach-meson8/include/mach/sd.h b/arch/arm/mach-meson8/include/mach/sd.h
+index 82d2f69231fe..db8591f8b05c 100755
+--- a/arch/arm/mach-meson8/include/mach/sd.h
++++ b/arch/arm/mach-meson8/include/mach/sd.h
+@@ -623,10 +623,10 @@ extern void amlsd_init_debugfs(struct mmc_host *host);
+ /* Secure REG can only be accessed in Secure World if TrustZone enabled.*/
+ #include <mach/meson-secure.h>
+ #define aml_jtag_gpioao() do {\
+-	meson_secure_reg_write((P_AO_SECURE_REG1-IO_SECBUS_BASE+IO_SECBUS_PHY_BASE), 0x102); \
++	meson_secure_reg_write(P_AO_SECURE_REG1, 0x102); \
+ } while(0)
+ #define aml_jtag_sd() do {\
+-	meson_secure_reg_write((P_AO_SECURE_REG1-IO_SECBUS_BASE+IO_SECBUS_PHY_BASE), 0x220); \
++	meson_secure_reg_write(P_AO_SECURE_REG1, 0x220); \
+ } while(0)
+ #endif /* CONFIG_MESON_TRUSTZONE */
+ 
+diff --git a/arch/arm/mach-meson8/meson-secure.c b/arch/arm/mach-meson8/meson-secure.c
+index 34df3c73cbe1..5cdd1eb3fca1 100644
+--- a/arch/arm/mach-meson8/meson-secure.c
++++ b/arch/arm/mach-meson8/meson-secure.c
+@@ -28,6 +28,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/hardware/cache-l2x0.h>
+ #include <linux/dma-mapping.h>
++#include <mach/io.h>
+ 
+ #ifdef CONFIG_MESON_TRUSTZONE
+ #include <mach/meson-secure.h>
+@@ -149,20 +150,28 @@ int meson_trustzone_efuse(struct efuse_hal_api_arg* arg)
+ 
+ uint32_t meson_secure_reg_read(uint32_t addr)
+ {
+-	int ret;
++	uint32_t ret;
++	uint32_t paddr;
++	int offset;
+ 
+-	ret = meson_smc2(addr);
+-	TZDBG("read [0x%x]=%x\n");
++	offset = IO_SECBUS_PHY_BASE - IO_SECBUS_BASE;
++	paddr = addr + offset;
++	ret = meson_smc2(paddr);
++	TZDBG("read [0x%x]=%x\n", paddr, ret);
+ 
+ 	return ret;
+ }
+ 
+ uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val)
+ {
+-	int ret;
+-
+-	ret = meson_smc3(addr, val);
+-	TZDBG("write [0x%x 0x%x]=%x\n", addr, val, ret);
++	uint32_t ret;
++	uint32_t paddr;
++	int offset;
++
++	offset = IO_SECBUS_PHY_BASE - IO_SECBUS_BASE;
++	paddr = addr + offset;
++	ret = meson_smc3(paddr, val);
++	TZDBG("write [0x%x 0x%x]=%x\n", paddr, val, ret);
+ 
+ 	return ret;
+ }
+diff --git a/sound/soc/aml/aml_m8.c b/sound/soc/aml/aml_m8.c
+index 084f7cf39776..7328472649a5 100755
+--- a/sound/soc/aml/aml_m8.c
++++ b/sound/soc/aml/aml_m8.c
+@@ -49,6 +49,10 @@
+ #include <plat/io.h>
+ #endif
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
++
+ #define USE_EXTERNAL_DAC 0
+ #define DRV_NAME "aml_snd_m8"
+ #define HP_DET                  1
+@@ -523,9 +527,14 @@ static void aml_m8_pinmux_init(struct snd_soc_card *card)
+     p_aml_audio->pin_ctl = devm_pinctrl_get_select(card->dev, "aml_snd_m8");
+     
+     p_audio = p_aml_audio;
+- #if USE_EXTERNAL_DAC
++#if USE_EXTERNAL_DAC
++#ifndef CONFIG_MESON_TRUSTZONE
+     aml_write_reg32(P_AO_SECURE_REG1,0x00000000);
+- #endif
++#else
++    /* Secure reg can only be accessed in Secure World if TrustZone enabled. */
++    meson_secure_reg_write(P_AO_SECURE_REG1, 0x00000000);
++#endif /* CONFIG_MESON_TRUSTZONE */
++#endif
+ 	ret = of_property_read_string(card->dev->of_node, "mute_gpio", &str);
+ 	if (ret < 0) {
+ 		printk("aml_snd_m8: faild to get mute_gpio!\n");
+diff --git a/sound/soc/aml/aml_m8_rt5616.c b/sound/soc/aml/aml_m8_rt5616.c
+index b8947316bd6a..100cb6f889c4 100755
+--- a/sound/soc/aml/aml_m8_rt5616.c
++++ b/sound/soc/aml/aml_m8_rt5616.c
+@@ -50,6 +50,10 @@
+ #include <plat/io.h>
+ #endif
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
++
+ #define USE_EXTERNAL_DAC 1
+ #define DRV_NAME "aml_m8_rt5616"
+ #define HP_DET                  1
+@@ -548,9 +552,14 @@ static void aml_m8_pinmux_init(struct snd_soc_card *card)
+     
+     
+         
+- #if USE_EXTERNAL_DAC
++#if USE_EXTERNAL_DAC
++#ifndef CONFIG_MESON_TRUSTZONE
+     aml_write_reg32(P_AO_SECURE_REG1,0x00000000);
+- #endif
++#else
++    /* Secure reg can only be accessed in Secure World if TrustZone enabled. */
++    meson_secure_reg_write(P_AO_SECURE_REG1, 0x00000000);
++#endif /* CONFIG_MESON_TRUSTZONE */
++#endif
+     ret = of_property_read_string(card->dev->of_node, "mute_gpio", &str);
+     if (ret < 0) {
+         printk("aml_snd_m8: faild to get mute_gpio!\n");
+-- 
+2.19.0
+

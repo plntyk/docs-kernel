@@ -1,0 +1,234 @@
+From cdaab2bff0051a9a6673f64568399b9ca267f88d Mon Sep 17 00:00:00 2001
+From: Baocheng Sun <baocheng.sun@amlogic.com>
+Date: Thu, 23 Mar 2017 16:44:02 +0800
+Subject: [PATCH 5960/5965] PD#141398: drm: only use GEM and PRIME
+
+Change-Id: I24f97701ab4ea9c846e5a828682100f343c87e5c
+Signed-off-by: Baocheng Sun <baocheng.sun@amlogic.com>
+---
+ drivers/amlogic/drm/Kconfig          |  1 -
+ drivers/amlogic/drm/Makefile         |  4 ++--
+ drivers/amlogic/drm/meson_drv.c      | 31 +++++++++++++++++++++++++---
+ drivers/gpu/drm/drm_gem_cma_helper.c | 10 ++++++---
+ 4 files changed, 37 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/drm/Kconfig b/drivers/amlogic/drm/Kconfig
+index 99719afcc77f..8e5aa22fe395 100644
+--- a/drivers/amlogic/drm/Kconfig
++++ b/drivers/amlogic/drm/Kconfig
+@@ -1,7 +1,6 @@
+ config DRM_MESON
+ 	tristate "DRM Support for Amlogic Meson Display Controller"
+ 	depends on DRM && OF && (ARM || ARM64)
+-	depends on ARCH_MESON || COMPILE_TEST
+ 	select DRM_KMS_HELPER
+ 	select DRM_KMS_CMA_HELPER
+ 	select DRM_GEM_CMA_HELPER
+diff --git a/drivers/amlogic/drm/Makefile b/drivers/amlogic/drm/Makefile
+index 2591978b8aad..eb7fafc61b7d 100644
+--- a/drivers/amlogic/drm/Makefile
++++ b/drivers/amlogic/drm/Makefile
+@@ -1,4 +1,4 @@
+-meson-y := meson_drv.o meson_plane.o meson_crtc.o meson_venc_cvbs.o
+-meson-y += meson_viu.o meson_vpp.o meson_venc.o meson_vclk.o meson_canvas.o
++meson-y := meson_drv.o
++#meson-y += meson_viu.o meson_vpp.o meson_venc.o meson_vclk.o meson_canvas.o meson_plane.o meson_crtc.o meson_venc_cvbs.o
+ 
+ obj-$(CONFIG_DRM_MESON) += meson.o
+diff --git a/drivers/amlogic/drm/meson_drv.c b/drivers/amlogic/drm/meson_drv.c
+index ff1f6019b97b..54c00c8d7eeb 100644
+--- a/drivers/amlogic/drm/meson_drv.c
++++ b/drivers/amlogic/drm/meson_drv.c
+@@ -27,11 +27,16 @@
+ #include <linux/of_graph.h>
+ 
+ #include <drm/drmP.h>
++
++/* #define MUSE */
++#ifdef MUSE
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_flip_work.h>
+ #include <drm/drm_crtc_helper.h>
+ #include <drm/drm_plane_helper.h>
++#endif
++
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_rect.h>
+@@ -65,13 +70,13 @@
+  * - Powering Up HDMI controller and PHY
+  */
+ 
++#ifdef MUSE
+ static void meson_fb_output_poll_changed(struct drm_device *dev)
+ {
+ 	struct meson_drm *priv = dev->dev_private;
+ 
+ 	drm_fbdev_cma_hotplug_event(priv->fbdev);
+ }
+-
+ static const struct drm_mode_config_funcs meson_mode_config_funcs = {
+ 	.output_poll_changed = meson_fb_output_poll_changed,
+ 	.atomic_check        = drm_atomic_helper_check,
+@@ -106,6 +111,7 @@ static irqreturn_t meson_irq(int irq, void *arg)
+ 
+ 	return IRQ_HANDLED;
+ }
++#endif
+ 
+ static const struct file_operations fops = {
+ 	.owner		= THIS_MODULE,
+@@ -122,6 +128,9 @@ static const struct file_operations fops = {
+ };
+ 
+ static struct drm_driver meson_driver = {
++	.driver_features	=  DRIVER_GEM | DRIVER_PRIME,
++
++#ifdef MUSE
+ 	.driver_features	= DRIVER_HAVE_IRQ | DRIVER_GEM |
+ 				  DRIVER_MODESET | DRIVER_PRIME |
+ 				  DRIVER_ATOMIC,
+@@ -133,6 +142,7 @@ static struct drm_driver meson_driver = {
+ 
+ 	/* IRQ */
+ 	.irq_handler		= meson_irq,
++#endif
+ 
+ 	/* PRIME Ops */
+ 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
+@@ -149,7 +159,7 @@ static struct drm_driver meson_driver = {
+ 	.dumb_create		= drm_gem_cma_dumb_create,
+ 	.dumb_destroy		= drm_gem_dumb_destroy,
+ 	.dumb_map_offset	= drm_gem_cma_dumb_map_offset,
+-	.gem_free_object_unlocked = drm_gem_cma_free_object,
++	.gem_free_object	= drm_gem_cma_free_object,
+ 	.gem_vm_ops		= &drm_gem_cma_vm_ops,
+ 
+ 	/* Misc */
+@@ -161,6 +171,7 @@ static struct drm_driver meson_driver = {
+ 	.minor			= 0,
+ };
+ 
++#ifdef MUSE
+ static bool meson_vpu_has_available_connectors(struct device *dev)
+ {
+ 	struct device_node *ep, *remote;
+@@ -182,21 +193,25 @@ static struct regmap_config meson_regmap_config = {
+ 	.reg_stride     = 4,
+ 	.max_register   = 0x1000,
+ };
++#endif
+ 
+ static int meson_drv_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct meson_drm *priv;
+ 	struct drm_device *drm;
++	int ret;
++
++#ifdef MUSE
+ 	struct resource *res;
+ 	void __iomem *regs;
+-	int ret;
+ 
+ 	/* Checks if an output connector is available */
+ 	if (!meson_vpu_has_available_connectors(dev)) {
+ 		dev_err(dev, "No output connector available\n");
+ 		return -ENODEV;
+ 	}
++#endif
+ 
+ 	drm = drm_dev_alloc(&meson_driver, dev);
+ 	if (IS_ERR(drm))
+@@ -211,6 +226,7 @@ static int meson_drv_probe(struct platform_device *pdev)
+ 	priv->drm = drm;
+ 	priv->dev = dev;
+ 
++#ifdef MUSE
+ 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "vpu");
+ 	regs = devm_ioremap_resource(dev, res);
+ 	if (IS_ERR(regs))
+@@ -287,6 +303,7 @@ static int meson_drv_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	drm_kms_helper_poll_init(drm);
++#endif
+ 
+ 	platform_set_drvdata(pdev, priv);
+ 
+@@ -297,7 +314,11 @@ static int meson_drv_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ free_drm:
++	DRM_DEBUG("free-drm");
++
++#ifdef MUSE
+ 	drm_dev_unref(drm);
++#endif
+ 
+ 	return ret;
+ }
+@@ -305,14 +326,18 @@ free_drm:
+ static int meson_drv_remove(struct platform_device *pdev)
+ {
+ 	struct drm_device *drm = dev_get_drvdata(&pdev->dev);
++#ifdef MUSE
+ 	struct meson_drm *priv = drm->dev_private;
++#endif
+ 
+ 	drm_dev_unregister(drm);
++#ifdef MUSE
+ 	drm_kms_helper_poll_fini(drm);
+ 	drm_fbdev_cma_fini(priv->fbdev);
+ 	drm_mode_config_cleanup(drm);
+ 	drm_vblank_cleanup(drm);
+ 	drm_dev_unref(drm);
++#endif
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/drm_gem_cma_helper.c b/drivers/gpu/drm/drm_gem_cma_helper.c
+index 0a7e011509bd..babd8ffa0d6f 100644
+--- a/drivers/gpu/drm/drm_gem_cma_helper.c
++++ b/drivers/gpu/drm/drm_gem_cma_helper.c
+@@ -52,14 +52,17 @@ struct drm_gem_cma_object *drm_gem_cma_create(struct drm_device *drm,
+ 	struct drm_gem_object *gem_obj;
+ 	int ret;
+ 
++	DEFINE_DMA_ATTRS(attrs);
++	dma_set_attr(DMA_ATTR_WRITE_COMBINE, &attrs);
++
+ 	size = round_up(size, PAGE_SIZE);
+ 
+ 	cma_obj = kzalloc(sizeof(*cma_obj), GFP_KERNEL);
+ 	if (!cma_obj)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	cma_obj->vaddr = dma_alloc_writecombine(drm->dev, size,
+-			&cma_obj->paddr, GFP_KERNEL | __GFP_NOWARN);
++	cma_obj->vaddr = dma_alloc_attrs(drm->dev, size,
++			&cma_obj->paddr,  GFP_KERNEL | __GFP_NOWARN, &attrs);
+ 	if (!cma_obj->vaddr) {
+ 		dev_err(drm->dev, "failed to allocate buffer with size %d\n", size);
+ 		ret = -ENOMEM;
+@@ -165,6 +168,7 @@ int drm_gem_cma_dumb_create(struct drm_file *file_priv,
+ {
+ 	struct drm_gem_cma_object *cma_obj;
+ 	int min_pitch = DIV_ROUND_UP(args->width * args->bpp, 8);
++	min_pitch = (min_pitch + 7) - (min_pitch + 7)%8;
+ 
+ 	if (args->pitch < min_pitch)
+ 		args->pitch = min_pitch;
+@@ -262,7 +266,7 @@ void drm_gem_cma_describe(struct drm_gem_cma_object *cma_obj, struct seq_file *m
+ 	if (obj->map_list.map)
+ 		off = (uint64_t)obj->map_list.hash.key;
+ 
+-	seq_printf(m, "%2d (%2d) %08llx %08Zx %p %d",
++	seq_printf(m, "%2d (%2d) %08llx %llx %p %Zx",
+ 			obj->name, obj->refcount.refcount.counter,
+ 			off, cma_obj->paddr, cma_obj->vaddr, obj->size);
+ 
+-- 
+2.19.0
+

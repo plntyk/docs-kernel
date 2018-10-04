@@ -1,0 +1,2449 @@
+From 30e1d686a6ea05e0292bf397c1db5b5e8e6f595e Mon Sep 17 00:00:00 2001
+From: "bo.yang" <bo.yang@amlogic.com>
+Date: Fri, 18 Apr 2014 19:06:53 +0800
+Subject: [PATCH 3927/5965] m6tvc: bringup m6c
+
+Compared with m6tvd and updated m6tvc.
+Select AVS decoder.
+---
+ arch/arm/boot/dts/amlogic/meson6tv_ref.dtd    | 761 +++++++++++++++++-
+ arch/arm/configs/meson6tv_defconfig           |  63 +-
+ arch/arm/mach-meson6tv/Makefile               |   2 +
+ .../arm/mach-meson6tv/board-meson6tv-common.c |  13 +-
+ arch/arm/mach-meson6tv/clock.c                | 101 ++-
+ arch/arm/mach-meson6tv/include/mach/cpu.h     |   2 +-
+ .../mach-meson6tv/include/mach/devio_aml.h    |  12 +
+ arch/arm/mach-meson6tv/include/mach/dmc.h     |  46 ++
+ .../arm/mach-meson6tv/include/mach/register.h |   5 +-
+ arch/arm/mach-meson6tv/include/mach/sd.h      | 629 +++++++++++++++
+ arch/arm/mach-meson6tv/include/mach/usb.h     |  27 +
+ .../arm/mach-meson6tv/include/mach/usbclock.h | 211 +++++
+ arch/arm/mach-meson6tv/usbclock.c             | 159 ++--
+ drivers/amlogic/amvecm/amvecm.c               |   4 +
+ 14 files changed, 1905 insertions(+), 130 deletions(-)
+ create mode 100755 arch/arm/mach-meson6tv/include/mach/devio_aml.h
+ create mode 100755 arch/arm/mach-meson6tv/include/mach/dmc.h
+ create mode 100755 arch/arm/mach-meson6tv/include/mach/sd.h
+ create mode 100755 arch/arm/mach-meson6tv/include/mach/usb.h
+ create mode 100755 arch/arm/mach-meson6tv/include/mach/usbclock.h
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6tv_ref.dtd b/arch/arm/boot/dts/amlogic/meson6tv_ref.dtd
+index b1da4466c98a..71e9ddbf7fac 100755
+--- a/arch/arm/boot/dts/amlogic/meson6tv_ref.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6tv_ref.dtd
+@@ -34,6 +34,23 @@
+ 		};
+ 	};
+ 
++/// ***************************************************************************************
++///	-	Cache
++//$$ MODULE="Cache"
++//$$ DEVICE="cache"
++	cache-controller {
++		compatible = "arm,meson-pl310-cache";
++		reg = <0xc4200000 0x1000>;
++		cache-unified;
++		cache-level = <2>;
++		aux-instruction_prefetch;
++		aux-data_prefetch;
++		aux-ns_lockdown;
++		aux-ns_int_ctrl;
++		aux-share_override;
++		aux-cache_replace_policy_round_robin;
++		prefetch-prefetch_offset = <6>;
++	};
+ 	/*start memory config*/
+ 	memory {
+ 		device_type = "memory";
+@@ -98,6 +115,84 @@
+ 		delay_setting = <500 50 20 20 50 0 0 200>;  /** CLK ON/OFF,PWM ON/OFF,PANEL_PWR ON/OFF,BL ON/OFF delay */
+ 	};
+ 
++/// ***************************************************************************************
++///	-	ION
++//$$ MODULE="ION"
++//$$ DEVICE="ion_dev"
++//$$ L2 PROP_STR = "status"
++	ion_dev {
++		compatible = "amlogic,ion_dev";
++		dev_name = "ion_dev";
++		status = "ok";
++		reserve-memory = <0x01200000>;
++		reserve-iomap = "true";
++	};
++//$$ DEVICE="deinterlace"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "reserve-memory"
++	deinterlace {
++		compatible = "amlogic,deinterlace";
++		dev_name = "deinterlace";
++		status = "okay";
++		reserve-memory = <0x01900000>;//1920x1088x3/2 + 256x1088/2= 25m
++		reserve-iomap = "true";
++	};
++/// ***************************************************************************************
++///	-	DISP&MM-A/V stream
++//$$ MODULE = "DISP&MM-A/V stream"
++//$$ DEVICE="mesonstream"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reserve-memory"
++	mesonstream {
++		compatible = "amlogic,mesonstream";
++		dev_name = "mesonstream.0";
++		status = "okay";
++		reserve-memory = <0x00a00000>;
++		reserve-iomap = "true";
++	};
++/// ***************************************************************************************
++///     -       DISP&MM-A/V stream
++//$$ MODULE = "DISP&MM-A/V video dec"
++//$$ DEVICE="vdec"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 4 ="reg"
++        vdec{
++                compatible = "amlogic,vdec";
++                dev_name = "vdec.0";
++                status = "okay";
++                reserve-memory = <0x04000000>; // 64M
++        };
++/// ***************************************************************************************
++///	-	DISP&MM-PostProcess
++//$$ MODULE="DISP&MM-PostProcess"
++//$$ DEVICE="ppmgr"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 ="reserve-memory"
++	ppmgr {
++		compatible = "amlogic,ppmgr";
++		dev_name = "ppmgr";
++		status = "okay";
++		reserve-memory = <0x02c00000>;
++		reserve-iomap = "true";
++	};
++/// ***************************************************************************************
++///	-	DISP&MM-AMLVIDEO2
++//$$ MODULE = "DISP&MM-AMLVIDEO2"
++//$$ DEVICE="amlvideo2"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++	amlvideo2 {
++		compatible = "amlogic,amlvideo2";
++		dev_name = "amlvideo2.0";
++		status = "okay";
++		reserve-memory = <0x01000000>;
++		reserve-iomap = "true";
++	};
++/// ***************************************************************************************
++///	-	DISP&MM-Vout
++//$$ MODULE = "DISP&MM-Vout"
++//$$ DEVICE = "mesonvout"
++//$$ L2 PROP_STR = "status"
+ 	mesonvout {
+ 		compatible = "amlogic,mesonvout";
+ 		dev_name = "mesonvout";
+@@ -109,6 +204,7 @@
+ 		dev_name = "mesonfb";
+ 		status = "okay";
+ 		reserve-memory = <0x01000000 0x00100000>;
++		reserve-iomap = "true";
+ 		vmode = <2>; /*0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P*/
+ 		display_size_default = <1920 1080 1920 2160 32>;
+ 	};
+@@ -123,6 +219,154 @@
+ 		compatible = "amlogic,cpufreq-meson";
+ 		status = "okay";
+ 	};
++/// ***************************************************************************************
++///	-	Power
++//$$ MODULE="Power"
++//$$ DEVICE="dvfs"
++//$$ L2 PROP_STR = "status"
++	dvfs {
++		compatible = "amlogic, amlogic-dvfs"; /** fixed for driver, don't change       */
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "ok";
++//$$ L2 PROP_U32 = "dvfs_id"
++//$$ L2 PROP_U32 = "table_count"
++//$$ L2 PROP_U32 11*3 = "dvfs_table"
++	vcck_dvfs {
++		dvfs_id     = <1>;  /** must be value of (1 << n) */
++		table_count = <11>; /** must be correct count for dvfs_table */
++		dvfs_table  = <
++			/* NOTE: frequent in this table must be ascending order */
++			/* frequent(Khz)    min_uV      max_uV                  */
++			200000		1080000		1080000
++			600000		1140000		1140000
++			792000		1200000		1200000
++			816000		1278000		1278000
++			840000		1278000		1278000
++			984000		1278000		1278000
++			1000000		1278000		1278000
++			1080000		1278000		1278000
++			1200000		1278000		1278000
++			1320000		1320000		1320000
++			1500000		1320000		1320000
++			>;
++		};
++	};
++//$$ DEVICE = "meson_vcck_dvfs_driver"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "default_uV"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "meson_vcck_dvfs_pin_0_match" = "pinctrl-0"
++//$$ L2 PROP_U32 = "use_pwm"
++//$$ L2 PROP_U32 = "table_count"
++//$$ L2 PROP_U32 16*2 = "cs_voltage_table"
++	meson_vcck_dvfs_driver {
++		compatible = "amlogic, meson_vcck_dvfs";
++		dev_name = "meson_vcck_dvfs_driver";
++		status = "ok";
++		default_uV = <1280000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&aml_pwm_pins>;
++		use_pwm = <1>;
++		pmw_controller = "PWM_B";
++		table_count = <16>;
++		cs_voltage_table = <
++			/*
++			* Note: This table is hardware depended, If your hardware use PWM method,
++			* then first line in this table is PWM register value, second line is
++			* voltage of VCCK according this PWM register value. If your platform use
++			* constant-current source to adjust vcck voltage, then the first line should
++			* set to 0, means not valid, member 'use_pwm' in this node should set to 0.
++			*
++			*  ---- This table must be in ascending order by voltage ----
++			*
++			*  PWM value       VCCK voltage
++			*/
++			0x130009	1010000
++			0x12000a	1050000
++			0x11000b	1070000
++			0x10000c	1090000
++			0x0f000d	1110000
++			0x0e000e	1130000
++			0x0d000f	1150000
++			0x0c0010	1170000
++			0x0b0011	1190000
++			0x0a0012	1210000
++			0x090013	1220000
++			0x080014	1240000
++			0x070015	1270000
++			0x060016	1280000
++			0x050017	1300000
++			0x040018	1320000
++		>;
++	};
++/// ***************************************************************************************
++///	-	USB Controller
++//$$ MODULE="USB Controller"
++	usb_con {
++		lm-compatible = "logicmodule-bus";
++//$$ DEVICE="usb_b"
++//$$ L2 PROP_U32 = "lm-periph-id"
++//$$ L2 PROP_STR = "clock-src"
++//$$ L2 PROP_U32 = "port-id"
++//$$ L2 PROP_U32 = "port-type"
++//$$ L2 PROP_U32 = "port-speed"
++//$$ L2 PROP_U32 = "port-config"
++//$$ L2 PROP_U32 = "port-dma"
++//$$ L2 PROP_U32 = "port-id-mode"
++//$$ L2 PROP_STR = "status"
++		usb_b {
++			lm-compatible = "amlogic,usb";
++			lm-periph-id = <1>; /** lm name */
++			clock-src = "usb1"; /** clock src */
++			port-id = <1>;	 /** ref to mach/usb.h */
++			port-type = <1>;	/** 0: otg, 1: host, 2: slave */
++			port-speed = <0>; /** 0: default, 1: high, 2: full */
++			port-config = <0>; /** 0: default */
++			port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
++			port-id-mode = <1>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
++			status = "okay";
++		};
++//$$ DEVICE="usb_a"
++//$$ L2 PROP_U32 = "lm-periph-id"
++//$$ L2 PROP_STR = "clock-src"
++//$$ L2 PROP_U32 = "port-id"
++//$$ L2 PROP_U32 = "port-type"
++//$$ L2 PROP_U32 = "port-speed"
++//$$ L2 PROP_U32 = "port-config"
++//$$ L2 PROP_U32 = "port-dma"
++//$$ L2 PROP_U32 = "port-id-mode"
++//$$ L2 PROP_STR = "gpio-vbus-power"
++//$$ L2 PROP_U32 = "gpio-work-mask"
++// L2 PROP_U32 = "charger_detect"
++//$$ L2 PROP_STR = "status"
++		usb_a {
++			lm-compatible = "amlogic,usb";
++			lm-periph-id = <0>; /** lm name */
++			clock-src = "usb0"; /** clock src */
++			port-id = <0>;	/** ref to mach/usb.h */
++			port-type = <1>;	/** 0: otg, 1: host, 2: slave */
++			port-speed = <0>; /** 0: default, high, 1: full */
++			port-config = <0>; /** 0: default */
++			port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
++			port-id-mode = <0>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
++			//gpio-vbus-power = "GPIOD_9";
++			//gpio-work-mask = <1>; /**0: work on pulldown,1:work on pullup*/
++			status = "okay";
++		};
++		usb_c {
++			lm-compatible = "amlogic,usb";
++			lm-periph-id = <2>; /** lm name */
++			clock-src = "usb2"; /** clock src */
++			port-id = <2>;	 /** ref to mach/usb.h */
++			port-type = <1>;	/** 0: otg, 1: host, 2: slave */
++			port-speed = <0>; /** 0: default, 1: high, 2: full */
++			port-config = <0>; /** 0: default */
++			port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
++			port-id-mode = <1>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
++			status = "okay";
++			};
++	};
+ 
+ 
+ 	i2c@c1108500 { /*I2C-A*/
+@@ -163,19 +407,149 @@
+ 
+ 
+ 	dummy_codec_audio {
+-		status = "okay";
++		status = "disabled";
+ 		compatible = "amlogic,aml_dummy_codec_audio";
+ 		dev_name = "aml_dummy_codec_audio.0";
+ 		pinctrl-names = "dummy_codec_audio";
+-		pinctrl-0 = <&aml_dummy_codec_pins>;
++		pinctrl-0 = <&aml_i2s_pins>;
+ 	};
+ 
+ 	dummy_codec {
+-		status = "okay";
++		status = "disabled";
+ 		compatible = "amlogic,aml_dummy_codec";
+ 		dev_name = "dummy_codec.0";
+ 	};
+ 
++	syno9629_codec {
++		status = "okay";
++		compatible = "amlogic,syno9629";
++		dev_name = "syno9629.0";
++	};
++	aml_audio_codec {
++		compatible = "amlogic,audio_codec";
++		tas5711:tas5711 {
++			codec_name = "tas5711";
++			i2c_addr = <0x1B>;
++			i2c_bus = "i2c_bus_a";
++			master_vol = <0x25>;
++			eq_name = "table","wall";
++			eq_table = /bits/ 8 <
++				0x00 0x7E 0x95 0xFF 0x0F 0x02 0xD4 0x01 0x00 0x7E 0x95 0xFF 0x00 0xFD 0x27 0xFF 0x0F 0x82 0xD0 0x01 /*0x29---ch1_bq[0]*/
++				0x00 0x7F 0x83 0xD8 0x0F 0x02 0xC3 0x92 0x00 0x7D 0xDB 0x4F 0x00 0xFD 0x3C 0x6E 0x0F 0x82 0xA0 0xD8 /*0x2A---ch1_bq[1]*/
++				0x00 0x82 0xCE 0x97 0x0F 0x4C 0x87 0x81 0x00 0x5F 0x69 0x2D 0x00 0xB3 0x78 0x7F 0x0F 0x9D 0xC8 0x3B /*0x2B---ch1_bq[2]*/
++				0x00 0x83 0x6B 0x4A 0x0F 0x7A 0x3D 0xA6 0x00 0x58 0x4D 0xED 0x00 0x85 0xC2 0x5A 0x0F 0xA4 0x46 0xC9 /*0x2C---ch1_bq[3]*/
++				0x00 0x83 0x6B 0x4A 0x0F 0xAB 0xEA 0x5C 0x00 0x58 0x4D 0xED 0x00 0x54 0x15 0xA4 0x0F 0xA4 0x46 0xC9 /*0x2D---ch1_bq[4]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x2E---ch1_bq[5]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x2F---ch1_bq[6]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x58---ch1_bq[7]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x59---ch1_bq[8]*/
++				0x00 0x7E 0x95 0xFF 0x0F 0x02 0xD4 0x01 0x00 0x7E 0x95 0xFF 0x00 0xFD 0x27 0xFF 0x0F 0x82 0xD0 0x01 /*0x30---ch2_bq[0]*/
++				0x00 0x7F 0x83 0xD8 0x0F 0x02 0xC3 0x92 0x00 0x7D 0xDB 0x4F 0x00 0xFD 0x3C 0x6E 0x0F 0x82 0xA0 0xD8 /*0x31---ch2_bq[1]*/
++				0x00 0x82 0xCE 0x97 0x0F 0x4C 0x87 0x81 0x00 0x5F 0x69 0x2D 0x00 0xB3 0x78 0x7F 0x0F 0x9D 0xC8 0x3B /*0x32---ch2_bq[2]*/
++				0x00 0x83 0x6B 0x4A 0x0F 0x7A 0x3D 0xA6 0x00 0x58 0x4D 0xED 0x00 0x85 0xC2 0x5A 0x0F 0xA4 0x46 0xC9 /*0x33---ch2_bq[3]*/
++				0x00 0x83 0x6B 0x4A 0x0F 0xAB 0xEA 0x5C 0x00 0x58 0x4D 0xED 0x00 0x54 0x15 0xA4 0x0F 0xA4 0x46 0xC9 /*0x34---ch2_bq[4]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x35---ch2_bq[5]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x36---ch2_bq[6]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x5C---ch2_bq[7]*/
++				0x00 0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 /*0x5D---ch2_bq[8]*/
++			>;
++			sub_bq_table = /bits/ 8 <
++				0x00 0x00 0x03 0x8A 0x00 0x00 0x07 0x14 0x00 0x00 0x03 0x8A 0x00 0xFC 0x35 0x5D 0x0F 0x83 0xBC 0x79 /*0x5A*/
++				0x00 0x00 0x03 0x8A 0x00 0x00 0x07 0x14 0x00 0x00 0x03 0x8A 0x00 0xFC 0x35 0x5D 0x0F 0x83 0xBC 0x79 /*0x5B*/
++			>;
++			drc1_tko_table = /bits/ 8 <
++				0xFD 0xA2 0x14 0x90 /*0x40---drc1_t*/
++				0x0F 0x81 0x47 0xAF /*0x41---drc1_k*/
++				0x00 0x08 0x42 0x10 /*0x42---drc1_o*/
++			>;
++			drc1_table = /bits/ 8 <
++				0x00 0x05 0x39 0x47 0x00 0x7A 0xC6 0xB8 /*0x3A---drc1_ae*/
++				0x00 0x05 0x39 0x47 0x00 0x7A 0xC6 0xB8 /*0x3B---drc1_aa*/
++				0x00 0x00 0x00 0xF9 0x00 0x7F 0xFF 0x06 /*0x3C---drc1_ad*/
++			>;
++			drc2_tko_table = /bits/ 8 <
++				0xFD 0xCC 0x99 0xDB /*0x43---drc1_t*/
++				0x0F 0x84 0x44 0x44 /*0x44---drc1_k*/
++				0x00 0x08 0x42 0x10 /*0x45---drc1_o*/
++			>;
++			drc2_table = /bits/ 8 <
++				0x00 0x05 0x39 0x47 0x00 0x7A 0xC6 0xB8 /*0x3D---drc1_ae*/
++				0x00 0x05 0x39 0x47 0x00 0x7A 0xC6 0xB8 /*0x3E---drc1_aa*/
++				0x00 0x00 0x00 0xF9 0x00 0x7F 0xFF 0x06 /*0x3F---drc1_ad*/
++			>;
++			input_mux_reg_buf = /bits/ 8 <0x00 0x10 0x77 0x72>;/*reg d0 d1 d2 d3*/
++			status = "okay";
++		};
++
++		tas5707:tas5707 {
++			codec_name = "tas5707";
++			i2c_addr = <0x1B>;
++			i2c_bus = "i2c_bus_a";
++			status = "disabled";
++		};
++	};
++
++	m6tv_audio {
++		status = "okay";
++		compatible = "sound_card,aml_m6tv_audio";
++		aml,sound_card = "AML-M6TV";
++		//aml,codec_dai = "tas5711-","rt5616-aif1","rt5631-hifi","wm8960-hifi";
++		dev_name = "aml_m6tv_audio.0";
++		mute_gpio = "GPIOW_19";
++		pinctrl-names = "aml_m6tv_audio";
++		pinctrl-0 = <&aml_i2s_pins>;
++	};
++
++	sdio {
++		compatible = "amlogic,aml_sdio";
++		dev_name = "aml_sdio.0";
++		reg = <0xc1108c20 0x20>;
++		pinctrl-names = "sd_clk_cmd_pins", "sd_all_pins", "emmc_clk_cmd_pins", "emmc_all_pins", "sdio_clk_cmd_pins", "sdio_all_pins"; /*sd:sdio_b, emmc:sdio_c, sdio:sdio_a*/
++		// pinctrl-0 = <&sd_pins>;
++		// pinctrl-1 = <&emmc_pins>;
++		// pinctrl-2 = <&sdio_pins>;
++		pinctrl-0 = <&sd_clk_cmd_pins>;
++		pinctrl-1 = <&sd_all_pins>;
++		pinctrl-2 = <&emmc_clk_cmd_pins>;
++		pinctrl-3 = <&emmc_all_pins>;
++		pinctrl-4 = <&sdio_clk_cmd_pins>;
++		pinctrl-5 = <&sdio_all_pins>;
++
++		sd {
++			port = <1>; /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++			pinname = "sd";
++			ocr_avail = <0x200000>;		/*VDD voltage 3.3 ~ 3.4 */
++			caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED";
++			f_min = <300000>;
++			f_max = <40000000>;
++			f_max_w = <40000000>;
++			max_req_size = <0x20000>;	/*128KB*/
++			gpio_dat3 = "CARD_3";
++			gpio_cd = "CARD_6";
++			gpio_power = "CARD_8";
++			power_level = <0>;
++			irq_in = <5>;
++			#irq_in_edge = "GPIO_IRQ_FALLING";
++			irq_out = <6>;
++			#irq_out_edge = "GPIO_IRQ_RISING";
++			card_type = <5>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++		};
++		emmc {
++			port = <2>; /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++			pinname = "emmc";
++			ocr_avail = <0x200000>; /*VDD voltage 3.3 ~ 3.4 */
++			caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++			f_min = <300000>;
++			f_max = <50000000>;
++			f_max_w = <50000000>;
++			max_req_size = <0x20000>; /*128KB*/
++			gpio_dat3 = "BOOT_3";
++			#gpio_cd = "CARD_6";
++			#gpio_power = "CARD_8";
++			#power_level = <0>;
++			card_type = <1>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++		};
++	}; /* end of sdio */
+ 	saradc {
+ 		compatible = "amlogic,saradc";
+ 		status = "okay";
+@@ -184,13 +558,13 @@
+ 	adc_keypad {
+ 		compatible = "amlogic,adc_keypad";
+ 		status = "okay";
+-		key_num = <5>;
++		key_num = <7>;
+ 		name_len = <20>;
+-		key_name = "menu","vol-","vol+","back","home";
+-		key_code = <139 114 115 158 102>;
+-		key_chan = <4 4 4 4 4>;
+-		key_val = <9 275 150 392 513>;
+-		key_tolerance = <40 40 40 40 40>;
++		key_name = "back","enter","menu","ch+","ch-","vol+","vol-";
++		key_code = <158 28 139 103 108 106 105>;
++		key_chan = <1 1 1 0 0 0 0>;
++		key_val = <185 372 570 0 186 370 576>;
++		key_tolerance = <40 40 40 40 40 40 40>;
+ 	};
+ 
+ 	key_input {
+@@ -220,6 +594,13 @@
+ 		interruptnum = <40>;
+ 	};
+ 
++	smartcard {
++		compatible = "amlogic,smartcard";
++		smc_reset_level = <0>;
++		smc_reset = "GPIOX_12";
++		pinctrl-names = "default";
++		pinctrl-0 = <&smc_pins>;
++	};
+ 	gpio:gpio {
+ 		compatible = "amlogic,m6tv-gpio";
+ 		dev_name = "gpio";
+@@ -248,7 +629,7 @@
+ 			amlogic,pins = "GPIOZ_8","GPIOZ_9";
+ 		};
+ 
+-		aml_dummy_codec_pins:aml_dummy_codec_pins {
++		aml_i2s_pins:aml_i2s_pins {
+ 			amlogic,setmask = <8 0x6A00000
+ 					   3 0x800000>;
+ 			amlogic,clrmask = <8 0x1461000
+@@ -258,11 +639,371 @@
+ 			amlogic,pins = "GPIOZ_14", "GPIOZ_15", "GPIOZ_16", "GPIOZ_17", "GPIOZ_19";
+ 		};
+ 
++		//$$ MATCH "meson_vcck_dvfs_pin_0_match" = "&aml_pwm_pins"
++		//$$ L2 PROP_U32 2 = "amlogic,setmask"
++		//$$ L2 PROP_U32 2 = "amlogic,clrmask"
++		//$$ L2 PROP_STR = "amlogic,pins"
++		aml_pwm_pins:aml_pwm {
++			amlogic,setmask = <2 0x2>;
++			amlogic,clrmask = <1 0x200000
++					   7 0x40000000
++					   9 0x8000000>;
++			amlogic,pins = "GPIOP_5";
++		};
++		sdio_all_pins:sdio_all_pins {
++			amlogic,setmask = <8 0x0000003f>;	/*sdio a*/
++			amlogic,clrmask = <6 0x3f000000		/*sdio c*/
++					   2 0x0000fc00		/*sdio b*/
++					   5 0x00006c00>;	/*sdhc a*/
++			amlogic,pins = "GPIOX_0","GPIOX_1","GPIOX_2","GPIOX_3","GPIOX_8","GPIOX_9";
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
++		sdio_clk_cmd_pins:sdio_clk_cmd_pins {
++			amlogic,setmask = <8 0x00000003>;	/*sdio a*/
++			amlogic,clrmask = <6 0x3f000000		/*sdio c*/
++					   2 0x0000fc00		/*sdio b*/
++					   5 0x00006c00>;	/*sdhc a*/
++			amlogic,pins = "GPIOX_8","GPIOX_9";
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
++		sd_all_pins:sd_all_pins {
++			amlogic,setmask = <2 0x0000fc00>;	/*sdio b*/
++			amlogic,clrmask = <6 0x3f000000		/*sdio c*/
++					   8 0x0000003f		/*sdio a*/
++					   2 0x000000f0>;	/*sdhc b*/
++			amlogic,pins = "CARD_0","CARD_1","CARD_2","CARD_3","CARD_4","CARD_5";
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
++		sd_clk_cmd_pins:sd_clk_cmd_pins {
++			amlogic,setmask = <2 0x00000c00>;	/*sdio b*/
++			amlogic,clrmask = <6 0x3f000000		/*sdio c*/
++					   8 0x0000003f		/*sdio a*/
++					   2 0x000000f0>;	/*sdhc b*/
++			amlogic,pins = "CARD_4","CARD_5"; /* CARD_4:CLK, CARD_5:CMD */
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
++		emmc_all_pins:emmc_all_pins {
++			amlogic,setmask = <6 0x3f000000>;	/*sdio c, */
++			amlogic,clrmask = <2 0x04c3fc00		/*sdio b & nand*/
++					   8 0x0000003f		/*sdio a*/
++					   4 0x6c000000		/*sdhc c*/
++					   3 0x80000000>;	/*I2C*/
++			amlogic,pins = "BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_10","BOOT_11";
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
++		emmc_clk_cmd_pins:emmc_clk_cmd_pins {
++			amlogic,setmask = <6 0x03000000>;	/*bit[24-25] */
++			amlogic,clrmask = <2 0x04c3fc00		/*sdio b & nand*/
++					   8 0x0000003f		/*sdio a*/
++					   4 0x6c000000		/*sdhc c*/
++					   3 0x80000000>;	/*I2C*/
++			amlogic,pins = "BOOT_10","BOOT_11";
++			amlogic,enable-output = <1>; /* 0:output, 1:input */
++			amlogic,pullup = <0>;
++		};
+ 		remote_pins:remote_pin {
+ 			amlogic,setmask = <10 0x1>;
+ 			amlogic,pins = "GPIOAO_7";
+ 		};
++
++		vga_pins:vga_pin {
++			amlogic,setmask = <9 0x18>;
++			amlogic,pins = "GPIOY_26", "GPIOY_27";
++		};
++		smc_pins:smc_pins {
++			amlogic,setmask = <4 0x003c0000>;
++			amlogic,clrmask = <0 0x00000040
++					   6 0x00200000
++					   7 0x0000000f
++					   8 0x00000800>;
++			amlogic,pins = "GPIOA_12","GPIOA_13","GPIOA_14","GPIOA_15";
++		};
++//$$ MATCH "dvb_p_ts0_pins_match" = "&dvb_p_ts0_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 8 = "amlogic,clrmask"
++//$$ L2 PROP_STR 12 = "amlogic,pins"
++		dvb_p_ts0_pins:dvb_p_ts0_pins {
++			amlogic,setmask = <3 0x3F>;
++			amlogic,clrmask = <1 0xCCC41
++					   4 0x2000000
++					   7 0x20000000
++					   9 0x431F>;
++			amlogic,pins = "GPIOY_9","GPIOY_10","GPIOY_11","GPIOY_12","GPIOY_13","GPIOY_14","GPIOY_15","GPIOY_16","GPIOY_0","GPIOY_1","GPIOY_4","GPIOY_8";
++		};
++//$$ MATCH "dvb_s_ts0_pins_match" = "&dvb_s_ts0_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 8 = "amlogic,clrmask"
++//$$ L2 PROP_STR 12 = "amlogic,pins"
++		dvb_s_ts0_pins:dvb_s_ts0_pins {
++			amlogic,setmask = <3 0x2F>;
++			amlogic,clrmask = <1 0xCCC41
++					   4 0x2000000
++					   7 0x20000000
++					   9 0x4310>;
++			amlogic,pins = "GPIOY_9","GPIOY_10","GPIOY_11","GPIOY_12","GPIOY_13","GPIOY_14","GPIOY_15","GPIOY_16","GPIOY_0","GPIOY_1","GPIOY_4","GPIOY_8";
++		};
++//$$ MATCH "dvb_fe_pins_match" = "&dvb_fe_pins"
++//$$ L2 PROP_U32 4 = "amlogic,clrmask"
++//$$ L2 PROP_STR 1 = "amlogic,pins"
++		dvb_fe_pins:dvb_fe_pins {
++			amlogic,clrmask = <5 0x800
++								8 0x2>;
++			amlogic,pins = "GPIOX_8";
++		};
+ 	}; /* end of pinmux*/
+ 
++	hdmirx {
++		compatible = "amlogic,hdmirx";
++		dev_name = "hdmirx";
++	};
++	vdin0 {
++		compatible = "amlogic,vdin";
++		dev_name = "vdin0";
++		status = "ok";
++		reserve-memory = <0x2400000>;
++		camera_size = <2592 1944>;//camera is 5647,the picture resolution is 2592x1944;so 2592x1944x2x4=41M
++		reserve-iomap = "true";
++		irq = <115>;
++		vdin_id = <0>;
++	};
++	vdin1 {
++		compatible = "amlogic,vdin";
++		dev_name = "vdin1";
++		status = "ok";
++		reserve-memory = <0x1000000>;
++		miracast_size = <1920 1080>;//miracast resolution is 1024x768,1024x768x2x4=6M
++		reserve-iomap = "true";
++		irq = <117>;
++		vdin_id = <1>;
++	};
++	tvafe {
++		compatible = "amlogic,tvafe";
++		dev_name = "tvafe";
++		status = "ok";
++		reserve-memory = <0x500000>;
++		reserve-iomap = "true";
++		tvafe_id = <0>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&vga_pins>;
++		tvafe_pin_mux = < /*!!particular sequence, no more and no less!!!*/
++			1	/*// TVAFE_ADC_PIN_A_PGA_0,  //CVBS0_Y = 0,*/
++			48	/*// TVAFE_ADC_PIN_SOG_7,    //CVBS0_SOG,*/
++			3	/*// TVAFE_ADC_PIN_A_PGA_2,  //CVBS1_Y,share with ypbpr*/
++			41	/*// TVAFE_ADC_PIN_SOG_0,    //CVBS1_SOG,*/
++			2	/*// TVAFE_ADC_PIN_A_PGA_1,  //CVBS2_Y,*/
++			41	/*// TVAFE_ADC_PIN_SOG_0,    //CVBS2_SOG,*/
++			12	/*// TVAFE_ADC_PIN_A_3,  //CVBS3_Y,*/
++			48	/*// TVAFE_ADC_PIN_SOG_7,    //CVBS3_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS4_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS4_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS5_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS5_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS6_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS6_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS7_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //CVBS7_SOG,*/
++			3	/*// TVAFE_ADC_PIN_A_PGA_2,  //S_VIDEO0_Y,*/
++			21	/*// TVAFE_ADC_PIN_B_4,  //S_VIDEO0_C,*/
++			47	/*// TVAFE_ADC_PIN_SOG_6,    //S_VIDEO0_SOG,*/
++			4	/*// TVAFE_ADC_PIN_A_PGA_3,  //S_VIDEO1_Y,*/
++			29	/*// TVAFE_ADC_PIN_C_4,   //S_VIDEO1_C,*/
++			48	/*// TVAFE_ADC_PIN_SOG_7,    //S_VIDEO1_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO2_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO2_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO2_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO3_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO3_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO3_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO4_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO4_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO4_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO5_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO5_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO5_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO6_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO6_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO6_SOG,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO7_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO7_C,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //S_VIDEO7_SOG,*/
++			11	/*// TVAFE_ADC_PIN_A_2,     //VGA0_G,*/
++			19	/*// TVAFE_ADC_PIN_B_2,     //VGA0_B,*/
++			27	/*// TVAFE_ADC_PIN_C_2,     //VGA0_R,*/
++			43	/*// TVAFE_ADC_PIN_SOG_2,    //VGA0_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA1_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA1_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA1_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA1_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA2_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA2_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA2_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA2_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA3_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA3_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA3_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA3_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA4_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA4_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA4_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA4_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA5_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA5_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA5_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA5_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA6_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA6_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA6_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA6_SOG*/
++			0	/*/ TVAFE_ADC_PIN_NULL,     //VGA7_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA7_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA7_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //VGA7_SOG*/
++			9	/*// TVAFE_ADC_PIN_A_0,     //COMP0_Y,*/
++			17	/*// TVAFE_ADC_PIN_B_0,     //COMP0_PB,*/
++			25	/*// TVAFE_ADC_PIN_C_0,     //COMP0_PR,*/
++			41	/*// TVAFE_ADC_PIN_SOG_0,    //COMP0_SOG*/
++			10	/*// TVAFE_ADC_PIN_A_1,     //COMP1_Y,*/
++			18	/*// TVAFE_ADC_PIN_B_1,     //COMP1_PB,*/
++			26	/*// TVAFE_ADC_PIN_C_1,     //COMP1_PR,*/
++			42	/*// TVAFE_ADC_PIN_SOG_1,    //COMP1_SOG*/
++			11	/*// TVAFE_ADC_PIN_A_2,     //COMP2_Y,*/
++			19	/*// TVAFE_ADC_PIN_B_2,     //COMP2_PB,*/
++			27	/*// TVAFE_ADC_PIN_C_2,     //COMP2_PR,*/
++			43	/*// TVAFE_ADC_PIN_SOG_2,    //COMP2_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP3_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP3_PB,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP3_PR,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP3_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP4_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP4_PB,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP4_PR,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP4_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP5_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP5_PB,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP5_PR,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP5_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP6_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP6_PB,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP6_PR,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP6_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP7_Y,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP7_PB,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP7_PR,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //COMP7_SOG*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART0_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART0_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART0_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART0_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART1_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART1_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART1_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART1_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART2_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART2_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART2_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART2_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART3_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART3_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART3_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART3_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART4_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART4_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART4_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART4_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART5_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART5_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART5_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART5_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART6_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART6_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART6_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART6_CVBS,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART7_G,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART7_B,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART7_R,*/
++			0	/*// TVAFE_ADC_PIN_NULL,     //SCART7_CVBS,*/
++		>;
++	};
++	d2d3 {
++		compatible = "amlogic,d2d3";
++		dev_name = "d2d3";
++		status = "ok";
++		reserve-memory = <0x200000>;
++		reserve-iomap = "true";
++		irq = <165>;
++		d2d3_id = <1>;
++	};
++/// ***************************************************************************************
++///	-	DVB
++//$$ MODULE="DVB"
++//$$ DEVICE="dvb"
++//$$ L2 PROP_STR = "ts0"
++//$$ L2 PROP_STR = "ts1"
++//$$ L2 PROP_STR = "ts2"
++//$$ L2 PROP_U32 = "ts0_invert"
++//$$ L2 PROP_U32 = "ts1_invert"
++//$$ L2 PROP_U32 = "ts2_invert"
++//$$ L2 PROP_U32 = "ts0_control"
++//$$ L2 PROP_U32 = "ts1_control"
++//$$ L2 PROP_U32 = "ts2_control"
++//$$ L2 PROP_STR 6 = "pinctrl-names"
++//$$ L2 PROP_CHOICE "dvb_p_ts0_pins_match" = "pinctrl-0"
++//$$ L2 PROP_CHOICE "dvb_s_ts0_pins_match" = "pinctrl-1"
++	dvb{
++		compatible = "amlogic,dvb";
++		/*"parallel","serial","disable"*/
++		ts0 = "disable";
++		ts1 = "serial";
++		ts2 = "parallel";
++		ts0_control = <0>;
++		ts1_control = <0>;
++		ts2_control = <0x800>;
++		ts0_invert = <0>;
++		ts1_invert = <0>;
++		ts2_invert = <1>;
++		pinctrl-names = "p_ts0", "s_ts0";
++		pinctrl-0 = <&dvb_p_ts0_pins>;
++		pinctrl-1 = <&dvb_s_ts0_pins>;
++	};
++//$$ DEVICE="dvbfe"
++//$$ L2 PROP_STR = "dtv_demod0"
++//$$ L2 PROP_U32 = "dtv_demod0_i2c_adap_id"
++//$$ L2 PROP_U32 = "dtv_demod0_i2c_addr"
++//$$ L2 PROP_U32 = "dtv_demod0_reset_value"
++//$$ L2 PROP_STR = "dtv_demod0_reset_gpio"
++//$$ L2 PROP_U32 = "fe0_dtv_demod"
++//$$ L2 PROP_U32 = "fe0_ts"
++//$$ L2 PROP_U32 = "fe0_dev"
++//$$ L2 PROP_STR 1 = "pinctrl-names"
++//$$ L2 PROP_CHOICE "dvb_fe_pins_match" = "pinctrl-0"
++	dvbfe{
++		compatible = "amlogic,dvbfe";
++		dtv_demod0 = "AMLDEMOD";
++		dtv_demod0_i2c_adap_id = <0>;
++		dtv_demod0_i2c_addr = <0x60>;
++		dtv_demod0_reset_value = <0>;
++		dtv_demod0_reset_gpio = "GPIOX_8" ;
++		dtv_demod0_mem = <1>;
++		reserve-memory = <0x06400000>;
++		reserve-iomap = "true";
++		fe0_dtv_demod = <0>;
++		fe0_ts = <2>;
++		fe0_dev = <0>;
++		tuner0 = "si2177_tuner";
++		tuner0_i2c_adap_id = <1>;
++		tuner0_i2c_addr = <0x60>;
++		tuner0_reset_value = <0>;
++		tuner0_reset_gpio =  "GPIOX_8" ;  /*GPIOX_8   76*/
++		fe0_tuner = <0>;
++		atv_demod0 = "si2177_atv_demod";
++		fe0_atv_demod = <0>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&dvb_fe_pins>;
++	};
+ }; /* end of / */
+ 
+diff --git a/arch/arm/configs/meson6tv_defconfig b/arch/arm/configs/meson6tv_defconfig
+index 7ae0c310e4cf..911a1ca17c9b 100755
+--- a/arch/arm/configs/meson6tv_defconfig
++++ b/arch/arm/configs/meson6tv_defconfig
+@@ -6,7 +6,6 @@ CONFIG_BSD_PROCESS_ACCT=y
+ CONFIG_IKCONFIG=y
+ CONFIG_IKCONFIG_PROC=y
+ CONFIG_BLK_DEV_INITRD=y
+-CONFIG_INITRAMFS_SOURCE="rootfs.cpio"
+ CONFIG_KALLSYMS_ALL=y
+ CONFIG_EMBEDDED=y
+ CONFIG_MODULES=y
+@@ -14,7 +13,6 @@ CONFIG_MODULE_UNLOAD=y
+ CONFIG_ARCH_MESON6TV=y
+ CONFIG_MESON_SUSPEND=y
+ CONFIG_MESON_LEGACY_REGISTER_API=y
+-# CONFIG_CACHE_L2X0 is not set
+ CONFIG_ARM_ERRATA_751472=y
+ CONFIG_ARM_ERRATA_754322=y
+ CONFIG_ARM_ERRATA_764369=y
+@@ -24,6 +22,9 @@ CONFIG_PREEMPT=y
+ CONFIG_AEABI=y
+ CONFIG_HIGHMEM=y
+ # CONFIG_COMPACTION is not set
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE=y
++CONFIG_CPU_FREQ_GOV_ONDEMAND=y
+ CONFIG_VFP=y
+ CONFIG_NEON=y
+ CONFIG_BINFMT_MISC=y
+@@ -134,7 +135,9 @@ CONFIG_NET_CLS_ACT=y
+ CONFIG_NET_ACT_POLICE=y
+ CONFIG_NET_ACT_GACT=y
+ CONFIG_NET_ACT_MIRRED=y
+-# CONFIG_OF_LM is not set
++CONFIG_CFG80211=y
++CONFIG_MAC80211=y
++CONFIG_AML_REG_DEBUG=y
+ # CONFIG_AML_RTC is not set
+ CONFIG_I2C_AML=y
+ CONFIG_SARADC_AM=y
+@@ -143,11 +146,24 @@ CONFIG_AM_REMOTE=y
+ CONFIG_ADC_KEYPADS_AM=y
+ CONFIG_KEY_INPUT_CUSTOM_AM=y
+ # CONFIG_AMLOGIC_BOARD_HAS_PMU is not set
+-# CONFIG_AMAUDIO is not set
+-# CONFIG_AM_CANVAS is not set
++CONFIG_MESON_CS_DCDC_REGULATOR=y
++CONFIG_AM_SMARTCARD=y
++CONFIG_AMLOGIC_USB=y
++CONFIG_MMC_AML=y
++# CONFIG_AML_NFTL_NEW is not set
++# CONFIG_AM_NAND is not set
++# CONFIG_AML_NEXT_NAND is not set
++CONFIG_AM_ETHERNET=y
++CONFIG_PHYLIB=y
++CONFIG_AM_WIFI=y
++CONFIG_AM_WIFI_SD_MMC=y
++CONFIG_AM_WIFI_USB=y
++CONFIG_RTL8188EU=m
++CONFIG_RTL8192CU=m
+ CONFIG_AMAUDIO2=y
+ CONFIG_VSYNC_RDMA=y
+ CONFIG_AM_VIDEO=y
++CONFIG_AM_VDEC_AVS=y
+ # CONFIG_AM_LCD_OUTPUT is not set
+ CONFIG_AML_TV_LCD=y
+ CONFIG_FB_AM=y
+@@ -181,13 +197,9 @@ CONFIG_MALI400=y
+ CONFIG_MALI400_DEBUG=y
+ # CONFIG_CRYPTO_AML_HW_CRYPRO is not set
+ # CONFIG_CRYPTO_DEVICE_DRIVER is not set
+-CONFIG_AM_VECM=y
+ CONFIG_UEVENT_HELPER_PATH="/sbin/hotplug"
+ CONFIG_DEVTMPFS=y
+ CONFIG_DEVTMPFS_MOUNT=y
+-CONFIG_MTD=y
+-CONFIG_MTD_BLOCK=y
+-CONFIG_MTD_NAND=y
+ CONFIG_PROC_DEVICETREE=y
+ CONFIG_OF_SELFTEST=y
+ CONFIG_BLK_DEV_LOOP=y
+@@ -195,31 +207,48 @@ CONFIG_SCSI=y
+ CONFIG_BLK_DEV_SD=y
+ CONFIG_BLK_DEV_SR=y
+ CONFIG_SCSI_MULTI_LUN=y
++CONFIG_NETDEVICES=y
++CONFIG_MARVELL_PHY=y
++CONFIG_AMLOGIC_PHY=y
++CONFIG_SMSC_PHY=y
+ CONFIG_INPUT_POLLDEV=y
+ CONFIG_INPUT_EVDEV=y
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_UINPUT=y
+ CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+-CONFIG_I2C=y
+-CONFIG_I2C_CHARDEV=y
+-CONFIG_SOUND=y
+-CONFIG_SND=y
+-CONFIG_SND_SOC=y
++CONFIG_POWER_SUPPLY=y
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_USB_SUPPORT=y
++CONFIG_USB_VIDEO_CLASS=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_BACKLIGHT_LCD_SUPPORT=y
++CONFIG_SND_USB_AUDIO=y
+ CONFIG_SND_AML_M6_SOC=y
+ CONFIG_SND_AML_M_DUMMY_CODEC=y
+-# CONFIG_HID_GENERIC is not set
+-# CONFIG_USB_SUPPORT is not set
+-CONFIG_SWITCH=y
++CONFIG_SND_AML_M6TV_AUDIO_CODEC=y
++CONFIG_SND_AML_M6TV_SYNOPSYS9629_CODEC=y
++CONFIG_SND_AML_M6TV_TAS5711=y
++CONFIG_UHID=y
++CONFIG_USB=y
++CONFIG_USB_ACM=y
++CONFIG_USB_STORAGE=y
++CONFIG_USB_SERIAL=y
++CONFIG_USB_GADGET=y
+ CONFIG_RTC_CLASS=y
+ CONFIG_UIO=y
+ CONFIG_UIO_PDRV=y
+ CONFIG_UIO_PDRV_GENIRQ=y
+ CONFIG_STAGING=y
++CONFIG_ZSMALLOC=y
++CONFIG_ZRAM=y
++CONFIG_ZRAM_DEBUG=y
+ CONFIG_ANDROID=y
+ CONFIG_ANDROID_BINDER_IPC=y
+ CONFIG_ASHMEM=y
+ CONFIG_ANDROID_LOGGER=y
+ CONFIG_ANDROID_LOW_MEMORY_KILLER=y
++CONFIG_ANDROID_INTF_ALARM_DEV=y
++CONFIG_SYNC=y
+ CONFIG_EXT2_FS=y
+ CONFIG_EXT3_FS=y
+ CONFIG_EXT3_FS_POSIX_ACL=y
+diff --git a/arch/arm/mach-meson6tv/Makefile b/arch/arm/mach-meson6tv/Makefile
+index bd6e07d8bff6..a86a4be04066 100755
+--- a/arch/arm/mach-meson6tv/Makefile
++++ b/arch/arm/mach-meson6tv/Makefile
+@@ -18,6 +18,8 @@ obj-$(CONFIG_CACHE_L2X0)			+= cache.o
+ # Power Management
+ obj-$(CONFIG_SUSPEND)				+= pm.o
+ 
++obj-$(CONFIG_AMLOGIC_USB) += usbclock.o
++
+ obj-$(CONFIG_HOTPLUG_CPU)			+= hotplug.o
+ obj-$(CONFIG_SMP)				+= headsmp.o smp.o
+ 
+diff --git a/arch/arm/mach-meson6tv/board-meson6tv-common.c b/arch/arm/mach-meson6tv/board-meson6tv-common.c
+index b21b736c8849..5f73886c56d6 100755
+--- a/arch/arm/mach-meson6tv/board-meson6tv-common.c
++++ b/arch/arm/mach-meson6tv/board-meson6tv-common.c
+@@ -1,7 +1,7 @@
+ /*
+  * arch/arm/mach-meson6tv/board-meson6tv-common.c
+  *
+- * Copyright (C) 2013 Amlogic, Inc.
++ * Copyright (C) 2014 Amlogic, Inc.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -26,9 +26,12 @@
+ #include <linux/reboot.h>
+ #include <linux/platform_device.h>
+ #include <linux/of_platform.h>
++#include <linux/amlogic/of_lm.h>
+ #include <asm/mach/arch.h>
+ #include <asm/mach/map.h>
+ #include <mach/io.h>
++#include <linux/io.h>
++#include <plat/lm.h>
+ #ifdef CONFIG_SMP
+ #include <mach/smp.h>
+ #endif
+@@ -76,12 +79,10 @@ static struct of_device_id mxs_of_platform_bus_ids[] = {
+ 	{},
+ };
+ 
+-#if 0
+ static struct of_device_id mxs_of_lm_bus_ids[] = {
+ 	{.compatible = "logicmodule-bus",},
+ 	{},
+ };
+-#endif
+ 
+ static void meson6tv_power_off(void)
+ {
+@@ -95,7 +96,9 @@ static void __init meson6tv_dt_init_machine(void)
+ 	parent = get_device(&platform_bus);
+ 
+ 	of_platform_populate(NULL, mxs_of_platform_bus_ids, NULL, parent);
+-	//of_lm_populate(NULL, mxs_of_lm_bus_ids, NULL, NULL);
++#ifdef CONFIG_OF_LM
++	of_lm_populate(NULL,mxs_of_lm_bus_ids,NULL,NULL);
++#endif
+ 
+ 	//of_platform_populate(NULL, of_default_bus_match_table,
+ 	//aml_meson6_auxdata_lookup, NULL);
+@@ -112,7 +115,7 @@ static const char __initdata *m6tv_common_boards_compat[] = {
+ DT_MACHINE_START(AML8726_MX, "Amlogic Meson6TV platform")
+ 	.smp		= smp_ops(meson6tv_smp_ops),
+ 	.map_io		= meson6tv_map_io,	// dt - 1
+-	.init_early	= meson6tv_init_early,	// dt -2
++	.init_early	= meson6tv_init_early,	// dt - 2
+ 	.init_irq	= meson6tv_init_irq,	// dt - 3
+ 	.init_time	= meson6tv_timer_init,	// dt - 4
+ 	.init_machine	= meson6tv_dt_init_machine,
+diff --git a/arch/arm/mach-meson6tv/clock.c b/arch/arm/mach-meson6tv/clock.c
+index ef8f8571fa16..cf11de5dcc29 100755
+--- a/arch/arm/mach-meson6tv/clock.c
++++ b/arch/arm/mach-meson6tv/clock.c
+@@ -41,6 +41,12 @@
+ #include <plat/regops.h>
+ #include <plat/cpufreq.h>
+ #include <linux/printk.h>
++#ifdef CONFIG_AMLOGIC_USB
++#include <mach/usbclock.h>
++#endif
++#include <mach/am_regs.h>
++
++
+ static DEFINE_SPINLOCK(mali_clk_lock);
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
+@@ -2740,48 +2746,48 @@ static struct class meson_freq_limit_class = {
+ static int __init meson_clock_init(void)
+ {
+ 	clkdev_add(&clk_lookup_xtal);
+-    CLK_DEFINE(pll_ddr,xtal,3,NULL,clk_msr_get,NULL,NULL,NULL);
+-    PLL_CLK_DEFINE(sys,(unsigned long)-1);
+-    PLL_CLK_DEFINE(vid2,12);
+-    PLL_CLK_DEFINE(fixed,-1);
+-    PLL_CLK_DEFINE(hpll,-1);///@todo unknown now
++	CLK_DEFINE(pll_ddr,xtal,3,NULL,clk_msr_get,NULL,NULL,NULL);
++	PLL_CLK_DEFINE(sys,(unsigned long)-1);
++	PLL_CLK_DEFINE(vid2,12);
++	PLL_CLK_DEFINE(fixed,-1);
++	PLL_CLK_DEFINE(hpll,-1);///@todo unknown now
+ 	clk_pll_fixed.msr_mul = 125 *2;
+ 	clk_pll_fixed.msr_div = 3;
+-    clk_pll_sys.get_rate = clk_get_rate_sys;
+-    clk_pll_vid2.get_rate = clk_get_rate_vid2;
+-    clk_pll_hpll.get_rate = clk_get_rate_hpll;
+-
+-    clk_pll_vid2.max = 1512000000;//1.5G
+-    clk_pll_vid2.min = 187500000;//187M
+-    clk_pll_hpll.max = 1512000000;//1.5G
+-    clk_pll_hpll.min = 187500000;//187M
+-    clk_pll_sys.max = 1512000000;//1.5G
+-    clk_pll_sys.min = 187500000;//187M
+-    clk_pll_ddr.max = 1512000000;//1.5G
+-    clk_pll_ddr.min = 187500000;//187M
+-    clk_pll_fixed.max = 2000000000; //2G
+-    clk_pll_fixed.min = 250000000;//250M
+-
+-    //create pll tree
+-    PLL_RELATION_DEF(sys,xtal);
+-    PLL_RELATION_DEF(ddr,xtal);
+-    PLL_RELATION_DEF(vid2,xtal);
+-    PLL_RELATION_DEF(fixed,xtal);
+-    PLL_RELATION_DEF(hpll,xtal);
++	clk_pll_sys.get_rate = clk_get_rate_sys;
++	clk_pll_vid2.get_rate = clk_get_rate_vid2;
++	clk_pll_hpll.get_rate = clk_get_rate_hpll;
++
++	clk_pll_vid2.max = 1512000000;//1.5G
++	clk_pll_vid2.min = 187500000;//187M
++	clk_pll_hpll.max = 1512000000;//1.5G
++	clk_pll_hpll.min = 187500000;//187M
++	clk_pll_sys.max = 1512000000;//1.5G
++	clk_pll_sys.min = 187500000;//187M
++	clk_pll_ddr.max = 1512000000;//1.5G
++	clk_pll_ddr.min = 187500000;//187M
++	clk_pll_fixed.max = 2000000000; //2G
++	clk_pll_fixed.min = 250000000;//250M
++
++	//create pll tree
++	PLL_RELATION_DEF(sys,xtal);
++	PLL_RELATION_DEF(ddr,xtal);
++	PLL_RELATION_DEF(vid2,xtal);
++	PLL_RELATION_DEF(fixed,xtal);
++	PLL_RELATION_DEF(hpll,xtal);
+ 
+     // Add clk81
+ #ifdef CONFIG_CLK81_DFS
+-    CLK_DEFINE(clk81, pll_fixed, 7, clk_set_rate_clk81, clk_msr_get, NULL, NULL, NULL);
++	CLK_DEFINE(clk81, pll_fixed, 7, clk_set_rate_clk81, clk_msr_get, NULL, NULL, NULL);
+ #else
+-    CLK_DEFINE(clk81, pll_fixed, 7, NULL, clk_msr_get, NULL, NULL, NULL);
++	CLK_DEFINE(clk81, pll_fixed, 7, NULL, clk_msr_get, NULL, NULL, NULL);
+ #endif
+ 
+ 	// Add clk81 as pll_fixed's child
+-    CLK_PLL_CHILD_DEF(clk81, fixed);
++	CLK_PLL_CHILD_DEF(clk81, fixed);
+ 
+-    clk_clk81.clk_gate_reg_adr = P_HHI_MPEG_CLK_CNTL;
+-    clk_clk81.clk_gate_reg_mask = (1<<7);
+-    clk_clk81.open_irq = 1;
++	clk_clk81.clk_gate_reg_adr = P_HHI_MPEG_CLK_CNTL;
++	clk_clk81.clk_gate_reg_mask = (1<<7);
++	clk_clk81.open_irq = 1;
+ 
+ 	// Add CPU clock
+ 	CLK_DEFINE(a9_clk, pll_sys, -1, clk_set_rate_a9, clk_get_rate_a9, NULL, NULL, NULL);
+@@ -2819,19 +2825,26 @@ static int __init meson_clock_init(void)
+ 	//clk_mali.status = clk_status_mali;
+ 	CLK_PLL_CHILD_DEF(mali, fixed);
+ 	//clk_ops_register(&clk_mali, &mali_clk_ops);
+-#if 0
+-    // Add clk usb0
+-    CLK_DEFINE(usb0,xtal,4,NULL,clk_msr_get,NULL,NULL,NULL);
+-    meson_clk_register(&clk_usb0,&clk_xtal);
+-    //clk_usb0.clk_gate_reg_adr = P_USB_ADDR0;
+-    //clk_usb0.clk_gate_reg_mask = (1<<0);
+-
+-    // Add clk usb1
+-    CLK_DEFINE(usb1,xtal,5,NULL,clk_msr_get,NULL,NULL,NULL);
+-  	meson_clk_register(&clk_usb1,&clk_xtal);
+-    //clk_usb1.clk_gate_reg_adr = P_USB_ADDR8;
+-    //clk_usb1.clk_gate_reg_mask = (1<<0);
++
++#ifdef CONFIG_AMLOGIC_USB
++	// Add clk usb0
++	CLK_DEFINE(usb0,xtal,4,NULL,clk_msr_get,clk_enable_usb,clk_disable_usb,"usb0");
++	meson_clk_register(&clk_usb0,&clk_xtal);
++	//clk_usb0.clk_gate_reg_adr = P_USB_ADDR0;
++	//clk_usb0.clk_gate_reg_mask = (1<<0);
++
++	// Add clk usb1
++	CLK_DEFINE(usb1,xtal,5,NULL,clk_msr_get,clk_enable_usb,clk_disable_usb,"usb1");
++	meson_clk_register(&clk_usb1,&clk_xtal);
++	//clk_usb1.clk_gate_reg_adr = P_USB_ADDR8;
++	//clk_usb1.clk_gate_reg_mask = (1<<0);
++
++	CLK_DEFINE(usb2,xtal,31,NULL,clk_msr_get,clk_enable_usb,clk_disable_usb,"usb2");
++	meson_clk_register(&clk_usb2,&clk_xtal);
++	//clk_usb2.clk_gate_reg_adr = P_USB_ADDR16;
++	//clk_usb2.clk_gate_reg_mask = (1<<0);
+ #endif
++
+ 	{
+ 		// Dump clocks
+ 		char *clks[] = {
+diff --git a/arch/arm/mach-meson6tv/include/mach/cpu.h b/arch/arm/mach-meson6tv/include/mach/cpu.h
+index ed282e812fd4..ba8ff814c618 100755
+--- a/arch/arm/mach-meson6tv/include/mach/cpu.h
++++ b/arch/arm/mach-meson6tv/include/mach/cpu.h
+@@ -1,5 +1,5 @@
+ /*
+-* arch/arm/mach-meson6/include/mach/cpu.h
++* arch/arm/mach-meson6tv/include/mach/cpu.h
+ *
+ * Copyright (C) 2012-2013 Amlogic, Inc.
+ *
+diff --git a/arch/arm/mach-meson6tv/include/mach/devio_aml.h b/arch/arm/mach-meson6tv/include/mach/devio_aml.h
+new file mode 100755
+index 000000000000..a38ab0d256da
+--- /dev/null
++++ b/arch/arm/mach-meson6tv/include/mach/devio_aml.h
+@@ -0,0 +1,12 @@
++#ifndef _DEVIO_AML_H_
++#define _DEVIO_AML_H_
++
++struct devio_aml_platform_data {
++	int (*io_setup)(void*);
++	int (*io_cleanup)(void*);
++	int (*io_power)(void *, int enable);
++	int (*io_reset)(void *, int enable);
++};
++
++#endif/*define _DEVIO_AML_H_*/
++
+diff --git a/arch/arm/mach-meson6tv/include/mach/dmc.h b/arch/arm/mach-meson6tv/include/mach/dmc.h
+new file mode 100755
+index 000000000000..63203c4258fb
+--- /dev/null
++++ b/arch/arm/mach-meson6tv/include/mach/dmc.h
+@@ -0,0 +1,46 @@
++#ifndef __MACH_MESON_DMC_H
++#define __MACH_MESON_DMC_H
++
++#define CANVAS_ADDR_LMASK			0x1fffffff
++#define CANVAS_WIDTH_LMASK			0x7
++#define CANVAS_WIDTH_LWID			3
++#define CANVAS_WIDTH_LBIT			29
++
++#define CANVAS_WIDTH_HMASK			0x1ff
++#define CANVAS_WIDTH_HBIT			0
++#define CANVAS_HEIGHT_MASK			0x1fff
++#define CANVAS_HEIGHT_BIT			9
++#define CANVAS_YWRAP				(1<<23)
++#define CANVAS_XWRAP				(1<<22)
++#define CANVAS_ADDR_NOWRAP			0x00
++#define CANVAS_ADDR_WRAPX			0x01
++#define CANVAS_ADDR_WRAPY			0x02
++#define CANVAS_BLKMODE_MASK			3
++#define CANVAS_BLKMODE_BIT			24
++#define CANVAS_BLKMODE_LINEAR			0x00
++#define CANVAS_BLKMODE_32X32			0x01
++#define CANVAS_BLKMODE_64X32			0x02
++
++#define CANVAS_LUT_INDEX_BIT			0
++#define CANVAS_LUT_INDEX_MASK			0x7
++#define CANVAS_LUT_WR_EN			(0x2 << 8)
++#define CANVAS_LUT_RD_EN			(0x1 << 8)
++
++#define MMC_PHY_CTRL				0x1380
++
++/****************logo relative part *************************************************/
++#define ASSIST_MBOX1_CLR_REG			VDEC_ASSIST_MBOX1_CLR_REG
++#define ASSIST_MBOX1_MASK			VDEC_ASSIST_MBOX1_MASK
++#define RESET_PSCALE				(1<<4)
++#define RESET_IQIDCT				(1<<2)
++#define RESET_MC				(1<<3)
++#define MEM_BUFCTRL_MANUAL			(1<<1)
++#define MEM_BUFCTRL_INIT			(1<<0)
++#define MEM_LEVEL_CNT_BIT			18
++#define MEM_FIFO_CNT_BIT			16
++#define MEM_FILL_ON_LEVEL			(1<<10)
++#define MEM_CTRL_EMPTY_EN			(1<<2)
++#define MEM_CTRL_FILL_EN			(1<<1)
++#define MEM_CTRL_INIT				(1<<0)
++
++#endif /* __MACH_MESON_DMC_H */
+diff --git a/arch/arm/mach-meson6tv/include/mach/register.h b/arch/arm/mach-meson6tv/include/mach/register.h
+index d609f71de3e3..b731cf38c245 100755
+--- a/arch/arm/mach-meson6tv/include/mach/register.h
++++ b/arch/arm/mach-meson6tv/include/mach/register.h
+@@ -6,7 +6,6 @@
+ #ifndef __MACH_MESON6TV_REG_ADDR_H_
+ #define __MACH_MESON6TV_REG_ADDR_H_
+ 
+-#include "io.h"
+ 
+ #define SECOND_DEMUX_OFFSET_0 0x50 	///../ucode/register.h
+ #define P_SECOND_DEMUX_OFFSET_0 		CBUS_REG_ADDR(SECOND_DEMUX_OFFSET_0) 	///../ucode/register.h
+@@ -3510,6 +3509,10 @@
+ #define P_VPP_VE_DEMO_LEFT_TOP_SCREEN_WIDTH 		CBUS_REG_ADDR(VPP_VE_DEMO_LEFT_TOP_SCREEN_WIDTH) 	///../ucode/register.h
+ #define VPP_VE_DEMO_CENTER_BAR 0x1da3 	///../ucode/register.h
+ #define P_VPP_VE_DEMO_CENTER_BAR 		CBUS_REG_ADDR(VPP_VE_DEMO_CENTER_BAR) 	///../ucode/register.h
++
++#define VPP_VE_H_V_SIZE 0x1da4 	///../ucode/register.h:7519
++#define P_VPP_VE_H_V_SIZE 		CBUS_REG_ADDR(VPP_VE_H_V_SIZE)
++
+ #define VPP_VDO_MEAS_CTRL 0x1da8 	///../ucode/register.h
+ #define P_VPP_VDO_MEAS_CTRL 		CBUS_REG_ADDR(VPP_VDO_MEAS_CTRL) 	///../ucode/register.h
+ #define VPP_VDO_MEAS_VS_COUNT_HI 0x1da9 	///../ucode/register.h
+diff --git a/arch/arm/mach-meson6tv/include/mach/sd.h b/arch/arm/mach-meson6tv/include/mach/sd.h
+new file mode 100755
+index 000000000000..4ea85a3d44f7
+--- /dev/null
++++ b/arch/arm/mach-meson6tv/include/mach/sd.h
+@@ -0,0 +1,629 @@
++/*
++ * SDHC definitions
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#ifndef __AML_SDHC_H__
++#define __AML_SDHC_H__
++
++#include <linux/types.h>
++#include <linux/device.h>
++#include <linux/mmc/host.h>
++#include <linux/earlysuspend.h>
++
++enum aml_mmc_waitfor {
++	XFER_INIT,
++	XFER_START,				/* 1 */
++	XFER_IRQ_OCCUR,			/* 2 */
++	XFER_IRQ_FIFO_ERR,		/* 3 */
++	XFER_IRQ_CRC_ERR,		/* 4 */
++	XFER_IRQ_TIMEOUT_ERR,	/* 5 */
++	XFER_IRQ_TASKLET_CMD,	/* 6 */
++	XFER_IRQ_TASKLET_DATA,	/* 7 */
++	XFER_IRQ_TASKLET_BUSY,	/* 8 */
++	XFER_IRQ_UNKNOWN_IRQ,	/* 9 */
++	XFER_TIMER_TIMEOUT,		/* 10 */
++	XFER_TASKLET_CMD,		/* 11 */
++	XFER_TASKLET_DATA,		/* 12 */
++	XFER_TASKLET_BUSY,		/* 13 */
++	XFER_TIMEDOUT,			/* 14 */
++	XFER_FINISHED,			/* 15 */
++	XFER_AFTER_START,		/* 16 */
++};
++
++struct amlsd_host;
++struct amlsd_platform {
++	struct amlsd_host* host;
++	struct mmc_host *mmc;
++	struct list_head sibling;
++	unsigned long ocr_avail;
++	unsigned int port;
++#define     PORT_SDIO_A     0
++#define     PORT_SDIO_B     1
++#define     PORT_SDIO_C     2
++#define     PORT_SDHC_A     3
++#define     PORT_SDHC_B     4
++#define     PORT_SDHC_C     5
++
++	unsigned int width;
++	unsigned int caps;
++	unsigned int caps2;
++    unsigned int card_capacity;
++
++	unsigned int f_min;
++	unsigned int f_max;
++	unsigned int f_max_w;
++	unsigned int clkc;
++	unsigned int clkc_w;
++	unsigned int ctrl;
++	unsigned int clock;
++	unsigned int low_burst;
++	unsigned int irq_in;
++	unsigned int irq_in_edge;
++	unsigned int irq_out;
++	unsigned int irq_out_edge;
++	unsigned int gpio_cd;
++	unsigned int gpio_power;
++	unsigned int power_level;
++	char pinname[32];
++	unsigned int gpio_ro;
++    unsigned int gpio_dat3;
++    unsigned int jtag_pin;
++    int is_sduart;
++    bool is_in;
++
++    /* we used this flag to filter some unnecessary cmd before initialized flow */
++    bool is_fir_init; // has been initialized for the first time
++    unsigned int card_type; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++#define CARD_TYPE_UNKNOWN           0        /* unknown */
++#define CARD_TYPE_MMC               1        /* MMC card */
++#define CARD_TYPE_SD                2        /* SD card */
++#define CARD_TYPE_SDIO              3        /* SDIO card */
++#define CARD_TYPE_SD_COMBO          4        /* SD combo (IO+mem) card */
++#define CARD_TYPE_NON_SDIO          5        /* NON sdio device (means SD/MMC card) */
++#define aml_card_type_unknown(c)    ((c)->card_type == CARD_TYPE_UNKNOWN)
++#define aml_card_type_mmc(c)        ((c)->card_type == CARD_TYPE_MMC)
++#define aml_card_type_sd(c)         ((c)->card_type == CARD_TYPE_SD)
++#define aml_card_type_sdio(c)       ((c)->card_type == CARD_TYPE_SDIO)
++#define aml_card_type_non_sdio(c)   ((c)->card_type == CARD_TYPE_NON_SDIO)
++
++    // struct pinctrl *uart_ao_pinctrl;
++	void (*irq_init)(struct amlsd_platform* pdata);
++
++	unsigned int max_blk_count;
++	unsigned int max_blk_size;
++	unsigned int max_req_size;
++	unsigned int max_seg_size;
++
++	/*for inand partition: struct mtd_partition, easy porting from nand*/
++	struct mtd_partition *parts;
++	unsigned int nr_parts;
++
++	struct resource* resource;
++	void (*xfer_pre)(struct amlsd_platform* pdata);
++	void (*xfer_post)(struct amlsd_platform* pdata);
++
++	int (*port_init)(struct amlsd_platform* pdata);
++	int (*cd)(struct amlsd_platform* pdata);
++	int (*ro)(struct amlsd_platform* pdata);
++	void (*pwr_pre)(struct amlsd_platform* pdata);
++	void (*pwr_on)(struct amlsd_platform* pdata);
++	void (*pwr_off)(struct amlsd_platform* pdata);
++
++};
++
++struct amlsd_host {
++	/* back-link to device */
++	struct device *dev;
++	struct list_head sibling;
++    struct platform_device *pdev;
++	struct amlsd_platform * pdata;
++	struct mmc_host		*mmc;
++	struct mmc_request	*request;
++	struct resource		*mem;
++	void __iomem		*base;
++	int			dma;
++	char*		bn_buf;
++	dma_addr_t		bn_dma_buf;
++	unsigned int f_max;
++	unsigned int f_max_w;
++	unsigned int f_min;
++	struct tasklet_struct cmd_tlet;
++	struct tasklet_struct data_tlet;
++	struct tasklet_struct busy_tlet;
++	struct tasklet_struct to_tlet;
++    // struct timer_list timeout_tlist;
++	struct delayed_work	timeout;
++	struct early_suspend amlsd_early_suspend;
++
++	unsigned int send;
++	unsigned int ctrl;
++	unsigned int clkc;
++	unsigned int clkc_w;
++	unsigned int pdma;
++	unsigned int pdma_s;
++	unsigned int pdma_low;
++	unsigned int misc;
++	unsigned int ictl;
++	unsigned int ista;
++	unsigned int dma_addr;
++
++	unsigned long		clk_rate;
++
++	struct  mmc_request	*mrq;
++	struct  mmc_request	*mrq2;
++	spinlock_t	mrq_lock;
++	int			cmd_is_stop;
++	enum aml_mmc_waitfor	xfer_step;
++
++	int			bus_width;
++	int     port;
++	int     locked;
++	char		*status;
++	unsigned int		ccnt, dcnt;
++
++#ifdef CONFIG_DEBUG_FS
++	struct dentry		*debug_root;
++	struct dentry		*debug_state;
++	struct dentry		*debug_regs;
++#endif
++
++#ifdef CONFIG_CPU_FREQ
++	struct notifier_block	freq_transition;
++#endif
++
++    u32			opcode; // add by gch for debug
++	u32			arg; // add by gch for debug
++
++#ifdef      CONFIG_MMC_AML_DEBUG
++    u32         req_cnt;
++    u32         trans_size;
++    u32         time_req_sta; // request start time
++#endif
++
++    struct pinctrl *pinctrl;
++    char pinctrl_name[30];
++
++    int storage_flag; // used for judging if there is a tsd/emmc
++
++    int         version; // bit[7-0]--minor version, bit[31-8]--major version
++};
++
++/*-sdio-*/
++
++#define SDIO_ARGU       (0x0)
++#define SDIO_SEND       (0x4)
++#define SDIO_CONF       (0x8)
++#define SDIO_IRQS       (0xc)
++#define SDIO_IRQC       (0x10)
++#define SDIO_MULT       (0x14)
++#define SDIO_ADDR       (0x18)
++#define SDIO_EXT        (0x1c)
++#define SDIO_CCTL       (0x40)
++#define SDIO_CDAT       (0x44)
++
++#define CLK_DIV         (0x1f4)
++
++struct cmd_send{
++    u32 cmd_command:8; /*[7:0] Command Index*/
++    u32 cmd_response_bits:8; /*[15:8]
++        * 00 means no response
++        * others: Response bit number(cmd bits+response bits+crc bits-1)*/
++    u32 response_do_not_have_crc7:1; /*[16]
++        * 0:Response need check CRC7, 1: dont need check*/
++    u32 response_have_data:1; /*[17]
++        * 0:Receiving Response without data, 1:Receiving response with data*/
++    u32 response_crc7_from_8:1; /*[18]
++        * 0:Normal CRC7, Calculating CRC7 will be from bit0 of all response bits,
++        * 1:Calculating CRC7 will be from bit8 of all response bits*/
++    u32 check_busy_on_dat0:1; /*[19]
++        * used for R1b response 0: dont check busy on dat0, 1:need check*/
++    u32 cmd_send_data:1; /*[20]
++        * 0:This command is not for transmitting data,
++        * 1:This command is for transmitting data*/
++    u32 use_int_window:1; /*[21]
++        * 0:SDIO DAT1 interrupt window disabled, 1:Enabled*/
++    u32 reserved:2;/*[23:22]*/
++    u32 repeat_package_times:8; /*[31:24] Total packages to be sent*/
++};
++
++struct sdio_config{
++    u32 cmd_clk_divide:10; /*[9:0] Clock rate setting,
++        * Frequency of SD equals to Fsystem/((cmd_clk_divide+1)*2)*/
++    u32 cmd_disable_crc:1; /*[10]
++        * 0:CRC employed, 1:dont send CRC during command being sent*/
++    u32 cmd_out_at_posedge:1; /*[11]
++        * Command out at negedge normally, 1:at posedge*/
++    u32 cmd_argument_bits:6; /*[17:12] before CRC added, normally 39*/
++    u32 do_not_delay_data:1; /*[18]
++        *0:Delay one clock normally, 1:dont delay*/
++    u32 data_latch_at_negedge:1; /*[19]
++        * 0:Data caught at posedge normally, 1:negedge*/
++    u32 bus_width:1; /*[20] 0:1bit, 1:4bit*/
++    u32 m_endian:2; /*[22:21]
++        * Change ENDIAN(bytes order) from DMA data (e.g. dma_din[31:0]).
++        * (00: ENDIAN no change, data output equals to original dma_din[31:0];
++        * 01: data output equals to {dma_din[23:16],dma_din[31:24],
++        * dma_din[7:0],dma_din[15:8]};10: data output equals to
++        * {dma_din[15:0],dma_din[31:16]};11: data output equals to
++        * {dma_din[7:0],dma_din[15:8],dma_din[23:16],dma_din[31:24]})*/
++    u32 sdio_write_nwr:6; /*[28:23]
++        * Number of clock cycles waiting before writing data*/
++    u32 sdio_write_crc_ok_status:3; /*[31:29] if CRC status
++        * equals this register, sdio write can be consider as correct*/
++};
++
++struct sdio_status_irq{
++    u32 sdio_status:4; /*[3:0] Read Only
++        * SDIO State Machine Current State, just for debug*/
++    u32 sdio_cmd_busy:1; /*[4] Read Only
++        * SDIO Command Busy, 1:Busy State*/
++    u32 sdio_response_crc7_ok:1; /*[5] Read Only
++        * SDIO Response CRC7 status, 1:OK*/
++    u32 sdio_data_read_crc16_ok:1; /*[6] Read Only
++        * SDIO Data Read CRC16 status, 1:OK*/
++    u32 sdio_data_write_crc16_ok:1; /*[7] Read Only
++        * SDIO Data Write CRC16 status, 1:OK*/
++    u32 sdio_if_int:1; /*[8] write 1 clear this int bit
++        * SDIO DAT1 Interrupt Status*/
++    u32 sdio_cmd_int:1; /*[9] write 1 clear this int bit
++        * Command Done Interrupt Status*/
++    u32 sdio_soft_int:1; /*[10] write 1 clear this int bit
++        * Soft Interrupt Status*/
++    u32 sdio_set_soft_int:1; /*[11] write 1 to this bit
++        * will set Soft Interrupt, read out is m_req_sdio, just for debug*/
++    u32 sdio_status_info:4; /*[15:12]
++        * used for change information between ARC and Amrisc */
++    u32 sdio_timing_out_int:1; /*[16] write 1 clear this int bit
++        * Timeout Counter Interrupt Status*/
++    u32 amrisc_timing_out_int_en:1; /*[17]
++        * Timeout Counter Interrupt Enable for AMRISC*/
++    u32 arc_timing_out_int_en:1; /*[18]
++        * Timeout Counter Interrupt Enable for ARC/ARM*/
++    u32 sdio_timing_out_count:13; /*[31:19]
++        * Timeout Counter Preload Setting and Present Status*/
++};
++
++struct sdio_irq_config{
++    u32 amrisc_if_int_en:1; /*[0]
++        * 1:SDIO DAT1 Interrupt Enable for AMRISC*/
++    u32 amrisc_cmd_int_en:1; /*[1]
++        * 1:Command Done Interrupt Enable for AMRISC*/
++    u32 amrisc_soft_int_en:1; /*[2]
++        * 1:Soft Interrupt Enable for AMRISC*/
++    u32 arc_if_int_en:1; /*[3]
++        * 1:SDIO DAT1 Interrupt Enable for ARM/ARC*/
++    u32 arc_cmd_int_en:1; /*[4]
++        * 1:Command Done Interrupt Enable for ARM/ARC*/
++    u32 arc_soft_int_en:1; /*[5]
++        * 1:Soft Interrupt Enable for ARM/ARC*/
++    u32 sdio_if_int_config:2; /*[7:6]
++        * 00:sdio_if_interrupt window will reset after data Tx/Rx or command
++        * done, others: only after command done*/
++    u32 sdio_force_data:6; /*[13:8]
++        * Write operation: Data forced by software
++        * Read operation: {CLK,CMD,DAT[3:0]}*/
++    u32 sdio_force_enable:1; /*[14] Software Force Enable
++        * This is the software force mode, Software can directly
++        * write to sdio 6 ports (cmd, clk, dat0..3) if force_output_en
++        * is enabled. and hardware outputs will be bypassed.*/
++    u32 soft_reset:1; /*[15]
++        * Write 1 Soft Reset, Don't need to clear it*/
++    u32 sdio_force_output_en:6; /*[21:16]
++        * Force Data Output Enable,{CLK,CMD,DAT[3:0]}*/
++    u32 disable_mem_halt:2; /*[23:22] write and read
++        * 23:Disable write memory halt, 22:Disable read memory halt*/
++    u32 sdio_force_data_read:6; /*[29:24] Read Only
++        * Data read out which have been forced by software*/
++    u32 force_halt:1; /*[30] 1:Force halt SDIO by software
++        * Halt in this sdio host controller means stop to transmit or
++        * receive data from sd card. and then sd card clock will be shutdown.
++        * Software can force to halt anytime, and hardware will automatically
++        * halt the sdio when reading fifo is full or writing fifo is empty*/
++    u32 halt_hole:1; /*[31]
++        * 0: SDIO halt for 8bit mode, 1:SDIO halt for 16bit mode*/
++};
++
++struct sdio_mult_config{
++    u32 sdio_port_sel:2; /*[1:0] 0:sdio_a, 1:sdio_b, 2:sdio_c*/
++    u32 ms_enable:1; /*[2] 1:Memory Stick Enable*/
++    u32 ms_sclk_always:1; /*[3] 1: Always send ms_sclk*/
++    u32 stream_enable:1; /*[4] 1:Stream Enable*/
++    u32 stream_8_bits_mode:1; /*[5] Stream 8bits mode*/
++    u32 data_catch_level:2; /*[7:6] Level of data catch*/
++    u32 write_read_out_index:1; /*[8] Write response index Enable
++        * [31:16], [11:10], [7:0] is set only when  bit8 of this register is not set.
++        * And other bits are set only when bit8 of this register is also set.*/
++    u32 data_catch_readout_en:1; /*[9] Data catch readout Enable*/
++    u32 sdio_0_data_on_1:1; /*[10] 1:dat0 is on dat1*/
++    u32 sdio_1_data_swap01:1; /*[11] 1:dat1 and dat0 swapped*/
++    u32 response_read_index:4; /*[15:12] Index of internal read response*/
++    u32 data_catch_finish_point:12; /*[27:16] If internal data
++        * catch counter equals this register, it indicates data catching is finished*/
++    u32 reserved:4; /*[31:28]*/
++};
++
++struct sdio_extension{
++    u32 cmd_argument_ext:16; /*[15:0] for future use*/
++    u32 data_rw_number:14; /*[29:16]
++        * Data Read/Write Number in one packet, include CRC16 if has CRC16*/
++    u32 data_rw_do_not_have_crc16:1; /*[30]
++        * 0:data Read/Write has crc16, 1:without crc16*/
++    u32 crc_status_4line:1; /*[31] 1:4Lines check CRC Status*/
++};
++
++struct sdio_reg{
++    u32 argument; /*2308*/
++    struct cmd_send send; /*2309*/
++    struct sdio_config config; /*230a*/
++    struct sdio_status_irq status; /*230b*/
++    struct sdio_irq_config irqc; /*230c*/
++    struct sdio_mult_config mult; /*230d*/
++    u32 m_addr; /*230e*/
++    struct sdio_extension ext;/*230f*/
++};
++
++/*-sdhc-*/
++
++#define SDHC_ARGU				(0x00)
++#define SDHC_SEND				(0x04)
++#define SDHC_CTRL				(0x08)
++#define SDHC_STAT				(0x0C)
++#define SDHC_CLKC				(0x10)
++#define SDHC_ADDR				(0x14)
++#define SDHC_PDMA				(0x18)
++#define SDHC_MISC				(0x1C)
++#define SDHC_DATA				(0x20)
++#define SDHC_ICTL				(0x24)
++#define SDHC_ISTA				(0x28)
++#define SDHC_SRST				(0x2C)
++#define SDHC_ESTA				(0x30)
++#define SDHC_ENHC				(0x34)
++#define SDHC_CLK2				(0x38)
++
++struct sdhc_send{
++	u32 cmd_index:6; /*[5:0] command index*/
++	u32 cmd_has_resp:1; /*[6] 0:no resp 1:has resp*/
++	u32 cmd_has_data:1; /*[7] 0:no data 1:has data*/
++	u32 resp_len:1; /*[8] 0:48bit 1:136bit*/
++	u32 resp_no_crc:1; /*[9] 0:check crc7 1:don't check crc7*/
++	u32 data_dir:1; /*[10] 0:data rx, 1:data tx*/
++	u32 data_stop:1; /*[11] 0:rx or tx, 1:data stop,ATTN:will give rx a softreset*/
++	u32 r1b:1; /*[12] 0: resp with no busy, 1:R1B*/
++	u32 reserved:3; /*[15:13] reserved*/
++	u32 total_pack:16; /*[31:16] total package number for writing or reading*/
++};
++
++struct sdhc_ctrl{
++	u32 dat_type:2; /*[1:0] 0:1bit, 1:4bits, 2:8bits, 3:reserved*/
++	u32 ddr_mode:1; /*[2] 0:SDR mode, 1:Don't set it*/
++	u32 tx_crc_nocheck:1; /*[3] 0:check sd write crc result, 1:disable tx crc check*/
++	u32 pack_len:9; /*[12:4] 0:512Bytes, 1:1, 2:2, ..., 511:511Bytes*/
++	u32 rx_timeout:7; /*[19:13] cmd or wcrc Receiving Timeout, default 64*/
++	u32 rx_period:4; /*[23:20]Period between response/cmd and next cmd, default 8*/
++	u32 rx_endian:3; /*[26:24] Rx Endian Control*/
++	u32 sdio_irq_mode:1; /*[27]0:Normal mode, 1: support data block gap
++			(need turn off clock gating)*/
++	u32 dat0_irq_sel:1; /*[28] Dat0 Interrupt selection,
++			0:busy check after response, 1:any rising edge of dat0*/
++	u32 tx_endian:3; /*[31:29] Tx Endian Control*/
++};
++
++struct sdhc_stat{
++	u32 cmd_busy:1; /*[0] 0:Ready for command, 1:busy*/
++	u32 dat3_0:4; /*[4:1] DAT[3:0]*/
++	u32 cmd:1; /*[5] CMD*/
++	u32 rxfifo_cnt:7; /*[12:6] RxFIFO count*/
++	u32 txfifo_cnt:7; /*[19:13] TxFIFO count*/
++	u32 dat7_4:4; /*[23:20] DAT[7:4]*/
++	u32 reserved:8; /*[31:24] Reserved*/
++};
++
++/*
++* to avoid glitch issue,
++* 1. clk_switch_on better be set after cfg_en be set to 1'b1
++* 2. clk_switch_off shall be set before cfg_en be set to 1'b0
++* 3. rx_clk/sd_clk phase diff please see SD_REGE_CLK2.
++*/
++struct sdhc_clkc{
++	u32 clk_div:12; /*[11:0] clk_div for TX_CLK 0: don't set it,
++			1:div2, 2:div3, 3:div4 ...*/
++	u32 tx_clk_on:1; /*[12] TX_CLK 0:switch off, 1:switch on*/
++	u32 rx_clk_on:1; /*[13] RX_CLK 0:switch off, 1:switch on*/
++	u32 sd_clk_on:1; /*[14] SD_CLK 0:switch off, 1:switch on*/
++	u32 mod_clk_on:1; /*[15] Clock Module Enable, Should
++			set before bit[14:12] switch on, and after bit[14:12] switch off*/
++	u32 clk_src_sel:2; /*[17:16] 0:osc, 1:fclk_div4, 2:fclk_div3, 3:fclk_div5*/
++	u32 reserved:6; /*[23:18] Reserved*/
++	u32 clk_jic:1; /*[24] Clock JIC for clock gating control
++			1: will turn off clock gating*/
++	u32 mem_pwr_off:2; /*[26:25] 00:Memory Power Up, 11:Memory Power Off*/
++	u32 reserved2:5; /*[31:27] Reserved*/
++};
++
++/*
++* Note1: dma_urgent is just set when bandwidth is very tight
++* Note2: pio_rdresp need to be combined with REG0_ARGU;
++* For R0, when 0, reading REG0 will get the normal 32bit response;
++* For R2, when 1, reading REG0 will get CID[31:0], when 2, get CID[63:32],
++* and so on; 6 or 7, will get original command argument.
++*/
++struct sdhc_pdma{
++	u32 dma_mode:1; /*[0] 0:PIO mode, 1:DMA mode*/
++	u32 pio_rdresp:3; /*[3:1] 0:[39:8] 1:1st 32bits, 2:2nd ...,
++			6 or 7:command argument*/
++	u32 dma_urgent:1; /*[4] 0:not urgent, 1:urgent*/
++	u32 wr_burst:5; /*[9:5] Number in one Write request burst(0:1,1:2...)*/
++	u32 rd_burst:5; /*[14:10] Number in one Read request burst(0:1, 1:2...)*/
++	u32 rxfifo_th:7; /*[21:15] RxFIFO threshold, >=rxth, will request write*/
++	u32 txfifo_th:7; /*[28:22] TxFIFO threshold, <=txth, will request read*/
++	u32 rxfifo_manual_flush:2; /*[30:29] [30]self-clear-flush,
++			[29] mode: 0:hw, 1:sw*/
++	u32 txfifo_fill:1; /*[31] self-clear-fill, recommand to write before sd send*/
++};
++
++struct sdhc_misc{
++	u32 reserved:4; /*[3:0] reserved*/
++	u32 wcrc_err_patt:3; /*[6:4] WCRC Error Pattern*/
++	u32 wcrc_ok_patt:3; /*[9:7] WCRC OK Pattern*/
++	u32 reserved1:6; /*[15:10] reserved*/
++	u32 burst_num:6; /*[21:16] Burst Number*/
++	u32 thread_id:6; /*[27:22] Thread ID*/
++	u32 manual_stop:1; /*[28] 0:auto stop mode, 1:manual stop mode*/
++	u32 reserved2:3; /*[31:29] reserved*/
++};
++
++struct sdhc_ictl{
++	u32 resp_ok:1; /*[0] Response is received OK*/
++	u32 resp_timeout:1; /*[1] Response Timeout Error*/
++	u32 resp_err_crc:1; /*[2] Response CRC Error*/
++	u32 resp_ok_noclear:1; /*[3] Response is received OK(always no self reset)*/
++	u32 data_1pack_ok:1; /*[4] One Package Data Completed ok*/
++	u32 data_timeout:1; /*[5] One Package Data Failed (Timeout Error)*/
++	u32 data_err_crc:1; /*[6] One Package Data Failed (CRC Error)*/
++	u32 data_xfer_ok:1; /*[7] Data Transfer Completed ok*/
++	u32 rx_higher:1; /*[8] RxFIFO count > threshold*/
++	u32 tx_lower:1; /*[9] TxFIFO count < threshold*/
++	u32 dat1_irq:1; /*[10] SDIO DAT1 Interrupt*/
++	u32 dma_done:1; /*[11] DMA Done*/
++	u32 rxfifo_full:1; /*[12] RxFIFO Full*/
++	u32 txfifo_empty:1; /*[13] TxFIFO Empty*/
++	u32 addi_dat1_irq:1; /*[14] Additional SDIO DAT1 Interrupt*/
++	u32 reserved:1; /*[15] reserved*/
++	u32 dat1_irq_delay:2; /*[17:16] sdio dat1 interrupt mask windows clear
++			delay control,0:2cycle 1:1cycles*/
++	u32 reserved1:14; /*[31:18] reserved*/
++};
++
++/*Note1: W1C is write one clear.*/
++struct sdhc_ista{
++	u32 resp_ok:1; /*[0] Response is received OK (W1C)*/
++	u32 resp_timeout:1; /*[1] Response is received Failed (Timeout Error) (W1C)*/
++	u32 resp_err_crc:1; /*[2] Response is received Failed (CRC Error) (W1C)*/
++	u32 resp_ok_noclear:1; /*[3] Response is Received OK (always no self reset)*/
++	u32 data_1pack_ok:1; /*[4] One Package Data Completed ok (W1C)*/
++	u32 data_timeout:1; /*[5] One Package Data Failed (Timeout Error) (W1C)*/
++	u32 data_err_crc:1; /*[6] One Package Data Failed (CRC Error) (W1C)*/
++	u32 data_xfer_ok:1; /*[7] Data Transfer Completed ok (W1C)*/
++	u32 rx_higher:1; /*[8] RxFIFO count > threshold (W1C)*/
++	u32 tx_lower:1; /*[9] TxFIFO count < threshold (W1C)*/
++	u32 dat1_irq:1; /*[10] SDIO DAT1 Interrupt (W1C)*/
++	u32 dma_done:1; /*[11] DMA Done (W1C)*/
++	u32 rxfifo_full:1; /*[12] RxFIFO Full(W1C)*/
++	u32 txfifo_empty:1; /*[13] TxFIFO Empty(W1C)*/
++	u32 addi_dat1_irq:1; /*[14] Additional SDIO DAT1 Interrupt*/
++	u32 reserved:19; /*[31:13] reserved*/
++};
++
++/*
++* Note1: Soft reset for DPHY TX/RX needs programmer to set it
++* and then clear it manually.*/
++struct sdhc_srst{
++	u32 main_ctrl:1; /*[0] Soft reset for MAIN CTRL(self clear)*/
++	u32 rxfifo:1; /*[1] Soft reset for RX FIFO(self clear)*/
++	u32 txfifo:1; /*[2] Soft reset for TX FIFO(self clear)*/
++	u32 dphy_rx:1; /*[3] Soft reset for DPHY RX*/
++	u32 dphy_tx:1; /*[4] Soft reset for DPHY TX*/
++	u32 dma_if:1; /*[5] Soft reset for DMA IF(self clear)*/
++	u32 reserved:26; /*[31:6] reserved*/
++};
++
++struct sdhc_enhc{
++	u32 rx_timeout:8; /*[7:0] Data Rx Timeout Setting*/
++	u32 sdio_irq_period:8; /*[15:8] SDIO IRQ Period Setting
++			(IRQ checking window length)*/
++	u32 dma_rd_resp:1; /*[16] No Read DMA Response Check*/
++	u32 dma_wr_resp:1; /*[16] No Write DMA Response Check*/
++	u32 rxfifo_th:7; /*[24:18] RXFIFO Full Threshold,default 60*/
++	u32 txfifo_th:7; /*[31:25] TXFIFO Empty Threshold,default 0*/
++};
++
++struct sdhc_clk2{
++	u32 rx_clk_phase:12; /*[11:0] rx_clk phase diff(default 0:no diff,
++			1:one input clock cycle ...)*/
++	u32 sd_clk_phase:12; /*[23:12] sd_clk phase diff(default 0:half(180 degree),
++			1:half+one input clock cycle, 2:half+2 input clock cycles, ...)*/
++	u32 reserved:8; /*[31:24] reserved*/
++};
++
++#define SDHC_CLOCK_SRC_FCLK_DIV4        1
++#define SDHC_CLOCK_SRC_FCLK_DIV3        2
++#define SDHC_CLOCK_SRC_FCLK_DIV5        3
++#define SDHC_ISTA_W1C_ALL               0x7fff
++#define SDHC_SRST_ALL                   0x3f
++#define SDHC_ICTL_ALL	                    0x7fff
++
++#define STAT_POLL_TIMEOUT				0xfffff
++
++#define MMC_RSP_136_NUM					4
++#define MMC_MAX_DEVICE					3
++#define MMC_TIMEOUT						5000
++
++//#define printk(a...)
++#define DBG_LINE_INFO()  printk(KERN_WARNING "[%s] : %s\n",__func__,__FILE__);
++//#define DBG_LINE_INFO()
++// #define dev_err(a,s) printk(KERN_INFO s);
++
++
++#define AML_MMC_DISABLED_TIMEOUT	100
++#define AML_MMC_SLEEP_TIMEOUT		1000
++#define AML_MMC_OFF_TIMEOUT 8000
++
++#define SDHC_BOUNCE_REQ_SIZE		(512*1024)
++#define SDIO_BOUNCE_REQ_SIZE		(128*1024)
++#define MMC_TIMEOUT_MS		20
++
++#define MESON_SDIO_PORT_A 0
++#define MESON_SDIO_PORT_B 1
++#define MESON_SDIO_PORT_C 2
++#define MESON_SDIO_PORT_XC_A 3
++#define MESON_SDIO_PORT_XC_B 4
++#define MESON_SDIO_PORT_XC_C 5
++
++void aml_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq);
++int aml_sdhc_get_cd(struct mmc_host *mmc);
++extern void amlsd_init_debugfs(struct mmc_host *host);
++
++extern struct mmc_host *sdio_host;
++
++#define     SPI_BOOT_FLAG                   0
++#define     NAND_BOOT_FLAG                  1
++#define     EMMC_BOOT_FLAG                  2
++#define     CARD_BOOT_FLAG                  3
++#define     SPI_NAND_FLAG                   4
++#define     SPI_EMMC_FLAG                   5
++
++#define R_BOOT_DEVICE_FLAG  READ_CBUS_REG(ASSIST_POR_CONFIG)
++
++#if defined (CONFIG_ARCH_MESON8) || defined (CONFIG_ARCH_MESON6TVD)
++#define POR_BOOT_VALUE ((((R_BOOT_DEVICE_FLAG>>9)&1)<<2)|((R_BOOT_DEVICE_FLAG>>6)&3)) // {poc[9],poc[7:6]}
++#else
++#define POR_BOOT_VALUE (R_BOOT_DEVICE_FLAG & 7)
++#endif
++
++#define POR_NAND_BOOT() ((POR_BOOT_VALUE == 7) || (POR_BOOT_VALUE == 6))
++#define POR_SPI_BOOT() ((POR_BOOT_VALUE == 5) || (POR_BOOT_VALUE == 4))
++#define POR_EMMC_BOOT() (POR_BOOT_VALUE == 3)
++#define POR_CARD_BOOT() (POR_BOOT_VALUE == 0)
++
++#define print_tmp(fmt, args...) do{\
++		printk("[%s] " fmt, __FUNCTION__, ##args);	\
++}while(0)
++
++// P_AO_SECURE_REG1 is "Secure Register 1" in <M8-Secure-AHB-Registers.doc>
++#define aml_jtag_gpioao() do{\
++    writel(0x102, (u32 *)P_AO_SECURE_REG1); \
++}while(0)
++
++#define aml_jtag_sd() do{\
++    writel(0x220, (u32 *)P_AO_SECURE_REG1); \
++}while(0)
++
++#define aml_uart_pinctrl() do {\
++    \
++}while(0)
++
++#endif
++
+diff --git a/arch/arm/mach-meson6tv/include/mach/usb.h b/arch/arm/mach-meson6tv/include/mach/usb.h
+new file mode 100755
+index 000000000000..6c5cf5d8dfcf
+--- /dev/null
++++ b/arch/arm/mach-meson6tv/include/mach/usb.h
+@@ -0,0 +1,27 @@
++/*
++ *	arch/arm/mach-meson6/include/mach/usb.h
++ *
++ *  Copyright (C) 2013 AMLOGIC, INC.
++ *
++ * License terms: GNU General Public License (GPL) version 2
++ * Basic register address definitions in physical memory and
++ * some block defintions for core devices like the timer.
++ * copy from linux kernel
++ */
++
++#ifndef __MACH_MESSON_USB_REGS_H
++#define __MACH_MESSON_USB_REGS_H
++
++#include <mach/am_regs.h>
++
++#define MESON_USB_PORT_NUM 3
++
++#define MESON_USB_NAMES "usb0","usb1","usb2"
++#define MESON_USB_FIFOS 1024,1024,1024
++#define MESON_USB_CTRL_ADDRS      ((void *)IO_USB_A_BASE),((void *)IO_USB_B_BASE),((void *)IO_USB_C_BASE)
++#define MESON_USB_CTRL_SIZES		SZ_256K,SZ_256K,SZ_256K
++#define MESON_USB_PHY_ADDRS      ((void *)P_USB_ADDR0),((void *)P_USB_ADDR8),((void *)P_USB_ADDR16)
++#define MESON_USB_PHY_SIZES			8,8,8
++#define MESON_USB_IRQS		INT_USB_A, INT_USB_B, INT_USB_C
++
++#endif
+diff --git a/arch/arm/mach-meson6tv/include/mach/usbclock.h b/arch/arm/mach-meson6tv/include/mach/usbclock.h
+new file mode 100755
+index 000000000000..803a74a9250d
+--- /dev/null
++++ b/arch/arm/mach-meson6tv/include/mach/usbclock.h
+@@ -0,0 +1,211 @@
++#ifndef __USB_CLK_HEADER_
++#define __USB_CLK_HEADER_
++
++#include <plat/lm.h>
++#include <mach/clock.h>
++typedef struct usb_peri_reg {
++	volatile uint32_t config;
++	volatile uint32_t ctrl;
++	volatile uint32_t endp_intr;
++	volatile uint32_t adp_bc;
++	volatile uint32_t dbg_uart;
++	volatile uint32_t test;
++	volatile uint32_t tune;
++	volatile uint32_t reserved;
++} usb_peri_reg_t;
++
++typedef union usb_config_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++        unsigned clk_en:1;
++        unsigned clk_sel:3;
++        unsigned clk_div:7;
++        unsigned reserved:20;
++        unsigned test_trig:1;
++    } b;
++} usb_config_data_t;
++
++typedef union usb_ctrl_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++        unsigned soft_prst:1;
++        unsigned soft_hreset:1;
++        unsigned ss_scaledown_mode:2;
++        unsigned clk_det_rst:1;
++        unsigned intr_sel:1;
++        unsigned reserved:2;
++        unsigned clk_detected:1;
++        unsigned sof_sent_rcvd_tgl:1;
++        unsigned sof_toggle_out:1;
++        unsigned not_used:4;
++        unsigned por:1;
++        unsigned sleepm:1;
++        unsigned txbitstuffennh:1;
++        unsigned txbitstuffenn:1;
++        unsigned commononn:1;
++        unsigned refclksel:2;
++        unsigned fsel:3;
++        unsigned portreset:1;
++        unsigned thread_id:6;
++    } b;
++} usb_ctrl_data_t;
++
++typedef union usb_endp_intr_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++        unsigned int0:1;
++        unsigned int1:1;
++        unsigned int2:1;
++        unsigned int3:1;
++        unsigned int4:1;
++        unsigned int5:1;
++        unsigned int6:1;
++        unsigned int7:1;
++        unsigned int8:1;
++        unsigned int9:1;
++        unsigned int10:1;
++        unsigned int11:1;
++        unsigned int12:1;
++        unsigned int13:1;
++        unsigned int14:1;
++        unsigned int15:1;
++        unsigned int16:1;
++        unsigned int17:1;
++        unsigned int18:1;
++        unsigned int19:1;
++        unsigned int20:1;
++        unsigned int21:1;
++        unsigned int22:1;
++        unsigned int23:1;
++        unsigned int24:1;
++        unsigned int25:1;
++        unsigned int26:1;
++        unsigned int27:1;
++        unsigned int28:1;
++        unsigned int29:1;
++        unsigned int30:1;
++        unsigned int31:1;
++    } b;
++} usb_endp_intr_data_t;
++
++typedef union usb_adp_bc_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++	unsigned vbusvldextsel:1;
++	unsigned vbusvldext:1;
++	unsigned otgdisable:1;
++	unsigned idpullup:1;
++	unsigned drvvbus:1;
++	unsigned adp_prb_en:1;
++	unsigned adp_dischrg:1;
++	unsigned adp_chrg:1;
++	unsigned sessend:1;
++	unsigned device_sess_vld:1;
++	unsigned bvalid:1;
++	unsigned avalid:1;
++	unsigned iddig:1;
++	unsigned vbusvalid:1;
++	unsigned adp_probe:1;
++	unsigned adp_sense:1;
++	unsigned aca_enable:1;
++	unsigned dcd_enable:1;
++	unsigned vdatdetenb:1;
++	unsigned vdatsrcenb:1;
++	unsigned chrgsel:1;
++	unsigned chg_det:1;
++	unsigned aca_pin_range_c:1;
++	unsigned aca_pin_range_b:1;
++	unsigned aca_pin_range_a:1;
++	unsigned aca_pin_gnd:1;
++	unsigned aca_pin_float:1;
++	unsigned not_used:5;
++    } b;
++} usb_adp_bc_data_t;
++
++typedef union usb_dbg_uart_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++	unsigned bypass_sel:1;
++	unsigned bypass_dm_en:1;
++	unsigned bypass_dp_en:1;
++	unsigned bypass_dm_data:1;
++	unsigned bypass_dp_data:1;
++	unsigned fsv_minus:1;
++	unsigned fsv_plus:1;
++	unsigned burn_in_test:1;
++	unsigned loopbackenb:1;
++	unsigned set_iddq:1;
++	unsigned ate_reset:1;
++	unsigned reserved:4;
++	unsigned not_used:17;
++    } b;
++} usb_dbg_uart_data_t;
++
++typedef union phy_test_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++	unsigned data_in:4;
++	unsigned data_in_en:4;
++	unsigned addr:4;
++	unsigned data_out_sel:1;
++	unsigned clk:1;
++	unsigned vatestenb:2;
++	unsigned data_out:4;
++	unsigned not_used:12;
++    } b;
++} phy_test_data_t;
++
++typedef union phy_tune_data {
++    /** raw register data */
++    uint32_t d32;
++    /** register bits */
++    struct {
++	unsigned tx_res_tune:2;
++	unsigned tx_hsxv_tune:2;
++	unsigned tx_vref_tune:4;
++	unsigned tx_rise_tune:2;
++	unsigned tx_preemp_pulse_tune:1;
++	unsigned tx_preemp_amp_tune:2;
++	unsigned tx_fsls_tune:4;
++	unsigned sqrx_tune:3;
++	unsigned otg_tune:3;
++	unsigned comp_dis_tune:3;
++	unsigned not_used:6;
++    } b;
++} phy_tune_data_t;
++
++
++/*
++ * Clock source index must sync with chip's spec
++ * M1/M2/M3/M6 are different!
++ * This is only for M6
++ */
++#define USB_PHY_CLK_SEL_XTAL	0
++#define USB_PHY_CLK_SEL_XTAL_DIV_2	1
++#define USB_PHY_CLK_SEL_DDR_PLL	2
++#define USB_PHY_CLK_SEL_MPLL_0	3
++#define USB_PHY_CLK_SEL_MPLL_1	4
++#define USB_PHY_CLK_SEL_MPLL_2	5
++#define USB_PHY_CLK_SEL_FCLK_DIV_2	6
++#define USB_PHY_CLK_SEL_FCLK_DIV_3	7
++
++#define USB_BC_MODE_DISCONNECT	0	/* Disconnected */
++#define USB_BC_MODE_SDP		1	/* PC */
++#define USB_BC_MODE_DCP		2	/* Charger */
++#define USB_BC_MODE_CDP		3	/* PC + Charger */
++
++int clk_enable_usb(struct clk *clk);
++int clk_disable_usb(struct clk *clk);
++#endif
+diff --git a/arch/arm/mach-meson6tv/usbclock.c b/arch/arm/mach-meson6tv/usbclock.c
+index 3f95066bd211..f3ecc58e0b74 100755
+--- a/arch/arm/mach-meson6tv/usbclock.c
++++ b/arch/arm/mach-meson6tv/usbclock.c
+@@ -11,6 +11,7 @@
+  * Platform machine definition.
+  */
+ #include <linux/kernel.h>
++#include <linux/module.h>
+ #include <linux/init.h>
+ #include <linux/mm.h>
+ #include <linux/sched.h>
+@@ -22,15 +23,14 @@
+ #include <asm/mach-types.h>
+ #include <asm/mach/arch.h>
+ #include <asm/delay.h>
+-#include <plat/platform.h>
+ #include <plat/lm.h>
+-#include <plat/regops.h>
+-#include <mach/hardware.h>
+ #include <mach/memory.h>
+ #include <mach/clock.h>
+ #include <mach/am_regs.h>
+ #include <mach/usbclock.h>
+-
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++#include <mach/mod_gate.h>
++#endif
+ /*
+  * M chip USB clock setting
+  */
+@@ -43,71 +43,126 @@
+ static const char * clock_src_name[] = {
+ 	"XTAL input",
+ 	"XTAL input divided by 2",
++	"DDR PLL",
++	"MPLL OUT0"
++	"MPLL OUT1",
++	"MPLL OUT2",
+ 	"FCLK / 2",
+-	"FCLK / 5"
++	"FCLK / 3"
+ };
+-
+-int set_usb_phy_clk(struct lm_device * plmdev,int is_enable)
++static int init_count;
++int clk_enable_usb(struct clk *clk)
+ {
+ 	int port_idx;
+-	usb_peri_reg_t * peri;
++	char * clk_name;
++	usb_peri_reg_t * peri_a,* peri_b,* peri_c,*peri;
+ 	usb_config_data_t config;
+ 	usb_ctrl_data_t control;
+ 	int clk_sel,clk_div,clk_src;
+ 	int time_dly = 500; //usec
+ 
+-	if(!plmdev)
++	if(!clk)
+ 		return -1;
+ 
+-	port_idx = plmdev->param.usb.port_idx;
+-	if(port_idx < 0 || port_idx > 3)
+-		return -1;
++	if(!init_count)
++	{
++		init_count++;
++		aml_set_reg32_bits(P_RESET1_REGISTER, 1, 2, 1);
++		//for(i = 0; i < 1000; i++)
++		//	udelay(time_dly);
++	}
+ 
+-	peri = (usb_peri_reg_t *)plmdev->param.usb.phy_tune_reg;
+-
+-	printk(KERN_NOTICE"USB (%d) peri reg base: %x\n",port_idx,(uint32_t)peri);
+-	if(is_enable){
+-
+-		clk_sel = plmdev->clock.sel;
+-		clk_div = plmdev->clock.div;
+-		clk_src = plmdev->clock.src;
+-
+-		config.d32 = peri->config;
+-		config.b.clk_sel = clk_sel;
+-		config.b.clk_div = clk_div;
+-		config.b.clk_en = 1;
+-		peri->config = config.d32;
+-
+-		printk(KERN_NOTICE"USB (%d) use clock source: %s\n",port_idx,clock_src_name[clk_sel]);
+-
+-		control.d32 = peri->ctrl;
+-		control.b.fsel = 2;	/* PHY default is 24M (5), change to 12M (2) */
+-		control.b.por = 1;
+-		peri->ctrl = control.d32;
+-		udelay(time_dly);
+-		control.b.por = 0;
+-		peri->ctrl = control.d32;
+-		udelay(time_dly);
+-
+-		/* read back clock detected flag*/
+-		control.d32 = peri->ctrl;
+-		if(!control.b.clk_detected){
+-			printk(KERN_ERR"USB (%d) PHY Clock not detected!\n",port_idx);
+-			return -1;
+-		}
++	clk_name = (char*)clk->priv;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name(clk_name, 1);
++#endif
++	peri_a = (usb_peri_reg_t *)P_USB_ADDR0;
++	peri_b = (usb_peri_reg_t *)P_USB_ADDR8;
++	peri_c = (usb_peri_reg_t *)P_USB_ADDR16;
++
++	if(!strcmp(clk_name,"usb0")){
++		peri = peri_a;
++		port_idx = USB_PORT_IDX_A;
++	}else if(!strcmp(clk_name,"usb1")){
++		peri = peri_b;
++		port_idx = USB_PORT_IDX_B;
++	}else if(!strcmp(clk_name,"usb2")){
++		peri = peri_c;
++		port_idx = USB_PORT_IDX_C;
+ 	}else{
++		printk(KERN_ERR "bad usb clk name: %s\n",clk_name);
++		return -1;
++	}
++
++
++	clk_sel = USB_PHY_CLK_SEL_XTAL;
++	clk_div = 1;
++	clk_src = 24000000;
++
++	config.d32 = peri->config;
++	config.b.clk_sel = clk_sel;
++	config.b.clk_div = clk_div;
++	config.b.clk_en = 1;
++	peri->config = config.d32;
++
++
++	printk(KERN_NOTICE"USB (%d) use clock source: %s\n",port_idx,clock_src_name[clk_sel]);
++
++	control.d32 = peri->ctrl;
++	control.b.fsel = 2;	/* PHY default is 24M (5), change to 12M (2) */
++	control.b.por = 1;
++	peri->ctrl = control.d32;
++	udelay(time_dly);
++	control.b.por = 0;
++	peri->ctrl = control.d32;
++	udelay(time_dly);
++
+ 
+-		config.d32 = peri->config;
+-		config.b.clk_en = 0;
+-		peri->config = config.d32;
+-		control.d32 = peri->ctrl;
+-		control.b.por = 1;
+-		peri->ctrl = control.d32;
++	/* read back clock detected flag*/
++	control.d32 = peri->ctrl;
++	if(!control.b.clk_detected){
++		printk(KERN_ERR"USB (%d) PHY Clock not detected!\n",0);
+ 	}
+-	dmb();
+ 
++
++	dmb();
+ 	return 0;
+ }
++EXPORT_SYMBOL(clk_enable_usb);
++
++int clk_disable_usb(struct clk *clk)
++{
++	char * clk_name;
++	usb_peri_reg_t * peri_a,* peri_b,* peri_c,*peri;
++
++	if(!clk)
++		return -1;
+ 
+-EXPORT_SYMBOL(set_usb_phy_clk);
++	clk_name = (char*)clk->priv;
++	peri_a = (usb_peri_reg_t *)P_USB_ADDR0;
++	peri_b = (usb_peri_reg_t *)P_USB_ADDR8;
++
++	if(!strcmp(clk_name,"usb0"))
++		peri = peri_a;
++	else if(!strcmp(clk_name,"usb1"))
++		peri = peri_b;
++	else if(!strcmp(clk_name,"usb2"))
++		peri = peri_c;
++	else{
++		printk(KERN_ERR "bad usb clk name: %s\n",clk_name);
++		return -1;
++	}
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name(clk_name, 0);
++#endif
++	//if(init_count){
++	//	init_count--;
++		//uart.d32 = peri->dbg_uart;
++		//uart.b.set_iddq = 1;
++		//peri->dbg_uart = uart.d32;
++	//}
++	dmb();
++	return 0;
++}
++EXPORT_SYMBOL(clk_disable_usb);
+ 
+diff --git a/drivers/amlogic/amvecm/amvecm.c b/drivers/amlogic/amvecm/amvecm.c
+index a0fe70a443b1..fdebe1206ad8 100755
+--- a/drivers/amlogic/amvecm/amvecm.c
++++ b/drivers/amlogic/amvecm/amvecm.c
+@@ -88,6 +88,7 @@ static void cm2_frame_switch_patch(void)
+     WRITE_CBUS_REG(VPP_CHROMA_ADDR_PORT, 0x20f);
+     WRITE_CBUS_REG(VPP_CHROMA_DATA_PORT, cm2_patch_flag);
+ }
++#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)
+ static void ve_frame_size_patch(unsigned int width,unsigned int height)
+ {
+     unsigned int vpp_size = height|(width << 16);
+@@ -96,6 +97,7 @@ static void ve_frame_size_patch(unsigned int width,unsigned int height)
+ 	ve_size = vpp_size;
+     }
+ }
++#endif
+ static void cm2_frame_size_patch(unsigned int width,unsigned int height)
+ {
+     unsigned int vpp_size;
+@@ -186,7 +188,9 @@ void amvecm_video_latch(void)
+     vs = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_V_START_END,16,12);
+     ve = READ_CBUS_REG_BITS(VPP_POSTBLEND_VD1_V_START_END,0,12);
+     cm2_frame_size_patch(he-hs+1,ve-vs+1);
++#if (MESON_CPU_TYPE==MESON_CPU_TYPE_MESON6TVD)
+     ve_frame_size_patch(he-hs+1,ve-vs+1);
++#endif
+     if (vecm_latch_flag & FLAG_VE_DNLP)
+     {
+         vecm_latch_flag &= ~FLAG_VE_DNLP;
+-- 
+2.19.0
+

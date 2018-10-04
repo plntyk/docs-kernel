@@ -1,0 +1,86 @@
+From a44b6cd0a74f4d68c2e45929aa985b75410a3bc7 Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Fri, 10 Jan 2014 13:40:35 +0800
+Subject: [PATCH 2955/5965] pd #84663: hdmitx: clk: disable hpll when viid pll
+ is using
+
+---
+ arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c   |  5 ++++-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c         | 15 ++++++++-------
+ include/linux/amlogic/hdmi_tx/hdmi_tx_module.h |  1 +
+ 3 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
+index 1e27addfcedb..076ef0d628b4 100644
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_hw.c
+@@ -1638,7 +1638,7 @@ static void hdmi_audio_init(unsigned char spdif_flag)
+     unsigned char tx_i2s_spdif;
+     unsigned char tx_i2s_8_channel;
+     
+-    hdmi_print(IMP, AUD "%s", spdif_flag ? "SPDIF" : "I2S");
++    hdmi_print(IMP, AUD "%s\n", spdif_flag ? "SPDIF" : "I2S");
+     
+     if(spdif_flag){
+         tx_i2s_spdif=0;
+@@ -2939,6 +2939,9 @@ static int hdmitx_cntl_misc(hdmitx_dev_t* hdmitx_device, unsigned cmd, unsigned
+             hdmi_phy_suspend();
+         }
+         break;
++    case MISC_VIID_IS_USING:
++        return !!(aml_read_reg32(P_HHI_VID2_PLL_CNTL) & (1 << 30));     // bit30: enable
++        break;
+     default:
+         hdmi_print(ERR, "misc: " "hdmitx: unknown cmd: 0x%x\n", cmd);
+     }
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index dc1ba92e48b1..23dc3cc739e6 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -1099,14 +1099,15 @@ static int hdmi_task_handle(void *data)
+             if(hdmi_hdcp_status == 1){
+                 hdmi_hdcp_reset = 1;
+             }
+-            hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_HPLL_OP, HPLL_DISABLE);
+             hdmitx_device->HWOp.CntlConfig(hdmitx_device, CONF_CLR_AVI_PACKET, 0);
+             hdmitx_device->HWOp.CntlConfig(hdmitx_device, CONF_CLR_VSDB_PACKET, 0);
+-            if(hdmitx_device->HWOp.Cntl){
+-                hdmitx_device->HWOp.CntlDDC(hdmitx_device, DDC_HDCP_OP, HDCP_OFF);
+-                hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_TMDS_PHY_OP, TMDS_PHY_DISABLE);
+-                hdmitx_device->HWOp.Cntl(hdmitx_device, HDMITX_IP_SW_RST, TX_SYS_SW_RST);
++            // if VIID PLL is using, then disable HPLL
++            if(hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_VIID_IS_USING, 0)) {
++                hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_HPLL_OP, HPLL_DISABLE);
+             }
++            hdmitx_device->HWOp.CntlDDC(hdmitx_device, DDC_HDCP_OP, HDCP_OFF);
++            hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_TMDS_PHY_OP, TMDS_PHY_DISABLE);
++            hdmitx_device->HWOp.Cntl(hdmitx_device, HDMITX_IP_SW_RST, TX_SYS_SW_RST);
+             hdmitx_edid_clear(hdmitx_device);
+             //When unplug hdmi, clear the hdmitx module edid ram and edid buffer.
+             hdmitx_edid_ram_buffer_clear(hdmitx_device);
+@@ -1677,8 +1678,8 @@ static void __exit amhdmitx_exit(void)
+     return ;
+ }
+ 
+-//module_init(amhdmitx_init);
+-arch_initcall(amhdmitx_init);
++module_init(amhdmitx_init);
++//arch_initcall(amhdmitx_init);
+ module_exit(amhdmitx_exit);
+ 
+ MODULE_DESCRIPTION("AMLOGIC HDMI TX driver");
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+index 7474dd34591f..39a9c3bdbfc2 100644
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+@@ -174,6 +174,7 @@ typedef struct hdmi_tx_dev_s {
+ #define MISC_TMDS_PHY_OP        (CMD_MISC_OFFSET + 0x04)
+     #define TMDS_PHY_ENABLE     0x1
+     #define TMDS_PHY_DISABLE    0x2
++#define MISC_VIID_IS_USING      (CMD_MISC_OFFSET + 0x05)
+ 
+ /***********************************************************************
+  *                          Get State //GetState
+-- 
+2.19.0
+

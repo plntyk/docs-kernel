@@ -1,0 +1,75 @@
+From d78a28b9ba68fd31866cfeeb20f246a0f945c609 Mon Sep 17 00:00:00 2001
+From: Hui Zhang <hui.zhang@amlogic.com>
+Date: Mon, 21 Sep 2015 14:32:09 +0800
+Subject: [PATCH 5849/5965] PD#108209: h264: add a no-vpts-flag for no vpts
+ stream from HW demux
+
+Change-Id: I2e118ae715dd17fc31f87156ad9f5b42609fce33
+---
+ drivers/amlogic/amports/vh264.c        | 11 ++++++++---
+ drivers/amlogic/amports/video.c        |  6 ++++++
+ include/linux/amlogic/amports/vframe.h |  2 +-
+ 3 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 1be9524d00a6..8e111a238ec6 100644
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -1119,8 +1119,13 @@ static void vh264_isr(void)
+             default:
+                 break;
+             }
+-
+-            // add 64bit pts us ;
++        // some ts streams without vpts from HW demux, do a check here
++        if ((sync_outside == 0) && (!first_pts_checkin_complete(PTS_TYPE_VIDEO)))
++        {
++                pts_valid = 0;
++               if (first_pts_checkin_complete(PTS_TYPE_AUDIO))
++                         vf->flag |= VFRAME_FLAG_NO_PTS;
++        } else {
+             if (unlikely((b_offset == first_offset) && (first_pts_cached))) {
+                 pts = first_pts;
+                 pts_us64 = first_pts64;
+@@ -1319,7 +1324,7 @@ static void vh264_isr(void)
+             if ((fixed_frame_rate_mode == FIX_FRAME_RATE_SMOOTH_CHECKING) && (sync_outside == 0) && pts_valid_save) {
+                 pts = pts_lookup_save;
+             }
+-
++            }
+             if (pic_struct_present) {
+                 if ((pic_struct == PIC_TOP_BOT) || (pic_struct == PIC_BOT_TOP)) {
+                     prog_frame = 0;
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index fed04e976cd1..73559f1e5a6c 100644
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -3171,6 +3171,12 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         vf = video_vf_peek();
+ 
+         if (vf) {
++             if ( vf->flag & VFRAME_FLAG_NO_PTS )
++                {
++                        if (!timestamp_apts_started())
++                          return IRQ_HANDLED;
++                        timestamp_vpts_set(timestamp_firstapts_get());
++                }
+             tsync_avevent_locked(VIDEO_START,
+                           (vf->pts) ? vf->pts : timestamp_vpts_get());
+ 
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+index cc963a1b1065..e56a908935d1 100644
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -60,7 +60,7 @@
+ 
+ #define VFRAME_FLAG_NO_DISCONTINUE      1
+ #define VFRAME_FLAG_SWITCHING_FENSE     2
+-
++#define VFRAME_FLAG_NO_PTS              4
+ typedef enum pixel_aspect_ratio_e {
+         PIXEL_ASPECT_RATIO_1_1,
+         PIXEL_ASPECT_RATIO_8_9,
+-- 
+2.19.0
+

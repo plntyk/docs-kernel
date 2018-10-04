@@ -1,0 +1,318 @@
+From 4e52bf8a3c7c5f1a951d69029500eb3010bf14bb Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Tue, 28 Oct 2014 13:54:02 +0800
+Subject: [PATCH 5018/5965] pd#99063:mm: optimize for 512M s805 platform
+
+Change-Id: Ibb788c82cd3e7c2fe6cd313852608cf5c2549c5f
+---
+ arch/arm/configs/meson8b_defconfig |  1 +
+ drivers/gpu/ion/ion_system_heap.c  |  5 +--
+ drivers/staging/zram/zram_drv.c    | 51 +++++++++++++++++++++++++++++-
+ include/linux/swap.h               |  1 +
+ mm/swap_state.c                    | 36 ++++++++++++++++-----
+ mm/swapfile.c                      |  2 +-
+ net/core/skbuff.c                  | 14 +++++---
+ net/wireless/core.c                |  8 ++---
+ 8 files changed, 98 insertions(+), 20 deletions(-)
+
+diff --git a/arch/arm/configs/meson8b_defconfig b/arch/arm/configs/meson8b_defconfig
+index a0616b675e84..69958732afcd 100755
+--- a/arch/arm/configs/meson8b_defconfig
++++ b/arch/arm/configs/meson8b_defconfig
+@@ -227,6 +227,7 @@ CONFIG_AML_RTL8211F=y
+ CONFIG_AM_WIFI=y
+ CONFIG_AM_WIFI_SD_MMC=y
+ CONFIG_AM_WIFI_USB=y
++CONFIG_DHD_USE_STATIC_BUF=y
+ CONFIG_SDIO_DHD_CDC_WIFI_40181_MODULE=m
+ CONFIG_RTL8188EU=m
+ CONFIG_RTL8189ES=m
+diff --git a/drivers/gpu/ion/ion_system_heap.c b/drivers/gpu/ion/ion_system_heap.c
+index 3aea57c5f46d..03eeb2c94a3c 100644
+--- a/drivers/gpu/ion/ion_system_heap.c
++++ b/drivers/gpu/ion/ion_system_heap.c
+@@ -36,6 +36,7 @@ static unsigned int low_order_gfp_flags  = (GFP_HIGHUSER | __GFP_ZERO |
+ 					 __GFP_NOWARN);
+ static const unsigned int orders[] = {8, 4, 3, 2, 1, 0};
+ static const int num_orders = ARRAY_SIZE(orders);
++extern unsigned long totalram_pages;
+ static int order_to_index(unsigned int order)
+ {
+ 	int i;
+@@ -76,7 +77,7 @@ static struct page *alloc_buffer_page(struct ion_system_heap *heap,
+ 	} else {
+ 		gfp_t gfp_flags = low_order_gfp_flags;
+ 
+-		if (order > 2)
++		if (((totalram_pages < 0x20000) && (order > 0)) || (order > 2))
+ 			gfp_flags = high_order_gfp_flags;
+ 		page = alloc_pages(gfp_flags, order);
+ 		if (!page)
+@@ -358,7 +359,7 @@ struct ion_heap *ion_system_heap_create(struct ion_platform_heap *unused)
+ 		struct ion_page_pool *pool;
+ 		gfp_t gfp_flags = low_order_gfp_flags;
+ 
+-		if (orders[i] > 2)
++		if (((totalram_pages < 0x20000) && (orders[i] > 0)) || orders[i] > 2)
+ 			gfp_flags = high_order_gfp_flags;
+ 		pool = ion_page_pool_create(gfp_flags, orders[i]);
+ 		if (!pool)
+diff --git a/drivers/staging/zram/zram_drv.c b/drivers/staging/zram/zram_drv.c
+index 284cf1ca1a9f..5baae0f94b6e 100644
+--- a/drivers/staging/zram/zram_drv.c
++++ b/drivers/staging/zram/zram_drv.c
+@@ -38,7 +38,8 @@
+ /* Globals */
+ static int zram_major;
+ struct zram *zram_devices;
+-
++void *compress_addr = NULL;
++void *user_addr = NULL;
+ /* Module params (documentation at end) */
+ static unsigned int num_devices = 1;
+ 
+@@ -593,7 +594,45 @@ static void zram_slot_free_notify(struct block_device *bdev,
+ 	zram_stat64_inc(zram, &zram->stats.notify_free);
+ }
+ 
++static int zram_ioctl(struct block_device *bdev, fmode_t f_mode,
++					  unsigned page_addr, unsigned long compress_len)
++{
++	int ret = 0;
++	size_t clen;
++	unsigned char *src = NULL, *uncmem = NULL, *user_mem = NULL;
++	unsigned long *compress_len_temp = (unsigned long *)compress_len;
++	void *compress_workmem = NULL;
++
++	switch(f_mode){
++		case 80:
++		if(!compress_addr){
++			*compress_len_temp = 0;
++			return -ENOMEM;
++		}
++
++		uncmem = kmap_atomic((struct page *)page_addr);
++		user_mem = user_addr;
++		memcpy(user_mem, uncmem, PAGE_SIZE);
++		src = user_mem + PAGE_SIZE;
++		compress_workmem = compress_addr;
++
++		ret = lzo1x_1_compress(user_mem, PAGE_SIZE, src, &clen,
++					   compress_workmem);
++
++		kunmap_atomic(uncmem);
++
++		*compress_len_temp = (unsigned long)clen;
++		break;
++
++		default:
++		break;
++	}
++
++	return ret;
++}
++
+ static const struct block_device_operations zram_devops = {
++	.ioctl = zram_ioctl,
+ 	.swap_slot_free_notify = zram_slot_free_notify,
+ 	.owner = THIS_MODULE
+ };
+@@ -694,6 +733,16 @@ static int __init zram_init(void)
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
++	compress_addr = kzalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
++	if(!compress_addr){
++		ret = -ENOMEM;
++		goto out;
++	}
++	user_addr = kzalloc(PAGE_SIZE << 1, GFP_KERNEL);
++	if(!user_addr){
++		ret = -ENOMEM;
++		goto out;
++	}
+ 
+ 	zram_major = register_blkdev(0, "zram");
+ 	if (zram_major <= 0) {
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index 08a0aed28795..f72c21a6f96b 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -392,6 +392,7 @@ extern int page_swapcount(struct page *);
+ extern struct swap_info_struct *page_swap_info(struct page *);
+ extern int reuse_swap_page(struct page *);
+ extern int try_to_free_swap(struct page *);
++extern struct swap_info_struct *swap_info_get(swp_entry_t entry);
+ struct backing_dev_info;
+ 
+ #ifdef CONFIG_MEMCG
+diff --git a/mm/swap_state.c b/mm/swap_state.c
+index f24ab0dff554..36953c4e8f78 100644
+--- a/mm/swap_state.c
++++ b/mm/swap_state.c
+@@ -117,10 +117,30 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
+ 	return error;
+ }
+ 
+-
++#define COMPRESS_PREV_USE 1
+ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
+ {
+ 	int error;
++#if COMPRESS_PREV_USE
++	unsigned long cmpr_len = 0;
++	struct block_device *bdev = NULL;
++	struct swap_info_struct *sis = NULL;
++	sis = swap_info_get(entry);
++	if (sis) {
++		if (sis->flags & SWP_BLKDEV) {
++			struct gendisk *disk = sis->bdev->bd_disk;
++			spin_unlock(&sis->lock);
++			if (disk && disk->fops->ioctl){
++				disk->fops->ioctl(bdev, 80, (unsigned)page,
++								 (unsigned long)&cmpr_len);
++				cmpr_len += cmpr_len >> 1;
++				if(cmpr_len > PAGE_SIZE){
++					return -EINVAL;
++				}
++			}
++		}
++	}
++#endif
+ 
+ 	error = radix_tree_preload(gfp_mask);
+ 	if (!error) {
+@@ -158,13 +178,14 @@ void __delete_from_swap_cache(struct page *page)
+  * @page: page we want to move to swap
+  *
+  * Allocate swap space for the page and add the page to the
+- * swap cache.  Caller needs to hold the page lock. 
++ * swap cache.  Caller needs to hold the page lock.
+  */
+ int add_to_swap(struct page *page, struct list_head *list)
+ {
+ 	swp_entry_t entry;
+ 	int err;
+ 
++
+ 	VM_BUG_ON(!PageLocked(page));
+ 	VM_BUG_ON(!PageUptodate(page));
+ 
+@@ -177,7 +198,6 @@ int add_to_swap(struct page *page, struct list_head *list)
+ 			swapcache_free(entry, NULL);
+ 			return 0;
+ 		}
+-
+ 	/*
+ 	 * Radix-tree node allocations from PF_MEMALLOC contexts could
+ 	 * completely exhaust the page allocator. __GFP_NOMEMALLOC
+@@ -227,9 +247,9 @@ void delete_from_swap_cache(struct page *page)
+ 	page_cache_release(page);
+ }
+ 
+-/* 
+- * If we are the only user, then try to free up the swap cache. 
+- * 
++/*
++ * If we are the only user, then try to free up the swap cache.
++ *
+  * Its ok to check for PageSwapCache without the page lock
+  * here because we are going to recheck again inside
+  * try_to_free_swap() _with_ the lock.
+@@ -243,7 +263,7 @@ static inline void free_swap_cache(struct page *page)
+ 	}
+ }
+ 
+-/* 
++/*
+  * Perform a free_page(), also freeing any swap cache associated with
+  * this page if it is the last user of the page.
+  */
+@@ -293,7 +313,7 @@ struct page * lookup_swap_cache(swp_entry_t entry)
+ 	return page;
+ }
+ 
+-/* 
++/*
+  * Locate a page of swap in physical memory, reserving swap cache space
+  * and reading the disk if it is not already cached.
+  * A failure return means that either the page allocation failed or that
+diff --git a/mm/swapfile.c b/mm/swapfile.c
+index 746af55b8455..3b8a5b3462f3 100644
+--- a/mm/swapfile.c
++++ b/mm/swapfile.c
+@@ -505,7 +505,7 @@ swp_entry_t get_swap_page_of_type(int type)
+ 	return (swp_entry_t) {0};
+ }
+ 
+-static struct swap_info_struct *swap_info_get(swp_entry_t entry)
++struct swap_info_struct *swap_info_get(swp_entry_t entry)
+ {
+ 	struct swap_info_struct *p;
+ 	unsigned long offset, type;
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 79143b7af7e5..8b7021d80925 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -344,14 +344,20 @@ static void *__netdev_alloc_frag(unsigned int fragsz, gfp_t gfp_mask)
+ {
+ 	struct netdev_alloc_cache *nc;
+ 	void *data = NULL;
+-	int order;
++	int order, tmp_order = NETDEV_FRAG_PAGE_MAX_ORDER;
++	unsigned int tmp_count = NETDEV_PAGECNT_MAX_BIAS;
+ 	unsigned long flags;
+ 
+ 	local_irq_save(flags);
+ 	nc = &__get_cpu_var(netdev_alloc_cache);
++
++	if(fragsz <= PAGE_SIZE){
++		tmp_order = 0;
++		tmp_count >>= 3;
++	}
+ 	if (unlikely(!nc->frag.page)) {
+ refill:
+-		for (order = NETDEV_FRAG_PAGE_MAX_ORDER; ;) {
++		for (order = tmp_order; ;) {
+ 			gfp_t gfp = gfp_mask;
+ 
+ 			if (order)
+@@ -364,8 +370,8 @@ refill:
+ 		}
+ 		nc->frag.size = PAGE_SIZE << order;
+ recycle:
+-		atomic_set(&nc->frag.page->_count, NETDEV_PAGECNT_MAX_BIAS);
+-		nc->pagecnt_bias = NETDEV_PAGECNT_MAX_BIAS;
++		atomic_set(&nc->frag.page->_count, tmp_count);
++		nc->pagecnt_bias = tmp_count;
+ 		nc->frag.offset = 0;
+ 	}
+ 
+diff --git a/net/wireless/core.c b/net/wireless/core.c
+index 389e96a21c1a..049012b4dc17 100755
+--- a/net/wireless/core.c
++++ b/net/wireless/core.c
+@@ -326,16 +326,16 @@ struct wiphy *wiphy_new(const struct cfg80211_ops *ops, int sizeof_priv)
+ 
+ 	alloc_size = sizeof(*rdev) + sizeof_priv;
+ 
+-	rdev = kzalloc(alloc_size, GFP_KERNEL);
+-	if (!rdev) {
+-		printk("kzalloc %d memory failed! try to use vzalloc\n", alloc_size);
++	//rdev = kzalloc(alloc_size, GFP_KERNEL);
++	//if (!rdev) {
++	//	printk("kzalloc %d memory failed! try to use vzalloc\n", alloc_size);
+ 		rdev = vzalloc(alloc_size);
+ 		if(!rdev) {
+ 			printk("vzalloc %d memory failed\n", alloc_size);
+ 		return NULL;
+ 		}
+ 		rdev->vmalloc_flag = 1;
+-	}
++	//}
+ 
+ 	rdev->ops = ops;
+ 
+-- 
+2.19.0
+

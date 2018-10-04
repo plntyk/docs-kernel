@@ -1,0 +1,301 @@
+From f007b79aef0081df387ce53c4d5d09bbb752f50a Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Thu, 19 Jun 2014 17:49:38 +0800
+Subject: [PATCH 4378/5965] pd#93386 changed some driver's ioctl memcpy for
+ copy_from_user for stable.
+
+---
+ drivers/amlogic/amports/amstream.c | 42 +++++++++++++++++++-----------
+ drivers/amlogic/amports/subtitle.c | 15 ++++++++---
+ drivers/amlogic/amports/video.c    | 36 ++++++++++++-------------
+ drivers/amlogic/ppmgr/ppmgr_drv.c  |  2 +-
+ 4 files changed, 57 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 624df2f3d37d..c981b110a327 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1320,7 +1320,8 @@ static long amstream_ioctl(struct file *file,
+     	
+     case AMSTREAM_IOC_VB_STATUS:
+         if (this->type & PORT_TYPE_VIDEO) {
+-            struct am_io_param *p = (void*)arg;
++            struct am_io_param para;
++            struct am_io_param *p = &para;
+ #if HAS_HEVC_VDEC
+             stream_buf_t *buf = (this->vformat == VFORMAT_HEVC) ? &bufs[BUF_TYPE_HEVC] : &bufs[BUF_TYPE_VIDEO];
+ #else
+@@ -1334,6 +1335,9 @@ static long amstream_ioctl(struct file *file,
+             p->status.data_len = stbuf_level(buf);
+             p->status.free_len = stbuf_space(buf);
+             p->status.read_pointer = stbuf_rp(buf);
++            if(copy_to_user((void *)arg,p,sizeof(para)))
++                r = -EFAULT;
++            return r;	
+         } else {
+             r = -EINVAL;
+         }
+@@ -1341,7 +1345,8 @@ static long amstream_ioctl(struct file *file,
+ 
+     case AMSTREAM_IOC_AB_STATUS:
+         if (this->type & PORT_TYPE_AUDIO) {
+-            struct am_io_param *p = (void*)arg;
++            struct am_io_param para;
++            struct am_io_param *p = &para;
+             stream_buf_t *buf = &bufs[BUF_TYPE_AUDIO];
+ 
+             if (p == NULL) {
+@@ -1352,6 +1357,9 @@ static long amstream_ioctl(struct file *file,
+             p->status.data_len = stbuf_level(buf);
+             p->status.free_len = stbuf_space(buf);
+             p->status.read_pointer = stbuf_rp(buf);
++            if(copy_to_user((void *)arg,p,sizeof(para)))
++               r = -EFAULT;
++            return r;	
+         } else {
+             r = -EINVAL;
+         }
+@@ -1417,7 +1425,8 @@ static long amstream_ioctl(struct file *file,
+         	r = -EINVAL;
+         } else{
+             u64 pts;
+-            memcpy(&pts,(void *)arg,sizeof(u64));
++            if(copy_from_user((void*)&pts,(void *)arg,sizeof(u64)))
++                return -EFAULT;
+ #if HAS_HEVC_VDEC
+             if (this->type & PORT_TYPE_HEVC) {
+                 r = es_vpts_checkin_us64(&bufs[BUF_TYPE_HEVC], pts);
+@@ -1439,8 +1448,8 @@ static long amstream_ioctl(struct file *file,
+             return -ENODEV;
+         } else {
+             struct vdec_status vstatus;
+-            struct am_io_param *p = (void*)arg;
+-
++            struct am_io_param para;
++            struct am_io_param *p = &para;
+             if (p == NULL) {
+                 return -EINVAL;
+             }
+@@ -1450,8 +1459,9 @@ static long amstream_ioctl(struct file *file,
+             p->vstatus.fps = vstatus.fps;
+             p->vstatus.error_count = vstatus.error_count;
+             p->vstatus.status = vstatus.status;
+-
+-            return 0;
++            if(copy_to_user((void*)arg,p,sizeof(para)))
++                r = -EFAULT;
++            return r;
+         }
+ 
+     case AMSTREAM_IOC_ADECSTAT:
+@@ -1462,7 +1472,8 @@ static long amstream_ioctl(struct file *file,
+             return -ENODEV;
+         } else {
+             struct adec_status astatus;
+-            struct am_io_param *p = (void*)arg;
++            struct am_io_param para;
++            struct am_io_param *p = &para;
+ 
+             if (p == NULL) {
+                 return -EINVAL;
+@@ -1473,8 +1484,9 @@ static long amstream_ioctl(struct file *file,
+             p->astatus.resolution = astatus.resolution;
+             p->astatus.error_count = astatus.error_count;
+             p->astatus.status = astatus.status;
+-
+-            return 0;
++            if(copy_to_user((void *)arg,p,sizeof(para)))
++                r = -EFAULT;
++            return r;
+         }
+ 
+     case AMSTREAM_IOC_PORT_INIT:
+@@ -1592,19 +1604,19 @@ static long amstream_ioctl(struct file *file,
+         timestamp_pcrscr_set(arg);
+         break;
+     case AMSTREAM_IOC_GET_LAST_CHECKIN_APTS:
+-        *((u32 *)arg) = get_last_checkin_pts(PTS_TYPE_AUDIO);
++        put_user(get_last_checkin_pts(PTS_TYPE_AUDIO),(int *)arg);
+         break;
+     case AMSTREAM_IOC_GET_LAST_CHECKIN_VPTS:
+-        *((u32 *)arg) = get_last_checkin_pts(PTS_TYPE_VIDEO);
++        put_user(get_last_checkin_pts(PTS_TYPE_VIDEO),(int *)arg);
+         break;
+     case AMSTREAM_IOC_GET_LAST_CHECKOUT_APTS:
+-        *((u32 *)arg) = get_last_checkout_pts(PTS_TYPE_AUDIO);
++        put_user(get_last_checkout_pts(PTS_TYPE_AUDIO),(int *)arg);
+         break;
+     case AMSTREAM_IOC_GET_LAST_CHECKOUT_VPTS:
+-        *((u32* )arg) = get_last_checkout_pts(PTS_TYPE_VIDEO);
++        put_user(get_last_checkout_pts(PTS_TYPE_VIDEO),(int *)arg);
+         break;
+     case AMSTREAM_IOC_SUB_NUM:
+-        *((u32 *)arg) = psparser_get_sub_found_num();
++        put_user(psparser_get_sub_found_num(),(int *)arg);
+         break;
+ 
+     case AMSTREAM_IOC_SUB_INFO:
+diff --git a/drivers/amlogic/amports/subtitle.c b/drivers/amlogic/amports/subtitle.c
+index 38e509baf347..a88d7d76fb43 100755
+--- a/drivers/amlogic/amports/subtitle.c
++++ b/drivers/amlogic/amports/subtitle.c
+@@ -9,6 +9,7 @@
+ #include <linux/fs.h>
+ #include <linux/interrupt.h>
+ #include <linux/amlogic/amports/amstream.h>
++#include <linux/uaccess.h>
+ 
+ #include <linux/amlogic/amlog.h>
+ MODULE_AMLOG(AMLOG_DEFAULT_LEVEL, 0, LOG_DEFAULT_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
+@@ -482,8 +483,10 @@ static long amsubtitle_ioctl(struct file *file,
+ {
+     switch (cmd) {
+     case AMSTREAM_IOC_GET_SUBTITLE_INFO: {
+-            subinfo_para_t *states = (void *)arg;
+-			
++            subinfo_para_t Vstates;
++            subinfo_para_t *states = &Vstates;
++            if(copy_from_user((void*)states,(void *)arg,sizeof(Vstates)))
++                return -EFAULT;
+             switch(states->subinfo_type) {
+             case SUB_ENABLE:
+                 states->subtitle_info = subtitle_enable;
+@@ -533,11 +536,16 @@ static long amsubtitle_ioctl(struct file *file,
+             default:
+ 		        break;
+             }
++            if(copy_to_user((void*)arg,(void *)states,sizeof(Vstates)))
++                return -EFAULT;
+         }
+ 
+ 		break;
+ 	case AMSTREAM_IOC_SET_SUBTITLE_INFO: {
+-            subinfo_para_t *states = (void *)arg;
++            subinfo_para_t Vstates;
++            subinfo_para_t *states = &Vstates;
++            if(copy_from_user((void*)states,(void *)arg,sizeof(Vstates)))
++                return -EFAULT;
+             switch(states->subinfo_type) {
+             case SUB_ENABLE:
+                 subtitle_enable = states->subtitle_info;
+@@ -595,6 +603,7 @@ static long amsubtitle_ioctl(struct file *file,
+             default:
+ 		        break;
+             }
++			
+         }
+ 
+         break;
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 4cc19a180a5e..ef39814da52f 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -1007,9 +1007,8 @@ static void zoom_get_vert_pos(vframe_t* vf,u32 vpp_3d_mode,u32 *ls,u32 *le,u32 *
+ #endif
+ static void zoom_display_horz(int hscale)
+ {
+-	u32 ls, le, rs, re, w;
++	u32 ls, le, rs, re;
+ #ifdef TV_3D_FUNCTION_OPEN
+-    	w = zoom_end_x_lines - zoom_start_x_lines + 1;
+     	if(process_3d_type&MODE_3D_ENABLE){
+         	zoom_get_horz_pos(cur_dispbuf,cur_frame_par->vpp_3d_mode,&ls,&le,&rs,&re);
+     	} else {
+@@ -3399,19 +3398,19 @@ static long amvideo_ioctl(struct file *file,
+         break;
+ 
+     case AMSTREAM_IOC_GET_SYNC_ADISCON:
+-        *((u32 *)arg) = tsync_get_sync_adiscont();
++        put_user(tsync_get_sync_adiscont(),(int *)arg);
+         break;
+ 
+ 	case AMSTREAM_IOC_GET_SYNC_VDISCON:
+-        *((u32 *)arg) = tsync_get_sync_vdiscont();
++        put_user(tsync_get_sync_vdiscont(),(int *)arg);
+         break;
+ 
+ 	case AMSTREAM_IOC_GET_SYNC_ADISCON_DIFF:
+-		*((u32 *)arg) = tsync_get_sync_adiscont_diff();
++        put_user(tsync_get_sync_adiscont(),(int *)arg);
+ 		break;
+ 
+ 	case AMSTREAM_IOC_GET_SYNC_VDISCON_DIFF:
+-		*((u32 *)arg) = tsync_get_sync_vdiscont_diff();
++        put_user(tsync_get_sync_vdiscont_diff(),(int *)arg);
+ 		break;
+ 
+ 	case AMSTREAM_IOC_SET_SYNC_ADISCON_DIFF:
+@@ -3424,21 +3423,19 @@ static long amvideo_ioctl(struct file *file,
+ 
+     case AMSTREAM_IOC_VF_STATUS: {
+             vframe_states_t vfsta;
+-            vframe_states_t *states = (void *)arg;
++            vframe_states_t states;
+             vf_get_states(&vfsta);
+-
+-            if (states == NULL)
+-                return -EINVAL;
+-
+-            states->vf_pool_size = vfsta.vf_pool_size;
+-            states->buf_avail_num = vfsta.buf_avail_num;
+-            states->buf_free_num = vfsta.buf_free_num;
+-            states->buf_recycle_num = vfsta.buf_recycle_num;
++            states.vf_pool_size = vfsta.vf_pool_size;
++            states.buf_avail_num = vfsta.buf_avail_num;
++            states.buf_free_num = vfsta.buf_free_num;
++            states.buf_recycle_num = vfsta.buf_recycle_num;
++            if(copy_to_user((void*)arg,&states,sizeof(states)))
++                ret = -EFAULT;
+         }
+         break;
+ 
+     case AMSTREAM_IOC_GET_VIDEO_DISABLE:
+-        *((u32 *)arg) = disable_video;
++        put_user(disable_video,(int *)arg);
+         break;
+ 
+     case AMSTREAM_IOC_SET_VIDEO_DISABLE:
+@@ -3446,7 +3443,7 @@ static long amvideo_ioctl(struct file *file,
+         break;
+ 
+     case AMSTREAM_IOC_GET_VIDEO_DISCONTINUE_REPORT:
+-        *((u32 *)arg) = enable_video_discontinue_report;
++		put_user(enable_video_discontinue_report,(int *)arg);
+         break;
+ 
+     case AMSTREAM_IOC_SET_VIDEO_DISCONTINUE_REPORT:
+@@ -3587,7 +3584,7 @@ static long amvideo_ioctl(struct file *file,
+         break;
+ 
+     case AMSTREAM_IOC_GET_FREERUN_MODE:
+-        *((u32 *)arg) = freerun_mode;
++        put_user(freerun_mode,(int *)arg);
+         break;
+     /****************************************************************
+     3d process ioctl
+@@ -3613,7 +3610,8 @@ static long amvideo_ioctl(struct file *file,
+     	}
+ 	case AMSTREAM_IOC_GET_3D_TYPE:
+ #ifdef TV_3D_FUNCTION_OPEN
+-        *((unsigned int *)arg) = process_3d_type;
++         put_user(process_3d_type,(int *)arg);
++
+ #endif
+         break;
+     case AMSTREAM_IOC_SET_VSYNC_UPINT:
+diff --git a/drivers/amlogic/ppmgr/ppmgr_drv.c b/drivers/amlogic/ppmgr/ppmgr_drv.c
+index 1a1f5b15b403..803fb4badafa 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_drv.c
++++ b/drivers/amlogic/ppmgr/ppmgr_drv.c
+@@ -1009,7 +1009,7 @@ static long ppmgr_ioctl(struct file *file,
+             break;
+ #endif
+         case PPMGR_IOC_GET_ANGLE:
+-            *((unsigned int *)argp) = ppmgr_device.angle;
++            put_user(ppmgr_device.angle,(unsigned int *)argp);
+             break;
+         case PPMGR_IOC_SET_ANGLE:
+             ret = _ppmgr_angle_write(args);
+-- 
+2.19.0
+

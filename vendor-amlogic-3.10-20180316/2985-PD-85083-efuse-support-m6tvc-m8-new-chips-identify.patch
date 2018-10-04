@@ -1,0 +1,504 @@
+From 05722100591931805edaa76a09d5a13043bad073 Mon Sep 17 00:00:00 2001
+From: "benlong.zhou" <benlong.zhou@amlogic.com>
+Date: Tue, 24 Dec 2013 15:17:04 +0800
+Subject: [PATCH 2985/5965] PD #85083: efuse: support m6tvc, m8 new chips
+ identify
+
+efuse: modified to identify method of chip
+  1   identify chip according value of register ASSIST_HW_REV
+  2   add m6tvd layout
+  3   this driver support m6,m6tv,m6tvlite(m6tvc),m6tvd,m8 and variant of the chips
+  4   add efuse version permit writing
+         EFUSE Support  --->
+             [*]   efuse write version permit
+---
+ drivers/amlogic/efuse/Kconfig         |   9 ++
+ drivers/amlogic/efuse/efuse_hw.c      | 139 ++++++++++++++++++++------
+ drivers/amlogic/efuse/efuse_regs.h    |  10 +-
+ drivers/amlogic/efuse/efuse_version.c |  80 ++++++++++++---
+ 4 files changed, 194 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/amlogic/efuse/Kconfig b/drivers/amlogic/efuse/Kconfig
+index cf318324af71..856ffd29d7ab 100755
+--- a/drivers/amlogic/efuse/Kconfig
++++ b/drivers/amlogic/efuse/Kconfig
+@@ -10,6 +10,15 @@ config EFUSE
+ 	help
+ 	    EFUSE device driver.
+ 
++config EFUSE_WRITE_VERSION_PERMIT
++	depends on EFUSE
++	bool "efuse write version permit"
++	default n
++	help
++		efuse version is prohibited writing in kernel default case, if it must be written, enable this config
++		if you don't understand efuse version, please don't enable this config
++
++
+ config EFUSE_LAYOUT_VERSION
+ 	depends on EFUSE
+ 	int "default efuse layout version"
+diff --git a/drivers/amlogic/efuse/efuse_hw.c b/drivers/amlogic/efuse/efuse_hw.c
+index 1bce5c02d0de..aaa0c4a7c9c1 100755
+--- a/drivers/amlogic/efuse/efuse_hw.c
++++ b/drivers/amlogic/efuse/efuse_hw.c
+@@ -293,38 +293,73 @@ static char *soc_chip[]={
+ 	{"efuse soc chip m3"},
+ 	{"efuse soc chip m6"},
+ 	{"efuse soc chip m6tv"},
++	{"efuse soc chip m6tvlite"},
+ 	{"efuse soc chip m8"},
+ 	{"efuse soc chip unknow"},
+ };
+ #endif
++
++#if 0
++struct efuse_chip_info_t{
++	unsigned int Id1;
++	unsigned int Id2;
++	efuse_socchip_type_e type;
++};
++static const struct efuse_chip_info_t efuse_chip_info[]={
++	{.Id1=0x000027ed, .Id2=0xe3a01000, .type=EFUSE_SOC_CHIP_M8},   //M8 second version
++	{.Id1=0x000025e2, .Id2=0xe3a01000, .type=EFUSE_SOC_CHIP_M8},   //M8 first version
++	{.Id1=0xe2000003, .Id2=0x00000bbb, .type=EFUSE_SOC_CHIP_M6}, //M6 Rev-B
++	{.Id1=0x00000d67, .Id2=0xe3a01000, .type=EFUSE_SOC_CHIP_M6}, //M6 Rev-D
++	{.Id1=0x00001435, .Id2=0xe3a01000, .type=EFUSE_SOC_CHIP_M6TV}, //M6TV
++	{.Id1=0x000005cb, .Id2=0xe3a01000, .type=EFUSE_SOC_CHIP_M6TVLITE}, //M6TVC,M6TVLITE(M6C)
++};
++#define EFUSE_CHIP_INFO_NUM		sizeof(efuse_chip_info)/sizeof(efuse_chip_info[0])
++#endif
++
++struct efuse_chip_identify_t{
++	unsigned int chiphw_mver;
++	unsigned int chiphw_subver;
++	unsigned int chiphw_thirdver;
++	efuse_socchip_type_e type;
++};
++static const struct efuse_chip_identify_t efuse_chip_hw_info[]={
++	{.chiphw_mver=26, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6TVD},      //M6TVD 
++	{.chiphw_mver=25, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M8},      //M8 
++	{.chiphw_mver=24, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6TVLITE},  //M6TVC,M6TVLITE(M6C)
++	{.chiphw_mver=23, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6TV},    //M6TV 
++	{.chiphw_mver=22, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M6},      //M6  
++	{.chiphw_mver=21, .chiphw_subver=0, .chiphw_thirdver=0, .type=EFUSE_SOC_CHIP_M3},
++};
++#define EFUSE_CHIP_HW_INFO_NUM  sizeof(efuse_chip_hw_info)/sizeof(efuse_chip_hw_info[0])
++
++
+ static efuse_socchip_type_e efuse_get_socchip_type(void)
+ {
+ 	efuse_socchip_type_e type;
+-	unsigned int __iomem *bootrom_base;
++	//unsigned int __iomem *bootrom_base;
+ 	//unsigned int *pID1 =(unsigned int *)0xd9040004;//phy address
+ 	//unsigned int *pID2 =(unsigned int *)0xd904002c;
+-	unsigned int __iomem *pID1,*pID2;
+-	bootrom_base = (void __iomem *)IO_BOOTROM_BASE;
+-	pID1 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x4);
+-	pID2 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x2c);
++	//unsigned int __iomem *pID1,*pID2;
++	//bootrom_base = (void __iomem *)IO_BOOTROM_BASE;
++	//pID1 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x4);
++	//pID2 = (unsigned int __iomem *)(IO_BOOTROM_BASE + 0x2c);
+ 	type = EFUSE_SOC_CHIP_UNKNOW;
+ 	if(cpu_is_before_m6()){
+ 		type = EFUSE_SOC_CHIP_M3;
+ 	}
+-	else if(0xe2000003 == *pID1 && 0x00000bbb == *pID2){
+-		//M6 Rev-B
+-		type = EFUSE_SOC_CHIP_M6;
+-	}
+-	else if(0x00000d67 == *pID1 && 0xe3a01000 == *pID2){
+-		//M6 Rev-D
+-		type = EFUSE_SOC_CHIP_M6;
+-	}
+-	else if(0x00001435 == *pID1 && 0x0e3a01000 == *pID2)
+-	{	//M6TV
+-		type = EFUSE_SOC_CHIP_M6TV;
+-	}
+-	else if(0x000025e2 == *pID1 && 0xe3a01000 == *pID2){
+-		type = EFUSE_SOC_CHIP_M8;
++	else{
++		unsigned int regval;
++		int i;
++		struct efuse_chip_identify_t *pinfo = (struct efuse_chip_identify_t*)&efuse_chip_hw_info[0];
++		regval = aml_read_reg32(P_ASSIST_HW_REV);
++		//printk("chip ASSIST_HW_REV reg:%d \n",regval);
++		for(i=0;i<EFUSE_CHIP_HW_INFO_NUM;i++){
++			if(pinfo->chiphw_mver == regval){
++				type = pinfo->type;
++				break;
++			}
++			pinfo++;
++		}
+ 	}
+ #ifdef SOC_CHIP_TYPE_TEST
+ 	printk("%s \n",soc_chip[type]);
+@@ -352,12 +387,18 @@ static int efuse_checkversion(char *buf)
+ 					}
+ 					break;
+ 				case EFUSE_SOC_CHIP_M6TV:
++				case EFUSE_SOC_CHIP_M6TVLITE:
+ 					if(ver != 2){
+ 						ver = -1;
+ 					}
+ 					break;
++				case EFUSE_SOC_CHIP_M6TVD:
++					if(ver != M6TVD_EFUSE_VERSION_SERIALNUM_V1){
++						ver = -1;
++					}
++					break;
+ 				case EFUSE_SOC_CHIP_M8:
+-					if(ver != 20){
++					if(ver != M8_EFUSE_VERSION_SERIALNUM_V1){
+ 						ver = -1;
+ 					}
+ 					break;
+@@ -374,8 +415,9 @@ static int efuse_checkversion(char *buf)
+ }
+ 
+ 
+-static void efuse_set_versioninfo(efuseinfo_item_t *info)
++static int efuse_set_versioninfo(efuseinfo_item_t *info)
+ {
++	int ret=-1;
+ 	efuse_socchip_type_e soc_type;
+ 	strcpy(info->title, "version");		
+ 	info->id = EFUSE_VERSION_ID;
+@@ -401,39 +443,55 @@ static void efuse_set_versioninfo(efuseinfo_item_t *info)
+ 			info->data_len = EFUSE_VERSION_DATA_LEN; //3;	
+ 			info->enc_len = EFUSE_VERSION_ENC_LEN; //4;
+ 			info->bch_en = EFUSE_VERSION_BCH_EN; //1;		
++			ret = 0;
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			info->offset = V2_EFUSE_VERSION_OFFSET; //3;		
+ 			info->data_len = V2_EFUSE_VERSION_DATA_LEN; //1;		
+ 			info->enc_len = V2_EFUSE_VERSION_ENC_LEN; //1;
+ 			info->bch_en = V2_EFUSE_VERSION_BCH_EN; //0;
++			ret = 0;
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 			info->offset = M8_EFUSE_VERSION_OFFSET; //509
+ 			info->data_len = M8_EFUSE_VERSION_DATA_LEN;
+ 			info->enc_len = M8_EFUSE_VERSION_ENC_LEN;
+ 			info->bch_en = M8_EFUSE_VERSION_BCH_EN;
++			ret = 0;
++			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			info->offset = M6TVD_EFUSE_VERSION_OFFSET;
++			info->data_len = M6TVD_EFUSE_VERSION_DATA_LEN;
++			info->enc_len = M6TVD_EFUSE_VERSION_ENC_LEN;
++			info->bch_en = M6TVD_EFUSE_VERSION_BCH_EN;
++			info->bch_reverse = M6TVD_EFUSE_VERSION_BCH_REVERSE;
++			ret = 0;
+ 			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+-			printk("%s:%d chip is unkow\n",__func__,__LINE__);
++			printk("%s:%d chip is unknow\n",__func__,__LINE__);
++			ret = -1;
+ 			break;
+ 	}
+ #endif
++	return ret;
+ }
+ 
+ 
+ static int efuse_readversion(void)
+ {
+-
+ 	char ver_buf[4], buf[4];
+ 	efuseinfo_item_t info;
+ 	int ret;
+ 	if(efuse_active_version != -1)
+ 		return efuse_active_version;
+ 	
+-	efuse_set_versioninfo(&info);
++	ret = efuse_set_versioninfo(&info);
++	if(ret < 0){
++		return ret;
++	}
+ 	memset(ver_buf, 0, sizeof(ver_buf));		
+ 	memset(buf, 0, sizeof(buf));
+ 	
+@@ -515,21 +573,25 @@ static int efuse_getinfo_byPOS(unsigned pos, efuseinfo_item_t *info)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			versionPOS = V2_EFUSE_VERSION_OFFSET; //3;
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 			versionPOS = M8_EFUSE_VERSION_OFFSET; //509
+ 			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			versionPOS = M6TVD_EFUSE_VERSION_OFFSET;
++			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+-			printk("%s:%d chip is unkow\n",__func__,__LINE__);
++			printk("%s:%d chip is unknow\n",__func__,__LINE__);
+ 			return -1;
+ 			//break;
+ 	}
+ #endif
+ 	if(pos == versionPOS){
+-		efuse_set_versioninfo(info);
+-		return 0;
++		ret = efuse_set_versioninfo(info);
++		return ret;
+ 	}
+ 	
+ 	ver = efuse_readversion();
+@@ -594,8 +656,8 @@ int efuse_getinfo_byID(unsigned id, efuseinfo_item_t *info)
+ 	int ret = -1;		
+ 	
+ 	if(id == EFUSE_VERSION_ID){
+-		efuse_set_versioninfo(info);
+-		return 0;		
++		ret = efuse_set_versioninfo(info);
++		return ret;		
+ 	}	
+ 	
+ 	ver = efuse_readversion();
+@@ -653,8 +715,8 @@ int efuse_getinfo_byTitle(char *title, efuseinfo_item_t *info)
+ 	int ret = -1;		
+ 	
+ 	if(strcmp(title,"version")==0){
+-		efuse_set_versioninfo(info);
+-		return 0;		
++		ret = efuse_set_versioninfo(info);
++		return ret;		
+ 	}	
+ 	
+ 	ver = efuse_readversion();
+@@ -838,10 +900,12 @@ int efuse_write_item(char *buf, size_t count, loff_t *ppos)
+ 		printk("not found the position:%d.\n", pos);
+ 		return -1;
+ 	}
++#ifndef CONFIG_EFUSE_WRITE_VERSION_PERMIT
+ 	if(strcmp(info.title, "version") == 0){
+ 		printk("prohibit write version in kernel\n");
+ 		return 0;
+ 	}
++#endif
+ 	
+ 	if(count>info.data_len){
+ 		printk("data length: %d is out of EFUSE layout!\n", count);
+@@ -925,6 +989,7 @@ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			//pos = ; 
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+@@ -942,6 +1007,8 @@ int efuse_read_intlItem(char *intl_item,char *buf,int size)
+ 				return ret;
+ 			}
+ 			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+ 			printk("%s:%d chip is unkow\n",__func__,__LINE__);
+@@ -970,11 +1037,15 @@ static uint32_t __v3_get_gap_start(uint32_t id)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			offset = id*36 + 136; ///M6
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 			offset = -1; // error position
+ 			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			offset = -1;
++			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+ 			offset = -1; // error position
+@@ -1052,10 +1123,13 @@ int32_t __v3_read_hash(uint32_t id,char * buf)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			__efuse_read(buf,34,&off);
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+ 			break;
+@@ -1132,6 +1206,7 @@ int32_t __v3_write_hash(uint32_t id,char * buf)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M6:
+ 		case EFUSE_SOC_CHIP_M6TV:
++		case EFUSE_SOC_CHIP_M6TVLITE:
+ 			if(!__v3_check_dirty(34, off ))
+ 			{
+ 				__efuse_write(buf, 34, &off);
+@@ -1144,6 +1219,8 @@ int32_t __v3_write_hash(uint32_t id,char * buf)
+ 			break;
+ 		case EFUSE_SOC_CHIP_M8:
+ 			break;
++		case EFUSE_SOC_CHIP_M6TVD:
++			break;
+ 		case EFUSE_SOC_CHIP_UNKNOW:
+ 		default:
+ 			break;
+diff --git a/drivers/amlogic/efuse/efuse_regs.h b/drivers/amlogic/efuse/efuse_regs.h
+index 4167cbc6e8d1..4c62b43d5cbd 100755
+--- a/drivers/amlogic/efuse/efuse_regs.h
++++ b/drivers/amlogic/efuse/efuse_regs.h
+@@ -130,8 +130,14 @@ bit[7-0]    XOR
+ #define	M8_EFUSE_VERSION_DATA_LEN		1
+ #define	M8_EFUSE_VERSION_BCH_EN			0
+ #define	M8_EFUSE_VERSION_BCH_REVERSE	0
++#define M8_EFUSE_VERSION_SERIALNUM_V1	20
+ 
+-
++#define	M6TVD_EFUSE_VERSION_OFFSET		509
++#define	M6TVD_EFUSE_VERSION_ENC_LEN		1
++#define	M6TVD_EFUSE_VERSION_DATA_LEN	1
++#define	M6TVD_EFUSE_VERSION_BCH_EN		0
++#define	M6TVD_EFUSE_VERSION_BCH_REVERSE	0
++#define M6TVD_EFUSE_VERSION_SERIALNUM_V1	40
+ 
+ 
+ typedef enum {
+@@ -139,7 +145,9 @@ typedef enum {
+ 	EFUSE_SOC_CHIP_M3,
+ 	EFUSE_SOC_CHIP_M6,
+ 	EFUSE_SOC_CHIP_M6TV,
++	EFUSE_SOC_CHIP_M6TVLITE,
+ 	EFUSE_SOC_CHIP_M8,
++	EFUSE_SOC_CHIP_M6TVD,
+ 	EFUSE_SOC_CHIP_UNKNOW,
+ }efuse_socchip_type_e;
+ 
+diff --git a/drivers/amlogic/efuse/efuse_version.c b/drivers/amlogic/efuse/efuse_version.c
+index 1d434de9e84f..9abcdd147707 100755
+--- a/drivers/amlogic/efuse/efuse_version.c
++++ b/drivers/amlogic/efuse/efuse_version.c
+@@ -398,7 +398,7 @@ static efuseinfo_item_t efuseinfo_v2[] =
+ };
+ 
+ //m8 efuse layout according to haixiang.bao allocation
+-static efuseinfo_item_t efuseinfo_M8_v20[] = 
++static efuseinfo_item_t efuseinfo_M8_serialNum_v1[] = 
+ {
+ 	{
+ 		.title = "licence",
+@@ -455,25 +455,76 @@ static efuseinfo_item_t efuseinfo_M8_v20[] =
+ 		.bch_reverse = 0,
+ 	},
+ 	{
+-		.title = "machineid",
+-		.id = EFUSE_MACHINEID_ID,
+-		.offset = 502,
++		.title = "version",
++		.id = EFUSE_VERSION_ID,
++		.offset = M8_EFUSE_VERSION_OFFSET, //509
++		.enc_len = M8_EFUSE_VERSION_ENC_LEN,
++		.data_len = M8_EFUSE_VERSION_DATA_LEN,
++		.bch_en = M8_EFUSE_VERSION_BCH_EN,
++		.bch_reverse = M8_EFUSE_VERSION_BCH_REVERSE,
++	},
++};
++
++//M6TVD layout
++static efuseinfo_item_t efuseinfo_m6tvd_serialNum_v1[] = 
++{
++	{
++		.title = "licence",
++		.id = EFUSE_LICENCE_ID,
++		.offset = 0,
+ 		.enc_len = 4,
+ 		.data_len = 4,
+ 		.bch_en = 0,
+ 		.bch_reverse = 0,
+ 	},
++	{
++		.title = "mac",    //for the main network interface
++		.id = EFUSE_MAC_ID,
++		.offset = 436,
++		.enc_len = 6,
++		.data_len = 6,
++		.bch_en = 0,
++		.bch_reverse = 0,
++	},
++	{
++		.title = "mac_bt",  //for the second network interface or bt
++		.id = EFUSE_MAC_BT_ID,
++		.offset = 442,
++		.enc_len = 6,
++		.data_len = 6,
++		.bch_en = 0,
++		.bch_reverse = 0,
++	},
++	{
++		.title = "mac_wifi", //for the second network interface or bt
++		.id = EFUSE_MAC_WIFI_ID,
++		.offset = 448,
++		.enc_len = 6,
++		.data_len = 6,
++		.bch_en = 0,
++		.bch_reverse = 0,
++	},
++	{
++		.title = "usid",
++		.id = EFUSE_USID_ID,
++		.offset = 454,
++		.enc_len = 48,
++		.data_len = 48,
++		.bch_en = 0,
++		.bch_reverse = 0,
++	},
+ 	{
+ 		.title = "version",
+ 		.id = EFUSE_VERSION_ID,
+-		.offset = M8_EFUSE_VERSION_OFFSET, //509
+-		.enc_len = M8_EFUSE_VERSION_ENC_LEN,
+-		.data_len = M8_EFUSE_VERSION_DATA_LEN,
+-		.bch_en = M8_EFUSE_VERSION_BCH_EN,
+-		.bch_reverse = M8_EFUSE_VERSION_BCH_REVERSE,
++		.offset = M6TVD_EFUSE_VERSION_OFFSET, //509
++		.enc_len = M6TVD_EFUSE_VERSION_ENC_LEN, //1
++		.data_len = M6TVD_EFUSE_VERSION_DATA_LEN,//1
++		.bch_en = M6TVD_EFUSE_VERSION_BCH_EN, //0
++		.bch_reverse = M6TVD_EFUSE_VERSION_BCH_REVERSE, //0
+ 	},
+ };
+ 
++
+ efuseinfo_t efuseinfo[] = 
+ {
+ 	{
+@@ -497,9 +548,14 @@ efuseinfo_t efuseinfo[] =
+ 		.version =3,
+ 	},
+ 	{
+-		.efuseinfo_version = efuseinfo_M8_v20,
+-		.size = sizeof(efuseinfo_M8_v20)/sizeof(efuseinfo_item_t),
+-		.version =20,
++		.efuseinfo_version = efuseinfo_M8_serialNum_v1,
++		.size = sizeof(efuseinfo_M8_serialNum_v1)/sizeof(efuseinfo_item_t),
++		.version =M8_EFUSE_VERSION_SERIALNUM_V1,
++	},
++	{
++		.efuseinfo_version = efuseinfo_m6tvd_serialNum_v1,
++		.size = sizeof(efuseinfo_m6tvd_serialNum_v1)/sizeof(efuseinfo_item_t),
++		.version =M6TVD_EFUSE_VERSION_SERIALNUM_V1,
+ 	},
+ };
+ 
+-- 
+2.19.0
+

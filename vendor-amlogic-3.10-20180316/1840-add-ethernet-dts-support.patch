@@ -1,0 +1,166 @@
+From 33fbaf218f5bd1d4295b7218dcada203bcab48f0 Mon Sep 17 00:00:00 2001
+From: "xueyue.ma" <xueyue.ma@amlogic.com>
+Date: Tue, 12 Nov 2013 18:46:43 +0800
+Subject: [PATCH 1840/5965] add ethernet dts support
+
+---
+ arch/arm/boot/dts/amlogic/aml_top.dtd        |  5 ++
+ arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd | 12 +++++
+ drivers/amlogic/ethernet/am_net8218.c        | 56 ++++++++++++--------
+ drivers/amlogic/ethernet/aml.dtd             | 11 ++++
+ 4 files changed, 63 insertions(+), 21 deletions(-)
+ create mode 100755 drivers/amlogic/ethernet/aml.dtd
+
+diff --git a/arch/arm/boot/dts/amlogic/aml_top.dtd b/arch/arm/boot/dts/amlogic/aml_top.dtd
+index e2f57308be04..e18cdc5902b3 100755
+--- a/arch/arm/boot/dts/amlogic/aml_top.dtd
++++ b/arch/arm/boot/dts/amlogic/aml_top.dtd
+@@ -349,6 +349,11 @@ sub_file /arch/arm/mach-meson8/aml_gpio.dtd
+ sub_file /arch/arm/mach-meson8/aml_pin.dtd
+ #endif
+ 
++/// ***************************************************************************************
++///	-	Ethernet
++//$$ MODULE="Ethernet"
++sub_file /drivers/amlogic/ethernet/aml.dtd
++
+ #the end of dtd file
+ }; /* end of / */
+ #endif
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+index b324e5c4a342..746bf62fc3cc 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+@@ -1637,5 +1637,17 @@ sdio{
+ 		};
+ 
+ 	};
++/// ***************************************************************************************
++///	-	Ethernet
++//$$ MODULE="Ethernet"
++//$$ DEVICE="meson-eth"
++//$$ L2 PROP_STR = "status"
++    meson-eth{
++		compatible = "amlogic,meson-eth";
++		dev_name = "meson-eth";
++		status = "okay";
++		ethbaseaddr = <0xfe0c0000>;
++		interruptnum = <40>;
++	};
+ 
+ }; /* end of / */
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index 7aa0e28e831a..0ebed0e10c34 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -2321,14 +2321,37 @@ static int __init am_eth_class_init(void)
+ /* --------------------------------------------------------------------------*/
+ static int ethernet_probe(struct platform_device *pdev)
+ {
++        int ret;
++	int res;
+ 	printk("ethernet_driver probe!\n");
++#ifdef CONFIG_OF
+ 	if (!pdev->dev.of_node) {
+ 		printk("eth: pdev->dev.of_node == NULL!\n");
+ 		return -1;
+ 	}
+-        int ret;
+ 	ret = of_property_read_u32(pdev->dev.of_node,"ethbaseaddr",&ethbaseaddr);
+-	ret = of_property_read_u32(pdev->dev.of_node,"interruptsnum",&interruptnum);
++	if (ret) {
++		printk("Please config ethbaseaddr.\n");
++		return -1;
++	}
++	ret = of_property_read_u32(pdev->dev.of_node,"interruptnum",&interruptnum);
++	if (ret) {
++		printk("Please config interruptnum.\n");
++		return -1;
++	}
++#endif
++	printk(DRV_NAME "init(dbg[%p]=%d)\n", (&g_debug), g_debug);
++	my_ndev = alloc_etherdev(sizeof(struct am_net_private));
++	if (my_ndev == NULL) {
++		printk(DRV_NAME "ndev alloc failed!!\n");
++		return -ENOMEM;
++	}
++	res = probe_init(my_ndev);
++	if (res != 0) 
++		free_netdev(my_ndev);
++	else 
++		res = am_eth_class_init();
++
+ 	eth_pdata = (struct aml_eth_platdata *)pdev->dev.platform_data;
+ 	if (!eth_pdata) {
+ 		printk("\nethernet pm ops resource undefined.\n");
+@@ -2407,11 +2430,15 @@ static int ethernet_resume(struct platform_device *dev)
+ 
+ 	return 0;
+ }
++#ifdef CONFIG_OF
+ static const struct of_device_id eth_dt_match[]={
+ 	{	.compatible 	= "amlogic,meson-eth",
+ 	},
+ 	{},
+ };
++#else
++#define eth_dt_match NULL
++#endif
+ 
+ static struct platform_driver ethernet_driver = {
+ 	.probe   = ethernet_probe,
+@@ -2433,28 +2460,15 @@ static struct platform_driver ethernet_driver = {
+ /* --------------------------------------------------------------------------*/
+ static int __init am_net_init(void)
+ {
+-	int res;
+-	printk(DRV_NAME "init(dbg[%p]=%d)\n", (&g_debug), g_debug);
+-	my_ndev = alloc_etherdev(sizeof(struct am_net_private));
+-	if (my_ndev == NULL) {
+-		printk(DRV_NAME "ndev alloc failed!!\n");
+-		return -ENOMEM;
+-	}
+-	res = probe_init(my_ndev);
+-	if (res != 0) {
+-		free_netdev(my_ndev);
+-	} else {
+-		res = am_eth_class_init();
+ 
+-		if (platform_driver_register(&ethernet_driver)) {
+-			printk("failed to register ethernet_pm driver\n");
+-			g_ethernet_registered = 0;
+-		} else {
+-			g_ethernet_registered = 1;
+-		}
++	if (platform_driver_register(&ethernet_driver)) {
++		printk("failed to register ethernet_pm driver\n");
++		g_ethernet_registered = 0;
++	} else {
++		g_ethernet_registered = 1;
+ 	}
+ 
+-	return res;
++	return 0;
+ }
+ 
+ /* --------------------------------------------------------------------------*/
+diff --git a/drivers/amlogic/ethernet/aml.dtd b/drivers/amlogic/ethernet/aml.dtd
+new file mode 100755
+index 000000000000..796377d0c6e3
+--- /dev/null
++++ b/drivers/amlogic/ethernet/aml.dtd
+@@ -0,0 +1,11 @@
++#ifdef CONFIG_AM_ETHERNET
++//$$ DEVICE="meson-eth"
++//$$ L2 PROP_STR = "status"
++    meson-eth{
++		compatible = "amlogic,meson-eth";
++		dev_name = "meson-eth";
++		status = "okay";
++		ethbaseaddr = <0xfe0c0000>;
++		interruptnum = <40>;
++	};
++#endif
+-- 
+2.19.0
+

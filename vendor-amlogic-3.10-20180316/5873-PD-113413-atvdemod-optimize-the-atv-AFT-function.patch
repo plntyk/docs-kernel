@@ -1,0 +1,131 @@
+From 9c4fb88f6d8ff19cab608b72627672e7c27710f1 Mon Sep 17 00:00:00 2001
+From: Jian Chen <jian.chen@amlogic.com>
+Date: Sat, 10 Oct 2015 11:00:55 +0800
+Subject: [PATCH 5873/5965] PD#113413: atvdemod: optimize the atv AFT function
+
+Change-Id: I7d76cec242eed770539e1ca94c9bb86a789a6d7e
+---
+ drivers/amlogic/dvb_tv/aml_fe.c               | 56 ++++++++++++++++++-
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        |  3 +-
+ 2 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index 53a06b012f8c..80c8e5dd9e5c 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -83,7 +83,15 @@ static struct aml_fe_drv *dtv_demod_drv_list = NULL;
+ static struct aml_fe_man  fe_man;
+ 
+ static u32 aml_fe_suspended = 0;
+-
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++static int afc_offset = 0;
++struct timer_list aml_timer;
++#define AML_INTERVAL		(HZ/100)   //10ms, #define HZ 100
++static unsigned int timer_init_state = 0;
++static unsigned int aml_timer_en = 1;
++module_param( aml_timer_en, uint, 0644);
++MODULE_PARM_DESC( aml_timer_en, "\n aml_timer_en\n");
++#endif
+ static DEFINE_SPINLOCK(lock);
+ static int aml_fe_afc_closer(struct dvb_frontend *fe,int minafcfreq,int maxafcfqreq);
+ 
+@@ -195,8 +203,32 @@ struct dvb_frontend * get_tuner(void)
+ 	return NULL;
+ }
+ EXPORT_SYMBOL(get_tuner);
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++extern void retrieve_frequency_offset(int *freq_offset);
++void aml_timer_hander(unsigned long arg)
++{
++	struct dvb_frontend *fe = (struct dvb_frontend *)arg;
++	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
++	int afc = 100;
++	struct aml_fe *fee;
++	if (aml_timer_en == 0) {
++		return;
++	}
++	aml_timer.expires = jiffies + AML_INTERVAL*10;//100ms timer
++	add_timer(&aml_timer);
+ 
+-
++	fee = fe->demodulator_priv;
++	retrieve_frequency_offset(&afc);
++	afc = afc*488/1000;
++	afc_offset += afc;
++	if ((abs(afc_offset) >= 2000) || (abs(afc) < 50))
++		return;
++	c->frequency += afc*1000;
++	if (fe->ops.tuner_ops.set_params) {
++		fe->ops.tuner_ops.set_params(fe);
++	}
++}
++#endif
+ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+ {
+ 	struct aml_fe *afe = fe->demodulator_priv;
+@@ -242,6 +274,24 @@ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+ 		afe->params.inversion = c->inversion;
+ 		afe->params.analog  = c->analog;
+ 	}
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))//afc tune
++	if (aml_timer_en == 1) {
++		if (timer_init_state == 1) {
++			del_timer_sync(&aml_timer);
++			timer_init_state = 0;
++		}
++	}
++
++	if (aml_timer_en == 1) {
++		init_timer(&aml_timer);
++		aml_timer.function = aml_timer_hander;
++		aml_timer.data = (ulong) fe;
++		aml_timer.expires = jiffies + AML_INTERVAL*500;//after 5s enable demod auto detect
++		afc_offset = 0;
++		add_timer(&aml_timer);
++		timer_init_state = 1;
++	}
++#endif
+ 
+ 	return ret;
+ }
+@@ -315,6 +365,7 @@ static enum dvbfe_algo aml_fe_get_analog_algo(struct dvb_frontend *dev)
+ {
+         return DVBFE_ALGO_CUSTOM;
+ }
++
+ //this func set two ways to search the channel
+ //1.if the afc_range>1Mhz,set the freq  more than once
+ //2. if the afc_range<=1MHz,set the freq only once ,on the mid freq
+@@ -339,6 +390,7 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 	pr_dbg("[%s] is working,afc_range=%d,flag=0x%x[1->auto,11->mannul],the received freq=[%d]\n",\
+ 			__func__,p->analog.afc_range,p->analog.flag,p->frequency);
+ 	pr_dbg("the tuner type is [%d]\n",fee->tuner->drv->id);
++
+ 	//backup the freq by api
+ 	set_freq=p->frequency;
+ 	if (p->analog.std ==0)
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index c8fe2799d18f..ea751e996d15 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -75,7 +75,7 @@ static unsigned int atvdemod_afc_offset = 500;
+ module_param( atvdemod_afc_offset, uint, 0644) ;
+ MODULE_PARM_DESC( atvdemod_afc_offset, "\n atvdemod_afc_offset\n");
+ 
+-static unsigned int atvdemod_timer_en = 1;
++static unsigned int atvdemod_timer_en = 0;
+ module_param( atvdemod_timer_en, uint, 0644);
+ MODULE_PARM_DESC( atvdemod_timer_en, "\n atvdemod_timer_en\n");
+ 
+@@ -1130,6 +1130,7 @@ void retrieve_frequency_offset(int *freq_offset)
+ 	}
+ 	*freq_offset = data_ret;
+ }
++EXPORT_SYMBOL(retrieve_frequency_offset);
+ void retrieve_video_lock(int *lock)
+ {
+ 	unsigned int data,wlock,slock;
+-- 
+2.19.0
+

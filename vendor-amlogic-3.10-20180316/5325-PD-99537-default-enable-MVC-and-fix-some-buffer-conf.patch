@@ -1,0 +1,112 @@
+From 2d958b0e0cb1db6e79e75995992de4f324fe9beb Mon Sep 17 00:00:00 2001
+From: "simon.zheng" <simon@ubuntu.(none)>
+Date: Mon, 12 Jan 2015 19:15:49 +0800
+Subject: [PATCH 5325/5965] PD#99537:default enable MVC and fix some buffer
+ config bug
+
+---
+ drivers/amlogic/amports/Kconfig               |  2 +-
+ .../m8/ucode/h264mvc/h264header_mvc_linux.h   |  4 ++--
+ drivers/amlogic/amports/vh264mvc.c            | 22 ++++++++++++++-----
+ drivers/amlogic/amports/video.c               |  4 ++--
+ 4 files changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/amports/Kconfig b/drivers/amlogic/amports/Kconfig
+index a83d04bb17bf..e678fb6a834e 100755
+--- a/drivers/amlogic/amports/Kconfig
++++ b/drivers/amlogic/amports/Kconfig
+@@ -95,7 +95,7 @@ config AM_VDEC_H264
+ 
+ config AM_VDEC_H264MVC
+ 	tristate "Amlogic H264MVC Video Decoder"
+-	default n
++	default y
+ 	
+ 	select AM_PTSSERVER
+ 	help
+diff --git a/drivers/amlogic/amports/m8/ucode/h264mvc/h264header_mvc_linux.h b/drivers/amlogic/amports/m8/ucode/h264mvc/h264header_mvc_linux.h
+index c21a328105d6..3a0d94e56526 100644
+--- a/drivers/amlogic/amports/m8/ucode/h264mvc/h264header_mvc_linux.h
++++ b/drivers/amlogic/amports/m8/ucode/h264mvc/h264header_mvc_linux.h
+@@ -42,8 +42,8 @@ const u32 MicroCode[] __attribute__ ((aligned (8))) = {
+ 	0x680000d,0xb80238d,0xcc00000,0xc0079c0,0x80c2301,0xb6f004d,0x400134d,0xb6e8090,
+ 	0xc7ffe40,0x7400308,0x6800050,0xb4073d0,0xc07fc40,0x68014cc,0xc07fbc0,0x680150c,
+ 	0xc7ffec0,0x4001410,0xc7faf00,0x0000000,0x64c5109,0x64c460a,0x7800848,0x5410208,
+-	0x780080b,0x20082c8,0x5801208,0xe000248,0x0000000,0x0000000,0x0000000,0xf000200,
+-	0xf010240,0x9708209,0x5401208,0x2008288,0x64c4309,0x2408248,0x64c4009,0x2408248,
++	0x780080b,0x20082c8,0x580a208,0xe000248,0x0000000,0x0000000,0x0000000,0xf000200,
++	0xf010240,0x9708209,0x540a208,0x2008288,0x64c4309,0x2408248,0x64c4009,0x2408248,
+ 	0x7c01308,0x5810208,0x7c012c8,0xcc00000,0x0000000,0x6800008,0x7c01188,0x6808012,
+ 	0xc006e80,0x80c2301,0xb20bfc8,0xc7fa6c0,0x7c00d88,0xc006d40,0x80c2301,0x7c00dc8,
+ 	0x649cb09,0x3809209,0xbe0c049,0xc7fa4c0,0x0000000,0xfc01200,0x7c00e08,0xfc01200,
+diff --git a/drivers/amlogic/amports/vh264mvc.c b/drivers/amlogic/amports/vh264mvc.c
+index 47e1a4fcd351..9c6ecb473ee8 100755
+--- a/drivers/amlogic/amports/vh264mvc.c
++++ b/drivers/amlogic/amports/vh264mvc.c
+@@ -1316,24 +1316,36 @@ static void error_do_work(struct work_struct *work)
+ 
+ static int amvdec_h264mvc_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct resource mem;
+     int buf_size;
+ 
++	struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+     printk("amvdec_h264mvc probe start.\n");
+ 
++#if 0
+     if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
+         printk("\namvdec_h264mvc memory resource undefined.\n");
+         return -EFAULT;
+     }
++#endif
+ 
+-    buf_size = mem->end - mem->start + 1;
++    if (pdata == NULL) {
++        printk("\namvdec_h264mvc memory resource undefined.\n");
++        return -EFAULT;
++    }  
++    mem.start = pdata->mem_start ;
++    mem.end =  pdata->mem_end ;
++       
++    buf_size = mem.end - mem.start + 1;
+     //buf_offset = mem->start - DEF_BUF_START_ADDR;
+-    work_space_adr = mem->start;
++    work_space_adr = mem.start;
+     DECODE_BUFFER_START = work_space_adr + work_space_size;
+-    DECODE_BUFFER_END = mem->start + buf_size;
++    DECODE_BUFFER_END = mem.start + buf_size;
+ 
+     printk("work_space_adr %x, DECODE_BUFFER_START %x, DECODE_BUFFER_END %x\n", work_space_adr, DECODE_BUFFER_START, DECODE_BUFFER_END);
+-    memcpy(&vh264mvc_amstream_dec_info, (void *)mem[1].start, sizeof(vh264mvc_amstream_dec_info));
++    if (pdata->sys_info) {
++        vh264mvc_amstream_dec_info = *pdata->sys_info;
++    }
+ 
+ 	vdec_power_mode(1);
+     if (vh264mvc_init() < 0) {
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 7ca7dcf1ba36..62575ad66740 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -2096,7 +2096,7 @@ amlog_mask(LOG_MASK_FRAMEINFO,
+             EnableVideoLayer();
+ 
+             if (vf->type & VIDTYPE_MVC)
+-                VSYNC_EnableVideoLayer2();
++                EnableVideoLayer2();
+         }
+     }
+ 
+@@ -3488,7 +3488,7 @@ exit:
+             video2_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+ 
+             if(debug_flag& DEBUG_FLAG_BLACKOUT){
+-                printk("VsyncEnableVideoLayer\n");
++                printk("VsyncEnableVideoLayer2\n");
+             }
+         } else if (video2_onoff_state == VIDEO_ENABLE_STATE_OFF_REQ) {
+         #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-- 
+2.19.0
+

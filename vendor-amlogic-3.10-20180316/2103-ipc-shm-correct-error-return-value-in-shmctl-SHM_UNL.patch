@@ -1,0 +1,61 @@
+From c6cac65e0d07f9a4c57b68702db945db6e0321f7 Mon Sep 17 00:00:00 2001
+From: Jesper Nilsson <jesper.nilsson@axis.com>
+Date: Thu, 21 Nov 2013 14:32:08 -0800
+Subject: [PATCH 2103/5965] ipc,shm: correct error return value in shmctl
+ (SHM_UNLOCK)
+
+commit 3a72660b07d86d60457ca32080b1ce8c2b628ee2 upstream.
+
+Commit 2caacaa82a51 ("ipc,shm: shorten critical region for shmctl")
+restructured the ipc shm to shorten critical region, but introduced a
+path where the return value could be -EPERM, even if the operation
+actually was performed.
+
+Before the commit, the err return value was reset by the return value
+from security_shm_shmctl() after the if (!ns_capable(...)) statement.
+
+Now, we still exit the if statement with err set to -EPERM, and in the
+case of SHM_UNLOCK, it is not reset at all, and used as the return value
+from shmctl.
+
+To fix this, we only set err when errors occur, leaving the fallthrough
+case alone.
+
+Signed-off-by: Jesper Nilsson <jesper.nilsson@axis.com>
+Cc: Davidlohr Bueso <davidlohr@hp.com>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: Michel Lespinasse <walken@google.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ ipc/shm.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/ipc/shm.c b/ipc/shm.c
+index 7b87bea5245b..8ffae5807317 100644
+--- a/ipc/shm.c
++++ b/ipc/shm.c
+@@ -974,12 +974,15 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
+ 		ipc_lock_object(&shp->shm_perm);
+ 		if (!ns_capable(ns->user_ns, CAP_IPC_LOCK)) {
+ 			kuid_t euid = current_euid();
+-			err = -EPERM;
+ 			if (!uid_eq(euid, shp->shm_perm.uid) &&
+-			    !uid_eq(euid, shp->shm_perm.cuid))
++			    !uid_eq(euid, shp->shm_perm.cuid)) {
++				err = -EPERM;
+ 				goto out_unlock0;
+-			if (cmd == SHM_LOCK && !rlimit(RLIMIT_MEMLOCK))
++			}
++			if (cmd == SHM_LOCK && !rlimit(RLIMIT_MEMLOCK)) {
++				err = -EPERM;
+ 				goto out_unlock0;
++			}
+ 		}
+ 
+ 		shm_file = shp->shm_file;
+-- 
+2.19.0
+

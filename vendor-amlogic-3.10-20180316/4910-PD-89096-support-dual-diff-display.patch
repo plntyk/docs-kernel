@@ -1,0 +1,1123 @@
+From 4a66519ed72d1a0f972d0f26456bda50fea443af Mon Sep 17 00:00:00 2001
+From: "wei.nie" <wei.nie@amlogic.com>
+Date: Thu, 25 Sep 2014 04:07:43 -0400
+Subject: [PATCH 4910/5965] PD#89096:support dual diff display
+
+---
+ arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd |   2 +-
+ drivers/amlogic/display/osd/osd_hw_def.h     | 124 +------
+ drivers/amlogic/display/osd/osd_main.c       |   2 +-
+ drivers/amlogic/display/osd_ext/Makefile     |   1 +
+ drivers/amlogic/display/osd_ext/osd_dev.c    |  10 +
+ drivers/amlogic/display/osd_ext/osd_dev.h    |   2 +
+ drivers/amlogic/display/osd_ext/osd_hw.c     | 341 ++++++++++++++++---
+ drivers/amlogic/display/osd_ext/osd_hw.h     |   2 +
+ drivers/amlogic/display/osd_ext/osd_hw_def.h |  34 +-
+ drivers/amlogic/display/osd_ext/osd_main.c   |  37 +-
+ drivers/amlogic/display/osd_ext/osd_main.h   |   1 +
+ drivers/amlogic/display/osd_ext/osd_sync.h   |  17 +
+ include/linux/amlogic/osd/osd.h              |   6 +-
+ include/linux/amlogic/osd/osd_hw.h           | 125 ++++++-
+ 14 files changed, 501 insertions(+), 203 deletions(-)
+ create mode 100755 drivers/amlogic/display/osd_ext/osd_sync.h
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+index a429115e9c2c..8d958f7494cd 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+@@ -139,7 +139,7 @@ void root_func(){
+ 		dev_name = "mesonfb";
+ 		status = "okay";
+ 	   	reserve-memory = <0x02400000  0x00100000>;
+-               vmode = <1>; /**0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P 3:VMODE_1080P*/
++		vmode = <1>; /**0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P 3:VMODE_1080P*/
+  		display_size_default = <2048 1536 2048 4608 32>;//2048x1536x4x3=0x02400000
+  		reserve-iomap = "true";
+ 	};
+diff --git a/drivers/amlogic/display/osd/osd_hw_def.h b/drivers/amlogic/display/osd/osd_hw_def.h
+index 5dd4e5293eaa..28fdc3979e20 100755
+--- a/drivers/amlogic/display/osd/osd_hw_def.h
++++ b/drivers/amlogic/display/osd/osd_hw_def.h
+@@ -2,7 +2,6 @@
+ #define	_OSD_HW_DEF_H
+ #include <linux/amlogic/osd/osd_hw.h>
+ #include <linux/amlogic/amports/vframe_provider.h>
+-#include <plat/fiq_bridge.h>
+ #include <linux/list.h>
+ 
+ /************************************************************************
+@@ -10,13 +9,10 @@
+ **	macro  define  part
+ **
+ **************************************************************************/
+-#define MAX_BUF_NUM	 3  /*fence relative*/
+-#define	LEFT		0
+-#define	RIGHT		1
+-#define	OSD_RELATIVE_BITS				0x33370
+-#define HW_OSD_COUNT					2
+-#define HW_OSD_BLOCK_COUNT				4
+-#define HW_OSD_BLOCK_REG_COUNT			(HW_OSD_BLOCK_COUNT*2)
++#define MAX_BUF_NUM						3  /*fence relative*/
++#define LEFT								0
++#define RIGHT								1
++#define OSD_RELATIVE_BITS				0x33370
+ #define HW_OSD_BLOCK_ENABLE_MASK		0x000F
+ #define HW_OSD_BLOCK_ENABLE_0			0x0001 /* osd blk0 enable */
+ #define HW_OSD_BLOCK_ENABLE_1			0x0002 /* osd blk1 enable */
+@@ -72,116 +68,6 @@
+  */
+ #define HW_OSD_BLOCK_LAYOUT_CUSTOMER 0xFFFF0000
+ 
+-
+-/************************************************************************
+-**
+-**	typedef  define  part
+-**
+-**************************************************************************/
+-typedef  void (*update_func_t)(void) ;   
+-
+-typedef  struct{
+-	struct list_head  	list ;
+-	update_func_t    	update_func;  //each reg group has it's own update function.
+-}hw_list_t;
+-
+-typedef  struct{
+-	u32  width;  //in byte unit
+-	u32	height; 
+-	u32  canvas_idx;
+-	u32	addr;
+-}fb_geometry_t;
+-typedef  struct{
+-	u16	h_enable;
+-	u16	v_enable;
+-}osd_scale_t;
+-typedef  struct{
+-	u16	hfs_enable;
+-	u16	vfs_enable;
+-}osd_freescale_t;
+-typedef  struct{
+-	osd_scale_t  origin_scale;
+-	u16  enable;
+-	u16  left_right;
+-	u16  l_start;
+-	u16  l_end;
+-	u16  r_start;
+-	u16  r_end;
+-}osd_3d_mode_t;
+-typedef struct{
+-	u32  on_off;
+-	u32  angle;
+-}osd_rotate_t;
+-
+-//define osd fence map .
+-typedef struct{
+-	u32  xoffset;
+-	u32  yoffset;
+-	u32  yres;
+-	s32  in_fd;
+-	s32  out_fd;
+-	u32  val;
+-	struct sync_fence *in_fence;
+-	struct files_struct * files;
+-}osd_fen_map_t;
+-
+-typedef struct {
+-	struct list_head list;
+-
+-	u32  fb_index;
+-	u32  buf_num;
+-	u32  xoffset;
+-	u32  yoffset;
+-	u32  yres;
+-	s32  in_fd;
+-	s32  out_fd;
+-	u32  val;
+-	struct sync_fence *in_fence;
+-	struct files_struct * files;
+-}osd_fence_map_t;
+-
+-typedef  pandata_t  dispdata_t;
+-
+-typedef  struct {
+-	pandata_t 		pandata[HW_OSD_COUNT];
+-	dispdata_t		dispdata[HW_OSD_COUNT];
+-	pandata_t 		scaledata[HW_OSD_COUNT];
+-	pandata_t 		free_scale_data[HW_OSD_COUNT];
+-	pandata_t		free_dst_data[HW_OSD_COUNT];
+-	u32  			gbl_alpha[HW_OSD_COUNT];
+-	u32  			color_key[HW_OSD_COUNT];
+-	u32				color_key_enable[HW_OSD_COUNT];
+-	u32				enable[HW_OSD_COUNT];
+-	u32				reg_status_save;
+-	bridge_item_t 		fiq_handle_item;
+-	osd_scale_t		scale[HW_OSD_COUNT];
+-	osd_freescale_t	free_scale[HW_OSD_COUNT];
+-	u32				free_scale_enable[HW_OSD_COUNT];
+-	u32				free_scale_width[HW_OSD_COUNT];
+-	u32				free_scale_height[HW_OSD_COUNT];
+-	fb_geometry_t		fb_gem[HW_OSD_COUNT];
+-	const color_bit_define_t *color_info[HW_OSD_COUNT];
+-	u32				scan_mode;
+-	u32				osd_order;
+-	osd_3d_mode_t	mode_3d[HW_OSD_COUNT];
+-	u32			updated[HW_OSD_COUNT];
+-	u32 			block_windows[HW_OSD_COUNT][HW_OSD_BLOCK_REG_COUNT];
+-	u32 			block_mode[HW_OSD_COUNT];
+-	u32			free_scale_mode[HW_OSD_COUNT];
+-	u32			osd_reverse[HW_OSD_COUNT];
+-	osd_rotate_t		rotate[HW_OSD_COUNT];
+-	pandata_t	rotation_pandata[HW_OSD_COUNT];
+-	hw_list_t	 	reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+-	u32			field_out_en;
+-	u32			scale_workaround;
+-	u32			fb_for_4k2k;
+-	u32         		antiflicker_mode;
+-	u32			angle[HW_OSD_COUNT];
+-	u32			clone;
+-	u32	       bot_type;
+-	dispdata_t	cursor_dispdata[HW_OSD_COUNT];
+-}hw_para_t;
+-
+ /************************************************************************
+ **
+ **	func declare  part
+@@ -230,7 +116,7 @@ static unsigned long 	lock_flags;
+ static unsigned long	fiq_flag;
+ #endif
+ static vframe_t vf;
+-static update_func_t     hw_func_array[HW_OSD_COUNT][HW_REG_INDEX_MAX]={
++static update_func_t hw_func_array[HW_OSD_COUNT][HW_REG_INDEX_MAX]={
+ 	{
+ 		osd1_update_color_mode,
+ 		osd1_update_enable,
+diff --git a/drivers/amlogic/display/osd/osd_main.c b/drivers/amlogic/display/osd/osd_main.c
+index f84b39eb5132..96f0b7b04caf 100755
+--- a/drivers/amlogic/display/osd/osd_main.c
++++ b/drivers/amlogic/display/osd/osd_main.c
+@@ -48,10 +48,10 @@
+ #include <linux/of.h>
+ #include <linux/of_fdt.h>
+ #include "osd_log.h"
++#include "osd_sync.h"
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/logo/logo_dev.h>
+ #include <linux/amlogic/logo/logo_dev_osd.h>
+-#include "osd_sync.h"
+ 
+ 
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+diff --git a/drivers/amlogic/display/osd_ext/Makefile b/drivers/amlogic/display/osd_ext/Makefile
+index cf8a4c551daa..8936e3fcb77e 100755
+--- a/drivers/amlogic/display/osd_ext/Makefile
++++ b/drivers/amlogic/display/osd_ext/Makefile
+@@ -12,3 +12,4 @@ endif
+ 
+ EXTRA_CFLAGS += -Iinclude/linux/osd/
+ EXTRA_CFLAGS += -Iinclude/linux/ge2d/
++EXTRA_CFLAGS += -Idrivers/staging/android/
+diff --git a/drivers/amlogic/display/osd_ext/osd_dev.c b/drivers/amlogic/display/osd_ext/osd_dev.c
+index 63443a5c13ad..b0a0c1454eca 100755
+--- a/drivers/amlogic/display/osd_ext/osd_dev.c
++++ b/drivers/amlogic/display/osd_ext/osd_dev.c
+@@ -207,6 +207,16 @@ void osddev_ext_set_window_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1)
+ 	osd_ext_set_window_axis_hw(index - 2, x0, y0, x1, y1);
+ }
+ 
++int osddev_ext_sync_request(struct fb_info * info, u32 xoffset, u32 yoffset, s32 in_fence_fd)
++{
++	return osd_ext_sync_request(info->node-2, info->var.yres, xoffset , yoffset, in_fence_fd);
++}
++
++int osddev_ext_wait_for_vsync(void)
++{
++	return osd_ext_wait_vsync_event();
++}
++
+ void osddev_ext_get_osd_ext_info(u32 index, s32(*posdval)[4], u32(*posdreg)[5], s32 info_flag)
+ {
+ 	osd_ext_get_osd_ext_info_hw(index - 2, posdval, posdreg, info_flag);
+diff --git a/drivers/amlogic/display/osd_ext/osd_dev.h b/drivers/amlogic/display/osd_ext/osd_dev.h
+index 4a6d8c729657..9d00de3ff4e8 100755
+--- a/drivers/amlogic/display/osd_ext/osd_dev.h
++++ b/drivers/amlogic/display/osd_ext/osd_dev.h
+@@ -86,6 +86,8 @@ extern void osddev_ext_get_free_scale_mode(u32 index, u32 *freescale_mode);
+ extern void osddev_ext_free_scale_mode(u32 index ,u32 freescale_mode);
+ extern void osddev_ext_get_window_axis(u32 index, s32 *x0, s32 *y0, s32 *x1, s32 *y1);
+ extern void osddev_ext_set_window_axis(u32 index, s32 x0, s32 y0, s32 x1, s32 y1);
++extern int    osddev_ext_sync_request(struct fb_info * info, u32 xoffset, u32 yoffset, s32 in_fence_fd);
++extern int    osddev_ext_wait_for_vsync(void);
+ extern void osddev_ext_get_osd_ext_info(u32 index, s32(*posdval)[4], u32(*posdreq)[5], s32 info_flag);
+ extern void osddev_ext_get_block_windows(u32 index, u32 *windows);
+ extern void osddev_ext_set_block_windows(u32 index, u32 *windows);
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw.c b/drivers/amlogic/display/osd_ext/osd_hw.c
+index 1ef5209a595a..ce3ca1c57d57 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw.c
++++ b/drivers/amlogic/display/osd_ext/osd_hw.c
+@@ -29,12 +29,18 @@
+ #include <linux/irqreturn.h>
+ #include <linux/errno.h>
+ #include <linux/irq.h>
++#include <linux/file.h>
++#include <linux/fdtable.h>
+ #include <linux/slab.h>
+ #include <linux/interrupt.h>
++#include <linux/kthread.h>
+ #include <linux/amlogic/amports/canvas.h>
++#include <sw_sync.h>
++#include <sync.h>
+ #include <linux/amlogic/amlog.h>
+ #include <linux/amlogic/amports/vframe_receiver.h>
+ #include <linux/amlogic/osd/osd.h>
++#include <linux/amlogic/osd/osd_hw.h>
+ #include <linux/amlogic/vout/vout_notify.h>
+ #ifdef CONFIG_AML_VSYNC_FIQ_ENABLE
+ #define FIQ_VSYNC
+@@ -43,11 +49,27 @@
+ #include "osd_hw_def.h"
+ #include "osd_clone.h"
+ #include "osd_prot.h"
++#include "osd_hw.h"
+ 
+ static DECLARE_WAIT_QUEUE_HEAD(osd_ext_vsync_wq);
+ static bool vsync_hit = false;
+ static bool osd_ext_vf_need_update = false;
+ 
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++//add sync fence relative varible here.
++//we will limit all fence relative code in this driver file.
++static int ext_timeline_created=0;
++static struct  sw_sync_timeline *ext_timeline;
++static u32 ext_cur_streamline_val;
++//thread control part
++struct kthread_worker ext_buffer_toggle_worker;
++struct task_struct *ext_buffer_toggle_thread;
++struct kthread_work ext_buffer_toggle_work;
++struct list_head	ext_post_fence_list;
++struct mutex		ext_post_fence_list_lock;
++
++void osd_ext_pan_display_fence(osd_ext_fence_map_t *fence_map);
++#endif
+ static struct vframe_provider_s osd_ext_vf_prov;
+ static int  g_vf_visual_width;
+ static int  g_vf_width;
+@@ -167,6 +189,170 @@ static unsigned int filt_coef2[] =  //2 point bilinear, bank_length == 2
+ 	0x40400000
+ };
+ 
++/********************************************************************/
++/***********		osd fence relative code 	 			*****************/
++/********************************************************************/
++
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++static inline int find_ext_buf_num(u32 yres,u32 yoffset)
++{
++	int n=yres;
++	int i;
++	for(i=0;i<MAX_BUF_NUM;i++)  //find current addr position.
++	{
++		if(yoffset  < (n))
++		break;
++		n+=yres;
++	}
++	return i;
++}
++
++//next we will process two osd layer in toggle buffer.
++static void osd_ext_toggle_buffer(struct kthread_work *work)
++{
++	osd_ext_fence_map_t *data, *next;
++	struct list_head saved_list;
++
++	mutex_lock(&ext_post_fence_list_lock);
++	saved_list = ext_post_fence_list;
++	list_replace_init(&ext_post_fence_list, &saved_list);
++	mutex_unlock(&ext_post_fence_list_lock);
++
++	list_for_each_entry_safe(data, next, &saved_list, list){
++		osd_ext_pan_display_fence(data);
++		if((data->in_fence) && (data->in_fd > 0)){
++			__close_fd(data->files, data->in_fd);
++			sync_fence_put(data->in_fence);
++		}
++		list_del(&data->list);
++		kfree(data);
++	}
++}
++
++static int out_ext_fence_create(int *release_fence_fd, u32 *val, u32 buf_num)
++{
++	//the first time create out_fence_fd==0
++	//sw_sync_timeline_inc  will release fence and it's sync point
++	struct sync_pt * outer_sync_pt;
++	struct sync_fence * outer_fence;
++	int out_fence_fd = -1;
++
++	out_fence_fd = get_unused_fd();
++	if(out_fence_fd < 0) return -1;//no file descriptor could be used. Error.
++	if(!ext_timeline_created)//timeline has not been created
++	{
++		ext_timeline = sw_sync_timeline_create("osd_ext_timeline");
++		ext_cur_streamline_val=1;
++		if(NULL==ext_timeline)
++		{
++			return -1;
++		}
++		init_kthread_worker(&ext_buffer_toggle_worker);
++		ext_buffer_toggle_thread= kthread_run(kthread_worker_fn,
++						&ext_buffer_toggle_worker, "aml_buf_ext_toggle");
++		init_kthread_work(&ext_buffer_toggle_work,osd_ext_toggle_buffer);
++		ext_timeline_created=1;
++	}
++	//install fence map; first ,the simplest.
++	ext_cur_streamline_val++;
++	*val=ext_cur_streamline_val;
++
++	outer_sync_pt=sw_sync_pt_create(ext_timeline,*val);
++	if(NULL == outer_sync_pt)
++	{
++		goto error_ret;
++	}
++
++	outer_fence=sync_fence_create("osd_ext_fence_out", outer_sync_pt);//fence object will be released when no point
++	if(NULL == outer_fence)
++	{
++		sync_pt_free(outer_sync_pt); //free sync point.
++		goto error_ret;
++	}
++
++	sync_fence_install(outer_fence,out_fence_fd);
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"---------------------------------------\n");
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"return out fence fd:%d\n",out_fence_fd);
++	*release_fence_fd = out_fence_fd;
++	return out_fence_fd;
++
++error_ret:
++	ext_cur_streamline_val--; //pt or fence fail,restore timeline value.
++	amlog_level(LOG_LEVEL_HIGH,"fence obj create fail\n");
++	put_unused_fd(out_fence_fd);
++	return -1;
++
++}
++
++int osd_ext_sync_request(u32 index, u32 yres, u32 xoffset,u32 yoffset,s32 in_fence_fd)
++{
++	int out_fence_fd = -1;
++	int buf_num = 0;
++
++	osd_ext_fence_map_t *fence_map = kzalloc(sizeof(osd_ext_fence_map_t), GFP_KERNEL);
++	buf_num = find_ext_buf_num(yres, yoffset);
++
++	if (!fence_map) {
++		printk("could not allocate osd_ext_fence_map\n");
++		return -ENOMEM;
++	}
++
++	mutex_lock(&ext_post_fence_list_lock);
++	fence_map->fb_index = index;
++	fence_map->buf_num = buf_num;
++	fence_map->yoffset = yoffset;
++	fence_map->xoffset = xoffset;
++	fence_map->yres = yres;
++	fence_map->in_fd = in_fence_fd;
++	fence_map->in_fence = sync_fence_fdget(in_fence_fd);
++	fence_map->files = current->files;
++
++	fence_map->out_fd = out_ext_fence_create(&out_fence_fd, &fence_map->val, buf_num);
++	list_add_tail(&fence_map->list, &ext_post_fence_list);
++	mutex_unlock(&ext_post_fence_list_lock);
++
++	queue_kthread_work(&ext_buffer_toggle_worker, &ext_buffer_toggle_work);
++
++	return  out_fence_fd;
++}
++
++static int  osd_ext_wait_buf_ready(osd_ext_fence_map_t *fence_map)
++{
++	s32 ret=-1;
++	struct sync_fence *buf_ready_fence = NULL;
++
++	if(fence_map->in_fd <= 0)
++	{
++		ret =-1;
++		return ret;
++	}
++
++	buf_ready_fence = fence_map->in_fence;
++	if(NULL == buf_ready_fence)
++	{
++		ret = -1;//no fence ,output directly.
++		return ret;
++	}
++
++	ret=sync_fence_wait(buf_ready_fence, -1);
++	if(ret < 0){
++		amlog_level(LOG_LEVEL_HIGH,"Sync Fence wait error:%d\n",ret);
++		printk("-----wait buf idx:[%d] ERROR\n-----on screen buf idx:[%d]\n",fence_map->buf_num, find_ext_buf_num(fence_map->yres, osd_ext_hw.pandata[fence_map->fb_index].y_start));
++	}else{
++		ret=1;
++	}
++
++	return ret;
++}
++
++#else
++int osd_ext_sync_request(u32 index, u32 yres,u32 xoffset, u32 yoffset,s32 in_fence_fd)
++{
++	amlog_level(LOG_LEVEL_HIGH,"osd_ext_sync_request not supported\n");
++	return -5566;
++}
++#endif
++
+ /********************************************************************/
+ /***********		osd psedu frame provider 			*****************/
+ /********************************************************************/
+@@ -204,7 +390,7 @@ static inline void osd_ext_update_3d_mode(int enable_osd1, int enable_osd2)
+ 	}
+ }
+ 
+-static inline void wait_vsync_wakeup(void)
++static inline void wait_ext_vsync_wakeup(void)
+ {
+ 	vsync_hit = true;
+ 	wake_up_interruptible(&osd_ext_vsync_wq);
+@@ -231,7 +417,7 @@ static inline void walk_through_update_list(void)
+ #ifdef FIQ_VSYNC
+ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ {
+-	wait_vsync_wakeup();
++	wait_ext_vsync_wakeup();
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -258,7 +444,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 		aml_write_reg32(P_VPU_PROT1_Y_START_END, data32);
+ 	}
+ #endif
+-	output_type=aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0x3;
++	output_type=aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL)&0xc;
+ 	osd_ext_hw.scan_mode= SCAN_MODE_PROGRESSIVE;
+ 	switch(output_type)
+ 	{
+@@ -330,7 +516,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #ifdef FIQ_VSYNC
+ 		fiq_bridge_pulse_trigger(&osd_ext_hw.fiq_handle_item);
+ #else
+-		wait_vsync_wakeup();
++		wait_ext_vsync_wakeup();
+ #endif
+ 	}
+ #ifndef FIQ_VSYNC
+@@ -345,6 +531,13 @@ void osd_ext_wait_vsync_hw(void)
+ 	wait_event_interruptible_timeout(osd_ext_vsync_wq, vsync_hit, HZ);
+ }
+ 
++s32 osd_ext_wait_vsync_event(void)
++{
++	vsync_hit = false;
++	wait_event_interruptible_timeout(osd_ext_vsync_wq, vsync_hit, 1); //waiting for 10ms.
++	return 0;
++}
++
+ void osd_ext_set_gbl_alpha_hw(u32 index, u32 gbl_alpha)
+ {
+ 	if (osd_ext_hw.gbl_alpha[index] != gbl_alpha) {
+@@ -591,6 +784,14 @@ void osd_ext_change_osd_ext_order_hw(u32 index, u32 order)
+ 	osd_ext_wait_vsync_hw();
+ }
+ 
++void osd_ext_enable_hw(int enable, int index)
++{
++	osd_ext_hw.enable[index] = enable;
++	add_to_update_list(index, OSD_ENABLE);
++
++	osd_ext_wait_vsync_hw();
++}
++
+ void osd_ext_free_scale_enable_hw(u32 index, u32 enable)
+ {
+ 	if (osd_ext_hw.free_scale_mode[index]){
+@@ -866,37 +1067,6 @@ void osd_ext_set_block_mode_hw(u32 index, u32 mode)
+ 	osd_ext_wait_vsync_hw();
+ }
+ 
+-void osd_ext_enable_3d_mode_hw(int index, int enable)
+-{
+-	spin_lock_irqsave(&osd_ext_lock, lock_flags);
+-	osd_ext_hw.mode_3d[index].enable = enable;
+-	spin_unlock_irqrestore(&osd_ext_lock, lock_flags);
+-	if (enable)		//when disable 3d mode ,we should return to stardard state.
+-	{
+-		osd_ext_hw.mode_3d[index].left_right = LEFT;
+-		osd_ext_hw.mode_3d[index].l_start = osd_ext_hw.pandata[index].x_start;
+-		osd_ext_hw.mode_3d[index].l_end =
+-		    (osd_ext_hw.pandata[index].x_end + osd_ext_hw.pandata[index].x_start) >> 1;
+-		osd_ext_hw.mode_3d[index].r_start = osd_ext_hw.mode_3d[index].l_end + 1;
+-		osd_ext_hw.mode_3d[index].r_end = osd_ext_hw.pandata[index].x_end;
+-		osd_ext_hw.mode_3d[index].origin_scale.h_enable = osd_ext_hw.scale[index].h_enable;
+-		osd_ext_hw.mode_3d[index].origin_scale.v_enable = osd_ext_hw.scale[index].v_enable;
+-		osd_ext_set_2x_scale_hw(index, 1, 0);
+-	} else {
+-
+-		osd_ext_set_2x_scale_hw(index, osd_ext_hw.mode_3d[index].origin_scale.h_enable,
+-					osd_ext_hw.mode_3d[index].origin_scale.v_enable);
+-	}
+-}
+-
+-void osd_ext_enable_hw(int enable, int index)
+-{
+-	osd_ext_hw.enable[index] = enable;
+-	add_to_update_list(index, OSD_ENABLE);
+-
+-	osd_ext_wait_vsync_hw();
+-}
+-
+ void osd_ext_set_2x_scale_hw(u32 index, u16 h_scale_enable, u16 v_scale_enable)
+ {
+ 	amlog_level(LOG_LEVEL_HIGH, "osd[%d] set scale, h_scale: %s, v_scale: %s\r\n",
+@@ -922,6 +1092,29 @@ void osd_ext_set_2x_scale_hw(u32 index, u16 h_scale_enable, u16 v_scale_enable)
+ 	osd_ext_wait_vsync_hw();
+ }
+ 
++void osd_ext_enable_3d_mode_hw(int index, int enable)
++{
++	spin_lock_irqsave(&osd_ext_lock, lock_flags);
++	osd_ext_hw.mode_3d[index].enable = enable;
++	spin_unlock_irqrestore(&osd_ext_lock, lock_flags);
++	if (enable)		//when disable 3d mode ,we should return to stardard state.
++	{
++		osd_ext_hw.mode_3d[index].left_right = LEFT;
++		osd_ext_hw.mode_3d[index].l_start = osd_ext_hw.pandata[index].x_start;
++		osd_ext_hw.mode_3d[index].l_end =
++		    (osd_ext_hw.pandata[index].x_end + osd_ext_hw.pandata[index].x_start) >> 1;
++		osd_ext_hw.mode_3d[index].r_start = osd_ext_hw.mode_3d[index].l_end + 1;
++		osd_ext_hw.mode_3d[index].r_end = osd_ext_hw.pandata[index].x_end;
++		osd_ext_hw.mode_3d[index].origin_scale.h_enable = osd_ext_hw.scale[index].h_enable;
++		osd_ext_hw.mode_3d[index].origin_scale.v_enable = osd_ext_hw.scale[index].v_enable;
++		osd_ext_set_2x_scale_hw(index, 1, 0);
++	} else {
++
++		osd_ext_set_2x_scale_hw(index, osd_ext_hw.mode_3d[index].origin_scale.h_enable,
++					osd_ext_hw.mode_3d[index].origin_scale.v_enable);
++	}
++}
++
+ void osd_ext_set_osd_ext_rotate_angle_hw(u32 index, u32 angle)
+ {
+ 	osd_ext_hw.rotate[index].angle = angle;
+@@ -1008,6 +1201,56 @@ void osd_ext_get_prot_canvas_hw(u32 index, s32 *x_start, s32 *y_start, s32 *x_en
+ 	*y_end = osd_ext_hw.rotation_pandata[index].y_end;
+ }
+ 
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++void osd_ext_pan_display_fence(osd_ext_fence_map_t *fence_map)
++{
++	s32 ret = 1;
++	long diff_x, diff_y;
++	u32 index = fence_map->fb_index;
++	u32 xoffset = fence_map->xoffset;
++	u32 yoffset = fence_map->yoffset;
++
++	if (index >= 2)
++		return;
++
++	if(ext_timeline_created) //out fence created success.
++	{
++		ret = osd_ext_wait_buf_ready(fence_map);
++		if(ret < 0)
++		{
++			amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"fence wait ret %d\n",ret);
++		}
++	}
++
++	if(ret){
++		if(xoffset!=osd_ext_hw.pandata[index].x_start || yoffset !=osd_ext_hw.pandata[index].y_start)
++		{
++			diff_x = xoffset - osd_ext_hw.pandata[index].x_start;
++			diff_y = yoffset - osd_ext_hw.pandata[index].y_start;
++
++			osd_ext_hw.pandata[index].x_start += diff_x;
++			osd_ext_hw.pandata[index].x_end   += diff_x;
++			osd_ext_hw.pandata[index].y_start += diff_y;
++			osd_ext_hw.pandata[index].y_end   += diff_y;
++			add_to_update_list(index, DISP_GEOMETRY);
++			osd_ext_wait_vsync_hw();
++		}
++	}
++
++	if(ext_timeline_created){
++		if(ret){
++			sw_sync_timeline_inc(ext_timeline, 1);
++		}else{
++			printk("------NOT signal out_fence ERROR\n");
++		}
++	}
++
++	amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"offset[%d-%d]x[%d-%d]y[%d-%d]\n", \
++			xoffset,yoffset,osd_ext_hw.pandata[index].x_start ,osd_ext_hw.pandata[index].x_end , \
++			osd_ext_hw.pandata[index].y_start ,osd_ext_hw.pandata[index].y_end);
++}
++#endif
++
+ void osd_ext_pan_display_hw(unsigned int xoffset, unsigned int yoffset, int index)
+ {
+ 	long diff_x, diff_y;
+@@ -1154,15 +1397,14 @@ static  void  osd1_update_disp_freescale_enable(void)
+ 
+ static void osd1_update_coef(void)
+ {
+-	int vf_coef_idx = 0;
+-	int *vf_coef;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	int i;
+ 	int hf_coef_idx = 0;
+ 	int hf_coef_wren = 1;
++
++	int vf_coef_idx = 0;
+ 	int vf_coef_wren = 1;
+-	int *hf_coef;
+-#endif
++	int *hf_coef, *vf_coef;
++
+ 	if (vf_coef_idx == 0){
+ 		vf_coef = filt_coef0;
+ 	}else if (vf_coef_idx == 1){
+@@ -1279,16 +1521,14 @@ static  void  osd2_update_disp_freescale_enable(void)
+ 
+ static void osd2_update_coef(void)
+ {
+-	int vf_coef_idx = 0;
+-	int  *vf_coef;
+-
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	int i;
+ 	int hf_coef_idx = 0;
+-	int vf_coef_wren = 1;
+ 	int hf_coef_wren = 1;
+-	int *hf_coef;
+-#endif
++
++	int vf_coef_idx = 0;
++	int vf_coef_wren = 1;
++	int *hf_coef, *vf_coef;
++
+ 	if (vf_coef_idx == 0){
+ 		vf_coef = filt_coef0;
+ 	}else if (vf_coef_idx == 1){
+@@ -2024,7 +2264,12 @@ void osd_ext_init_hw(u32 logo_loaded)
+ 	osd_ext_hw.block_mode[OSD1] = osd_ext_hw.block_mode[OSD2] = 0;
+ 	osd_ext_hw.rotation_pandata[OSD1].x_start = osd_ext_hw.rotation_pandata[OSD1].y_start = 0;
+ 	osd_ext_hw.rotation_pandata[OSD2].x_start = osd_ext_hw.rotation_pandata[OSD2].y_start = 0;
+-	memset(osd_ext_hw.rotate,0,sizeof(osd_rotate_t));
++	memset(osd_ext_hw.rotate,0,sizeof(osd_ext_rotate_t));
++
++#ifdef  CONFIG_FB_OSD_SUPPORT_SYNC_FENCE
++	INIT_LIST_HEAD(&ext_post_fence_list);
++	mutex_init(&ext_post_fence_list_lock);
++#endif
+ 
+ #ifdef FIQ_VSYNC
+ 	osd_ext_hw.fiq_handle_item.handle = vsync_isr;
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw.h b/drivers/amlogic/display/osd_ext/osd_hw.h
+index 627248a93f87..16f7a47c2fd2 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw.h
++++ b/drivers/amlogic/display/osd_ext/osd_hw.h
+@@ -105,6 +105,8 @@ extern void osd_ext_set_prot_canvas_hw(u32 index, s32 x_start, s32 y_start, s32
+ extern void osd_ext_setpal_hw(unsigned regno, unsigned red, unsigned green, unsigned blue, unsigned transp, int index);
+ extern void osd_ext_enable_hw(int enable, int index);
+ extern void osd_ext_pan_display_hw(unsigned int xoffset, unsigned int yoffset, int index);
++extern int    osd_ext_sync_request(u32 index, u32 yres,u32 xoffset ,u32 yoffset,s32 in_fence_fd);
++extern s32  osd_ext_wait_vsync_event(void);
+ #if defined(CONFIG_FB_OSD2_CURSOR)
+ extern void osd_ext_cursor_hw(s16 x, s16 y, s16 xstart, s16 ystart, u32 osd_ext_w, u32 osd_ext_h, int index);
+ #endif
+diff --git a/drivers/amlogic/display/osd_ext/osd_hw_def.h b/drivers/amlogic/display/osd_ext/osd_hw_def.h
+index 156d9c21cd5d..7abda53b6a24 100755
+--- a/drivers/amlogic/display/osd_ext/osd_hw_def.h
++++ b/drivers/amlogic/display/osd_ext/osd_hw_def.h
+@@ -9,6 +9,9 @@
+ **	macro  define  part
+ **
+ **************************************************************************/
++
++#define MAX_BUF_NUM	 3  /*fence relative*/
++
+ #define	LEFT		0
+ #define	RIGHT		1
+ #define	OSD_RELATIVE_BITS               0x333f0
+@@ -81,14 +84,14 @@ typedef void (*update_func_t)(void);
+ typedef struct {
+ 	struct list_head list;
+ 	update_func_t update_func;  //each reg group has it's own update function.
+-} hw_list_t;
++} hw_ext_list_t;
+ 
+ typedef struct {
+ 	u32 width;  //in byte unit
+ 	u32	height;
+ 	u32 canvas_idx;
+ 	u32	addr;
+-} fb_geometry_t;
++} fb_ext_geometry_t;
+ 
+ typedef struct {
+ 	u16	h_enable;
+@@ -113,7 +116,22 @@ typedef struct {
+ typedef struct{
+ 	u32  on_off;
+ 	u32  angle;
+-}osd_rotate_t;
++}osd_ext_rotate_t;
++
++typedef struct {
++	struct list_head list;
++
++	u32  fb_index;
++	u32  buf_num;
++	u32  xoffset;
++	u32  yoffset;
++	u32  yres;
++	s32  in_fd;
++	s32  out_fd;
++	u32  val;
++	struct sync_fence *in_fence;
++	struct files_struct * files;
++}osd_ext_fence_map_t;
+ 
+ typedef pandata_t dispdata_t;
+ 
+@@ -134,7 +152,7 @@ typedef struct {
+ 	u32             free_scale_enable[HW_OSD_COUNT];
+ 	u32             free_scale_width[HW_OSD_COUNT];
+ 	u32             free_scale_height[HW_OSD_COUNT];
+-	fb_geometry_t   fb_gem[HW_OSD_COUNT];
++	fb_ext_geometry_t   fb_gem[HW_OSD_COUNT];
+ 	const color_bit_define_t *color_info[HW_OSD_COUNT];
+ 	u32             scan_mode;
+ 	u32             osd_ext_order;
+@@ -144,12 +162,12 @@ typedef struct {
+ 	u32             block_mode[HW_OSD_COUNT];
+ 	u32		free_scale_mode[HW_OSD_COUNT];
+ 	u32		osd_reverse[HW_OSD_COUNT];
+-	osd_rotate_t	rotate[HW_OSD_COUNT];
++	osd_ext_rotate_t	rotate[HW_OSD_COUNT];
+ 	pandata_t		rotation_pandata[HW_OSD_COUNT];
+-	hw_list_t       reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
++	hw_ext_list_t       reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+ 	u32             clone[HW_OSD_COUNT];
+ 	u32             angle[HW_OSD_COUNT];
+-} hw_para_t;
++} hw_para_ext_t;
+ 
+ /************************************************************************
+ **
+@@ -188,7 +206,7 @@ static void osd2_update_disp_3d_mode(void);
+ **
+ **************************************************************************/
+ static DEFINE_SPINLOCK(osd_ext_lock);
+-static hw_para_t osd_ext_hw;
++static hw_para_ext_t osd_ext_hw;
+ static unsigned long lock_flags;
+ #ifdef FIQ_VSYNC
+ static unsigned long fiq_flag;
+diff --git a/drivers/amlogic/display/osd_ext/osd_main.c b/drivers/amlogic/display/osd_ext/osd_main.c
+index c9b442e606c8..d29ef889404c 100755
+--- a/drivers/amlogic/display/osd_ext/osd_main.c
++++ b/drivers/amlogic/display/osd_ext/osd_main.c
+@@ -46,6 +46,7 @@
+ #include <asm/uaccess.h>
+ #include "osd_log.h"
+ #include "osd_main.h"
++#include "osd_sync.h"
+ #include "osd_dev.h"
+ #include <linux/amlogic/amlog.h>
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+@@ -267,6 +268,7 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	u32 block_windows[8] = {0};
+ 	u32 block_mode;
+ 	unsigned long ret;
++	fb_ext_sync_request_t  sync_request;
+ 
+ 	switch (cmd) {
+ 	case  FBIOPUT_OSD_SRCKEY_ENABLE:
+@@ -281,6 +283,11 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	case FBIOPUT_OSD_SCALE_AXIS:
+ 		ret = copy_from_user(&osd_ext_axis, argp, 4 * sizeof(s32));
+ 		break;
++	case FBIOPUT_OSD_SYNC_ADD:
++		ret=copy_from_user(&sync_request,argp,sizeof(fb_ext_sync_request_t));
++		//printk("osd_mai request offset:%d\n", sync_request.offset);
++		break;
++	case FBIO_WAITFORVSYNC:
+ 	case FBIOGET_OSD_SCALE_AXIS:
+ 	case FBIOPUT_OSD_ORDER:
+ 	case FBIOGET_OSD_ORDER:
+@@ -431,6 +438,17 @@ osd_ext_ioctl(struct fb_info *info, unsigned int cmd,
+ 	case FBIOPUT_OSD_WINDOW_AXIS:
+ 		osddev_ext_set_window_axis(info->node, osd_ext_dst_axis[0], osd_ext_dst_axis[1], osd_ext_dst_axis[2], osd_ext_dst_axis[3]);
+ 		break;
++	case FBIOPUT_OSD_SYNC_ADD:
++		sync_request.out_fen_fd=osddev_ext_sync_request(info, sync_request.xoffset, sync_request.yoffset, sync_request.in_fen_fd);
++		ret=copy_to_user(argp, &sync_request, sizeof(fb_ext_sync_request_t));
++		if(sync_request.out_fen_fd < 0) // fence create fail.
++		ret=-1;
++		break;
++	case FBIO_WAITFORVSYNC:
++		osddev_ext_wait_for_vsync();
++		ret=1;
++		ret=copy_to_user(argp,&ret,sizeof(u32));
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -1373,7 +1391,6 @@ osd_ext_probe(struct platform_device *pdev)
+ 
+ 	if (NULL == init_logo_obj) {
+ 		set_current_vmode2(VMODE_INIT_NULL);
+-		//set_current_vmode2(VMODE_LCD);
+ 		osddev_ext_init();
+ 	}
+ 	vinfo = get_current_vinfo2();
+@@ -1383,21 +1400,8 @@ osd_ext_probe(struct platform_device *pdev)
+ 		printk("don't find need osd_ext memory from mesonfb_ext-dts\n");
+ 	}
+ 
+-	for (index = 0; index < OSD_COUNT; index++) {
++	for (index = 0; index < OSD_COUNT; index++){
+ 		//platform resource
+-#if 0
+-		if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, index))) {
+-			amlog_level(LOG_LEVEL_HIGH, "No frame buffer memory define.\n");
+-			r = -EFAULT;
+-			goto failed2;
+-		}
+-
+-		//if we have no resource then no need to create this device.
+-		amlog_level(LOG_LEVEL_HIGH, "[osd%d] 0x%x-0x%x\n", index+2, mem->start, mem->end);
+-		if (!mem || mem->start == 0 || mem->end == 0 || mem->start == mem->end) {
+-			continue ;
+-		}
+-#else
+ 		if(osd_ext_memory){
+ 			mem = &memobj;
+ 			ret = find_reserve_block(pdev->dev.of_node->name,index);
+@@ -1409,7 +1413,7 @@ osd_ext_probe(struct platform_device *pdev)
+ 			mem->start = (phys_addr_t)get_reserve_block_addr(ret);
+ 			mem->end = mem->start+ (phys_addr_t)get_reserve_block_size(ret)-1;
+ 		}
+-#endif
++
+ 		fbi = framebuffer_alloc(sizeof(struct myfb_dev), &pdev->dev);
+ 		if (!fbi) {
+ 			r = -ENOMEM;
+@@ -1671,3 +1675,4 @@ module_exit(osd_ext_remove_module);
+ MODULE_DESCRIPTION("AMLOGIC framebuffer driver");
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Tim Yao <timyao@amlogic.com>");
++
+diff --git a/drivers/amlogic/display/osd_ext/osd_main.h b/drivers/amlogic/display/osd_ext/osd_main.h
+index 6743348c6fa4..2fc2f55f675a 100755
+--- a/drivers/amlogic/display/osd_ext/osd_main.h
++++ b/drivers/amlogic/display/osd_ext/osd_main.h
+@@ -158,5 +158,6 @@ typedef struct {
+ #define  FBIOPUT_OSD_WINDOW_AXIS  	0x4513
+ #define FBIOPUT_OSD_ROTATE_ON   	0x4516
+ #define FBIOPUT_OSD_ROTATE_ANGLE	0x4517
++#define  FBIOPUT_OSD_SYNC_ADD	0x4518
+ 
+ #endif /* OSD_MAIN_H */
+diff --git a/drivers/amlogic/display/osd_ext/osd_sync.h b/drivers/amlogic/display/osd_ext/osd_sync.h
+new file mode 100755
+index 000000000000..6cc0a74dc30c
+--- /dev/null
++++ b/drivers/amlogic/display/osd_ext/osd_sync.h
+@@ -0,0 +1,17 @@
++#ifndef   _OSD_SYNC_H
++#define _OSD_SYNC_H
++#include  <sw_sync.h>
++#include  <sync.h>
++
++typedef  struct{
++	unsigned int  xoffset;
++	unsigned int  yoffset;
++	int  in_fen_fd;
++	int  out_fen_fd;
++}fb_ext_sync_request_t;
++
++typedef  struct{
++	struct sw_sync_timeline  *timeline;
++}osd_ext_sync_obj;
++
++#endif
+diff --git a/include/linux/amlogic/osd/osd.h b/include/linux/amlogic/osd/osd.h
+index 9832f2c4cfcc..8aa4340569ff 100755
+--- a/include/linux/amlogic/osd/osd.h
++++ b/include/linux/amlogic/osd/osd.h
+@@ -55,8 +55,6 @@ typedef  enum {
+ 	
+ }color_index_t;
+ 
+-
+-
+ typedef  struct {
+ 	color_index_t	color_index;
+ 	u8	hw_colormat;
+@@ -80,10 +78,8 @@ typedef  struct {
+ 
+ 	u8	color_type;
+ 	u8	bpp;
+-
+-		
+-	
+ }color_bit_define_t;
++
+ typedef struct osd_ctl_s {
+     u32  xres_virtual;
+     u32  yres_virtual;
+diff --git a/include/linux/amlogic/osd/osd_hw.h b/include/linux/amlogic/osd/osd_hw.h
+index dfbf0f161b65..cc014b96cef3 100755
+--- a/include/linux/amlogic/osd/osd_hw.h
++++ b/include/linux/amlogic/osd/osd_hw.h
+@@ -1,6 +1,13 @@
+ #ifndef  OSD_HW_H
+ #define OSD_HW_H
+ 
++#include "osd.h"
++#include <plat/fiq_bridge.h>
++
++#define HW_OSD_COUNT					2
++#define HW_OSD_BLOCK_COUNT			4
++#define HW_OSD_BLOCK_REG_COUNT		(HW_OSD_BLOCK_COUNT*2)
++
+ typedef  enum{
+ 	OSD1=0,
+ 	OSD2
+@@ -39,13 +46,121 @@ typedef struct {
+ 	s32 y_end;
+ } pandata_t;
+ 
++typedef  void (*update_func_t)(void);
++
++typedef  struct{
++	struct list_head  	list ;
++	update_func_t    	update_func;  //each reg group has it's own update function.
++}hw_list_t;
++
++typedef  struct{
++	u32  width;  //in byte unit
++	u32	height;
++	u32  canvas_idx;
++	u32	addr;
++}fb_geometry_t;
++
++typedef  struct{
++	u16	h_enable;
++	u16	v_enable;
++}osd_scale_t;
++
++typedef  struct{
++	u16	hfs_enable;
++	u16	vfs_enable;
++}osd_freescale_t;
++
++typedef  struct{
++	osd_scale_t  origin_scale;
++	u16  enable;
++	u16  left_right;
++	u16  l_start;
++	u16  l_end;
++	u16  r_start;
++	u16  r_end;
++}osd_3d_mode_t;
++
++typedef struct{
++	u32  on_off;
++	u32  angle;
++}osd_rotate_t;
++
++//define osd fence map .
++typedef struct{
++	u32  xoffset;
++	u32  yoffset;
++	u32  yres;
++	s32  in_fd;
++	s32  out_fd;
++	u32  val;
++	struct sync_fence *in_fence;
++	struct files_struct * files;
++}osd_fen_map_t;
++
++typedef struct {
++	struct list_head list;
++
++	u32  fb_index;
++	u32  buf_num;
++	u32  xoffset;
++	u32  yoffset;
++	u32  yres;
++	s32  in_fd;
++	s32  out_fd;
++	u32  val;
++	struct sync_fence *in_fence;
++	struct files_struct * files;
++}osd_fence_map_t;
++
++typedef  pandata_t  dispdata_t;
++
++typedef  struct {
++	pandata_t 		pandata[HW_OSD_COUNT];
++	dispdata_t		dispdata[HW_OSD_COUNT];
++	pandata_t 		scaledata[HW_OSD_COUNT];
++	pandata_t 		free_scale_data[HW_OSD_COUNT];
++	pandata_t		free_dst_data[HW_OSD_COUNT];
++	u32  			gbl_alpha[HW_OSD_COUNT];
++	u32  			color_key[HW_OSD_COUNT];
++	u32				color_key_enable[HW_OSD_COUNT];
++	u32				enable[HW_OSD_COUNT];
++	u32				reg_status_save;
++	bridge_item_t 		fiq_handle_item;
++	osd_scale_t		scale[HW_OSD_COUNT];
++	osd_freescale_t	free_scale[HW_OSD_COUNT];
++	u32				free_scale_enable[HW_OSD_COUNT];
++	u32				free_scale_width[HW_OSD_COUNT];
++	u32				free_scale_height[HW_OSD_COUNT];
++	fb_geometry_t		fb_gem[HW_OSD_COUNT];
++	const color_bit_define_t *color_info[HW_OSD_COUNT];
++	u32				scan_mode;
++	u32				osd_order;
++	osd_3d_mode_t	mode_3d[HW_OSD_COUNT];
++	u32			updated[HW_OSD_COUNT];
++	u32 			block_windows[HW_OSD_COUNT][HW_OSD_BLOCK_REG_COUNT];
++	u32 			block_mode[HW_OSD_COUNT];
++	u32			free_scale_mode[HW_OSD_COUNT];
++	u32			osd_reverse[HW_OSD_COUNT];
++	osd_rotate_t		rotate[HW_OSD_COUNT];
++	pandata_t	rotation_pandata[HW_OSD_COUNT];
++	hw_list_t	 	reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
++	u32			field_out_en;
++	u32			scale_workaround;
++	u32			fb_for_4k2k;
++	u32         		antiflicker_mode;
++	u32			angle[HW_OSD_COUNT];
++	u32			clone;
++	u32	       bot_type;
++	dispdata_t	cursor_dispdata[HW_OSD_COUNT];
++}hw_para_t;
++
+ #define  OSD_ORDER_01		1	 /*forground osd1*/
+ #define  OSD_ORDER_10		2	 /*forground osd2*/
+-#define OSD_GLOBAL_ALPHA_DEF  0xff
+-#define OSD_DATA_BIG_ENDIAN 	0
+-#define OSD_DATA_LITTLE_ENDIAN 1
+-#define OSD_TC_ALPHA_ENABLE_DEF 0  //disable tc_alpha
+-#define   REG_OFFSET		(0x20<<2)
++#define  OSD_GLOBAL_ALPHA_DEF  0xff
++#define  OSD_DATA_BIG_ENDIAN 	0
++#define  OSD_DATA_LITTLE_ENDIAN 1
++#define  OSD_TC_ALPHA_ENABLE_DEF 0  //disable tc_alpha
++#define  REG_OFFSET		(0x20<<2)
+ 
+ extern void  osd_set_colorkey_hw(u32 index,u32 bpp,u32 colorkey ) ;
+ extern void  osd_srckey_enable_hw(u32  index,u8 enable);
+-- 
+2.19.0
+

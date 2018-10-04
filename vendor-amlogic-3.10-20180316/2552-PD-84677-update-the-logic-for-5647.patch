@@ -1,0 +1,147 @@
+From a3c71d7afd65eac5c613d7767e3a2943c03b399d Mon Sep 17 00:00:00 2001
+From: jiwei chen <jiwei.chen@amlogic.com>
+Date: Thu, 19 Dec 2013 14:08:38 +0800
+Subject: [PATCH 2552/5965] PD #84677: update the logic for 5647.
+
+---
+ drivers/amlogic/camera/ov5647.c    |  2 +-
+ drivers/amlogic/tvin/isp/isp_drv.c | 24 ++++++++++++++----------
+ drivers/amlogic/tvin/isp/isp_drv.h |  2 +-
+ drivers/amlogic/tvin/isp/isp_hw.c  |  4 ++++
+ drivers/amlogic/tvin/isp/isp_hw.h  |  1 +
+ drivers/amlogic/tvin/isp/isp_sm.c  |  3 ++-
+ 6 files changed, 23 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index b3a03f7604aa..171f77eec962 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -2674,7 +2674,7 @@ void OV5647_set_param_exposure(struct ov5647_device *dev,enum camera_exposure_e
+ {
+     struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
+     int value;
+-    if(para == EXPOSURE_0_STEP){
++    if(0){//para == EXPOSURE_0_STEP){
+         dev->cam_para->cam_command = CAM_COMMAND_AE_ON;
+         dev->ae_on = true;
+     }else{
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 5505cea292d9..045669dcfc97 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -158,6 +158,9 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 			devp->flag &= (~ISP_FLAG_RECONFIG);
+ 			pr_info("config according to configure file.\n");
+ 		}
++	}else if(!strcmp(parm[0],"bypass_all")){
++		isp_bypass_all();
++		pr_info("isp bypass all.\n");
+ 	}
+ 	return len;
+ }
+@@ -1129,8 +1132,8 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 		ret = max(isp_capture_sm(devp),ret);
+ 	if(isr_debug&&ret)
+ 		pr_info("%s isp %d buf.\n",__func__,ret);
+-	if(!(devp->flag & ISP_FLAG_TEST_WB))
+ #ifndef USE_WORK_QUEUE
++	if(!(devp->flag & ISP_FLAG_TEST_WB))
+ 	    tasklet_schedule(&devp->isp_task);
+ #else
+         schedule_work(&devp->isp_wq);
+@@ -1163,16 +1166,17 @@ static void  isp_do_work(struct work_struct *work)
+ 	unsigned newstep = 0;
+ 	struct cam_function_s *func = &devp->cam_param->cam_function;
+ 
+-	if((devp->flag & ISP_FLAG_AE)&&(ae_enable)){
+-		isp_ae_sm(devp);
+-	}
+-	if((devp->flag&ISP_FLAG_AWB)&&(awb_enable)){
+-		isp_awb_sm(devp);
+-	}
+-	if((devp->flag&ISP_AF_SM_MASK)&&(af_enable)){
+-		isp_af_detect(devp);
++	if(!(devp->flag & ISP_FLAG_TEST_WB)){
++		if((devp->flag & ISP_FLAG_AE)&&(ae_enable)){
++			isp_ae_sm(devp);
++		}
++		if((devp->flag&ISP_FLAG_AWB)&&(awb_enable)){
++			isp_awb_sm(devp);
++		}
++		if((devp->flag&ISP_AF_SM_MASK)&&(af_enable)){
++			isp_af_detect(devp);
++		}
+ 	}
+-
+ 	if(ae_flag&0x1)
+ 	{
+ 		ae_flag &= (~0x1);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 3605b70cfb7e..6fb45c6c684d 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.12.18a"
++#define ISP_VER					"2013.12.18b"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 33dea63d82f1..5bc3c96918f5 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -506,11 +506,15 @@ static void isp_set_lnsd(xml_lut_ls_t *lnsd)
+ 	int i = 0;
+ 	if(lnsd){
+ 		pr_info("%s\n",__func__);
++		WRITE_VCBUS_REG(0x2d28, (READ_VCBUS_REG(0x2d28)&0xefffffff)); // disable lens shielding
++		WRITE_VCBUS_REG(0x2daf, 0x0000000c);         // lens shielding lut ram: v-bus write mode		
+ 		WRITE_VCBUS_REG(ISP_LNS_XYSCAL, lnsd->reg_map[i]);
+ 		for(i=1;i<XML_LUT_LS;i++){
+ 			WR(ISP_LNSD_LUT_ADDR,i-1);
+ 			WR(ISP_LNSD_LUT_DATA,lnsd->reg_map[i]);
+ 		}
++	    WRITE_VCBUS_REG(0x2daf, 0x00000000); // lens shielding lut ram: hardware read mode	
++	    WRITE_VCBUS_REG(0x2d28, (READ_VCBUS_REG(0x2d28)|0x10000000));		
+ 	}
+ }
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index 631771618ceb..9c96d2511d78 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -111,6 +111,7 @@ extern void flash_on(bool mode_pol_inv,bool led1_pol_inv,bool pin_mux_inv,wave_t
+ extern void torch_level(bool mode_pol_inv,bool led1_pol_inv,bool pin_mux_inv,bool torch_pol_inv,wave_t *wave_param,unsigned int level);
+ extern void wave_power_manage(bool enable);
+ extern void isp_hw_reset(void);
++extern void isp_bypass_all(void);
+ extern void isp_hw_enable(bool enable);
+ extern void isp_awb_set_gain(unsigned int r, unsigned int g, unsigned int b);
+ extern void isp_awb_get_gain(isp_awb_gain_t *awb_gain);
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 2dd38bd94683..425d175150cd 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -106,7 +106,7 @@ static inline int find_step(cam_function_t *func, unsigned int low, unsigned int
+ 	}
+ 	//pr_info("[isp] %s step:%d set default .\n", __func__, (mid + 1));
+ 	if((mid + 1) > hign){
+-		pr_info("[isp]find_step,warning mid:%d,hign:%d\n",mid,hign);
++		//pr_info("[isp]find_step,warning mid:%d,hign:%d\n",mid,hign);
+ 		return hign;
+ 	}
+ 	return (mid + 1);
+@@ -305,6 +305,7 @@ void isp_ae_sm(isp_dev_t *devp)
+ 			aepa->max_lumasum3 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_mid2high) >> 10;
+ 			aepa->max_lumasum4 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_high) >> 10;
+ 			aepa->pre_gain = 400;
++			if(devp->ae_info.manul_level==0)
+ 			aepa->targ = aep->targetmid;
+ 			temp = 1;
+ 			aepa->alert_r = ((aepa->pixel_sum >> 4) * aep->ratio_r) >> 8;
+-- 
+2.19.0
+

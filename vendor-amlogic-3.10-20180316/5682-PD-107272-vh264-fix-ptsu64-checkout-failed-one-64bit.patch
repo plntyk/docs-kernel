@@ -1,0 +1,96 @@
+From 1873e2b90f78cc89f5b57da33e3c913edd33e335 Mon Sep 17 00:00:00 2001
+From: Yvonne Chen <yvonne.chen@amlogic.com>
+Date: Fri, 26 Jun 2015 11:03:18 +0800
+Subject: [PATCH 5682/5965] =?UTF-8?q?PD#107272=EF=BC=9Avh264:=20fix=20ptsu?=
+ =?UTF-8?q?64=20checkout=20failed=20&=20one=2064bit=20division=20bug?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: I47665ccc4a49f371c8a40e1f3e56c42c920115f5
+---
+ drivers/amlogic/amports/ptsserv.c |  2 +-
+ drivers/amlogic/amports/vh264.c   | 15 ++++++++++++---
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 00f8e76be768..963b4419a3a5 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -454,7 +454,7 @@ static int pts_checkin_offset_inline(u8 type, u32 offset, u32 val,u64 uS64)
+ }
+ int pts_checkin_offset(u8 type, u32 offset, u32 val){
+     u64 us;
+-    us = div64_u64(val*100,9);
++    us = div64_u64((u64)val*100,9);
+     return pts_checkin_offset_inline(type,offset,val,us);
+ }
+ int pts_checkin_offset_us64(u8 type, u32 offset, u64 us){
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index dec7b96da9fa..1cc8785ef3de 100644
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -985,6 +985,7 @@ static void vh264_isr(void)
+     vframe_t *vf;
+     unsigned int cpu_cmd;
+     unsigned int pts,pts_lookup_save,pts_valid_save, pts_valid = 0;
++    unsigned int pts_us64_valid = 0;
+     u64 pts_us64;
+     bool force_interlaced_frame = false;
+     unsigned int sei_itu35_flags;
+@@ -1115,17 +1116,20 @@ static void vh264_isr(void)
+                 pts_us64 = first_pts64;
+                 first_pts_cached = false;
+                 pts_valid = 1;
++                pts_us64_valid = 1;
+ #ifdef DEBUG_PTS
+                 pts_hit++;
+ #endif
+             }
+             else if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, b_offset, &pts, 0,&pts_us64) == 0){
+                 pts_valid = 1;
++                pts_us64_valid = 1;
+ #ifdef DEBUG_PTS
+                 pts_hit++;
+ #endif
+             } else {
+                 pts_valid = 0;
++                pts_us64_valid = 0;
+ #ifdef DEBUG_PTS
+                 pts_missed++;
+ #endif
+@@ -1332,7 +1336,10 @@ static void vh264_isr(void)
+                 vf->duration_pulldown = 0;
+                 vf->index = buffer_index;
+                 vf->pts = (pts_valid) ? pts : 0;
+-                vf->pts_us64= (pts_valid) ? pts_us64 : 0;
++                if (pts_us64_valid == 1)
++                    vf->pts_us64= (pts_valid) ? pts_us64 : 0;
++                else
++                    vf->pts_us64= div64_u64(((u64)vf->pts)*100,9);
+                 vf->canvas0Addr = vf->canvas1Addr = spec2canvas(&buffer_spec[buffer_index]);
+                 vfbuf_use[buffer_index]++;
+                 if ((error_recovery_mode_use & 2) && error) {
+@@ -1341,7 +1348,6 @@ static void vh264_isr(void)
+                     p_last_vf = vf;
+                     pts_discontinue=false;
+                     kfifo_put(&display_q, (const vframe_t **)&vf);
+-
+                     vf_notify_receiver(PROVIDER_NAME,VFRAME_EVENT_PROVIDER_VFRAME_READY,NULL);
+                 }
+ 
+@@ -1368,7 +1374,10 @@ static void vh264_isr(void)
+                 vf->duration_pulldown = 0;
+                 vf->index = buffer_index;
+                 vf->pts = (pts_valid) ? pts : 0;
+-                vf->pts_us64= (pts_valid) ? pts_us64 : 0;
++                if (pts_us64_valid == 1)
++                    vf->pts_us64= (pts_valid) ? pts_us64 : 0;
++                else
++                    vf->pts_us64= div64_u64(((u64)vf->pts)*100,9);
+                 vf->canvas0Addr = vf->canvas1Addr = spec2canvas(&buffer_spec[buffer_index]);
+                 vfbuf_use[buffer_index]++;
+                 p_last_vf = vf;
+-- 
+2.19.0
+

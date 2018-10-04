@@ -1,0 +1,68 @@
+From 1f00f4c22739456cf464cd976c628733b27cd924 Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Mon, 16 Dec 2013 16:15:18 +0800
+Subject: [PATCH 2531/5965] PD #80306: Fix system halt. 4 cores will write the
+ same reg use spin lock to protect it.
+
+---
+ arch/arm/mach-meson8/time.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/time.c b/arch/arm/mach-meson8/time.c
+index 33b20de8958f..bada8f063bfa 100755
+--- a/arch/arm/mach-meson8/time.c
++++ b/arch/arm/mach-meson8/time.c
+@@ -351,11 +351,15 @@ static struct meson_clock *clockevent_to_clock(struct clock_event_device *evt)
+ 	//return container_of(evt, struct meson_clock, clockevent);
+ 	return (struct meson_clock*)evt->private;
+ }
++
++static DEFINE_SPINLOCK(time_lock);
++
+ static void meson_clkevt_set_mode(enum clock_event_mode mode,
+                                   struct clock_event_device *dev)
+ {
+-
+ 	struct meson_clock * clk=clockevent_to_clock(dev);
++
++	spin_lock(&time_lock);
+ 	switch (mode) {
+ 		case CLOCK_EVT_MODE_RESUME:
+ 			printk(KERN_INFO"Resume timer%s\n", clk->name);
+@@ -365,12 +369,13 @@ static void meson_clkevt_set_mode(enum clock_event_mode mode,
+ 		case CLOCK_EVT_MODE_PERIODIC:
+ 			aml_set_reg32_bits(clk->mux_reg, 1, clk->bit_mode, 1);
+ 			aml_set_reg32_bits(clk->mux_reg, 1, clk->bit_enable, 1);
+-
++			//printk("Periodic timer %s!,mux_reg=%x\n", clk->name,aml_read_reg32(clk->mux_reg));
+ 		break;
+ 
+ 		case CLOCK_EVT_MODE_ONESHOT:
+ 			aml_set_reg32_bits(clk->mux_reg, 0, clk->bit_mode, 1);
+ 			aml_set_reg32_bits(clk->mux_reg, 1, clk->bit_enable, 1);
++			//printk("One shot timer %s!mux_reg=%x\n", clk->name,aml_read_reg32(clk->mux_reg));
+ 		break;
+ 		case CLOCK_EVT_MODE_SHUTDOWN:
+ 		case CLOCK_EVT_MODE_UNUSED:
+@@ -378,6 +383,7 @@ static void meson_clkevt_set_mode(enum clock_event_mode mode,
+ 			aml_set_reg32_bits(clk->mux_reg, 0, clk->bit_enable, 1);
+ 		break;
+ 	}
++	spin_unlock(&time_lock);
+ }
+ static int meson_set_next_event(unsigned long evt,
+                                 struct clock_event_device *dev)
+@@ -468,8 +474,8 @@ int  __cpuinit meson_local_timer_setup(struct clock_event_device *evt)
+ 	aml_write_reg32(clk->reg, 9999);
+ 	
+ 	meson_timer_init_device(&(clk->clockevent));
+-//	printk(KERN_ERR"Local timer: %s (%p) for CPU%d initialized\n",
+-//		clk->clockevent.name,clk,cpu);
++	//printk(KERN_ERR"Local timer: %s (%p) for CPU%d initialized\n",
++	//	clk->clockevent.name,clk,cpu);
+ 
+ 	meson_evt = &clk->clockevent;
+ 	evt->name = meson_evt->name;
+-- 
+2.19.0
+

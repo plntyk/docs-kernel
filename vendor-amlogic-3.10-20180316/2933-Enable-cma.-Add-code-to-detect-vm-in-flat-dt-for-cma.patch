@@ -1,0 +1,201 @@
+From 44d93b091c1ce42ac1d42424bd90606201e742fc Mon Sep 17 00:00:00 2001
+From: "Chris.Sun" <qiuwei.sun@amlogic.com>
+Date: Fri, 13 Dec 2013 20:10:26 +0800
+Subject: [PATCH 2933/5965] Enable cma. Add code to detect vm in flat dt for
+ cma.
+
+Conflicts:
+
+	arch/arm/configs/meson6_defconfig
+	drivers/amlogic/camera/common/vm.c
+---
+ arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd |  1 -
+ arch/arm/mach-meson6/board-meson6-common.c  | 37 ++++++++-
+ drivers/amlogic/camera/common/vm.c          | 86 ++++++++++++++++++++-
+ 3 files changed, 121 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd b/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
+index ef5b3d9188b7..3d116ebe3642 100755
+--- a/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6_g33_1G.dtd
+@@ -115,7 +115,6 @@
+ 		compatible = "amlogic,vm";
+ 		dev_name = "vm.0";
+ 		status = "okay";
+-		reserve-memory = <0x01000000>;
+ 	};
+ 
+ 	ppmgr{
+diff --git a/arch/arm/mach-meson6/board-meson6-common.c b/arch/arm/mach-meson6/board-meson6-common.c
+index b2c90c8a780c..2b4163ebebf3 100644
+--- a/arch/arm/mach-meson6/board-meson6-common.c
++++ b/arch/arm/mach-meson6/board-meson6-common.c
+@@ -42,11 +42,46 @@
+ #endif
+ #include <linux/syscore_ops.h>
+ #include <mach/am_regs.h>
++
++#include <linux/of_fdt.h>
++#include <linux/amlogic/vmapi.h>
+ static void meson_map_board_io(void);
+ extern unsigned long long aml_reserved_start;
+ extern unsigned long long aml_reserved_end;
+ extern void __init meson_timer_init(void);
+ 
++//#ifdef CONFIG_AMLOGIC_VIDEOIN_MANAGER && CONFIG_CMA
++#ifdef CONFIG_CMA
++static int __init early_dt_scan_vm(unsigned long node, const char *uname,
++				   int depth, void *data)
++{
++    char *p;
++    unsigned long l;
++    if(strcmp("vm", uname))
++        return 0;
++
++    p = of_get_flat_dt_prop(node, "status", &l);
++
++    if(p != 0 && l > 0)
++    {
++        if(strncmp("ok", p, 2) == 0)
++        {
++            vm_reserve_cma();
++        }
++    }
++    /* break */
++    return 1;
++}
++#endif
++
++static __init void meson6_reserve(void)
++{
++
++#ifdef CONFIG_CMA
++    of_scan_flat_dt(early_dt_scan_vm, NULL);
++#endif
++}
++
+ __initdata struct map_desc meson_board_io_desc[1];
+ 
+ static __init void meson_map_board_io(void)
+@@ -140,7 +175,7 @@ static const char *m6_common_board_compat[] __initdata = {
+ };
+ 
+ DT_MACHINE_START(AML8726_MX, "Amlogic Meson6 platform")
+-//.reserve	= 
++	.reserve	= meson6_reserve,
+ //.nr_irqs	= 
+ 	.smp		= smp_ops(meson_smp_ops),
+ 	.map_io		= meson_map_io,/// dt - 1
+diff --git a/drivers/amlogic/camera/common/vm.c b/drivers/amlogic/camera/common/vm.c
+index e8d3adb4cd11..7578d96a0a65 100755
+--- a/drivers/amlogic/camera/common/vm.c
++++ b/drivers/amlogic/camera/common/vm.c
+@@ -1833,6 +1833,74 @@ int uninit_vm_device(void)
+ }
+ 
+ 
++#ifdef CONFIG_CMA
++
++void set_vm_buf_info(resource_size_t start,unsigned int size);
++void unset_vm_buf_info();
++
++static dma_addr_t vm_buf_phys = ~0;
++static void *vm_buf_virt;
++static size_t vm_buf_size;
++
++int vm_init_buf(size_t size)
++{
++
++    if(size ==0)
++        return;
++
++    if(vm_buf_phys != ~0)
++    {
++        pr_info("phys already in use phys %p, virt %p, size %d\n", vm_buf_phys, vm_buf_virt, size/1024);
++        dma_free_coherent(&vm_plat_dev.dev, vm_buf_size, vm_buf_virt, vm_buf_phys); 
++    }
++
++    vm_buf_virt = dma_alloc_coherent(&vm_plat_dev.dev, size, &vm_buf_phys, GFP_KERNEL);
++
++    pr_info("%s: allocating virt %p, phys %p, size %dk\n", __func__, vm_buf_virt, vm_buf_phys, size/1024);
++    if(vm_buf_virt == 0)
++    {
++        pr_err("CMA failed to allocate dma buffer\n");
++        return -1;
++    }
++    else
++        set_vm_buf_info(vm_buf_phys, size);
++
++    vm_buf_size = size;
++    return 0;
++}
++
++EXPORT_SYMBOL(vm_init_buf);
++
++void vm_deinit_buf()
++{
++    if(0 == vm_buf_size)
++    {
++        pr_warn("vm buf size equals 0\n");
++        return;
++    }
++    unset_vm_buf_info();
++    if(vm_buf_phys != ~0)
++    {
++        dma_free_coherent(&vm_plat_dev.dev, vm_buf_size, vm_buf_virt, vm_buf_phys); 
++        vm_buf_phys = ~0;
++        vm_buf_virt = 0;
++        vm_buf_size = 0;
++    }
++    pr_info("%s\n", __func__);
++}
++
++EXPORT_SYMBOL(vm_deinit_buf);
++
++void __init vm_reserve_cma()
++{
++    int ret = dma_declare_contiguous(&vm_plat_dev.dev, 36 * SZ_1M, 0, 0);
++    if(ret)
++        pr_err("%s : dma_declare_contiguous failed\n", __func__);
++}
++#endif
++
++
++
+ /*******************************************************************
+  *
+  * interface for Linux driver
+@@ -1912,13 +1980,29 @@ static struct platform_driver vm_drv = {
+ static int __init
+ vm_init_module(void)
+ {
+-	int err;
++	int err = 0;
++    struct device_node *n;
+ 
+ 	amlog_level(LOG_LEVEL_HIGH,"vm_init\n");
++
++    /* See if we can find the camera node in device tree*/
++    if(of_find_compatible_node(NULL, NULL, "amlogic,cams_prober") == 0)
++        goto out;
++
++    /* Check vm's state in device tree */ 
++    n = of_find_compatible_node(NULL, NULL, "amlogic,vm");
++    if(!n || !of_device_is_available(n))
++        goto out;
++
++
+ 	if ((err = platform_driver_register(&vm_drv))) {
+ 		printk(KERN_ERR "Failed to register vm driver (error=%d\n", err);
+ 	}
+ 
++    err = platform_device_register(&vm_plat_dev);
++    if(err)
++        platform_driver_unregister(&vm_drv);
++out:
+ 	return err;
+ }
+ 
+-- 
+2.19.0
+

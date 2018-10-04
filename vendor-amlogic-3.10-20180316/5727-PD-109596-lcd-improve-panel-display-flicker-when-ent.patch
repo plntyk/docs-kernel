@@ -1,0 +1,141 @@
+From 43ddf12f28a36883d6b355d3f078fc2eb2f3a9ca Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Wed, 22 Jul 2015 16:00:19 +0800
+Subject: [PATCH 5727/5965] PD#109596: lcd: improve panel display flicker when
+ enter in kernel
+
+Change-Id: I929c8dda306c18844118f9d5cec6adf8f775b725
+---
+ drivers/amlogic/display/lcd/aml_lcd_tv.c | 59 +++++++++++++++++-------
+ 1 file changed, 42 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index f024ec3ec801..ac0c7c79da0c 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -67,6 +67,7 @@ enum {
+ 	LCD_OUTPUT_MODE_4K2K50HZ420,
+ 	LCD_OUTPUT_MODE_4K2K60HZ,
+ 	LCD_OUTPUT_MODE_4K2K50HZ,
++	LCD_OUTPUT_MODE_MAX,
+ };
+ 
+ static const vinfo_t lcd_info[] =
+@@ -148,6 +149,17 @@ static const vinfo_t lcd_info[] =
+ 		.sync_duration_num = 50,
+ 		.sync_duration_den = 1,
+ 	},
++	{
++		.name              = "invalid",
++		.mode              = VMODE_INIT_NULL,
++		.width             = 1920,
++		.height            = 1080,
++		.field_height      = 1080,
++		.aspect_ratio_num  = 16,
++		.aspect_ratio_den  = 9,
++		.sync_duration_num = 60,
++		.sync_duration_den = 1,
++	},
+ };
+ 
+ static int lcd_vmode_is_mached(int index)
+@@ -501,6 +513,7 @@ static inline void _init_display_driver(Lcd_Config_t *pConf_t)
+ 
+ static void _lcd_module_enable(void)
+ {
++	printk("%s\n", __func__);
+ 	_init_display_driver(&lcd_config_dft);
+ }
+ 
+@@ -508,28 +521,39 @@ static DEFINE_MUTEX(lcd_vout_mutex);
+ 
+ static const vinfo_t *lcd_get_current_info(void)
+ {
+-   return &lcd_info[lcd_output_mode];
++	if (lcd_output_mode >= LCD_OUTPUT_MODE_MAX)
++		lcd_output_mode = LCD_OUTPUT_MODE_MAX;
++	return &lcd_info[lcd_output_mode];
+ }
+ 
+-
++static unsigned int first_init = 0;
+ static int lcd_set_current_vmode(vmode_t mode)
+ {
+ 	unsigned int ret = 0;
+ 	printk("initcall %s mode = %d\n", __func__, mode);
+ 
+ 	mutex_lock(&lcd_vout_mutex);
+-	switch (mode) {
+-	case VMODE_1080P:
+-	case VMODE_1080P_50HZ:
+-	case VMODE_768P:
+-	case VMODE_4K2K_60HZ_Y420:
+-	case VMODE_4K2K_50HZ_Y420:
+-	case VMODE_4K2K_60HZ:
+-	case VMODE_4K2K_50HZ:
+-		_lcd_module_enable();
+-		break;
+-	default:
+-		ret = -EINVAL;
++	if (first_init == 0) {
++		first_init = 1;
++		printk("skip %s when first enter kernel\n", __func__);
++		mutex_unlock(&lcd_vout_mutex);
++		return ret;
++	}
++
++	if (!(mode & VMODE_LOGO_BIT_MASK)) {
++		switch (mode & VMODE_MODE_BIT_MASK) {
++		case VMODE_1080P:
++		case VMODE_1080P_50HZ:
++		case VMODE_768P:
++		case VMODE_4K2K_60HZ_Y420:
++		case VMODE_4K2K_50HZ_Y420:
++		case VMODE_4K2K_60HZ:
++		case VMODE_4K2K_50HZ:
++			_lcd_module_enable();
++			break;
++		default:
++			ret = -EINVAL;
++		}
+ 	}
+ 	mutex_unlock(&lcd_vout_mutex);
+ 
+@@ -596,7 +620,7 @@ static int lcd_resume(int pm_event)
+ 		pm_event == PM_EVENT_RESTORE)
+ 		return 0;
+ 
+-	lcd_set_current_vmode(VMODE_LCD);
++	_lcd_module_enable();
+ 
+ 	return 0;
+ }
+@@ -701,6 +725,7 @@ static int lcd_probe(struct platform_device *pdev)
+ 		TV_LCD_ERR("lcd_register_client fail!\n");
+ 	}
+ 
++	first_init = 0;
+ 	TV_LCD_INFO("LCD probe ok\n");
+ 
+ 	return 0;
+@@ -741,7 +766,7 @@ static struct platform_driver lcd_driver = {
+ 
+ static int __init lcd_init(void)
+ {
+-	 printk("LCD driver init\n");
++	/* printk("LCD driver init\n"); */
+ 	 if (platform_driver_register(&lcd_driver)) {
+ 		 printk("failed to register lcd driver module\n");
+ 		 return -ENODEV;
+@@ -775,7 +800,7 @@ int __init outputmode_setup(char *s)
+ 	} else  if (!strcmp(s,"768p60hz")){
+ 		lcd_output_mode = LCD_OUTPUT_MODE_768P60HZ;
+ 	} else {
+-		lcd_output_mode = VMODE_INIT_NULL;
++		lcd_output_mode = LCD_OUTPUT_MODE_MAX;
+ 		printk("the output mode is not support!\n");
+ 	}
+ 	printk("the output mode is %d\n", lcd_output_mode);
+-- 
+2.19.0
+

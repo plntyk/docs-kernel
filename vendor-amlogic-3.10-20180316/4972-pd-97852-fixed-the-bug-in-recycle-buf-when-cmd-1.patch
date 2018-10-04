@@ -1,0 +1,54 @@
+From 6eb7db1e0261945dd9b369efb8bf56c3ae1d8734 Mon Sep 17 00:00:00 2001
+From: "hui.zhang" <hui.zhang@amlogic.com>
+Date: Wed, 8 Oct 2014 10:58:58 +0800
+Subject: [PATCH 4972/5965] pd#97852, fixed the bug in recycle buf when cmd = 1
+
+Change-Id: I5db36eb4d062906d6cfd64316f4a1a6655042bbd
+---
+ drivers/amlogic/amports/vh264.c | 23 +++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index fb27cb4087fe..7dc8309bf7df 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -1372,7 +1372,8 @@ static void vh264_put_timer_func(unsigned long arg)
+ #endif
+ 
+     while (!kfifo_is_empty(&recycle_q) &&
+-           ((READ_VREG(AV_SCRATCH_7) == 0) || (READ_VREG(AV_SCRATCH_8) == 0))) {
++           ((READ_VREG(AV_SCRATCH_7) == 0) || (READ_VREG(AV_SCRATCH_8) == 0)) &&
++           (vh264_stream_switching_state == SWITCHING_STATE_OFF)) {
+         vframe_t *vf;
+         if (kfifo_get(&recycle_q, &vf)) {
+             if ((vf->index >= 0) && (vf != &switching_fense_vf)) {
+@@ -1390,9 +1391,23 @@ static void vh264_put_timer_func(unsigned long arg)
+         }
+     }
+ 
+-    if ((vh264_stream_switching_state != SWITCHING_STATE_OFF) &&
+-        (kfifo_len(&newframe_q) == VF_POOL_SIZE)) {
+-        stream_switching_done();
++    if (vh264_stream_switching_state != SWITCHING_STATE_OFF) {
++        while (!kfifo_is_empty(&recycle_q)) {
++            vframe_t *vf;
++            if (kfifo_get(&recycle_q, &vf)) {
++                if ((vf->index >= 0) && (vf != &switching_fense_vf)) {
++                    vf->index = VF_BUF_NUM;
++                    kfifo_put(&newframe_q, (const vframe_t **)&vf);
++                }
++            }
++        }
++
++        WRITE_VREG(AV_SCRATCH_7, 0);
++        WRITE_VREG(AV_SCRATCH_8, 0);
++
++        if (kfifo_len(&newframe_q) == VF_POOL_SIZE) {
++            stream_switching_done();
++        }
+     }
+ 
+     timer->expires = jiffies + PUT_INTERVAL;
+-- 
+2.19.0
+

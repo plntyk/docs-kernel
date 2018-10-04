@@ -1,0 +1,568 @@
+From 083499b3b2e7a8942d9e53efda630169ebf4a3d3 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Mon, 29 Sep 2014 11:43:55 -0700
+Subject: [PATCH 4918/5965] Video decoder: Code clean up to use platform device
+ with driver data instead of resource data structure.
+
+Change-Id: I0afbbe2eb7c05e9b5c979e203dfb6032ceabab69
+---
+ drivers/amlogic/amports/amvdec.h     |  7 +++
+ drivers/amlogic/amports/vavs.c       | 12 ++---
+ drivers/amlogic/amports/vdec.c       | 65 +++++++++-------------------
+ drivers/amlogic/amports/vdec.h       | 11 ++++-
+ drivers/amlogic/amports/vh264.c      | 25 ++++++-----
+ drivers/amlogic/amports/vh264_4k2k.c | 21 +++++----
+ drivers/amlogic/amports/vh264mvc.c   | 16 ++++---
+ drivers/amlogic/amports/vh265.c      | 16 +++----
+ drivers/amlogic/amports/vmjpeg.c     | 12 ++---
+ drivers/amlogic/amports/vmpeg12.c    | 10 ++---
+ drivers/amlogic/amports/vmpeg4.c     | 13 +++---
+ drivers/amlogic/amports/vreal.c      | 12 ++---
+ drivers/amlogic/amports/vvc1.c       | 12 ++---
+ 13 files changed, 122 insertions(+), 110 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amvdec.h b/drivers/amlogic/amports/amvdec.h
+index 78f89bc799e3..5092b83b7ecc 100755
+--- a/drivers/amlogic/amports/amvdec.h
++++ b/drivers/amlogic/amports/amvdec.h
+@@ -28,6 +28,13 @@
+ #define UCODE_ALIGN         8
+ #define UCODE_ALIGN_MASK    7UL
+ 
++typedef struct amvdec_dec_reg_s {
++    unsigned long mem_start;
++    unsigned long mem_end;
++    struct device *cma_dev;
++    struct dec_sysinfo *dec_sysinfo;
++} amvdec_dec_reg_t;
++
+ extern  s32 amvdec_loadmc(const u32 *p);
+ extern void amvdec_start(void);
+ extern void amvdec_stop(void);
+diff --git a/drivers/amlogic/amports/vavs.c b/drivers/amlogic/amports/vavs.c
+index d51d05d742ee..18718b111d2d 100755
+--- a/drivers/amlogic/amports/vavs.c
++++ b/drivers/amlogic/amports/vavs.c
+@@ -827,22 +827,24 @@ static s32 vavs_init(void)
+ 
+ static int amvdec_avs_probe(struct platform_device *pdev)
+ {
+-        struct resource *mem;
++        struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 
+-        if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0)))
++        if (pdata == NULL)
+         {
+                 printk("amvdec_avs memory resource undefined.\n");
+                 return -EFAULT;
+         }
+ 
+-        buf_start = mem->start;
+-        buf_size = mem->end - mem->start + 1;
++        buf_start = pdata->mem_start;
++        buf_size = pdata->mem_end - pdata->mem_start + 1;
++
+         if(buf_start>ORI_BUFFER_START_ADDR)
+             buf_offset = buf_start - ORI_BUFFER_START_ADDR;
+         else
+             buf_offset = buf_start;
+ 
+-        memcpy(&vavs_amstream_dec_info, (void *)mem[1].start, sizeof(vavs_amstream_dec_info));
++	if (pdata->sys_info)
++            vavs_amstream_dec_info = *pdata->sys_info;
+ 
+         printk("%s (%d,%d) %d\n", __func__, vavs_amstream_dec_info.width, vavs_amstream_dec_info.height, vavs_amstream_dec_info.rate);
+         if (vavs_init() < 0)
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index bcde09689d3a..a3f84e7fbb48 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -52,28 +52,13 @@ static int inited_vcodec_num = 0;
+ static int poweron_clock_level = 0;
+ static unsigned int debug_trace_num = 16*20;
+ static struct platform_device *vdec_device = NULL;
++static struct platform_device *vdec_core_device = NULL;
+ struct am_reg {
+     char *name;
+     int offset;
+ };
+ 
+-static struct resource amvdec_mem_resource[]  = {
+-    [0] = {
+-        .start = 0,
+-        .end   = 0,
+-        .flags = 0,
+-    },
+-    [1] = {
+-        .start = 0,
+-        .end   = 0,
+-        .flags = 0,
+-    },
+-    [2] = {
+-        .start = 0,
+-        .end   = 0,
+-        .flags = 0,
+-    },
+-};
++static struct vdec_dev_reg_s vdec_dev_reg;
+ 
+ static const char *vdec_device_name[] = {
+     "amvdec_mpeg12",
+@@ -90,25 +75,21 @@ static const char *vdec_device_name[] = {
+     "amvdec_h265"
+ };
+ 
+-void vdec_set_decinfo(void *p)
++void vdec_set_decinfo(struct dec_sysinfo *p)
+ {
+-    amvdec_mem_resource[1].start = (resource_size_t)p;
++    vdec_dev_reg.sys_info = p;
+ }
+ 
+-int vdec_set_resource(struct resource *s, struct device *p)
++int vdec_set_resource(unsigned long start, unsigned long end, struct device *p)
+ {
+     if (inited_vcodec_num != 0) {
+         printk("ERROR:We can't support the change resource at code running\n");
+         return -1;
+     }
+ 
+-    if(s){
+-        amvdec_mem_resource[0].start = s->start;
+-        amvdec_mem_resource[0].end = s->end;
+-        amvdec_mem_resource[0].flags = s->flags;
+-    }
+-
+-    amvdec_mem_resource[2].start = (resource_size_t)p;
++    vdec_dev_reg.mem_start = start;
++    vdec_dev_reg.mem_end   = end;
++    vdec_dev_reg.cma_dev   = p;
+ 
+     return 0;
+ }
+@@ -124,14 +105,8 @@ s32 vdec_init(vformat_t vf)
+ 
+     inited_vcodec_num++;
+ 
+-    if (amvdec_mem_resource[0].flags != IORESOURCE_MEM) {
+-        printk("no memory resouce for codec,Maybe have not set it\n");
+-        inited_vcodec_num--;
+-        return -ENOMEM;
+-    }
+-
+-    vdec_device = platform_device_register_simple(vdec_device_name[vf], -1,
+-                                              amvdec_mem_resource, ARRAY_SIZE(amvdec_mem_resource));
++    vdec_device = platform_device_register_data(&vdec_core_device->dev, vdec_device_name[vf], -1,
++                                            &vdec_dev_reg, sizeof(vdec_dev_reg));
+ 
+     if (IS_ERR(vdec_device)) {
+         r = PTR_ERR(vdec_device);
+@@ -664,15 +639,18 @@ static struct class vdec_class = {
+ static int vdec_probe(struct platform_device *pdev)
+ {
+     s32 r;
+-    static struct resource res;
+     const void * name;
+     int offset, size;
++    unsigned long start, end;
+ 
+     r = class_register(&vdec_class);
+     if (r) {
+         printk("vdec class create fail.\n");
+         return r;
+     }
++
++    vdec_core_device = pdev;
++
+     r = find_reserve_block(pdev->dev.of_node->name,0);
+ 
+     if(r < 0){
+@@ -705,18 +683,17 @@ static int vdec_probe(struct platform_device *pdev)
+                 r = -EFAULT;
+                 goto error;
+             }			
+-            res.start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
+-            res.end = res.start+ size-1;		
+-		}
++            start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
++            end = start+ size-1;
++        }
+     }else{
+-        res.start = (phys_addr_t)get_reserve_block_addr(r);
+-        res.end = res.start+ (phys_addr_t)get_reserve_block_size(r)-1;
++        start = (phys_addr_t)get_reserve_block_addr(r);
++        end = start+ (phys_addr_t)get_reserve_block_size(r)-1;
+     }
+ 
+-    printk("init vdec memsource %x->%x\n",res.start,res.end);
+-    res.flags = IORESOURCE_MEM;
++    printk("init vdec memsource %lx->%lx\n", start, end);
+ 
+-    vdec_set_resource(&res, &pdev->dev);
++    vdec_set_resource(start, end, &pdev->dev);
+ 
+ #if MESON_CPU_TYPE < MESON_CPU_TYPE_MESON6TVD
+     /* default to 250MHz */
+diff --git a/drivers/amlogic/amports/vdec.h b/drivers/amlogic/amports/vdec.h
+index 4a0ca021b068..c76d0e008b84 100755
+--- a/drivers/amlogic/amports/vdec.h
++++ b/drivers/amlogic/amports/vdec.h
+@@ -28,8 +28,15 @@
+ 
+ #include <mach/cpu.h>
+ 
+-extern void vdec_set_decinfo(void *p);
+-extern int vdec_set_resource(struct resource *s, struct device *p);
++typedef struct vdec_dev_reg_s {
++    unsigned long mem_start;
++    unsigned long mem_end;
++    struct device *cma_dev;
++    struct dec_sysinfo *sys_info;
++} vdec_dev_reg_t;
++
++extern void vdec_set_decinfo(struct dec_sysinfo *p);
++extern int vdec_set_resource(unsigned long start, unsigned long end, struct device *p);
+ 
+ extern s32 vdec_init(vformat_t vf);
+ extern s32 vdec_release(vformat_t vf);
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index a8a38d3301eb..329a6897fb1f 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -1903,26 +1903,31 @@ static void stream_switching_do(struct work_struct *work)
+ 
+ static int amvdec_h264_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
++
+     mutex_lock(&vh264_mutex);
+-    //printk("amvdec_h264 probe start.\n");
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("\namvdec_h264 memory resource undefined.\n");
+         mutex_unlock(&vh264_mutex);
+         return -EFAULT;
+     }
+-    ucode_map_start=mem->start;
+-    buf_size = mem->end - mem->start + 1;
++
++    ucode_map_start = pdata->mem_start;
++    buf_size = pdata->mem_end - pdata->mem_start + 1;
+     if (buf_size < DEFAULT_MEM_SIZE) {
+         printk("\namvdec_h264 memory size not enough.\n");
+         return -ENOMEM;
+     }
+ 
+-    buf_offset = mem->start - DEF_BUF_START_ADDR;
+-    buf_start = V_BUF_ADDR_OFFSET + mem->start;
+-    printk("mem-addr=%x,buff_offset=%x,buf_start=%x\n",mem->start,buf_offset,buf_start);
+-    memcpy(&vh264_amstream_dec_info, (void *)mem[1].start, sizeof(vh264_amstream_dec_info));
++    buf_offset = pdata->mem_start - DEF_BUF_START_ADDR;
++    buf_start = V_BUF_ADDR_OFFSET + pdata->mem_start;
++
++    if (pdata->sys_info) {
++        vh264_amstream_dec_info = *pdata->sys_info;
++    }
++
++    printk("amvdec_h264 mem-addr=%lx,buff_offset=%x,buf_start=%x\n",pdata->mem_start,buf_offset,buf_start);
+ 
+     if (vh264_init() < 0) {
+         printk("\namvdec_h264 init failed.\n");
+@@ -1935,8 +1940,8 @@ static int amvdec_h264_probe(struct platform_device *pdev)
+ 
+     atomic_set(&vh264_active, 1);
+ 
+-    //printk("amvdec_h264 probe end.\n");
+     mutex_unlock(&vh264_mutex);
++
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/amports/vh264_4k2k.c b/drivers/amlogic/amports/vh264_4k2k.c
+index b19d61676741..ee4b222b6238 100755
+--- a/drivers/amlogic/amports/vh264_4k2k.c
++++ b/drivers/amlogic/amports/vh264_4k2k.c
+@@ -1381,27 +1381,30 @@ extern void AbortEncodeWithVdec2(int abort);
+ 
+ static int amvdec_h264_4k2k_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
++
+     printk("amvdec_h264_4k2k probe start.\n");
++
+     mutex_lock(&vh264_4k2k_mutex);
+     
+     fatal_error = 0;
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("\namvdec_h264_4k2k memory resource undefined.\n");
+         mutex_unlock(&vh264_4k2k_mutex);
+         return -EFAULT;
+     }
+ 
+-    work_space_adr = mem->start;
+-    decoder_buffer_start = mem->start + DECODER_WORK_SPACE_SIZE;
+-    decoder_buffer_end = mem->end + 1;
+-
+-    printk("H.264 4k2k decoder mem resource 0x%x -- 0x%x\n", decoder_buffer_start, decoder_buffer_end);
++    work_space_adr = pdata->mem_start;
++    decoder_buffer_start = pdata->mem_start + DECODER_WORK_SPACE_SIZE;
++    decoder_buffer_end = pdata->mem_end + 1;
+ 
+-    memcpy(&vh264_4k2k_amstream_dec_info, (void *)mem[1].start, sizeof(vh264_4k2k_amstream_dec_info));
++    if (pdata->sys_info) {
++        vh264_4k2k_amstream_dec_info = *pdata->sys_info;
++    }
++    cma_dev = pdata->cma_dev;
+ 
+-    cma_dev = (struct device *)mem[2].start;
++    printk("H.264 4k2k decoder mem resource 0x%x -- 0x%x\n", decoder_buffer_start, decoder_buffer_end);
+ 
+     if (!H264_4K2K_SINGLE_CORE) {
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)&&(HAS_HDEC)
+diff --git a/drivers/amlogic/amports/vh264mvc.c b/drivers/amlogic/amports/vh264mvc.c
+index 0a96667f39ff..b8e3820ab1c4 100755
+--- a/drivers/amlogic/amports/vh264mvc.c
++++ b/drivers/amlogic/amports/vh264mvc.c
+@@ -1156,24 +1156,26 @@ static void error_do_work(struct work_struct *work)
+ 
+ static int amvdec_h264mvc_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+     int buf_size;
+ 
+     printk("amvdec_h264mvc probe start.\n");
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("\namvdec_h264mvc memory resource undefined.\n");
+         return -EFAULT;
+     }
+ 
+-    buf_size = mem->end - mem->start + 1;
+-    //buf_offset = mem->start - DEF_BUF_START_ADDR;
+-    work_space_adr = mem->start;
++    buf_size = pdata->mem_end - pdata->mem_start + 1;
++    work_space_adr = pdata->mem_start;
+     DECODE_BUFFER_START = work_space_adr + work_space_size;
+-    DECODE_BUFFER_END = mem->start + buf_size;
++    DECODE_BUFFER_END = pdata->mem_start + buf_size;
++
++    if (pdata->sys_info) {
++        vh264mvc_amstream_dec_info = *pdata->sys_info;
++    }
+ 
+     printk("work_space_adr %x, DECODE_BUFFER_START %x, DECODE_BUFFER_END %x\n", work_space_adr, DECODE_BUFFER_START, DECODE_BUFFER_END);
+-    memcpy(&vh264mvc_amstream_dec_info, (void *)mem[1].start, sizeof(vh264mvc_amstream_dec_info));
+ 
+     if (vh264mvc_init() < 0) {
+         printk("\namvdec_h264mvc init failed.\n");
+diff --git a/drivers/amlogic/amports/vh265.c b/drivers/amlogic/amports/vh265.c
+index e977dfa9ab96..27c2f1393ef6 100755
+--- a/drivers/amlogic/amports/vh265.c
++++ b/drivers/amlogic/amports/vh265.c
+@@ -3883,35 +3883,35 @@ static int vh265_stop(void)
+ 
+ static int amvdec_h265_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+     int i;
+ 
+     mutex_lock(&vh265_mutex);
+     
+     fatal_error = 0;
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("\namvdec_h265 memory resource undefined.\n");
+         mutex_unlock(&vh265_mutex);
+         return -EFAULT;
+     }
+ 
+-    mc_buf_spec.buf_end = mem->end + 1;
++    mc_buf_spec.buf_end = pdata->mem_end + 1;
+     for(i=0;i<WORK_BUF_SPEC_NUM;i++){
+-        amvh265_workbuff_spec[i].start_adr = mem->start;
++        amvh265_workbuff_spec[i].start_adr = pdata->mem_start;
+     }
+ 
+-    if(debug) printk("===H.265 decoder mem resource 0x%x -- 0x%x\n", mem->start, mem->end + 1);
++    if(debug) printk("===H.265 decoder mem resource 0x%lx -- 0x%lx\n", pdata->mem_start, pdata->mem_end + 1);
+ 
+-    if (mem[1].start != 0) {
+-        memcpy(&vh265_amstream_dec_info, (void *)mem[1].start, sizeof(vh265_amstream_dec_info));
++    if (pdata->sys_info) {
++        vh265_amstream_dec_info = *pdata->sys_info;
+     } else {
+         vh265_amstream_dec_info.width = 0;
+         vh265_amstream_dec_info.height = 0;
+         vh265_amstream_dec_info.rate = 30;
+     }
+ 
+-    cma_dev = (struct device *)mem[2].start;
++    cma_dev = pdata->cma_dev;
+ 
+     if (vh265_init() < 0) {
+         printk("\namvdec_h265 init failed.\n");
+diff --git a/drivers/amlogic/amports/vmjpeg.c b/drivers/amlogic/amports/vmjpeg.c
+index 741a998559ed..51eb68661835 100755
+--- a/drivers/amlogic/amports/vmjpeg.c
++++ b/drivers/amlogic/amports/vmjpeg.c
+@@ -729,23 +729,25 @@ static s32 vmjpeg_init(void)
+ 
+ static int amvdec_mjpeg_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 	
+     mutex_lock(&vmjpeg_mutex);
+ 	
+     amlog_level(LOG_LEVEL_INFO, "amvdec_mjpeg probe start.\n");
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         amlog_level(LOG_LEVEL_ERROR, "amvdec_mjpeg memory resource undefined.\n");
+         mutex_unlock(&vmjpeg_mutex);
+ 		
+         return -EFAULT;
+     }
+ 
+-    buf_start = mem->start;
+-    buf_size  = mem->end - mem->start + 1;
++    buf_start = pdata->mem_start;
++    buf_size  = pdata->mem_end - pdata->mem_start + 1;
+ 
+-    memcpy(&vmjpeg_amstream_dec_info, (void *)mem[1].start, sizeof(vmjpeg_amstream_dec_info));
++    if (pdata->sys_info) {
++        vmjpeg_amstream_dec_info = *pdata->sys_info;
++    }
+ 
+     if (vmjpeg_init() < 0) {
+         amlog_level(LOG_LEVEL_ERROR, "amvdec_mjpeg init failed.\n");
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index 692f17acb13d..9c46d5cb803d 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -849,17 +849,17 @@ static s32 vmpeg12_init(void)
+ 
+ static int amvdec_mpeg12_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 
+     amlog_level(LOG_LEVEL_INFO, "amvdec_mpeg12 probe start.\n");
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
+-        amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg12 memory resource undefined.\n");
++    if (pdata == NULL) {
++        amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg12 platform data undefined.\n");
+         return -EFAULT;
+     }
+ 
+-    buf_start = mem->start;
+-    buf_size  = mem->end - mem->start + 1;
++    buf_start = pdata->mem_start;
++    buf_size  = pdata->mem_end - pdata->mem_start + 1;
+ 
+     if (vmpeg12_init() < 0) {
+         amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg12 init failed.\n");
+diff --git a/drivers/amlogic/amports/vmpeg4.c b/drivers/amlogic/amports/vmpeg4.c
+index 7d4fac82d93c..7e1729673fdf 100755
+--- a/drivers/amlogic/amports/vmpeg4.c
++++ b/drivers/amlogic/amports/vmpeg4.c
+@@ -882,18 +882,21 @@ static s32 vmpeg4_init(void)
+ 
+ static int amvdec_mpeg4_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg4 memory resource undefined.\n");
+         return -EFAULT;
+     }
+ 
+-    buf_start = mem->start;
+-    buf_size = mem->end - mem->start + 1;
++    buf_start = pdata->mem_start;
++    buf_size = pdata->mem_end - pdata->mem_start + 1;
+     buf_offset = buf_start - ORI_BUFFER_START_ADDR;
+ 
+-    memcpy(&vmpeg4_amstream_dec_info, (void *)mem[1].start, sizeof(vmpeg4_amstream_dec_info));
++    if (pdata->sys_info) {
++        vmpeg4_amstream_dec_info = *pdata->sys_info;
++    }
++
+     if (vmpeg4_init() < 0) {
+         amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg4 init failed.\n");
+ 
+diff --git a/drivers/amlogic/amports/vreal.c b/drivers/amlogic/amports/vreal.c
+index 1e3159551877..c9ab83d446e4 100755
+--- a/drivers/amlogic/amports/vreal.c
++++ b/drivers/amlogic/amports/vreal.c
+@@ -812,18 +812,20 @@ extern void AbortEncodeWithVdec2(int abort);
+ 
+ static int amvdec_real_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("amvdec_real memory resource undefined.\n");
+         return -EFAULT;
+     }
+ 
+-    buf_start = mem->start;
+-    buf_size = mem->end - mem->start + 1;
++    buf_start = pdata->mem_start;
++    buf_size = pdata->mem_end - pdata->mem_start + 1;
+     buf_offset = buf_start - RM_DEF_BUFFER_ADDR;
+ 
+-    memcpy(&vreal_amstream_dec_info, (void *)mem[1].start, sizeof(vreal_amstream_dec_info));
++    if (pdata->sys_info) {
++        vreal_amstream_dec_info = *pdata->sys_info;
++    }
+ 
+ #if (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8)&&(HAS_HDEC)
+     if(IS_MESON_M8_CPU){
+diff --git a/drivers/amlogic/amports/vvc1.c b/drivers/amlogic/amports/vvc1.c
+index a64a701ef8bc..4b131b48bce9 100755
+--- a/drivers/amlogic/amports/vvc1.c
++++ b/drivers/amlogic/amports/vvc1.c
+@@ -893,18 +893,20 @@ static s32 vvc1_init(void)
+ 
+ static int amvdec_vc1_probe(struct platform_device *pdev)
+ {
+-    struct resource *mem;
++    struct vdec_dev_reg_s *pdata = (struct vdec_dev_reg_s *)pdev->dev.platform_data;
+ 
+-    if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0))) {
++    if (pdata == NULL) {
+         printk("amvdec_vc1 memory resource undefined.\n");
+         return -EFAULT;
+     }
+ 
+-    buf_start = mem->start;
+-    buf_size = mem->end - mem->start + 1;
++    buf_start = pdata->mem_start;
++    buf_size = pdata->mem_end - pdata->mem_start + 1;
+     buf_offset = buf_start - ORI_BUFFER_START_ADDR;
+ 
+-    memcpy(&vvc1_amstream_dec_info, (void *)mem[1].start, sizeof(vvc1_amstream_dec_info));
++    if (pdata->sys_info) {
++        vvc1_amstream_dec_info = *pdata->sys_info;
++    }
+ 
+     if (vvc1_init() < 0) {
+         printk("amvdec_vc1 init failed.\n");
+-- 
+2.19.0
+

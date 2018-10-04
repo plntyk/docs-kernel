@@ -1,0 +1,201 @@
+From 740ea758aa442d6b4ff2df61f0c373ee55db3547 Mon Sep 17 00:00:00 2001
+From: Tao Zeng <tao.zeng@amlogic.com>
+Date: Tue, 19 May 2015 15:55:37 +0800
+Subject: [PATCH 5611/5965] PD#106783: cec: fix devices still can be found
+ issue if CEC disabled
+
+1. if cec is disabled, keep cec to be reset state instead of disable
+   IRQ(this will cause other devices on CEC bus can't success tx and
+   can't be found by TV)
+2. change code logic of cec task for node init to prevent long time
+   of first init
+
+Change-Id: I45530a028e99eda00e2ba068bf4d01618e11620e
+---
+ .../mach-meson6/hdmi_tx_hw/hdmi_tx_cec_hw.c   |  5 ++
+ .../mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c   |  5 ++
+ .../mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c  |  5 ++
+ .../hdmi_tx_hw_20/hdmi_tx_cec_hw.c            |  5 ++
+ .../hdmi_tx_hw_20/hdmi_tx_cec_hw.c            |  5 ++
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c    | 72 +++++++++----------
+ include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h   |  1 +
+ 7 files changed, 61 insertions(+), 37 deletions(-)
+
+diff --git a/arch/arm/mach-meson6/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson6/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index b4506611be0f..febf151ecbb0 100755
+--- a/arch/arm/mach-meson6/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson6/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -439,3 +439,8 @@ void cec_test_(unsigned int cmd)
+ {
+     printk("CEC: bus level: %s\n", BUS_LEVEL() ? "High" : "Low");
+ }
++
++void cec_keep_reset(void)
++{
++    hdmi_wr_reg(OTHER_BASE_ADDR+HDMI_OTHER_CTRL0, 0xc); //[3]cec_creg_sw_rst [2]cec_sys_sw_rst
++}
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 1c8d41db9474..f0348eb59bce 100755
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -463,3 +463,8 @@ void cec_test_(unsigned int cmd)
+ {
+     ;
+ }
++
++void cec_keep_reset(void)
++{
++    aml_write_reg32(P_AO_CEC_GEN_CNTL, 0x1);
++}
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 8e7e4effd01d..96a55466a66f 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -487,3 +487,8 @@ void cec_test_(unsigned int cmd)
+ {
+     ;
+ }
++
++void cec_keep_reset(void)
++{
++    aml_write_reg32(P_AO_CEC_GEN_CNTL, 0x1);
++}
+diff --git a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+index 5633487cf05c..a2a78bd22762 100644
+--- a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+@@ -1012,3 +1012,8 @@ void cec_test_(unsigned int cmd)
+ {
+ 
+ }
++
++void cec_keep_reset(void)
++{
++    aml_write_reg32(P_AO_CEC_GEN_CNTL, 0x1);
++}
+diff --git a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+index 5534a4b71633..9cdda6261789 100644
+--- a/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-mesong9tv/hdmi_tx_hw_20/hdmi_tx_cec_hw.c
+@@ -1012,3 +1012,8 @@ void cec_test_(unsigned int cmd)
+ {
+     
+ }
++
++void cec_keep_reset(void)
++{
++    aml_write_reg32(P_AO_CEC_GEN_CNTL, 0x1);
++}
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index c9479bbaf9c5..dd1ecb20c02f 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -410,38 +410,30 @@ static enum hrtimer_restart cec_late_check_rx_buffer(struct hrtimer *timer)
+     return HRTIMER_NORESTART;
+ }
+ 
+-static void cec_task(struct work_struct *work)
+-{
+-    extern void dump_hdmi_cec_reg(void);
+-    static int hdp_status = 0;
+-    hdmitx_dev_t* hdmitx_device = (hdmitx_dev_t*)container_of(work, hdmitx_dev_t, cec_work);
+-
+-    // Get logical address
+-    hdmi_print(INF, CEC "CEC task process\n");
+-    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK) &&
+-       (hdmitx_device->hpd_state && !hdp_status))
+-    {
+-        if (cec_global_info.cec_flag.cec_init_flag == 0) {
+-            msleep_interruptible(15000);
+-            cec_global_info.cec_flag.cec_init_flag = 1;
+-        }
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
+-        cec_gpi_init();
+-#endif
+-        cec_node_init(hdmitx_device);
+-        hdp_status = hdmitx_device->hpd_state;
+-    }
+-    //cec_rx_buf_check();
+-    cec_isr_post_process();
+-    //cec_usr_cmd_post_process();
+-    if (!hdmitx_device->hpd_state) {
+-        hdp_status = 0;
+-    }
+-    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) {
+-        /* start timer for late cec rx buffer check */
+-        hrtimer_start(&cec_late_timer, ktime_set(0, 384*1000*1000), HRTIMER_MODE_REL);
+-    }
+-}
++static void cec_task(struct work_struct *work)
++{
++    extern void dump_hdmi_cec_reg(void);
++    hdmitx_dev_t* hdmitx_device = (hdmitx_dev_t*)container_of(work, hdmitx_dev_t, cec_work);
++
++    // Get logical address
++    hdmi_print(INF, CEC "CEC task process\n");
++    if ((hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) &&
++        !cec_global_info.cec_flag.cec_init_flag) {
++        msleep_interruptible(15000);
++        cec_global_info.cec_flag.cec_init_flag = 1;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
++        cec_gpi_init();
++#endif
++        cec_node_init(hdmitx_device);
++    }
++    //cec_rx_buf_check();
++    cec_isr_post_process();
++    //cec_usr_cmd_post_process();
++    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) {
++        /* start timer for late cec rx buffer check */
++        hrtimer_start(&cec_late_timer, ktime_set(0, 384*1000*1000), HRTIMER_MODE_REL);
++    }
++}
+ 
+ /***************************** cec low level code end *****************************/
+ 
+@@ -1882,10 +1874,6 @@ void cec_usrcmd_set_config(const char * buf, size_t count)
+     value = aml_read_reg32(P_AO_DEBUG_REG0);
+     aml_set_reg32_bits(P_AO_DEBUG_REG0, param[0], 0, 32);
+     hdmitx_device->cec_func_config = aml_read_reg32(P_AO_DEBUG_REG0);
+-    if (!(hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) || !hdmitx_device->hpd_state )
+-    {
+-        return ;
+-    }
+     if ((0 == (value & 0x1)) && (1 == (param[0] & 1)))
+     {
+         hdmitx_device->cec_init_ready = 1;
+@@ -1893,8 +1881,18 @@ void cec_usrcmd_set_config(const char * buf, size_t count)
+ #if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
+         cec_gpi_init();
+ #endif
++        cec_global_info.cec_flag.cec_init_flag = 1;
+         cec_node_init(hdmitx_device);
+-    }
++    } else if ((value & 0x01) && !(param[0] & 0x01)) {
++        /* toggle off cec funtion by user */
++        hdmi_print(INF, CEC "user disable cec\n");
++        /* disable irq to stop rx/tx process */
++        cec_keep_reset();
++    }
++    if (!(hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) ||
++        !hdmitx_device->hpd_state) {
++        return ;
++    }
+     if ((1 == (param[0] & 1)) && (0x2 == (value & 0x2)) && (0x0 == (param[0] & 0x2)))
+     {
+         cec_menu_status_smp(DEVICE_MENU_INACTIVE);
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
+index 5b72518eae52..a79973568ec2 100755
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
+@@ -611,6 +611,7 @@ void cec_inactive_source(void);
+ void cec_set_standby(void);
+ void cec_isr_post_process(void);
+ void cec_clear_buf(unsigned int flag);
++void cec_keep_reset(void);
+ 
+ void cec_tx_irq_handle(void);
+ 
+-- 
+2.19.0
+

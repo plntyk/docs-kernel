@@ -1,0 +1,210 @@
+From 74a3cdb2a13b731dfff58850489057a35ff192b7 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Tue, 13 May 2014 19:31:33 -0700
+Subject: [PATCH 4083/5965] PD #90783-6 Fix amstream bufs prints for HEVC port.
+
+---
+ drivers/amlogic/amports/amstream.c |  41 +++++++-----
+ drivers/amlogic/amports/ptsserv.c  | 101 +++++++++++++++++++----------
+ 2 files changed, 88 insertions(+), 54 deletions(-)
+
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index 8596669ab443..6f97c89da08c 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -1783,11 +1783,12 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+         /*buf stats*/
+ 
+         pbuf += sprintf(pbuf, "\tbuf addr:%#x\n", p->buf_start);
+-        if (p->type != BUF_TYPE_SUBTITLE) {
+ 
++        if (p->type != BUF_TYPE_SUBTITLE) {
+             pbuf += sprintf(pbuf, "\tbuf size:%#x\n", p->buf_size);
+             pbuf += sprintf(pbuf, "\tbuf canusesize:%#x\n", p->canusebuf_size);
+             pbuf += sprintf(pbuf, "\tbuf regbase:%#lx\n", p->reg_base);
++
+             if (p->reg_base && p->flag & BUF_FLAG_IN_USE) {
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+                 switch_mod_gate_by_name("vdec", 1);
+@@ -1798,7 +1799,7 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+                 switch_mod_gate_by_name("vdec", 0);
+ #endif
+-            }else {
++            } else {
+                 pbuf += sprintf(pbuf, "\tbuf no used.\n");
+             }
+         } else {
+@@ -1820,23 +1821,27 @@ static ssize_t bufs_show(struct class *class, struct class_attribute *attr, char
+ 
+         pbuf += sprintf(pbuf, "\tbuf first_stamp:%#x\n", p->first_tstamp);
+         pbuf += sprintf(pbuf, "\tbuf wcnt:%#x\n\n", p->wcnt);
+-		
+-		pbuf += sprintf(pbuf, "\tbuf max_buffer_delay_ms:%dms\n", p->max_buffer_delay_ms);
+-		{
+-			int calc_delayms=0;
+-			u32 bitrate=0,avg_bitrate=0;
+-			calc_delayms=calculation_stream_delayed_ms(p->type,&bitrate,&avg_bitrate);
+-			if(calc_delayms>=0){
+-		    	pbuf += sprintf(pbuf, "\tbuf current delay:%dms\n",calc_delayms);
+-		    	pbuf += sprintf(pbuf, "\tbuf bitrate latest:%dbps,avg:%dbps\n",bitrate,avg_bitrate);
+-		    	pbuf += sprintf(pbuf, "\tbuf time after last pts:%d ms\n",
+-                      calculation_stream_ext_delayed_ms(p->type));
+-				pbuf += sprintf(pbuf, "\tbuf time after last write data :%d ms\n",
+-					  (int)(jiffies_64 - p->last_write_jiffies64)*1000/HZ);
+-
+-			}
+-		}
++        pbuf += sprintf(pbuf, "\tbuf max_buffer_delay_ms:%dms\n", p->max_buffer_delay_ms);
++
++        if (p->reg_base && p->flag & BUF_FLAG_IN_USE) {
++            int calc_delayms=0;
++            u32 bitrate=0,avg_bitrate=0;
++
++            calc_delayms = calculation_stream_delayed_ms(p->type, &bitrate, &avg_bitrate);
++
++            if (calc_delayms>=0) {
++                pbuf += sprintf(pbuf, "\tbuf current delay:%dms\n",calc_delayms);
++                pbuf += sprintf(pbuf, "\tbuf bitrate latest:%dbps,avg:%dbps\n",bitrate,avg_bitrate);
++                pbuf += sprintf(pbuf, "\tbuf time after last pts:%d ms\n",
++
++                calculation_stream_ext_delayed_ms(p->type));
++
++                pbuf += sprintf(pbuf, "\tbuf time after last write data :%d ms\n",
++                                (int)(jiffies_64 - p->last_write_jiffies64)*1000/HZ);
++            }
++        }
+     }
++
+     return pbuf - buf;
+ }
+ 
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index 0a1081cffeb8..bb53b9dd491b 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -175,56 +175,85 @@ EXPORT_SYMBOL(pts_cached_time);
+ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ {
+     pts_table_t *pTable;
+-	u32 timestampe_delayed=0;
+-	u32 outtime;
++    u32 timestampe_delayed=0;
++    u32 outtime;
+ 	
+     if (type >= PTS_TYPE_MAX) {
+         return 0;
+     }
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == PTS_TYPE_HEVC) {
++        pTable = &pts_table[PTS_TYPE_VIDEO];
++    } else
++#endif
+     pTable = &pts_table[type];
+ 
+-    if((pTable->last_checkin_pts==-1) || (pTable->last_checkout_pts==-1))
+-	    return 0;
+-	if(type == PTS_TYPE_VIDEO)
+-		outtime=timestamp_vpts_get();
+-	else if(type ==PTS_TYPE_AUDIO)
+-		outtime=timestamp_apts_get();
+-	else 
+-		outtime=timestamp_pcrscr_get();
+-    timestampe_delayed=(pTable->last_checkin_pts-outtime)/90;
+-	if((timestampe_delayed<0 ||timestampe_delayed>5*1000) && pTable->last_avg_bitrate>0){
+-		int diff=pTable->last_checkin_offset-pTable->last_checkout_offset;
+-		int diff2=stbuf_level(get_buf_by_type(type));
+-		if((diff-diff2)> (pTable->last_avg_bitrate/8/10) || (diff-diff2*10))
+-			diff =diff2;
+-		int delay_ms=diff*1000/(1+pTable->last_avg_bitrate/8);
+-		if(timestampe_delayed< 0 ||abs(timestampe_delayed-delay_ms)>3*1000){
+-			timestampe_delayed=delay_ms;
+-			///printk("..recalculated %d ms delay,diff=%d\n",timestampe_delayed,diff);
+-		}
++    if((pTable->last_checkin_pts==-1) || (pTable->last_checkout_pts==-1)) {
++        return 0;
++    }
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    if (type == PTS_TYPE_HEVC) {
++        outtime = timestamp_vpts_get();
++    } else
++#endif
++    if (type == PTS_TYPE_VIDEO) {
++        outtime = timestamp_vpts_get();
++    } else if (type ==PTS_TYPE_AUDIO) {
++        outtime = timestamp_apts_get();
++    } else {
++        outtime = timestamp_pcrscr_get();
++    }
++
++    timestampe_delayed = (pTable->last_checkin_pts-outtime)/90;
++
++    if ((timestampe_delayed<0 ||timestampe_delayed>5*1000) && pTable->last_avg_bitrate>0) {
++        int diff = pTable->last_checkin_offset-pTable->last_checkout_offset;
++        int diff2 = stbuf_level(get_buf_by_type(type));
++
++        if ((diff-diff2) > (pTable->last_avg_bitrate/8/10) || (diff-diff2*10)) {
++            int delay_ms;
++            diff = diff2;
++            delay_ms=diff*1000/(1+pTable->last_avg_bitrate/8);
++
++            if (timestampe_delayed< 0 ||abs(timestampe_delayed-delay_ms)>3*1000) {
++                timestampe_delayed=delay_ms;
++                ///printk("..recalculated %d ms delay,diff=%d\n",timestampe_delayed,diff);
++            }
+ 	}
+-	if(latestbitrate)
+-		*latestbitrate=pTable->last_bitrate;
+-	if(avg_bitare)
+-		*avg_bitare=pTable->last_avg_bitrate;
+-	return timestampe_delayed;
++    }
++
++    if (latestbitrate) {
++        *latestbitrate=pTable->last_bitrate;
++    }
++
++    if (avg_bitare) {
++        *avg_bitare=pTable->last_avg_bitrate;
++    }
++
++    return timestampe_delayed;
+ }
+ EXPORT_SYMBOL(calculation_stream_delayed_ms);
++
+ int calculation_stream_ext_delayed_ms(u8 type)
+ {
+-       pts_table_t *pTable;
+-       int extdelay_ms;
+-       if (type >= PTS_TYPE_MAX) {
+-        return 0;
++    pts_table_t *pTable;
++    int extdelay_ms;
++
++    if (type >= PTS_TYPE_MAX) {
++         return 0;
+     }
+-       pTable = &pts_table[type];
+-       extdelay_ms=jiffies-pTable->last_checkin_jiffies;
+-       if(extdelay_ms<0)
+-               extdelay_ms=0;
+-       return extdelay_ms*1000/HZ;
+-}
+ 
++    pTable = &pts_table[type];
++    extdelay_ms = jiffies-pTable->last_checkin_jiffies;
++
++    if (extdelay_ms < 0) {
++        extdelay_ms=0;
++    }
++
++    return extdelay_ms*1000/HZ;
++}
+ #endif
+ 
+ static int pts_checkin_offset_inline(u8 type, u32 offset, u32 val,u64 uS64)
+-- 
+2.19.0
+

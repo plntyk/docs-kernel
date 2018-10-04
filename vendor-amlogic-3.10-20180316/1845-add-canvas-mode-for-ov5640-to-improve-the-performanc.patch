@@ -1,0 +1,619 @@
+From c5a1de11ca8e65f370d499bf236bd1e6cdf72615 Mon Sep 17 00:00:00 2001
+From: "brian.zhu" <brian.zhu@amlogic.com>
+Date: Wed, 13 Nov 2013 02:39:06 +0800
+Subject: [PATCH 1845/5965] add canvas mode for ov5640 to improve the
+ performancce
+
+---
+ drivers/amlogic/amports/encoder.c      |   1 +
+ drivers/amlogic/camera/common/vm.c     |  90 ++++++++++-------
+ drivers/amlogic/camera/common/vmapi.h  |   1 +
+ drivers/amlogic/camera/ov5640.c        | 129 +++++++++++++++++++------
+ drivers/amlogic/video_dev/amlvideo.c   |   2 +-
+ drivers/amlogic/video_dev/amlvideo2.c  |   1 +
+ include/linux/amlogic/amports/canvas.h |   7 +-
+ 7 files changed, 166 insertions(+), 65 deletions(-)
+
+diff --git a/drivers/amlogic/amports/encoder.c b/drivers/amlogic/amports/encoder.c
+index b2f66625fb2f..a439c5a0d812 100755
+--- a/drivers/amlogic/amports/encoder.c
++++ b/drivers/amlogic/amports/encoder.c
+@@ -482,6 +482,7 @@ static void mfdin_basic (unsigned input, unsigned char iformat, unsigned char of
+ 
+     WRITE_HREG(HCODEC_MFDIN_REG8_DMBL,(picsize_x << 12) |(picsize_y << 0));
+     WRITE_HREG(HCODEC_MFDIN_REG9_ENDN,(7<<0)| (6<<3)|( 5<<6)|(4<<9) |(3<<12) |(2<<15) |( 1<<18) |(0<<21));
++    //WRITE_HREG(HCODEC_MFDIN_REG6_DCFG, 0x1ff);
+ }
+ 
+ static int  set_input_format (amvenc_mem_type type, amvenc_frame_fmt fmt, unsigned input, unsigned offset, unsigned size, unsigned char need_flush)
+diff --git a/drivers/amlogic/camera/common/vm.c b/drivers/amlogic/camera/common/vm.c
+index ba2a04724582..e4050f5b6b22 100755
+--- a/drivers/amlogic/camera/common/vm.c
++++ b/drivers/amlogic/camera/common/vm.c
+@@ -98,21 +98,21 @@ static inline void vm_vf_put_from_provider(vframe_t *vf);
+ 
+ #define VM_DEPTH_16_CANVAS VM_CANVAS_INDEX         //for single canvas use ,RGB16, YUV422,etc
+ 
+-#define VM_DEPTH_24_CANVAS VM_CANVAS_INDEX+2
++#define VM_DEPTH_24_CANVAS (VM_CANVAS_INDEX+2)
+ 
+-#define VM_DEPTH_8_CANVAS_Y  VM_CANVAS_INDEX+4     // for Y/CbCr 4:2:0
+-#define VM_DEPTH_8_CANVAS_UV VM_CANVAS_INDEX+5
+-#define VM_DEPTH_8_CANVAS_U VM_CANVAS_INDEX+7
+-#define VM_DEPTH_8_CANVAS_V VM_CANVAS_INDEX+8
++#define VM_DEPTH_8_CANVAS_Y  (VM_CANVAS_INDEX+4)     // for Y/CbCr 4:2:0
++#define VM_DEPTH_8_CANVAS_UV (VM_CANVAS_INDEX+5)
++#define VM_DEPTH_8_CANVAS_U (VM_CANVAS_INDEX+7)
++#define VM_DEPTH_8_CANVAS_V (VM_CANVAS_INDEX+8)
+ 
+-#define VM_RES_CANVAS_INDEX VM_CANVAS_INDEX+9
+-#define VM_RES_CANVAS_INDEX_U VM_CANVAS_INDEX+10
+-#define VM_RES_CANVAS_INDEX_V VM_CANVAS_INDEX+11
+-#define VM_RES_CANVAS_INDEX_UV VM_CANVAS_INDEX+12
++#define VM_RES_CANVAS_INDEX (VM_CANVAS_INDEX+9)
++#define VM_RES_CANVAS_INDEX_U (VM_CANVAS_INDEX+10)
++#define VM_RES_CANVAS_INDEX_V (VM_CANVAS_INDEX+11)
++#define VM_RES_CANVAS_INDEX_UV VM_RES_CANVAS_INDEX_U
+ 
+-#define VM_DMA_CANVAS_INDEX VM_CANVAS_INDEX+14
++#define VM_DMA_CANVAS_INDEX (VM_CANVAS_INDEX+14)
+ 
+-#define VM_CANVAS_MX VM_CANVAS_INDEX+15
++#define VM_CANVAS_MX (VM_CANVAS_INDEX+15)
+ 
+ #ifdef CONFIG_AMLOGIC_CAPTURE_FRAME_ROTATE
+ static int vmdecbuf_size[] ={
+@@ -174,12 +174,10 @@ static inline void ptr_atomic_wrap_inc(u32 *ptr)
+ #endif
+ 
+ 
+-
+-#ifdef CONFIG_CMA
+-
+ void set_vm_buf_info(resource_size_t start,unsigned int size);
+-void unset_vm_buf_info();
+-
++void unset_vm_buf_info(void);
++static void vm_cache_flush(unsigned buf_start , unsigned buf_size );
++#ifdef CONFIG_CMA
+ static dma_addr_t vm_buf_phys = ~0;
+ static void *vm_buf_virt;
+ static size_t vm_buf_size;
+@@ -188,11 +186,11 @@ int vm_init_buf(size_t size)
+ {
+ 
+     if(size ==0)
+-        return;
++        return -1;
+ 
+     if(vm_buf_phys != ~0)
+     {
+-        pr_info("phys already in use phys %p, virt %p\n", vm_buf_phys, vm_buf_virt);
++        //pr_info("phys already in use phys %p, virt %p\n", vm_buf_phys, vm_buf_virt);
+         dma_free_coherent(NULL, vm_buf_size, vm_buf_virt, vm_buf_phys); 
+     }
+ 
+@@ -694,7 +692,7 @@ static int get_output_format(int v4l2_format)
+ 	return format;
+ }
+ 
+-static vm_output_para_t output_para = {0,0,0,0,0,0,-1,-1,0,0};
++static vm_output_para_t output_para = {0,0,0,0,0,0,-1,-1,0,0,0};
+ 
+ typedef struct vm_dma_contig_memory {
+ 	u32 magic;
+@@ -779,14 +777,14 @@ int get_canvas_index(int v4l2_format, int *depth)
+ 	return canvas;
+ }
+ 
+-int get_canvas_index_res(int v4l2_format, int *depth, int width, int height, unsigned buf)
++int get_canvas_index_res(int ext_canvas, int v4l2_format, int *depth, int width, int height, unsigned buf)
+ {
+-	int canvas = VM_RES_CANVAS_INDEX;
++	int canvas = ext_canvas;
+ 	*depth = 16;
+ 	switch(v4l2_format){
+ 	case V4L2_PIX_FMT_RGB565X:
+ 	case V4L2_PIX_FMT_VYUY:
+-		canvas = VM_RES_CANVAS_INDEX;
++		canvas = ext_canvas&0xff;
+ 		*depth = 16 ;
+ 		canvas_config(canvas,
+ 			(unsigned long)buf,
+@@ -796,7 +794,7 @@ int get_canvas_index_res(int v4l2_format, int *depth, int width, int height, uns
+ 	case V4L2_PIX_FMT_YUV444:
+ 	case V4L2_PIX_FMT_BGR24:
+ 	case V4L2_PIX_FMT_RGB24:
+-		canvas = VM_RES_CANVAS_INDEX;
++		canvas = ext_canvas&0xff;
+ 		*depth = 24;
+ 		canvas_config(canvas,
+ 			(unsigned long)buf,
+@@ -805,32 +803,32 @@ int get_canvas_index_res(int v4l2_format, int *depth, int width, int height, uns
+ 		break; 
+ 	case V4L2_PIX_FMT_NV12:
+ 	case V4L2_PIX_FMT_NV21: 
+-		canvas_config(VM_RES_CANVAS_INDEX,
++		canvas_config(ext_canvas&0xff,
+ 			(unsigned long)buf,
+ 			width, height,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		canvas_config(VM_RES_CANVAS_INDEX_UV,
++		canvas_config((ext_canvas&0xff00)>>8,
+ 			(unsigned long)(buf+width*height),
+ 			width, height/2,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		canvas = VM_RES_CANVAS_INDEX | (VM_RES_CANVAS_INDEX_UV<<8);
++		canvas = ext_canvas&0xffff;
+ 		*depth = 12;   
+ 		break;
+ 	case V4L2_PIX_FMT_YVU420:
+ 	case V4L2_PIX_FMT_YUV420:
+-		canvas_config(VM_RES_CANVAS_INDEX,
++		canvas_config(ext_canvas&0xff,
+ 			(unsigned long)buf,
+ 			width, height,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		canvas_config(VM_RES_CANVAS_INDEX_U,
++		canvas_config((ext_canvas&0xff00)>>8,
+ 			(unsigned long)(buf+width*height),
+ 			width/2, height/2,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		canvas_config(VM_RES_CANVAS_INDEX_V,
++		canvas_config((ext_canvas&0xff0000)>>16,
+ 			(unsigned long)(buf+width*height*5/4),
+ 			width/2, height/2,
+ 			CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+-		canvas = VM_RES_CANVAS_INDEX|(VM_RES_CANVAS_INDEX_U<<8)|(VM_RES_CANVAS_INDEX_V<<16);
++		canvas = ext_canvas&0xffffff;
+ 		*depth = 12;
+ 		break;
+ 	default:
+@@ -881,7 +879,10 @@ int vm_fill_buffer(struct videobuf_buffer* vb , vm_output_para_t* para)
+ 		depth =  (vb->bytesperline <<3)/vb->width;
+ 		break;
+ 	case  MAGIC_RE_MEM:
+-		canvas_index =  get_canvas_index_res(v4l2_format,&depth,vb->width,vb->height,(unsigned)para->vaddr);
++		if(para->ext_canvas!=0)
++		    canvas_index = get_canvas_index_res(para->ext_canvas,v4l2_format,&depth,vb->width,(para->height==0)?vb->height:para->height,(unsigned)para->vaddr);
++		else
++		    canvas_index =  get_canvas_index_res((VM_RES_CANVAS_INDEX|(VM_RES_CANVAS_INDEX_U<<8)|(VM_RES_CANVAS_INDEX_V<<16)),v4l2_format,&depth,vb->width,vb->height,(unsigned)para->vaddr);
+ 		break;
+ 	case  MAGIC_SG_MEM:
+ 	case  MAGIC_VMAL_MEM:
+@@ -902,8 +903,11 @@ int vm_fill_buffer(struct videobuf_buffer* vb , vm_output_para_t* para)
+ 	output_para.zoom= para->zoom;
+ 	output_para.angle= para->angle;
+ 	output_para.vaddr = para->vaddr;
++	output_para.ext_canvas = (magic == MAGIC_RE_MEM)?para->ext_canvas:0;
+ 	up(&vb_start_sema);
+ 	ret = down_interruptible(&vb_done_sema);
++	if(magic == MAGIC_RE_MEM)
++		vm_cache_flush((unsigned)para->vaddr, output_para.bytesperline*((para->height==0)?output_para.height:para->height));
+ 	return ret;
+ }
+ 
+@@ -1617,6 +1621,25 @@ void get_vm_buf_info(resource_size_t* start,unsigned int* size,struct io_mapping
+ 		*mapping = vm_device.mapping;
+ }
+ 
++/*
++static void vm_dma_flush(unsigned buf_start , unsigned buf_size )
++{
++	if(vm_device.dev){
++		if((buf_start>=vm_device.buffer_start)&&((buf_start+buf_size)<=(vm_device.buffer_start + vm_device.buffer_size)))
++			dma_sync_single_for_device(vm_device.dev,buf_start ,buf_size, DMA_TO_DEVICE);
++	}
++}
++*/
++
++static void vm_cache_flush(unsigned buf_start , unsigned buf_size )
++{
++	if(vm_device.dev){
++		if((buf_start>=vm_device.buffer_start)&&((buf_start+buf_size)<=(vm_device.buffer_start + vm_device.buffer_size)))
++			dma_sync_single_for_cpu(vm_device.dev , buf_start, buf_size, DMA_FROM_DEVICE);
++	}
++}
++
++
+ static int vm_open(struct inode *inode, struct file *file)
+ {
+ 	 ge2d_context_t *context=NULL;
+@@ -1721,6 +1744,7 @@ int uninit_vm_device(void)
+ 	{
+ 		if(vm_device.dev)
+ 		device_destroy(vm_device.cla, MKDEV(vm_device.major, 0));
++		vm_device.dev = NULL;
+ 		class_unregister(vm_device.cla);
+ 	}
+ 
+@@ -1739,12 +1763,10 @@ MODULE_AMLOG(AMLOG_DEFAULT_LEVEL, 0xff, LOG_LEVEL_DESC, LOG_MASK_DESC);
+ /* for driver. */
+ static int vm_driver_probe(struct platform_device *pdev)
+ {
++#ifndef CONFIG_CMA
+ 	char* buf_start;
+ 	unsigned int buf_size;
+ 	struct resource *mem;
+-
+-
+-#ifndef CONFIG_CMA
+ 
+ 	if (!(mem = platform_get_resource(pdev, IORESOURCE_MEM, 0)))
+ 	{
+diff --git a/drivers/amlogic/camera/common/vmapi.h b/drivers/amlogic/camera/common/vmapi.h
+index 7c247582dfa5..a6febd18bb4e 100755
+--- a/drivers/amlogic/camera/common/vmapi.h
++++ b/drivers/amlogic/camera/common/vmapi.h
+@@ -12,6 +12,7 @@ typedef struct vm_output_para{
+ 	int mirror;   // set -1 as invalid
+ 	int angle;
+ 	unsigned vaddr;
++	unsigned int ext_canvas;
+ }vm_output_para_t;
+ 
+ extern int vm_fill_buffer(struct videobuf_buffer* vb, vm_output_para_t* para);
+diff --git a/drivers/amlogic/camera/ov5640.c b/drivers/amlogic/camera/ov5640.c
+index 338492582169..877210bfc816 100755
+--- a/drivers/amlogic/camera/ov5640.c
++++ b/drivers/amlogic/camera/ov5640.c
+@@ -29,7 +29,7 @@
+ #include <linux/kthread.h>
+ #include <linux/highmem.h>
+ #include <linux/freezer.h>
+-#include <media/videobuf-vmalloc.h>
++#include <media/videobuf-res.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <linux/wakelock.h>
+@@ -45,12 +45,15 @@
+ 
+ #include "common/plat_ctrl.h"
+ #include "common/vmapi.h"
++#include "common/vm.h"
+ #include "ov5640_firmware.h"
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ #include <mach/mod_gate.h>
+ #endif
+ #define OV5640_CAMERA_MODULE_NAME "ov5640"
++#define MAGIC_RE_MEM 0x123039dc
++#define OV5640_RES0_CANVAS_INDEX CAMERA_USER_CANVAS_INDEX
+ 
+ /* Wake up at about 30 fps */
+ #define WAKE_NUMERATOR 30
+@@ -130,6 +133,18 @@ static struct v4l2_frmivalenum ov5640_frmivalenum[]={
+ 				.denominator = 30,
+ 			}
+ 		}
++	},{
++		.index = 0,
++		.pixel_format = V4L2_PIX_FMT_NV21,
++		.width = 1920,
++		.height = 1080,
++		.type = V4L2_FRMIVAL_TYPE_DISCRETE,
++		{
++			.discrete ={
++				.numerator = 1,
++				.denominator = 30,
++			}
++		}
+ 	},{
+ 		.index = 1,
+ 		.pixel_format = V4L2_PIX_FMT_NV21,
+@@ -472,6 +487,8 @@ struct ov5640_buffer {
+ 	struct videobuf_buffer vb;
+ 
+ 	struct ov5640_fmt        *fmt;
++
++	unsigned int canvas_id;
+ };
+ 
+ struct ov5640_dmaqueue {
+@@ -549,6 +566,8 @@ struct ov5640_fh {
+ 	unsigned int               width, height;
+ 	struct videobuf_queue      vb_vidq;
+ 
++	struct videobuf_res_privdata res;
++
+ 	enum v4l2_buf_type         type;
+ 	int	           input;     /* Input Number on bars */
+ 	int  stream_on;
+@@ -2009,16 +2028,13 @@ static struct aml_camera_i2c_fig_s OV5640_capture_2M_script[] = {
+ };
+ 
+ static resolution_param_t  prev_resolution_array[] = {
+-	#if 0
+ 	{
+ 		.frmsize			= {1920, 1080},
+ 		.active_frmsize			= {1280, 718},
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_1920X1080,
+ 		.reg_script			= OV5640_preview_720P_script,
+-	},
+-	#endif
+-	{
++	},{
+ 		.frmsize			= {1280, 960},
+ 		.active_frmsize			= {1280, 958},
+ 		.active_fps			= 30,
+@@ -2030,8 +2046,7 @@ static resolution_param_t  prev_resolution_array[] = {
+ 		.active_fps			= 30,
+ 		.size_type			= SIZE_1280X720,
+ 		.reg_script			= OV5640_preview_720P_script,
+-	},
+-	{
++	},{
+ 		.frmsize			= {1024, 768},
+ 		.active_frmsize			= {1280, 958},
+ 		.active_fps			= 30,
+@@ -2910,6 +2925,38 @@ unsigned char v4l_2_ov5640(int val)
+ 	else return 0;
+ }
+ 
++static int convert_canvas_index(unsigned int v4l2_format, unsigned int start_canvas)
++{
++	int canvas = start_canvas;
++
++	switch(v4l2_format){
++	case V4L2_PIX_FMT_RGB565X:
++	case V4L2_PIX_FMT_VYUY:
++		canvas = start_canvas;
++		break;
++	case V4L2_PIX_FMT_YUV444:
++	case V4L2_PIX_FMT_BGR24:
++	case V4L2_PIX_FMT_RGB24:
++		canvas = start_canvas;
++		break; 
++	case V4L2_PIX_FMT_NV12:
++	case V4L2_PIX_FMT_NV21: 
++		canvas = start_canvas | ((start_canvas+1)<<8);
++		break;
++	case V4L2_PIX_FMT_YVU420:
++	case V4L2_PIX_FMT_YUV420:
++		if(V4L2_PIX_FMT_YUV420 == v4l2_format){
++			canvas = start_canvas|((start_canvas+1)<<8)|((start_canvas+2)<<16);
++		}else{
++			canvas = start_canvas|((start_canvas+2)<<8)|((start_canvas+1)<<16);
++		}
++		break;
++	default:
++		break;
++	}
++	return canvas;
++}
++
+ static int ov5640_setting(struct ov5640_device *dev,int PROP_ID,int value ) 
+ {
+ 	int ret=0;
+@@ -3043,18 +3090,24 @@ static void power_down_ov5640(struct ov5640_device *dev)
+ static void ov5640_fillbuff(struct ov5640_fh *fh, struct ov5640_buffer *buf)
+ {
+ 	struct ov5640_device *dev = fh->dev;
+-	void *vbuf = videobuf_to_vmalloc(&buf->vb);
++	//void *vbuf = videobuf_to_vmalloc(&buf->vb);
++	void *vbuf = (void *)videobuf_to_res(&buf->vb);
+ 	vm_output_para_t para = {0};
+ 	dprintk(dev,1,"%s\n", __func__);    
+ 	if (!vbuf)
+     	return;
+ 	/*  0x18221223 indicate the memory type is MAGIC_VMAL_MEM*/
++	if(buf->canvas_id == 0)
++           buf->canvas_id = convert_canvas_index(fh->fmt->fourcc, OV5640_RES0_CANVAS_INDEX+buf->vb.i*3);
+ 	para.mirror = ov5640_qctrl[2].default_value&3;
+ 	para.v4l2_format = fh->fmt->fourcc;
+-	para.v4l2_memory = 0x18221223;
++	para.v4l2_memory = MAGIC_RE_MEM;//0x18221223;
+ 	para.zoom = ov5640_qctrl[10].default_value;
+ 	para.angle = ov5640_qctrl[11].default_value;
+ 	para.vaddr = (unsigned)vbuf;
++	para.ext_canvas = buf->canvas_id;
++	para.width = buf->vb.width;
++	para.height = buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+@@ -3196,10 +3249,14 @@ static void ov5640_stop_thread(struct ov5640_dmaqueue  *dma_q)
+ static int
+ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ {
+-	struct ov5640_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct ov5640_fh *fh  = container_of(res, struct ov5640_fh, res);
+ 	struct ov5640_device *dev  = fh->dev;
+ 	//int bytes = fh->fmt->depth >> 3 ;
+-	*size = (fh->width*fh->height*fh->fmt->depth)>>3;    
++	int height = fh->height;
++	if(height==1080)
++           height = 1088;
++	*size = (fh->width*height*fh->fmt->depth)>>3;    
+ 	if (0 == *count)
+         *count = 32;
+ 
+@@ -3214,7 +3271,8 @@ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ 
+ static void free_buffer(struct videobuf_queue *vq, struct ov5640_buffer *buf)
+ {
+-	struct ov5640_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct ov5640_fh *fh  = container_of(res, struct ov5640_fh, res);
+ 	struct ov5640_device *dev  = fh->dev;
+ 
+ 	dprintk(dev, 1, "%s, state: %i\n", __func__, buf->vb.state);
+@@ -3223,7 +3281,7 @@ static void free_buffer(struct videobuf_queue *vq, struct ov5640_buffer *buf)
+ 	if (in_interrupt())
+     		BUG();
+ 
+-	videobuf_vmalloc_free(&buf->vb);
++	videobuf_res_free(vq, &buf->vb);
+ 	dprintk(dev, 1, "free_buffer: freed\n");
+ 	buf->vb.state = VIDEOBUF_NEEDS_INIT;
+ }
+@@ -3234,7 +3292,8 @@ static int
+ buffer_prepare(struct videobuf_queue *vq, struct videobuf_buffer *vb,
+                     	enum v4l2_field field)
+ {
+-	struct ov5640_fh     *fh  = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct ov5640_fh *fh  = container_of(res, struct ov5640_fh, res);
+ 	struct ov5640_device    *dev = fh->dev;
+ 	struct ov5640_buffer *buf = container_of(vb, struct ov5640_buffer, vb);
+ 	int rc;
+@@ -3278,7 +3337,8 @@ static void
+ buffer_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ {
+ 	struct ov5640_buffer    *buf  = container_of(vb, struct ov5640_buffer, vb);
+-	struct ov5640_fh        *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct ov5640_fh *fh  = container_of(res, struct ov5640_fh, res);
+ 	struct ov5640_device       *dev  = fh->dev;
+ 	struct ov5640_dmaqueue *vidq = &dev->vidq;
+ 
+@@ -3291,8 +3351,9 @@ static void buffer_release(struct videobuf_queue *vq,
+                struct videobuf_buffer *vb)
+ {
+ 	struct ov5640_buffer   *buf  = container_of(vb, struct ov5640_buffer, vb);
+-	struct ov5640_fh       *fh   = vq->priv_data;
+-	struct ov5640_device      *dev  = (struct ov5640_device *)fh->dev;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct ov5640_fh *fh  = container_of(res, struct ov5640_fh, res);
++	struct ov5640_device *dev = (struct ov5640_device *)fh->dev;
+ 
+ 	dprintk(dev, 1, "%s\n", __func__);
+ 
+@@ -3316,7 +3377,7 @@ static int vidioc_querycap(struct file *file, void  *priv,
+ 	struct ov5640_device *dev = fh->dev;
+ 
+ 	strcpy(cap->driver, "ov5640");
+-	strcpy(cap->card, "ov5640");
++	strcpy(cap->card, "ov5640.canvas");
+ 	strlcpy(cap->bus_info, dev->v4l2_dev.name, sizeof(cap->bus_info));
+ 	cap->version = OV5640_CAMERA_VERSION;
+ 	cap->capabilities =	V4L2_CAP_VIDEO_CAPTURE |
+@@ -3518,7 +3579,6 @@ static int vidioc_g_parm(struct file *file, void *priv,
+ 	return 0;
+ }
+ 
+-
+ static int vidioc_reqbufs(struct file *file, void *priv,
+               struct v4l2_requestbuffers *p)
+ {
+@@ -3530,8 +3590,15 @@ static int vidioc_reqbufs(struct file *file, void *priv,
+ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct ov5640_fh  *fh = priv;
+-
+-	return (videobuf_querybuf(&fh->vb_vidq, p));
++	int ret = videobuf_querybuf(&fh->vb_vidq, p);
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++	    p->reserved  = convert_canvas_index(fh->fmt->fourcc, OV5640_RES0_CANVAS_INDEX+p->index*3);
++	}else{
++	    p->reserved = 0;
++	}
++#endif
++	return ret;
+ }
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+@@ -3578,7 +3645,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+                 para.v_active = fh->dev->cur_resolution_param->active_frmsize.height;
+                 para.hs_bp = 0;
+                 para.vs_bp = 2;
+-                para.cfmt = TVIN_YUV422;
++                para.cfmt = TVIN_NV21;
+                 para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;	
+         } else {
+                 para.frame_rate = ov5640_frmintervals_active.denominator;;
+@@ -3586,7 +3653,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+                 para.v_active = fh->dev->cur_resolution_param->active_frmsize.height;
+                 para.hs_bp = 0;
+                 para.vs_bp = 2;
+-                para.cfmt = TVIN_YUV422;
++                para.cfmt = TVIN_NV21;
+                 para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+         }
+ 
+@@ -3827,6 +3894,8 @@ static int ov5640_open(struct file *file)
+ 	struct ov5640_device *dev = video_drvdata(file);
+ 	struct ov5640_fh *fh = NULL;
+ 	//struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
++	resource_size_t mem_start = 0;
++	unsigned int mem_size = 0;
+ 	int retval = 0;
+ 	//int reg_val;
+ 	//int i = 0;
+@@ -3896,10 +3965,16 @@ static int ov5640_open(struct file *file)
+ 	fh->f_flags  = file->f_flags;
+ 	/* Resets frame counters */
+ 	dev->jiffies = jiffies;
+-            
+-	videobuf_queue_vmalloc_init(&fh->vb_vidq, &ov5640_video_qops,
+-        	NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
+-        	sizeof(struct ov5640_buffer), fh, NULL);
++
++	get_vm_buf_info(&mem_start, &mem_size, NULL);
++	fh->res.start = mem_start;
++	fh->res.end = mem_start+mem_size-1;
++	fh->res.magic = MAGIC_RE_MEM;
++	fh->res.priv = NULL;		
++	videobuf_queue_res_init(&fh->vb_vidq, &ov5640_video_qops,
++					NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
++					sizeof(struct ov5640_buffer), (void*)&fh->res, NULL);
++
+ 	bDoingAutoFocusMode=false;
+ 	ov5640_start_thread(fh);
+ 	return 0;
+diff --git a/drivers/amlogic/video_dev/amlvideo.c b/drivers/amlogic/video_dev/amlvideo.c
+index 9c5850d50390..23b5e3e65ed8 100755
+--- a/drivers/amlogic/video_dev/amlvideo.c
++++ b/drivers/amlogic/video_dev/amlvideo.c
+@@ -789,7 +789,7 @@ static int amlvideo_mmap(struct file *file, struct vm_area_struct *vma) {
+     int ret;
+ 
+     dprintk(dev, 1, "mmap called, vma=0x%08lx\n", (unsigned long)vma);
+-
++    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+     ret = videobuf_mmap_mapper(&fh->vb_vidq, vma);
+ 
+     dprintk(dev, 1, "vma start=0x%08lx, size=%ld, ret=%d\n", (unsigned long)vma->vm_start, (unsigned long)vma->vm_end-(unsigned long)vma->vm_start, ret);
+diff --git a/drivers/amlogic/video_dev/amlvideo2.c b/drivers/amlogic/video_dev/amlvideo2.c
+index b7f64b6d1273..9de54e735901 100755
+--- a/drivers/amlogic/video_dev/amlvideo2.c
++++ b/drivers/amlogic/video_dev/amlvideo2.c
+@@ -1730,6 +1730,7 @@ static int amlvideo2_mmap(struct file *file, struct vm_area_struct *vma)
+ 
+ 	dprintk(node->vid_dev, 1, "mmap called, vma=0x%08lx\n", (unsigned long)vma);
+ 
++	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+ 	ret = videobuf_mmap_mapper(&fh->vb_vidq, vma);
+ 
+ 	dprintk(node->vid_dev, 1, "vma start=0x%08lx, size=%ld, ret=%d\n",
+diff --git a/include/linux/amlogic/amports/canvas.h b/include/linux/amlogic/amports/canvas.h
+index d4edaa902196..84530289b87a 100755
+--- a/include/linux/amlogic/amports/canvas.h
++++ b/include/linux/amlogic/amports/canvas.h
+@@ -50,9 +50,7 @@ typedef struct {
+ #define AMVDEC_H264_CANVAS_MAX 0xbf
+ 
+ 
+-//tvin camera  vdin0: 0x18-0x1d   vdin1: 0x1e-0x23, nv21 chroma: 0x24-0x2f
+-#define VDIN_CAMERA_CANVAS_INDEX   0x18
+-#define VDIN_CAMERA_CANVAS_MAX_INDEX 0x2f
++//0x18-0x23  empty
+ 
+ //jpeg dec
+ #define JPEGDEC_CANVAS_INDEX   0//0x18//0x3a
+@@ -129,6 +127,9 @@ typedef struct {
+ #define VDIN1_CANVAS_INDEX              0x24
+ #define VDIN1_CANVAS_MAX_INDEX          0x3B
+ 
++#define CAMERA_USER_CANVAS_INDEX             0x98
++#define CAMERA_USER_CANVAS_MAX_INDEX     0xaf
++
+ #if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+ #define AMLVIDEO2_RES_CANVAS 0xD8
+ #define AMLVIDEO2_MAX_RES_CANVAS 0xE3
+-- 
+2.19.0
+

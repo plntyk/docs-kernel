@@ -1,0 +1,97 @@
+From 3eab7ee26f35ccd3e1978ce7c16d1c3de03228e2 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Thu, 7 Nov 2013 16:57:14 -0800
+Subject: [PATCH 1793/5965] PD #81060 Apply cbus access hack after RMVB
+ playback.
+
+---
+ drivers/amlogic/amports/vdec.c  | 16 +++++++++++++---
+ drivers/amlogic/amports/vdec.h  |  1 +
+ drivers/amlogic/amports/vreal.c |  6 ++++++
+ 3 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index 60a8def8521b..b0df9e9f899e 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -557,13 +557,21 @@ const u32 fix_mc[] __attribute__ ((aligned (8))) = {
+     0x0809c05a, 0x06696000, 0x0c780000, 0x00000000
+ };
+ 
+-static void vdec_dos_top_reg_fix(void)
++void vdec_dos_top_reg_fix(void)
+ {
++    bool hcodec_on = vdec_on(VDEC_HCODEC);
++
++    if ((hcodec_on) && (READ_VREG(HCODEC_MPSR) & 1)) {
++        return;
++    }
++
+     /* this function should be called only once after power on
+      * to work around a HW bug for dual video decoders access
+      * DOS top level CBUS registers
+      */
+-    vdec_poweron(VDEC_HCODEC);
++    if (!hcodec_on) {
++        vdec_poweron(VDEC_HCODEC);
++    }
+ 
+     amhcodec_loadmc(fix_mc);
+ 
+@@ -573,7 +581,9 @@ static void vdec_dos_top_reg_fix(void)
+ 
+     amhcodec_stop();
+ 
+-    vdec_poweroff(VDEC_HCODEC);
++    if (!hcodec_on) {
++        vdec_poweroff(VDEC_HCODEC);
++    }
+ }
+ #endif
+ 
+diff --git a/drivers/amlogic/amports/vdec.h b/drivers/amlogic/amports/vdec.h
+index 9435c219819c..a8bc6684d206 100755
+--- a/drivers/amlogic/amports/vdec.h
++++ b/drivers/amlogic/amports/vdec.h
+@@ -44,6 +44,7 @@ extern void vdec2_power_mode(int level);
+ extern void vdec_poweron(vdec_type_t core);
+ extern void vdec_poweroff(vdec_type_t core);
+ extern bool vdec_on(vdec_type_t core);
++extern void vdec_dos_top_reg_fix(void);
+ #else
+ #define vdec_poweron(core)
+ #define vdec_poweroff(core)
+diff --git a/drivers/amlogic/amports/vreal.c b/drivers/amlogic/amports/vreal.c
+index 86c834b778b1..0a250ad6ccfd 100755
+--- a/drivers/amlogic/amports/vreal.c
++++ b/drivers/amlogic/amports/vreal.c
+@@ -31,6 +31,7 @@
+ #include <plat/io.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/amlogic/amports/amstream.h>
++#include <linux/amlogic/amports/vformat.h>
+ #include <linux/amlogic/amports/ptsserv.h>
+ #include <linux/amlogic/amports/canvas.h>
+ #include <linux/amlogic/amports/vframe.h>
+@@ -40,6 +41,7 @@
+ 
+ #include <asm/uaccess.h>
+ 
++#include "vdec.h"
+ #include "vdec_reg.h"
+ #include "vreal.h"
+ #include "amvdec.h"
+@@ -849,6 +851,10 @@ static int amvdec_real_remove(struct platform_device *pdev)
+ 
+     amvdec_disable();
+ 
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++    vdec_dos_top_reg_fix();
++#endif
++
+     printk("frame duration %d, frames %d\n", frame_dur, frame_count);
+     return 0;
+ }
+-- 
+2.19.0
+

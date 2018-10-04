@@ -1,0 +1,1209 @@
+From 897555740b11a546a63d9fe18f410cc9c9661ccf Mon Sep 17 00:00:00 2001
+From: Shi Liu <shi.liu@amlogic.com>
+Date: Fri, 13 Mar 2015 11:13:39 +0800
+Subject: [PATCH 5456/5965] PD #101972: mm: cma: optimize for cma allocation
+
+Change-Id: Iad36a19300c25e2b799cf56a42187136f84a8a38
+---
+ drivers/base/dma-contiguous.c    | 38 +++++++++++++-----
+ drivers/staging/android/ashmem.c |  7 ++--
+ fs/mpage.c                       | 28 ++++++++++---
+ include/linux/mm.h               |  8 +++-
+ include/linux/pagevec.h          | 14 ++++++-
+ include/linux/vmstat.h           |  3 +-
+ mm/compaction.c                  | 20 +++++++++-
+ mm/filemap.c                     | 24 ++++++++++--
+ mm/memory.c                      | 23 +++++++++--
+ mm/migrate.c                     | 67 +++++++++++++++++++++++++++++++-
+ mm/page_alloc.c                  | 30 +++++++++-----
+ mm/page_isolation.c              | 44 +++++++++++++++++++--
+ mm/readahead.c                   | 38 +++++++++++++++++-
+ mm/shmem.c                       | 17 ++++++++
+ mm/swap_state.c                  | 10 ++++-
+ mm/vmscan.c                      | 22 ++++++++++-
+ 16 files changed, 345 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/base/dma-contiguous.c b/drivers/base/dma-contiguous.c
+index 74f26c910506..3e4a4f49ae3f 100644
+--- a/drivers/base/dma-contiguous.c
++++ b/drivers/base/dma-contiguous.c
+@@ -43,6 +43,7 @@ struct cma {
+ 	unsigned long	base_pfn;
+ 	unsigned long	count;
+ 	unsigned long	*bitmap;
++	struct mutex lock;
+ };
+ 
+ static DEFINE_MUTEX(cma_mutex);
+@@ -183,6 +184,7 @@ static __init struct cma *cma_create_area(unsigned long base_pfn,
+ 	if (ret)
+ 		goto error;
+ 
++	mutex_init(&cma->lock);
+ 	pr_debug("%s: returned %p\n", __func__, (void *)cma);
+ 	return cma;
+ 
+@@ -224,7 +226,7 @@ int __init cma_fdt_scan(unsigned long node, const char *uname,
+     {
+         p = of_get_flat_dt_prop(node, "region_name", &l);
+         if(p != 0 && l > 0)
+-            strncpy(cma_areas[cma_area_count - 1].name, p, CMA_REGION_NAME_MAX); 
++            strncpy(cma_areas[cma_area_count - 1].name, p, CMA_REGION_NAME_MAX);
+     }
+ 
+ 	return 0;
+@@ -269,7 +271,7 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
+ 		if (dma_contiguous_reserve_area(sel_size, &base, limit) == 0)
+         {
+ 			dma_contiguous_def_base = base;
+-            strcpy(cma_areas[cma_area_count - 1].name, "cma_global"); 
++			strcpy(cma_areas[cma_area_count - 1].name, "cma_global");
+         }
+ 	}
+ #ifdef CONFIG_OF
+@@ -457,6 +459,13 @@ static int __init cma_init_reserved_areas(void)
+ }
+ core_initcall(cma_init_reserved_areas);
+ 
++static void clear_cma_bitmap(struct cma *cma, unsigned long pfn, int count)
++{
++	mutex_lock(&cma->lock);
++	bitmap_clear(cma->bitmap, pfn - cma->base_pfn, count);
++	mutex_unlock(&cma->lock);
++}
++
+ /**
+  * dma_alloc_from_contiguous() - allocate pages from contiguous area
+  * @dev:   Pointer to device for which the allocation is performed.
+@@ -490,30 +499,41 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
+ 
+ 	mask = (1 << align) - 1;
+ 
+-	mutex_lock(&cma_mutex);
+ 
+ 	for (;;) {
++		mutex_lock(&cma->lock);
+ 		pageno = bitmap_find_next_zero_area(cma->bitmap, cma->count,
+ 						    start, count, mask);
+-		if (pageno >= cma->count)
++		if (pageno >= cma->count) {
++			mutex_unlock(&cma->lock);
+ 			break;
++		}
++		bitmap_set(cma->bitmap, pageno, count);
++		/*
++		 * It's safe to drop the lock here. We've marked this region for
++		 * our exclusive use. If the migration fails we will take the
++		 * lock again and unmark it.
++		 */
++		mutex_unlock(&cma->lock);
+ 
+ 		pfn = cma->base_pfn + pageno;
++		mutex_lock(&cma_mutex);
+ 		ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA);
++		mutex_unlock(&cma_mutex);
+ 		if (ret == 0) {
+-			bitmap_set(cma->bitmap, pageno, count);
+ 			page = pfn_to_page(pfn);
+ 			break;
+ 		} else if (ret != -EBUSY) {
++			clear_cma_bitmap(cma, pfn, count);
+ 			break;
+ 		}
++		clear_cma_bitmap(cma, pfn, count);
+ 		pr_debug("%s(): memory range at %p is busy, retrying\n",
+-			 __func__, pfn_to_page(pfn));
++				 __func__, pfn_to_page(pfn));
+ 		/* try again with a bit different memory target */
+ 		start = pageno + mask + 1;
+ 	}
+ 
+-	mutex_unlock(&cma_mutex);
+ 	pr_debug("%s(): returned %p\n", __func__, page);
+ 	return page;
+ }
+@@ -546,10 +566,8 @@ bool dma_release_from_contiguous(struct device *dev, struct page *pages,
+ 
+ 	VM_BUG_ON(pfn + count > cma->base_pfn + cma->count);
+ 
+-	mutex_lock(&cma_mutex);
+-	bitmap_clear(cma->bitmap, pfn - cma->base_pfn, count);
+ 	free_contig_range(pfn, count);
+-	mutex_unlock(&cma_mutex);
++	clear_cma_bitmap(cma, pfn, count);
+ 
+ 	return true;
+ }
+diff --git a/drivers/staging/android/ashmem.c b/drivers/staging/android/ashmem.c
+index 27f3b03233fb..612fc4850ff3 100644
+--- a/drivers/staging/android/ashmem.c
++++ b/drivers/staging/android/ashmem.c
+@@ -367,8 +367,10 @@ static int ashmem_shrink(struct shrinker *s, struct shrink_control *sc)
+ #if defined(CONFIG_SMP)
+ 	owner = ashmem_mutex.owner;
+ #endif
+-	if(!(owner && (owner == current)))
+-		mutex_lock(&ashmem_mutex);
++	if (owner && (owner == current))
++		return -1;
++
++	mutex_lock(&ashmem_mutex);
+ 
+ 	list_for_each_entry_safe(range, next, &ashmem_lru_list, lru) {
+ 		loff_t start = range->pgstart * PAGE_SIZE;
+@@ -386,7 +388,6 @@ static int ashmem_shrink(struct shrinker *s, struct shrink_control *sc)
+ 		if (sc->nr_to_scan <= 0)
+ 			break;
+ 	}
+-	if(!(owner && (owner == current)))
+ 		mutex_unlock(&ashmem_mutex);
+ 
+ 	return lru_count;
+diff --git a/fs/mpage.c b/fs/mpage.c
+index 0face1c4d4c6..da80caacd9a2 100644
+--- a/fs/mpage.c
++++ b/fs/mpage.c
+@@ -109,8 +109,8 @@ mpage_alloc(struct block_device *bdev,
+  * them.  So when the buffer is up to date and the page size == block size,
+  * this marks the page up to date instead of adding new buffers.
+  */
+-static void 
+-map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block) 
++static void
++map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct buffer_head *page_bh, *head;
+@@ -121,9 +121,9 @@ map_buffer_to_page(struct page *page, struct buffer_head *bh, int page_block)
+ 		 * don't make any buffers if there is only one buffer on
+ 		 * the page and the page just needs to be set up to date
+ 		 */
+-		if (inode->i_blkbits == PAGE_CACHE_SHIFT && 
++		if (inode->i_blkbits == PAGE_CACHE_SHIFT &&
+ 		    buffer_uptodate(bh)) {
+-			SetPageUptodate(page);    
++			SetPageUptodate(page);
+ 			return;
+ 		}
+ 		create_empty_buffers(page, 1 << inode->i_blkbits, 0);
+@@ -240,7 +240,7 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
+ 			map_buffer_to_page(page, map_bh, page_block);
+ 			goto confused;
+ 		}
+-	
++
+ 		if (first_hole != blocks_per_page)
+ 			goto confused;		/* hole -> non-hole */
+ 
+@@ -362,6 +362,10 @@ confused:
+  *
+  * This all causes the disk requests to be issued in the correct order.
+  */
++#ifdef CONFIG_CMA
++extern void wakeup_wq(bool has_cma);
++extern bool has_cma_page(struct page *page);
++#endif
+ int
+ mpage_readpages(struct address_space *mapping, struct list_head *pages,
+ 				unsigned nr_pages, get_block_t get_block)
+@@ -371,7 +375,16 @@ mpage_readpages(struct address_space *mapping, struct list_head *pages,
+ 	sector_t last_block_in_bio = 0;
+ 	struct buffer_head map_bh;
+ 	unsigned long first_logical_block = 0;
++#ifdef CONFIG_CMA
++	bool has_cma = false;
++	struct page * tmp_page = NULL;
+ 
++	list_for_each_entry(tmp_page, pages, lru){
++		has_cma = has_cma_page(tmp_page);
++		if (has_cma)
++			break;
++	}
++#endif
+ 	map_bh.b_state = 0;
+ 	map_bh.b_size = 0;
+ 	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+@@ -389,6 +402,9 @@ mpage_readpages(struct address_space *mapping, struct list_head *pages,
+ 		}
+ 		page_cache_release(page);
+ 	}
++#ifdef CONFIG_CMA
++	wakeup_wq(has_cma);
++#endif
+ 	BUG_ON(!list_empty(pages));
+ 	if (bio)
+ 		mpage_bio_submit(READ, bio);
+@@ -427,7 +443,7 @@ EXPORT_SYMBOL(mpage_readpage);
+  *
+  * If all blocks are found to be contiguous then the page can go into the
+  * BIO.  Otherwise fall back to the mapping's writepage().
+- * 
++ *
+  * FIXME: This code wants an estimate of how many pages are still to be
+  * written, so it can intelligently allocate a suitably-sized BIO.  For now,
+  * just allocate full-size (16-page) BIOs.
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 3883d9332c78..d444cb966c1a 100755
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -40,6 +40,12 @@ extern int sysctl_legacy_va_layout;
+ #define sysctl_legacy_va_layout 0
+ #endif
+ 
++#ifdef CONFIG_CMA
++#define MIGRATE_CMA_HOLD  1
++#define MIGRATE_CMA_ALLOC 2
++#define MIGRATE_CMA_REL   3
++#endif
++
+ #include <asm/page.h>
+ #include <asm/pgtable.h>
+ #include <asm/processor.h>
+@@ -193,7 +199,7 @@ struct vm_fault {
+ /*
+  * These are the virtual MM functions - opening of an area, closing and
+  * unmapping it (needed to keep files on disk up-to-date etc), pointer
+- * to the functions called when a no-page or a wp-page exception occurs. 
++ * to the functions called when a no-page or a wp-page exception occurs.
+  */
+ struct vm_operations_struct {
+ 	void (*open)(struct vm_area_struct * area);
+diff --git a/include/linux/pagevec.h b/include/linux/pagevec.h
+index 2aa12b8499c0..a38a901be7a7 100644
+--- a/include/linux/pagevec.h
++++ b/include/linux/pagevec.h
+@@ -11,6 +11,7 @@
+ /* 14 pointers + two long's align the pagevec structure to a power of two */
+ #define PAGEVEC_SIZE	14
+ 
++#include <linux/page-isolation.h>
+ struct page;
+ struct address_space;
+ 
+@@ -54,8 +55,19 @@ static inline unsigned pagevec_space(struct pagevec *pvec)
+  */
+ static inline unsigned pagevec_add(struct pagevec *pvec, struct page *page)
+ {
++	unsigned ret = 0;
++
+ 	pvec->pages[pvec->nr++] = page;
+-	return pagevec_space(pvec);
++	ret = pagevec_space(pvec);
++
++#ifdef CONFIG_CMA
++	if(is_migrate_cma(get_pageblock_migratetype(page)) ||
++	   is_migrate_isolate(get_pageblock_migratetype(page))){
++		ret = 0;
++	}
++#endif
++
++	return ret;
+ }
+ 
+ static inline void pagevec_release(struct pagevec *pvec)
+diff --git a/include/linux/vmstat.h b/include/linux/vmstat.h
+index 9044769f2296..601c9f495207 100644
+--- a/include/linux/vmstat.h
++++ b/include/linux/vmstat.h
+@@ -5,6 +5,7 @@
+ #include <linux/percpu.h>
+ #include <linux/mm.h>
+ #include <linux/mmzone.h>
++#include <linux/page-isolation.h>
+ #include <linux/vm_event_item.h>
+ #include <linux/atomic.h>
+ 
+@@ -261,7 +262,7 @@ static inline void __mod_zone_freepage_state(struct zone *zone, int nr_pages,
+ 					     int migratetype)
+ {
+ 	__mod_zone_page_state(zone, NR_FREE_PAGES, nr_pages);
+-	if (is_migrate_cma(migratetype))
++	if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 		__mod_zone_page_state(zone, NR_FREE_CMA_PAGES, nr_pages);
+ }
+ 
+diff --git a/mm/compaction.c b/mm/compaction.c
+index 06b1cbaa14ca..99ed413ebfd9 100755
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -648,13 +648,23 @@ next_pageblock:
+  * suitable for isolating free pages from and then isolate them.
+  */
+ static void isolate_freepages(struct zone *zone,
+-				struct compact_control *cc)
++				struct compact_control *cc, struct page *migratepage)
+ {
+ 	struct page *page;
+ 	unsigned long high_pfn, low_pfn, pfn, z_end_pfn, end_pfn;
+ 	int nr_freepages = cc->nr_freepages;
+ 	struct list_head *freelist = &cc->freepages;
++#ifdef CONFIG_CMA
++	struct address_space *mapping = NULL;
++	bool use_cma = true;
++
++	mapping = page_mapping(migratepage);
++	if ((unsigned long)mapping & PAGE_MAPPING_ANON)
++		mapping = NULL;
+ 
++	if (mapping && (mapping_gfp_mask(mapping) & __GFP_BDEV))
++		use_cma = false;
++#endif
+ 	/*
+ 	 * Initialise the free scanner. The starting point is where we last
+ 	 * scanned from (or the end of the zone if starting). The low point
+@@ -703,6 +713,12 @@ static void isolate_freepages(struct zone *zone,
+ 		if (!isolation_suitable(cc, page))
+ 			continue;
+ 
++#ifdef CONFIG_CMA
++		if (is_migrate_isolate(get_pageblock_migratetype(page)))
++			continue;
++		if (!use_cma && is_migrate_cma(get_pageblock_migratetype(page)))
++			continue;
++#endif
+ 		/* Found a block suitable for isolating free pages from */
+ 		isolated = 0;
+ 
+@@ -749,7 +765,7 @@ static struct page *compaction_alloc(struct page *migratepage,
+ 
+ 	/* Isolate free pages if necessary */
+ 	if (list_empty(&cc->freepages)) {
+-		isolate_freepages(cc->zone, cc);
++		isolate_freepages(cc->zone, cc, migratepage);
+ 
+ 		if (list_empty(&cc->freepages))
+ 			return NULL;
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 7905fe721aa8..2dd56913afee 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1096,6 +1096,8 @@ static void shrink_readahead_size_eio(struct file *filp,
+  * This is really ugly. But the goto's actually try to clarify some
+  * of the logic when it comes to error handling etc.
+  */
++extern bool has_cma_page(struct page *page);
++extern void wakeup_wq(bool has_cma);
+ static void do_generic_file_read(struct file *filp, loff_t *ppos,
+ 		read_descriptor_t *desc, read_actor_t actor)
+ {
+@@ -1108,6 +1110,7 @@ static void do_generic_file_read(struct file *filp, loff_t *ppos,
+ 	unsigned long offset;      /* offset into pagecache page */
+ 	unsigned int prev_offset;
+ 	int error;
++	bool has_cma = false;
+ 
+ 	index = *ppos >> PAGE_CACHE_SHIFT;
+ 	prev_index = ra->prev_pos >> PAGE_CACHE_SHIFT;
+@@ -1132,6 +1135,8 @@ find_page:
+ 			if (unlikely(page == NULL))
+ 				goto no_cached_page;
+ 		}
++		if (!has_cma)
++			has_cma = has_cma_page(page);
+ 		if (PageReadahead(page)) {
+ 			page_cache_async_readahead(mapping,
+ 					ra, filp, page,
+@@ -1301,10 +1306,13 @@ no_cached_page:
+ 			desc->error = error;
+ 			goto out;
+ 		}
++		if (!has_cma)
++			has_cma = has_cma_page(page);
+ 		goto readpage;
+ 	}
+ 
+ out:
++	wakeup_wq(has_cma);
+ 	ra->prev_pos = prev_index;
+ 	ra->prev_pos <<= PAGE_CACHE_SHIFT;
+ 	ra->prev_pos |= prev_offset;
+@@ -1503,7 +1511,7 @@ EXPORT_SYMBOL(generic_file_aio_read);
+ static int page_cache_read(struct file *file, pgoff_t offset)
+ {
+ 	struct address_space *mapping = file->f_mapping;
+-	struct page *page; 
++	struct page *page;
+ 	int ret;
+ 
+ 	do {
+@@ -1520,7 +1528,7 @@ static int page_cache_read(struct file *file, pgoff_t offset)
+ 		page_cache_release(page);
+ 
+ 	} while (ret == AOP_TRUNCATED_PAGE);
+-		
++
+ 	return ret;
+ }
+ 
+@@ -1616,6 +1624,7 @@ int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 	struct page *page;
+ 	pgoff_t size;
+ 	int ret = 0;
++	bool has_cma = false;
+ 
+ 	size = (i_size_read(inode) + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+ 	if (offset >= size)
+@@ -1626,6 +1635,7 @@ int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 	 */
+ 	page = find_get_page(mapping, offset);
+ 	if (likely(page) && !(vmf->flags & FAULT_FLAG_TRIED)) {
++		has_cma = has_cma_page(page);
+ 		/*
+ 		 * We found the page, so try async readahead before
+ 		 * waiting for the lock.
+@@ -1641,10 +1651,12 @@ retry_find:
+ 		page = find_get_page(mapping, offset);
+ 		if (!page)
+ 			goto no_cached_page;
++		has_cma = has_cma_page(page);
+ 	}
+ 
+ 	if (!lock_page_or_retry(page, vma->vm_mm, vmf->flags)) {
+ 		page_cache_release(page);
++		wakeup_wq(has_cma);
+ 		return ret | VM_FAULT_RETRY;
+ 	}
+ 
+@@ -1652,6 +1664,8 @@ retry_find:
+ 	if (unlikely(page->mapping != mapping)) {
+ 		unlock_page(page);
+ 		put_page(page);
++		wakeup_wq(has_cma);
++		has_cma = false;
+ 		goto retry_find;
+ 	}
+ 	VM_BUG_ON(page->index != offset);
+@@ -1671,10 +1685,12 @@ retry_find:
+ 	if (unlikely(offset >= size)) {
+ 		unlock_page(page);
+ 		page_cache_release(page);
++		wakeup_wq(has_cma);
+ 		return VM_FAULT_SIGBUS;
+ 	}
+ 
+ 	vmf->page = page;
++	wakeup_wq(has_cma);
+ 	return ret | VM_FAULT_LOCKED;
+ 
+ no_cached_page:
+@@ -1716,6 +1732,8 @@ page_not_uptodate:
+ 			error = -EIO;
+ 	}
+ 	page_cache_release(page);
++	wakeup_wq(has_cma);
++	has_cma = false;
+ 
+ 	if (!error || error == AOP_TRUNCATED_PAGE)
+ 		goto retry_find;
+@@ -2405,7 +2423,7 @@ generic_file_buffered_write(struct kiocb *iocb, const struct iovec *iov,
+ 		written += status;
+ 		*ppos = pos + status;
+   	}
+-	
++
+ 	return written ? written : status;
+ }
+ EXPORT_SYMBOL(generic_file_buffered_write);
+diff --git a/mm/memory.c b/mm/memory.c
+index 4b60011907d7..ad0330a481e4 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1089,6 +1089,8 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+ 	return ret;
+ }
+ 
++extern bool has_cma_page(struct page *page);
++extern void wakeup_wq(bool has_cma);
+ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 				struct vm_area_struct *vma, pmd_t *pmd,
+ 				unsigned long addr, unsigned long end,
+@@ -1096,6 +1098,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ {
+ 	struct mm_struct *mm = tlb->mm;
+ 	int force_flush = 0;
++	bool has_cma = false;
+ 	int rss[NR_MM_COUNTERS];
+ 	spinlock_t *ptl;
+ 	pte_t *start_pte;
+@@ -1155,6 +1158,9 @@ again:
+ 				rss[MM_FILEPAGES]--;
+ 			}
+ 			page_remove_rmap(page);
++			if (!has_cma) {
++				has_cma = has_cma_page(page);
++			}
+ 			if (unlikely(page_mapcount(page) < 0))
+ 				print_bad_pte(vma, addr, ptent, page);
+ 			force_flush = !__tlb_remove_page(tlb, page);
+@@ -1201,7 +1207,7 @@ again:
+ 	 * the PTE lock to avoid doing the potential expensive TLB invalidate
+ 	 * and page-free while holding it.
+ 	 */
+-	if (force_flush) {
++	if (force_flush || has_cma) {
+ 		unsigned long old_end;
+ 
+ 		force_flush = 0;
+@@ -1215,10 +1221,12 @@ again:
+ 		tlb->end = addr;
+ 
+ 		tlb_flush_mmu(tlb);
++		wakeup_wq(has_cma);
+ 
+ 		tlb->start = addr;
+ 		tlb->end = old_end;
+ 
++		has_cma = false;
+ 		if (addr != end)
+ 			goto again;
+ 	}
+@@ -1713,7 +1721,7 @@ long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+ 
+ 	VM_BUG_ON(!!pages != !!(gup_flags & FOLL_GET));
+ 
+-	/* 
++	/*
+ 	 * Require read or write permissions.
+ 	 * If FOLL_FORCE is set, we only require the "MAY" flags.
+ 	 */
+@@ -3009,6 +3017,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	struct mem_cgroup *ptr;
+ 	int exclusive = 0;
+ 	int ret = 0;
++	bool has_cma = false;
+ 
+ 	if (!pte_unmap_same(mm, pmd, page_table, orig_pte))
+ 		goto out;
+@@ -3056,6 +3065,8 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		swapcache = page;
+ 		goto out_release;
+ 	}
++	if (!has_cma)
++		has_cma = has_cma_page(page);
+ 
+ 	swapcache = page;
+ 	locked = lock_page_or_retry(page, mm, flags);
+@@ -3160,6 +3171,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ unlock:
+ 	pte_unmap_unlock(page_table, ptl);
+ out:
++	wakeup_wq(has_cma);
+ 	return ret;
+ out_nomap:
+ 	mem_cgroup_cancel_charge_swapin(ptr);
+@@ -3172,6 +3184,7 @@ out_release:
+ 		unlock_page(swapcache);
+ 		page_cache_release(swapcache);
+ 	}
++	wakeup_wq(has_cma);
+ 	return ret;
+ }
+ 
+@@ -3309,7 +3322,7 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	struct vm_fault vmf;
+ 	int ret;
+ 	int page_mkwrite = 0;
+-
++	bool has_cma = false;
+ 	/*
+ 	 * If we do COW later, allocate page befor taking lock_page()
+ 	 * on the file cache page. This will reduce lock holding time.
+@@ -3346,6 +3359,8 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		ret = VM_FAULT_HWPOISON;
+ 		goto uncharge_out;
+ 	}
++	if (!has_cma)
++		has_cma = has_cma_page(vmf.page);
+ 
+ 	/*
+ 	 * For consistency in subsequent calls, make the faulted page always
+@@ -3467,10 +3482,12 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 			page_cache_release(vmf.page);
+ 	}
+ 
++	wakeup_wq(has_cma);
+ 	return ret;
+ 
+ unwritable_page:
+ 	page_cache_release(page);
++	wakeup_wq(has_cma);
+ 	return ret;
+ uncharge_out:
+ 	/* fs's fault handler get error */
+diff --git a/mm/migrate.c b/mm/migrate.c
+index a357f359b5e7..8b4abcbb8f54 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -36,6 +36,7 @@
+ #include <linux/hugetlb_cgroup.h>
+ #include <linux/gfp.h>
+ #include <linux/balloon_compaction.h>
++#include <linux/page-isolation.h>
+ 
+ #include <asm/tlbflush.h>
+ 
+@@ -43,7 +44,52 @@
+ #include <trace/events/migrate.h>
+ 
+ #include "internal.h"
+-
++#ifdef CONFIG_CMA
++DEFINE_MUTEX(migrate_wait);
++int migrate_status = 0;
++int mutex_status = 0;
++int migrate_refcount = 0;
++wait_queue_head_t migrate_wq;
++EXPORT_SYMBOL(migrate_status);
++EXPORT_SYMBOL(migrate_refcount);
++EXPORT_SYMBOL(migrate_wq);
++EXPORT_SYMBOL(migrate_wait);
++EXPORT_SYMBOL(mutex_status);
++void wakeup_wq(bool has_cma)
++{
++	if (has_cma) {
++		if (migrate_refcount > 0) {
++			mutex_lock(&migrate_wait);
++			mutex_status = 0x0d;
++			migrate_refcount--;
++			if (!migrate_refcount) {
++				if (migrate_status == MIGRATE_CMA_ALLOC) {
++					wake_up_interruptible(&migrate_wq);
++					migrate_status = MIGRATE_CMA_REL;
++				}
++			}
++			mutex_status = 0x0d1;
++			mutex_unlock(&migrate_wait);
++		}
++	}
++}
++EXPORT_SYMBOL(wakeup_wq);
++bool has_cma_page(struct page *page)
++{
++	if (is_migrate_cma(get_pageblock_migratetype(page)) ||
++	   is_migrate_isolate(get_pageblock_migratetype(page))) {
++		migrate_refcount++;
++		if (migrate_status != MIGRATE_CMA_ALLOC)
++			migrate_status = MIGRATE_CMA_HOLD;
++		return true;
++	}
++	return false;
++}
++EXPORT_SYMBOL(has_cma_page);
++#else
++void wakeup_wq(bool has_cma) {}
++bool has_cma_page(struct page *page){return false;}
++#endif
+ /*
+  * migrate_prep() needs to be called before we start compiling a list of pages
+  * to be migrated using isolate_lru_page(). If scheduling work on other CPUs is
+@@ -851,6 +897,25 @@ uncharge:
+ 				 (rc == MIGRATEPAGE_SUCCESS ||
+ 				  rc == MIGRATEPAGE_BALLOON_SUCCESS));
+ 	unlock_page(page);
++#ifdef CONFIG_CMA
++	if ((force && rc == -EAGAIN) && (mode == MIGRATE_SYNC)) {
++		DECLARE_WAITQUEUE(wait, current);
++		if (migrate_status == MIGRATE_CMA_HOLD ||
++		   migrate_status == MIGRATE_CMA_ALLOC) {
++			mutex_lock(&migrate_wait);
++			migrate_status = MIGRATE_CMA_ALLOC;
++			init_waitqueue_head(&migrate_wq);
++			add_wait_queue(&migrate_wq, &wait);
++			mutex_unlock(&migrate_wait);
++
++			schedule_timeout_interruptible(20);
++
++			mutex_lock(&migrate_wait);
++			remove_wait_queue(&migrate_wq, &wait);
++			mutex_unlock(&migrate_wait);
++		}
++	}
++#endif
+ out:
+ 	return rc;
+ }
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 16474a0676c7..07731bef3997 100755
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -584,7 +584,7 @@ static inline void __free_one_page(struct page *page,
+ 			list_del(&buddy->lru);
+ 			zone->free_area[order].nr_free--;
+ 			rmv_page_order(buddy);
+-			if(is_migrate_cma(migratetype))
++			if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 				zone->free_area[order].nr_free_cma--;
+ 		}
+ 		combined_idx = buddy_idx & page_idx;
+@@ -618,7 +618,7 @@ static inline void __free_one_page(struct page *page,
+ 	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
+ out:
+ 	zone->free_area[order].nr_free++;
+-	if(is_migrate_cma(migratetype))
++	if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 		zone->free_area[order].nr_free_cma++;
+ }
+ 
+@@ -850,7 +850,7 @@ static inline void expand(struct zone *zone, struct page *page,
+ #endif
+ 		list_add(&page[size].lru, &area->free_list[migratetype]);
+ 		area->nr_free++;
+-		if(is_migrate_cma(migratetype))
++		if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 			area->nr_free_cma++;
+ 		set_page_order(&page[size], high);
+ 	}
+@@ -917,10 +917,14 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
+ 
+ 		page = list_entry(area->free_list[migratetype].next,
+ 							struct page, lru);
++#ifdef CONFIG_CMA
++		if (is_migrate_isolate(get_pageblock_migratetype(page)))
++			continue;
++#endif
+ 		list_del(&page->lru);
+ 		rmv_page_order(page);
+ 		area->nr_free--;
+-		if(is_migrate_cma(migratetype))
++		if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 			area->nr_free_cma--;
+ 		expand(zone, page, order, current_order, area, migratetype);
+ 		return page;
+@@ -1063,7 +1067,7 @@ __rmqueue_fallback(struct zone *zone, int order, int start_migratetype)
+ 			page = list_entry(area->free_list[migratetype].next,
+ 					struct page, lru);
+ 			area->nr_free--;
+-			if(is_migrate_cma(migratetype))
++			if (is_migrate_cma(migratetype) || is_migrate_isolate(migratetype))
+ 				area->nr_free_cma--;
+ 
+ 			/*
+@@ -1224,7 +1228,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
+ 		}
+ 		set_freepage_migratetype(page, mt);
+ 		list = &page->lru;
+-		if (is_migrate_cma(mt))
++		if (is_migrate_cma(mt) || is_migrate_isolate(mt))
+ 			__mod_zone_page_state(zone, NR_FREE_CMA_PAGES,
+ 					      -(1 << order));
+ 	}
+@@ -1492,7 +1496,7 @@ static int __isolate_free_page(struct page *page, unsigned int order)
+ 	list_del(&page->lru);
+ 	zone->free_area[order].nr_free--;
+ 	rmv_page_order(page);
+-	if(is_migrate_cma(mt))
++	if (is_migrate_cma(mt) || is_migrate_isolate(mt))
+ 		zone->free_area[order].nr_free_cma--;
+ 	/* Set the pageblock if the isolated page is at least a pageblock */
+ 	if (order >= pageblock_order - 1) {
+@@ -6043,7 +6047,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
+ 		       unsigned migratetype)
+ {
+ 	unsigned long outer_start, outer_end;
+-	int ret = 0, order;
++	int ret = 0, order, try_times = 0;
+ 
+ 	struct compact_control cc = {
+ 		.nr_migratepages = 0,
+@@ -6084,6 +6088,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
+ 	if (ret)
+ 		return ret;
+ 
++try_again:
+ 	ret = __alloc_contig_migrate_range(&cc, start, end);
+ 	if (ret)
+ 		goto done;
+@@ -6113,6 +6118,9 @@ int alloc_contig_range(unsigned long start, unsigned long end,
+ 	while (!PageBuddy(pfn_to_page(outer_start))) {
+ 		if (++order >= MAX_ORDER) {
+ 			ret = -EBUSY;
++			try_times++;
++			if (try_times < 10)
++				goto try_again;
+ 			goto done;
+ 		}
+ 		outer_start &= ~0UL << order;
+@@ -6122,6 +6130,9 @@ int alloc_contig_range(unsigned long start, unsigned long end,
+ 	if (test_pages_isolated(outer_start, end, false)) {
+ 		pr_warn("alloc_contig_range test_pages_isolated(%lx, %lx) failed\n",
+ 		       outer_start, end);
++		try_times++;
++		if (try_times < 10)
++			goto try_again;
+ 		ret = -EBUSY;
+ 		goto done;
+ 	}
+@@ -6256,7 +6267,8 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
+ 		list_del(&page->lru);
+ 		rmv_page_order(page);
+ 		zone->free_area[order].nr_free--;
+-		if(is_migrate_cma(get_pageblock_migratetype(page)))
++		if (is_migrate_cma(get_pageblock_migratetype(page)) ||
++		   is_migrate_isolate(get_pageblock_migratetype(page)))
+ 			zone->free_area[order].nr_free_cma--;
+ #ifdef CONFIG_HIGHMEM
+ 		if (PageHighMem(page))
+diff --git a/mm/page_isolation.c b/mm/page_isolation.c
+index 383bdbb98b04..32539c47456b 100644
+--- a/mm/page_isolation.c
++++ b/mm/page_isolation.c
+@@ -3,11 +3,21 @@
+  */
+ 
+ #include <linux/mm.h>
++#include <linux/pagemap.h>
+ #include <linux/page-isolation.h>
+ #include <linux/pageblock-flags.h>
+ #include <linux/memory.h>
+ #include "internal.h"
+ 
++int iso_status = 0;
++int iso_recount = 0;
++wait_queue_head_t iso_wq;
++DEFINE_MUTEX(iso_wait);
++EXPORT_SYMBOL(iso_status);
++EXPORT_SYMBOL(iso_recount);
++EXPORT_SYMBOL(iso_wq);
++EXPORT_SYMBOL(iso_wait);
++extern signed long  schedule_timeout_interruptible(signed long timeout);
+ int set_migratetype_isolate(struct page *page, bool skip_hwpoisoned_pages)
+ {
+ 	struct zone *zone;
+@@ -210,11 +220,11 @@ __test_page_isolated_in_pageblock(unsigned long pfn, unsigned long end_pfn,
+ 			continue;
+ 		}
+ 		else
+-			break;
++			return -EBUSY;
+ 	}
+ 	if (pfn < end_pfn)
+-		return 0;
+-	return 1;
++		return 1;
++	return 0;
+ }
+ 
+ int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
+@@ -244,14 +254,40 @@ int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
+ 	ret = __test_page_isolated_in_pageblock(start_pfn, end_pfn,
+ 						skip_hwpoisoned_pages);
+ 	spin_unlock_irqrestore(&zone->lock, flags);
+-	return ret ? 0 : -EBUSY;
++	if (ret == -EBUSY) {
++		DECLARE_WAITQUEUE(wait, current);
++		if (iso_status == MIGRATE_CMA_HOLD ||
++		   iso_status == MIGRATE_CMA_ALLOC) {
++			mutex_lock(&iso_wait);
++			iso_status = MIGRATE_CMA_ALLOC;
++			init_waitqueue_head(&iso_wq);
++			add_wait_queue(&iso_wq, &wait);
++			mutex_unlock(&iso_wait);
++
++			schedule_timeout_interruptible(20);
++
++			mutex_lock(&iso_wait);
++			remove_wait_queue(&iso_wq, &wait);
++			mutex_unlock(&iso_wait);
++		}
++	}
++
++	return ret? -EBUSY: 0;
+ }
+ 
+ struct page *alloc_migrate_target(struct page *page, unsigned long private,
+ 				  int **resultp)
+ {
+ 	gfp_t gfp_mask = GFP_USER | __GFP_MOVABLE;
++#ifdef CONFIG_CMA
++	struct address_space *mapping = NULL;
+ 
++	mapping = page_mapping(page);
++	if ((unsigned long)mapping & PAGE_MAPPING_ANON)
++		mapping = NULL;
++	if (mapping)
++		gfp_mask |= (mapping_gfp_mask(mapping) & __GFP_BDEV);
++#endif
+ 	if (PageHighMem(page))
+ 		gfp_mask |= __GFP_HIGHMEM;
+ 
+diff --git a/mm/readahead.c b/mm/readahead.c
+index daed28dd5830..75a3528522c6 100644
+--- a/mm/readahead.c
++++ b/mm/readahead.c
+@@ -19,7 +19,12 @@
+ #include <linux/pagemap.h>
+ #include <linux/syscalls.h>
+ #include <linux/file.h>
++#include <linux/page-isolation.h>
+ 
++extern int iso_status;
++extern int iso_recount;
++extern wait_queue_head_t iso_wq;
++extern struct mutex iso_wait;
+ /*
+  * Initialise a struct file's readahead state.  Assumes that the caller has
+  * memset *ra to zero.
+@@ -149,6 +154,8 @@ out:
+  *
+  * Returns the number of pages requested, or the maximum amount of I/O allowed.
+  */
++extern bool has_cma_page(struct page *page);
++extern void wakeup_wq(bool has_cma);
+ static int
+ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+ 			pgoff_t offset, unsigned long nr_to_read,
+@@ -161,7 +168,9 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+ 	int page_idx;
+ 	int ret = 0;
+ 	loff_t isize = i_size_read(inode);
+-
++#ifdef CONFIG_CMA
++	bool has_cma = false;
++#endif
+ 	if (isize == 0)
+ 		goto out;
+ 
+@@ -185,6 +194,16 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+ 		page = page_cache_alloc_readahead(mapping);
+ 		if (!page)
+ 			break;
++#ifdef CONFIG_CMA
++		if (!has_cma && (is_migrate_cma(get_pageblock_migratetype(page)) ||
++		   is_migrate_isolate(get_pageblock_migratetype(page)))) {
++			if (iso_status != MIGRATE_CMA_ALLOC)
++				iso_status = MIGRATE_CMA_HOLD;
++			iso_recount++;
++			has_cma = true;
++			has_cma_page(page);
++		}
++#endif
+ 		page->index = page_offset;
+ 		list_add(&page->lru, &page_pool);
+ 		if (page_idx == nr_to_read - lookahead_size)
+@@ -199,6 +218,23 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+ 	 */
+ 	if (ret)
+ 		read_pages(mapping, filp, &page_pool, ret);
++#ifdef CONFIG_CMA
++	if (has_cma) {
++		if (iso_recount > 0) {
++
++			mutex_lock(&iso_wait);
++			iso_recount--;
++			if (!iso_recount) {
++				if (iso_status == MIGRATE_CMA_ALLOC) {
++					wake_up_interruptible(&iso_wq);
++					iso_status = MIGRATE_CMA_REL;
++				}
++			}
++			mutex_unlock(&iso_wait);
++		}
++		wakeup_wq(has_cma);
++	}
++#endif
+ 	BUG_ON(!list_empty(&page_pool));
+ out:
+ 	return ret;
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 6019778b951b..17f487b9cdef 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -100,6 +100,8 @@ enum sgp_type {
+ 	SGP_FALLOC,	/* like SGP_WRITE, but make existing page Uptodate */
+ };
+ 
++extern void wakeup_wq(bool has_cma);
++extern bool has_cma_page(struct page *page);
+ #ifdef CONFIG_TMPFS
+ static unsigned long shmem_default_max_blocks(void)
+ {
+@@ -1077,6 +1079,7 @@ static int shmem_getpage_gfp(struct inode *inode, pgoff_t index,
+ 	int error;
+ 	int once = 0;
+ 	int alloced = 0;
++	bool has_cma = false;
+ 
+ 	if (index > (MAX_LFS_FILESIZE >> PAGE_CACHE_SHIFT))
+ 		return -EFBIG;
+@@ -1087,6 +1090,8 @@ repeat:
+ 		swap = radix_to_swp_entry(page);
+ 		page = NULL;
+ 	}
++	if (page && !has_cma)
++		has_cma = has_cma_page(page);
+ 
+ 	if (sgp != SGP_WRITE && sgp != SGP_FALLOC &&
+ 	    ((loff_t)index << PAGE_CACHE_SHIFT) >= i_size_read(inode)) {
+@@ -1104,6 +1109,7 @@ repeat:
+ 	}
+ 	if (page || (sgp == SGP_READ && !swap.val)) {
+ 		*pagep = page;
++		wakeup_wq(has_cma);
+ 		return 0;
+ 	}
+ 
+@@ -1127,6 +1133,8 @@ repeat:
+ 				goto failed;
+ 			}
+ 		}
++		if (page && !has_cma)
++			has_cma = has_cma_page(page);
+ 
+ 		/* We have to do this with page locked to prevent races */
+ 		lock_page(page);
+@@ -1198,6 +1206,8 @@ repeat:
+ 			error = -ENOMEM;
+ 			goto decused;
+ 		}
++		if (page && !has_cma)
++			has_cma = has_cma_page(page);
+ 
+ 		SetPageSwapBacked(page);
+ 		__set_page_locked(page);
+@@ -1254,6 +1264,7 @@ clear:
+ 			goto failed;
+ 	}
+ 	*pagep = page;
++	wakeup_wq(has_cma);
+ 	return 0;
+ 
+ 	/*
+@@ -1282,6 +1293,8 @@ unlock:
+ 		unlock_page(page);
+ 		page_cache_release(page);
+ 	}
++	wakeup_wq(has_cma);
++	has_cma = false;
+ 	if (error == -ENOSPC && !once++) {
+ 		info = SHMEM_I(inode);
+ 		spin_lock(&info->lock);
+@@ -1471,6 +1484,7 @@ static void do_shmem_file_read(struct file *filp, loff_t *ppos, read_descriptor_
+ 	pgoff_t index;
+ 	unsigned long offset;
+ 	enum sgp_type sgp = SGP_READ;
++	bool has_cma = false;
+ 
+ 	/*
+ 	 * Might this read be for a stacking filesystem?  Then when reading
+@@ -1507,6 +1521,8 @@ static void do_shmem_file_read(struct file *filp, loff_t *ppos, read_descriptor_
+ 		if (page)
+ 			unlock_page(page);
+ 
++		if (page && !has_cma)
++			has_cma = has_cma_page(page);
+ 		/*
+ 		 * We must evaluate after, since reads (unlike writes)
+ 		 * are called without i_mutex protection against truncate
+@@ -1564,6 +1580,7 @@ static void do_shmem_file_read(struct file *filp, loff_t *ppos, read_descriptor_
+ 		cond_resched();
+ 	}
+ 
++	wakeup_wq(has_cma);
+ 	*ppos = ((loff_t) index << PAGE_CACHE_SHIFT) + offset;
+ 	file_accessed(filp);
+ }
+diff --git a/mm/swap_state.c b/mm/swap_state.c
+index 36953c4e8f78..f3036a5ea3c3 100644
+--- a/mm/swap_state.c
++++ b/mm/swap_state.c
+@@ -319,11 +319,14 @@ struct page * lookup_swap_cache(swp_entry_t entry)
+  * A failure return means that either the page allocation failed or that
+  * the swap entry is no longer in use.
+  */
++extern bool has_cma_page(struct page *page);
++extern void wakeup_wq(bool has_cma);
+ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
+ 			struct vm_area_struct *vma, unsigned long addr)
+ {
+ 	struct page *found_page, *new_page = NULL;
+ 	int err;
++	bool has_cma = false;
+ 
+ 	do {
+ 		/*
+@@ -344,6 +347,8 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
+ 			if (!new_page)
+ 				break;		/* Out of memory */
+ 		}
++		if (!has_cma)
++			has_cma = has_cma_page(new_page);
+ 
+ 		/*
+ 		 * call radix_tree_preload() while we can wait.
+@@ -392,6 +397,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
+ 			 */
+ 			lru_cache_add_anon(new_page);
+ 			swap_readpage(new_page);
++			wakeup_wq(has_cma);
+ 			return new_page;
+ 		}
+ 		radix_tree_preload_end();
+@@ -404,8 +410,10 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
+ 		swapcache_free(entry, NULL);
+ 	} while (err != -ENOMEM);
+ 
+-	if (new_page)
++	if (new_page) {
++		wakeup_wq(has_cma);
+ 		page_cache_release(new_page);
++	}
+ 	return found_page;
+ }
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 70fa9ed8254c..5779d8c06f05 100755
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -1349,6 +1349,10 @@ putback_inactive_pages(struct lruvec *lruvec, struct list_head *page_list)
+  * shrink_inactive_list() is a helper for shrink_zone().  It returns the number
+  * of reclaimed pages
+  */
++#ifdef CONFIG_CMA
++extern bool has_cma_page(struct page *page);
++extern void wakeup_wq(bool has_cma);
++#endif
+ static noinline_for_stack unsigned long
+ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 		     struct scan_control *sc, enum lru_list lru)
+@@ -1363,7 +1367,10 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 	int file = is_file_lru(lru);
+ 	struct zone *zone = lruvec_zone(lruvec);
+ 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
+-
++#ifdef CONFIG_CMA
++	struct page *page = NULL;
++	bool has_cma = false;
++#endif
+ 	while (unlikely(too_many_isolated(zone, file, sc))) {
+ 		congestion_wait(BLK_RW_ASYNC, HZ/10);
+ 
+@@ -1399,6 +1406,15 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 	if (nr_taken == 0)
+ 		return 0;
+ 
++#ifdef CONFIG_CMA
++	list_for_each_entry(page, &page_list, lru){
++		if (page) {
++			has_cma = has_cma_page(page);
++			if (has_cma)
++				break;
++		}
++	}
++#endif
+ 	nr_reclaimed = shrink_page_list(&page_list, zone, sc, TTU_UNMAP,
+ 					&nr_dirty, &nr_writeback, false);
+ 
+@@ -1422,7 +1438,9 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 	spin_unlock_irq(&zone->lru_lock);
+ 
+ 	free_hot_cold_page_list(&page_list, 1);
+-
++#ifdef CONFIG_CMA
++	wakeup_wq(has_cma);
++#endif
+ 	/*
+ 	 * If reclaim is isolating dirty pages under writeback, it implies
+ 	 * that the long-lived page allocation rate is exceeding the page
+-- 
+2.19.0
+

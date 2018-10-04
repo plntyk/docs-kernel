@@ -1,0 +1,1197 @@
+From d830348e34e46b519353c66604f5a51ba9523ff3 Mon Sep 17 00:00:00 2001
+From: "sunny.luo" <sunny.luo@amlogic.com>
+Date: Fri, 27 Jun 2014 11:31:34 +0800
+Subject: [PATCH 4399/5965] SPICC:merge m6 driver to m8
+
+---
+ arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd  |  27 +
+ .../arm/mach-meson8/include/mach/spicc.h      | 219 ++++----
+ drivers/amlogic/Kconfig                       |   1 +
+ drivers/amlogic/Makefile                      |   1 +
+ drivers/amlogic/spi/Kconfig                   |   9 +-
+ drivers/amlogic/spi/Makefile                  |   4 +-
+ drivers/amlogic/spi/aml_spi.c                 | 361 -------------
+ drivers/amlogic/spi/spicc.c                   | 475 ++++++++++++++++++
+ 8 files changed, 602 insertions(+), 495 deletions(-)
+ rename drivers/amlogic/spi/aml_spi.h => arch/arm/mach-meson8/include/mach/spicc.h (61%)
+ delete mode 100755 drivers/amlogic/spi/aml_spi.c
+ create mode 100755 drivers/amlogic/spi/spicc.c
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+index e28879041fc1..d640b07bcfe4 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_1G.dtd
+@@ -618,6 +618,27 @@ sdio{
+ 	};
+ 
+ /// ***************************************************************************************
++	spi@c1108d80{
++		compatible = "amlogic,spicc";
++		dev_name = "spicc";
++		status = "disable";
++		reg = <0xc1108d80 0x28>;
++		pinctrl-names="default";
++		pinctrl-0=<&spicc_pins>;
++		device_id = <0>;
++		num_chipselect = <1>;
++		cs_gpios = "GPIOZ_14";
++		test_spi_dev@0 {
++			compatible = "amlogic,test_spi_dev";
++			status = "okay";
++			chip_select = <0>;
++			max_speed_hz = <2000000>;
++			mode = <0>;  /*SPI_MODE_0*/
++			bits_per_word = <8>;
++		};
++	};
++/// ***************************************************************************************
++
+ ///	-	Power
+ //$$ MODULE="Power"
+ //$$ DEVICE="dvfs"
+@@ -2428,6 +2449,12 @@ sdio{
+ 			amlogic,setmask=<4 0xc>;
+ 			amlogic,pins="GPIOH_7","GPIOH_8";
+ 		};
++
++		spicc_pins:spicc{
++			amlogic,setmask=<8 0xe000>;
++			amlogic,clrmask=<5 0xc0 6 0xe0>;
++			amlogic,pins="GPIOZ_11", "GPIOZ_12", "GPIOZ_13";
++		};
+ 		
+ //$$ MATCH "Bl_pin_0_match" = "&lcd_backlight_pins"
+ //$$ L2 PROP_U32 2 = "amlogic,setmask"
+diff --git a/drivers/amlogic/spi/aml_spi.h b/arch/arm/mach-meson8/include/mach/spicc.h
+similarity index 61%
+rename from drivers/amlogic/spi/aml_spi.h
+rename to arch/arm/mach-meson8/include/mach/spicc.h
+index 9d8565601e5f..07cb6d8e0bbb 100755
+--- a/drivers/amlogic/spi/aml_spi.h
++++ b/arch/arm/mach-meson8/include/mach/spicc.h
+@@ -1,127 +1,92 @@
+-#include <linux/kernel.h>
+-#include <linux/init.h>
+-#include <linux/interrupt.h>
+-#include <linux/module.h>
+-#include <linux/mutex.h>
+-#include <linux/device.h>
+-#include <linux/delay.h>
+-#include <linux/dma-mapping.h>
+-#include <linux/platform_device.h>
+-#include <linux/err.h>
+-#include <linux/clk.h>
+-#include <linux/io.h>
+-
+-#include <linux/spi/spi.h>
+-#include <mach/spi.h>
+-#include <mach/pinmux.h>
+-
+-#define AML_SPI_DBG 0
+-
+-#ifdef AML_SPI_DBG
+-#define spi_dbg     printk("enter %s line:%d \n", __func__, __LINE__)
+-#else
+-#define spi_dbg
+-#endif
+-
+-
+-#define SPICC_FIFO_SIZE 16
+-
+-#define SPICC_DMA  0
+-#define SPICC_PIO  1
+-
+-struct spicc_conreg {
+-  unsigned int enable       :1;
+-  unsigned int mode         :1;
+-  unsigned int xch          :1;
+-  unsigned int smc          :1;
+-  unsigned int clk_pol      :1;
+-  unsigned int clk_pha      :1;
+-  unsigned int ss_ctl       :1;
+-  unsigned int ss_pol       :1;
+-  unsigned int drctl        :2;
+-  unsigned int rsv1         :2;
+-  unsigned int chip_select  :2;
+-  unsigned int rsv2         :2;
+-  unsigned int data_rate_div :3;
+-  unsigned int bits_per_word :6;
+-  unsigned int burst_len    :7;
+-};
+-
+-struct spicc_intreg {
+-  unsigned int tx_empty_en  :1;
+-  unsigned int tx_half_en   :1;
+-  unsigned int tx_full_en   :1;
+-  unsigned int rx_ready_en  :1;
+-  unsigned int rx_half_en   :1;
+-  unsigned int rx_full_en   :1;
+-  unsigned int rx_of_en     :1;
+-  unsigned int xfer_com_en  :1;
+-  unsigned int rsv1         :24;
+-};
+-
+-struct spicc_dmareg {
+-  unsigned int en           :1;
+-  unsigned int tx_fifo_th   :5;
+-  unsigned int rx_fifo_th   :5;
+-  unsigned int num_rd_burst :4;
+-  unsigned int num_wr_burst :4;
+-  unsigned int urgent       :1;
+-  unsigned int thread_id    :6;
+-  unsigned int burst_num    :6;
+-};
+-
+-struct spicc_statreg {
+-  unsigned int tx_empty     :1;
+-  unsigned int tx_half      :1;
+-  unsigned int tx_full      :1;
+-  unsigned int rx_ready     :1;
+-  unsigned int rx_half      :1;
+-  unsigned int rx_full      :1;
+-  unsigned int rx_of        :1;
+-  unsigned int xfer_com     :1;
+-  unsigned int rsv1         :24;
+-};
+-
+-struct aml_spi_reg_master {
+-	volatile unsigned int rxdata;
+-	volatile unsigned int txdata;
+-	volatile struct spicc_conreg conreg;
+-	volatile struct spicc_intreg intreg;
+-	volatile struct spicc_dmareg dmareg;
+-	volatile struct spicc_statreg statreg;
+-	volatile unsigned int periodreg;
+-	volatile unsigned int testreg;
+-	volatile unsigned int draddr;
+-	volatile unsigned int dwaddr;
+-};
+-
+-struct amlogic_spi {
+-	spinlock_t		    lock;
+-	struct list_head	msg_queue;
+-	//struct completion   done;
+-	struct workqueue_struct *workqueue;
+-	struct work_struct work;	
+-	int			        irq;
+-	
+-		
+-	struct spi_master	*master;
+-	struct spi_device	spi_dev;
+-	struct spi_device   *tgl_spi;
+-	
+-	
+-	struct  aml_spi_reg_master __iomem*  master_regs;
+-	
+-
+-	unsigned        master_no;
+-
+-	unsigned        io_pad_type;
+-	unsigned char   wp_pin_enable;
+-	unsigned char   hold_pin_enable;
+-	unsigned        num_cs;
+-	unsigned        cur_mode;
+-	unsigned        cur_bpw;
+-	unsigned        cur_speed;
+-
+-};
+-
+-
++#ifndef __SPICC_H__
++#define __SPICC_H__
++
++
++#define spicc_clk_gate_on()  SET_CBUS_REG_MASK(HHI_GCLK_MPEG0, (1<<8))
++#define spicc_clk_gate_off() CLEAR_CBUS_REG_MASK(HHI_GCLK_MPEG0, (1<<8))
++
++#define SPICC_FIFO_SIZE 16
++
++struct spicc_conreg {
++  unsigned int enable       :1;
++  unsigned int mode         :1;
++  unsigned int xch          :1;
++  unsigned int smc          :1;
++  	#define SPICC_DMA  0
++		#define SPICC_PIO  1
++  unsigned int clk_pol      :1;
++  unsigned int clk_pha      :1;
++  unsigned int ss_ctl       :1;
++  unsigned int ss_pol       :1;
++  unsigned int drctl        :2;
++  unsigned int rsv1         :2;
++  unsigned int chip_select  :2;
++  unsigned int rsv2         :2;
++  unsigned int data_rate_div :3;
++  unsigned int bits_per_word :6;
++  unsigned int burst_len    :7;
++};
++
++struct spicc_intreg {
++  unsigned int tx_empty_en  :1;
++  unsigned int tx_half_en   :1;
++  unsigned int tx_full_en   :1;
++  unsigned int rx_ready_en  :1;
++  unsigned int rx_half_en   :1;
++  unsigned int rx_full_en   :1;
++  unsigned int rx_of_en     :1;
++  unsigned int xfer_com_en  :1;
++  unsigned int rsv1         :24;
++};
++
++struct spicc_dmareg {
++  unsigned int en           :1;
++  unsigned int tx_fifo_th   :5;
++  unsigned int rx_fifo_th   :5;
++  unsigned int num_rd_burst :4;
++  unsigned int num_wr_burst :4;
++  unsigned int urgent       :1;
++  unsigned int thread_id    :6;
++  unsigned int burst_num    :6;
++};
++
++struct spicc_statreg {
++  unsigned int tx_empty     :1;
++  unsigned int tx_half      :1;
++  unsigned int tx_full      :1;
++  unsigned int rx_ready     :1;
++  unsigned int rx_half      :1;
++  unsigned int rx_full      :1;
++  unsigned int rx_of        :1;
++  unsigned int xfer_com     :1;
++  unsigned int rsv1         :24;
++};
++
++struct spicc_regs {
++	volatile unsigned int rxdata;
++	volatile unsigned int txdata;
++	volatile struct spicc_conreg conreg;
++	volatile struct spicc_intreg intreg;
++	volatile struct spicc_dmareg dmareg;
++	volatile struct spicc_statreg statreg;
++	volatile unsigned int periodreg;
++	volatile unsigned int testreg;
++	volatile unsigned int draddr;
++	volatile unsigned int dwaddr;
++};
++
++struct spicc_platform_data {
++  int device_id;
++  struct spicc_regs __iomem *regs;
++#ifdef CONFIG_OF
++	struct pinctrl *pinctrl;
++#else
++	pinmux_set_t pinctrl;
++#endif
++  int num_chipselect;
++  int *cs_gpios;
++};
++
++
++#endif
++
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+index 67219ed74141..3be3f6b82370 100755
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -25,6 +25,7 @@ source "drivers/amlogic/efuse/Kconfig"
+ source "drivers/amlogic/smartcard/Kconfig"
+ source "drivers/amlogic/thermal/Kconfig"
+ source "drivers/amlogic/watchdog/Kconfig"
++source "drivers/amlogic/spi/Kconfig"
+ 
+ #
+ #	Block devices
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+index c8a3931b8168..91eec4f16cef 100755
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -128,3 +128,4 @@ obj-y += crypto/
+ 
+ #obj-$(CONFIG_MESON_TRUSTZONE) += trustzone/
+ obj-$(CONFIG_MESON_TRUSTZONE) += secure_monitor/
++obj-y += spi/
+diff --git a/drivers/amlogic/spi/Kconfig b/drivers/amlogic/spi/Kconfig
+index 579834459397..21ae561a4683 100755
+--- a/drivers/amlogic/spi/Kconfig
++++ b/drivers/amlogic/spi/Kconfig
+@@ -5,13 +5,12 @@
+ menu "AMLOGIC SPI Hardware bus support"
+ 
+ 
+-config AMLOGIC_SPI_HW_MASTER
+-	tristate "AMLOGIC SPI HARDWARE BUS MASTER SUPPORT"
++config AMLOGIC_SPICC_MASTER
++	tristate "AMLOGIC SPICC MASTER SUPPORT"
+ 
+   select SPI
+ 	help
+-		This is amlogic spi bus Hardware master suport
+-		This driver can also be built as a module.  If so, the module
+-		will be called spi-apollo.
++		This is amlogic SPICC hardware bus master.
++		This driver can also be built as a module.
+ 	  
+ endmenu
+diff --git a/drivers/amlogic/spi/Makefile b/drivers/amlogic/spi/Makefile
+index 4ad7748532e2..f6225070311f 100755
+--- a/drivers/amlogic/spi/Makefile
++++ b/drivers/amlogic/spi/Makefile
+@@ -1,5 +1,5 @@
+ #
+-# Makefile for the amlogic spi nor flash bus drivers.
++# Makefile for the amlogic SPI bus drivers.
+ #
+ 
+-obj-$(CONFIG_AMLOGIC_SPI_HW_MASTER)	+= aml_spi.o
++obj-$(CONFIG_AMLOGIC_SPICC_MASTER)	+= spicc.o
+diff --git a/drivers/amlogic/spi/aml_spi.c b/drivers/amlogic/spi/aml_spi.c
+deleted file mode 100755
+index 895edd0581bf..000000000000
+--- a/drivers/amlogic/spi/aml_spi.c
++++ /dev/null
+@@ -1,361 +0,0 @@
+-#include <linux/kernel.h>
+-#include <linux/init.h>
+-#include <linux/interrupt.h>
+-#include <linux/module.h>
+-#include <linux/mutex.h>
+-#include <linux/device.h>
+-#include <linux/delay.h>
+-#include <linux/dma-mapping.h>
+-#include <linux/platform_device.h>
+-#include <linux/err.h>
+-#include <linux/clk.h>
+-#include <linux/io.h>
+-//#include <linux/gpio.h>
+-#include <mach/gpio.h>
+-#include <linux/spi/spi.h>
+-#include <mach/pinmux.h>
+-#include "aml_spi.h"
+-
+-static bool spicc_dbgf = 0;
+-#define spicc_dbg(fmt, args...)  { if(spicc_dbgf) \
+-					printk("[spicc]: " fmt, ## args); }
+-
+-int ss_pinmux[] = {16, 15, 18};
+-static void spicc_chip_select(struct amlogic_spi *amlogic_spi, bool select)
+-{
+-  u8 chip_select = amlogic_spi->tgl_spi->chip_select;
+-  u32 gpio_cs;
+-  bool ss_pol = (amlogic_spi->tgl_spi->mode & SPI_CS_HIGH) ? 1 : 0;
+-
+-  if (amlogic_spi->tgl_spi->controller_data) {
+-    gpio_cs = *(u32 *)amlogic_spi->tgl_spi->controller_data;
+-    gpio_out(gpio_cs, ss_pol ? select : !select);
+-  }
+-  else if (chip_select < 3){
+-    amlogic_spi->master_regs->conreg.chip_select = chip_select;
+-    amlogic_spi->master_regs->conreg.ss_pol = ss_pol;
+-    amlogic_spi->master_regs->conreg.ss_ctl = ss_pol;
+-    SET_CBUS_REG_MASK(PERIPHS_PIN_MUX_8, 1<<ss_pinmux[chip_select]);
+-  }
+-}
+-
+-static inline void spicc_reg_dbg(struct amlogic_spi *amlogic_spi)
+-{
+-  printk("spiccaddr = 0x%x\n", amlogic_spi->master_regs);
+-  printk("conreg    = 0x%x\n", amlogic_spi->master_regs->conreg);
+-  printk("intreg    = 0x%x\n", amlogic_spi->master_regs->intreg);
+-  printk("dmareg    = 0x%x\n", amlogic_spi->master_regs->dmareg);
+-  printk("statreg   = 0x%x\n", amlogic_spi->master_regs->statreg);
+-  printk("periodreg = 0x%x\n", amlogic_spi->master_regs->periodreg);
+-  printk("testreg   = 0x%x\n", amlogic_spi->master_regs->testreg);
+-  printk("draddr    = 0x%x\n", amlogic_spi->master_regs->draddr);
+-  printk("dwaddr    = 0x%x\n", amlogic_spi->master_regs->dwaddr);
+-}
+-
+-static void aml_spi_set_mode(struct amlogic_spi *amlogic_spi, unsigned mode) 
+-{    
+-  amlogic_spi->cur_mode = mode;
+-  amlogic_spi->master_regs->conreg.clk_pha = (mode & SPI_CPHA) ? 1:0;
+-  amlogic_spi->master_regs->conreg.clk_pol = (mode & SPI_CPOL) ? 1:0;
+-  amlogic_spi->master_regs->conreg.drctl = 0; //data ready, 0-ignore, 1-falling edge, 2-rising edge  
+-}
+-
+-static void aml_spi_set_clk(struct amlogic_spi *amlogic_spi, unsigned spi_speed) 
+-{	
+-	struct clk *sys_clk = clk_get_sys("clk81", NULL);
+-	unsigned sys_clk_rate = clk_get_rate(sys_clk);
+-	unsigned div, mid_speed;
+-  
+-  // actually, spi_speed = sys_clk_rate / 2^(conreg.data_rate_div+2)
+-  mid_speed = (sys_clk_rate * 3) >> 4;
+-  for(div=0; div<7; div++) {
+-    if (spi_speed >= mid_speed) break;    
+-    mid_speed >>= 1;
+-  }
+-  amlogic_spi->master_regs->conreg.data_rate_div = div;
+-  amlogic_spi->cur_speed = spi_speed;
+-  spicc_dbg("sys_clk_rate=%d, spi_speed=%d, div=%d\n", sys_clk_rate, spi_speed, div);
+-}
+-
+-static void aml_spi_set_platform_data(struct amlogic_spi *spi, 
+-										struct aml_spi_platform *plat)
+-{
+-	spi->spi_dev.dev.platform_data = plat;
+-	
+-    spi->master_no = plat->master_no;
+-    spi->io_pad_type = plat->io_pad_type;
+-    spi->wp_pin_enable = plat->wp_pin_enable;
+-    spi->hold_pin_enable = plat->hold_pin_enable;
+-    //spi->irq = plat->irq;
+-    spi->num_cs = plat->num_cs;
+-}
+-
+-/* mode: SPICC_DMA_MODE/SPICC_PIO_MODE
+- */
+-static void spi_hw_init(struct amlogic_spi	*amlogic_spi)
+-{
+-  SET_CBUS_REG_MASK(HHI_GCLK_MPEG0, (1<<8)); //SPICC clk gate
+-  SET_CBUS_REG_MASK(PERIPHS_PIN_MUX_8, (1<<12)|((1<<13))|(1<<14));
+-  //SET_CBUS_REG_MASK(PAD_PULL_UP_REG5, (1<<1));	//enable internal pullup
+-  amlogic_spi->master_regs->testreg |= 1<<24; //clock free enable
+-  amlogic_spi->master_regs->conreg.enable = 0; // disable SPICC
+-  amlogic_spi->master_regs->conreg.mode = 1; // 0-slave, 1-master
+-  amlogic_spi->master_regs->conreg.xch = 0;
+-  amlogic_spi->master_regs->conreg.smc = SPICC_PIO;
+-  amlogic_spi->master_regs->conreg.bits_per_word = 7;//t->bits_per_word ? t->bits_per_word:spi->bits_per_word;
+-  aml_spi_set_mode(amlogic_spi, SPI_MODE_0); // default spi mode 0
+-  aml_spi_set_clk(amlogic_spi, SPI_CLK_2M); // default spi speed 2M
+-  amlogic_spi->master_regs->conreg.ss_ctl = 1;
+-}
+-
+-
+-static int spi_add_dev(struct amlogic_spi *amlogic_spi, struct spi_master	*master)
+-{
+-	amlogic_spi->spi_dev.master = master;
+-	device_initialize(&amlogic_spi->spi_dev.dev);
+-	amlogic_spi->spi_dev.dev.parent = &amlogic_spi->master->dev;
+-	amlogic_spi->spi_dev.dev.bus = &spi_bus_type;
+-
+-	strcpy((char *)amlogic_spi->spi_dev.modalias, SPI_DEV_NAME);
+-	dev_set_name(&amlogic_spi->spi_dev.dev, "%s:%d", "m1spi", master->bus_num);
+-	return device_add(&amlogic_spi->spi_dev.dev);
+-}
+-
+-//setting clock and pinmux here
+-static  int amlogic_spi_setup(struct spi_device	*spi)
+-{
+-    return 0;
+-}
+-
+-static  void amlogic_spi_cleanup(struct spi_device	*spi)
+-{
+-	if (spi->modalias)
+-		kfree(spi->modalias);
+-}
+-
+-static void amlogic_spi_handle_one_msg(struct amlogic_spi *amlogic_spi, struct spi_message *m)
+-{
+-	struct spi_device *spi = m->spi;
+-	struct spi_transfer *t;
+-	struct aml_spi_reg_master __iomem* regs = amlogic_spi->master_regs;
+-
+-  int len, num, i, retry;
+-  u8 *txp, *rxp, dat;
+-  int ret = 0;
+-
+-  // re-set to prevent others from disable the SPICC clk gate
+-  SET_CBUS_REG_MASK(HHI_GCLK_MPEG0, (1<<8)); // SPICC clk gate
+-  if (amlogic_spi->tgl_spi != spi) {
+-    amlogic_spi->tgl_spi = spi;
+-    aml_spi_set_clk(amlogic_spi, spi->max_speed_hz);	    
+-	  aml_spi_set_mode(amlogic_spi, spi->mode);
+-	}
+-  spicc_chip_select(amlogic_spi, 1); // select
+-  regs->conreg.enable = 1; // enable spicc
+-  
+-	list_for_each_entry(t, &m->transfers, transfer_list) {
+-  	if((amlogic_spi->cur_speed != t->speed_hz) && t->speed_hz) {
+-  	    aml_spi_set_clk(amlogic_spi, t->speed_hz);	    
+-  	}  
+-    spicc_dbg("length = %d\n", t->len);
+-    len = t->len;
+-    txp = (u8 *)t->tx_buf;
+-    rxp = (u8 *)t->rx_buf;
+-    while (len > 0) {
+-      num = (len > SPICC_FIFO_SIZE) ? SPICC_FIFO_SIZE : len;
+-      for (i=0; i<num; i++) {
+-        dat = txp ? (*txp++) : 0;
+-        regs->txdata = dat;
+-        spicc_dbg("txdata[%d] = 0x%x\n", i, dat);
+-      }
+-      for (i=0; i<num; i++) {
+-        retry = 100;
+-        while (!regs->statreg.rx_ready && retry--) {udelay(1);}
+-        dat = regs->rxdata;
+-        if (rxp) *rxp++ = dat;
+-        spicc_dbg("rxdata[%d] = 0x%x\n", i, dat);
+-        if (!retry) {
+-          ret = -EBUSY;
+-          printk("error: spicc timeout\n");
+-          goto spi_handle_end;
+-        }
+-      }
+-      len -= num;
+-    }
+-
+-		m->actual_length += t->len;
+-		if (t->delay_usecs) {
+-			udelay(t->delay_usecs);
+-		}
+-	}
+-
+-spi_handle_end:
+-  regs->conreg.enable = 0; // disable spicc
+-  spicc_chip_select(amlogic_spi, 0); // unselect
+-  
+-  m->status = ret;
+-  if(m->context) {
+-    m->complete(m->context);
+-  }
+-}
+-
+-static int amlogic_spi_transfer(struct spi_device *spi,
+-				struct spi_message *m)
+-{
+-	struct amlogic_spi *amlogic_spi = spi_master_get_devdata(spi->master);
+-	unsigned long flags;
+-
+-	m->actual_length = 0;
+-	m->status = -EINPROGRESS;
+-
+-	spin_lock_irqsave(&amlogic_spi->lock, flags);
+-	list_add_tail(&m->queue, &amlogic_spi->msg_queue);
+-	queue_work(amlogic_spi->workqueue, &amlogic_spi->work);
+-	spin_unlock_irqrestore(&amlogic_spi->lock, flags);
+-
+-	return 0;
+-}
+-
+-static void amlogic_spi_work(struct work_struct *work)
+-{
+-	struct amlogic_spi *amlogic_spi = container_of(work, struct amlogic_spi,
+-						       work);
+-    unsigned long flags;
+-
+-	spin_lock_irqsave(&amlogic_spi->lock, flags);
+-	while (!list_empty(&amlogic_spi->msg_queue)) {
+-		struct spi_message *m = container_of(amlogic_spi->msg_queue.next,
+-						   struct spi_message, queue);
+-
+-		list_del_init(&m->queue);
+-		spin_unlock_irqrestore(&amlogic_spi->lock, flags);
+-
+-		amlogic_spi_handle_one_msg(amlogic_spi, m);
+-
+-		spin_lock_irqsave(&amlogic_spi->lock, flags);
+-	}
+-	spin_unlock_irqrestore(&amlogic_spi->lock, flags);
+-}
+-
+-static int amlogic_spi_probe(struct platform_device *pdev)
+-{
+-	struct spi_master	*master;
+-	struct amlogic_spi	*amlogic_spi;
+-	struct resource		*res;
+-	int			status = 0;
+-
+-   
+-	if (pdev->dev.platform_data == NULL) {
+-		dev_err(&pdev->dev, "platform_data missing!\n");
+-		return -ENODEV;
+-	}
+-
+-	master = spi_alloc_master(&pdev->dev, sizeof *amlogic_spi);
+-	if (master == NULL) {
+-		dev_dbg(&pdev->dev, "Unable to allocate SPI Master\n");
+-		return -ENOMEM;
+-	}	
+-
+-  master->bus_num = (pdev->id != -1)? pdev->id:1;
+-
+-	master->setup = amlogic_spi_setup;
+-	master->transfer = amlogic_spi_transfer;
+-	master->cleanup = amlogic_spi_cleanup;
+-
+-	dev_set_drvdata(&pdev->dev, master);
+-
+-	amlogic_spi = spi_master_get_devdata(master);
+-	amlogic_spi->master = master;
+-
+-	aml_spi_set_platform_data(amlogic_spi, pdev->dev.platform_data);
+-	//init_completion(&amlogic_spi->done);
+-	
+-  master->num_chipselect = amlogic_spi->num_cs;
+-	res = platform_get_resource(pdev, IORESOURCE_MEM, amlogic_spi->master_no);
+-	if (res == NULL) {
+-	    status = -ENOMEM;
+-	    dev_err(&pdev->dev, "Unable to get SPI MEM resource!\n");
+-        goto err1;
+-	}		
+-    amlogic_spi->master_regs = (struct aml_spi_reg_master __iomem*)(res->start);
+-#if 0	//remove irq 
+-	/* Register for SPI Interrupt */
+-	status = request_irq(amlogic_spi->irq, amlogic_spi_irq_handle,
+-			  0, "aml_spi", amlogic_spi);	
+-	if (status != 0)
+-	{
+-	    dev_dbg(&pdev->dev, "spi request irq failed and status:%d\n", status);
+-	    goto err1;
+-	}
+-#endif	  
+-	amlogic_spi->workqueue = create_singlethread_workqueue(
+-		dev_name(master->dev.parent));
+-	if (amlogic_spi->workqueue == NULL) {
+-		status = -EBUSY;
+-		goto err1;
+-	}	
+-	  		  
+-	spin_lock_init(&amlogic_spi->lock);
+-	INIT_WORK(&amlogic_spi->work, amlogic_spi_work);
+-	INIT_LIST_HEAD(&amlogic_spi->msg_queue);
+-		
+-	status = spi_register_master(master);
+-	if (status < 0)
+-    {
+-        dev_dbg(&pdev->dev, "spi register failed and status:%d\n", status);
+-		goto err0;
+-	}
+-	
+-	spi_hw_init(amlogic_spi);
+-  spicc_reg_dbg(amlogic_spi);
+- 	status = spi_add_dev(amlogic_spi, master);
+-	printk("aml spi init ok and status:%d \n", status);
+-	
+-	return status;    
+-err0:
+-   destroy_workqueue(amlogic_spi->workqueue);     
+-err1:
+-	spi_master_put(master);
+-	return status;
+-}
+-
+-static int amlogic_spi_remove(struct platform_device *pdev)
+-{
+-	struct spi_master	*master;
+-	struct amlogic_spi	*amlogic_spi;
+-
+-	master = dev_get_drvdata(&pdev->dev);
+-	amlogic_spi = spi_master_get_devdata(master);
+-
+-	spi_unregister_master(master);
+-
+-	return 0;
+-}
+-
+-static struct platform_driver amlogic_spi_driver = { 
+-	.probe = amlogic_spi_probe, 
+-	.remove = amlogic_spi_remove, 
+-	.driver =
+-	    {
+-			.name = "aml_spi", 
+-			.owner = THIS_MODULE, 
+-		}, 
+-};
+-
+-static int __init amlogic_spi_init(void) 
+-{	
+-	return platform_driver_register(&amlogic_spi_driver);
+-}
+-
+-static void __exit amlogic_spi_exit(void) 
+-{	
+-	platform_driver_unregister(&amlogic_spi_driver);
+-} 
+-
+-subsys_initcall(amlogic_spi_init);
+-module_exit(amlogic_spi_exit);
+-//module_init(amlogic_spi_init);
+-//module_exit(amlogic_spi_exit);
+-
+-MODULE_DESCRIPTION("Amlogic Spi driver");
+-MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/spi/spicc.c b/drivers/amlogic/spi/spicc.c
+new file mode 100755
+index 000000000000..49bb8df7f772
+--- /dev/null
++++ b/drivers/amlogic/spi/spicc.c
+@@ -0,0 +1,475 @@
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/device.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/platform_device.h>
++#include <linux/err.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/spi/spi.h>
++#include <mach/pinmux.h>
++#include <mach/am_regs.h>
++#include <mach/spicc.h>
++#include <linux/of_address.h>
++#ifdef CONFIG_OF
++#include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/of.h>
++#else
++#include <mach/gpio.h>
++#include <mach/gpio_data.h>
++#endif
++
++/**
++ * struct spicc
++ * @lock: spinlock for SPICC controller.
++  * @msg_queue: link with the spi message list.
++ * @wq: work queque
++ * @work: work
++ * @master: spi master alloc for this driver.
++ * @spi: spi device on working.
++ * @regs: the start register address of this SPICC controller.
++ */
++struct spicc {
++	spinlock_t lock;
++	struct list_head msg_queue;
++	struct workqueue_struct *wq;
++	struct work_struct work;			
++	struct spi_master	*master;
++	struct spi_device	*spi;
++	struct class cls;
++
++
++	struct spicc_regs __iomem *regs;
++#ifdef CONFIG_OF
++	struct pinctrl *pinctrl;
++#else
++	pinmux_set_t pinctrl;
++#endif
++};
++
++static bool spicc_dbgf = 1;
++#define spicc_dbg(fmt, args...)  { if(spicc_dbgf) \
++					printk("[spicc]: " fmt, ## args); }
++
++
++static void spicc_dump(struct spicc *spicc)
++{
++	spicc_dbg("rxdata(0x%8x)    = 0x%x\n", &spicc->regs->rxdata, spicc->regs->rxdata);
++	spicc_dbg("txdata(0x%8x)    = 0x%x\n", &spicc->regs->txdata, spicc->regs->txdata);
++	spicc_dbg("conreg(0x%8x)    = 0x%x\n", &spicc->regs->conreg, *((volatile unsigned int *)(&spicc->regs->conreg)));
++	spicc_dbg("intreg(0x%8x)    = 0x%x\n", &spicc->regs->intreg, *((volatile unsigned int *)(&spicc->regs->intreg)));
++	spicc_dbg("dmareg(0x%8x)    = 0x%x\n", &spicc->regs->dmareg, *((volatile unsigned int *)(&spicc->regs->dmareg)));
++	spicc_dbg("statreg(0x%8x)   = 0x%x\n", &spicc->regs->statreg, *((volatile unsigned int *)(&spicc->regs->statreg)));
++	spicc_dbg("periodreg(0x%8x) = 0x%x\n", &spicc->regs->periodreg, spicc->regs->periodreg);
++	spicc_dbg("testreg(0x%8x)   = 0x%x\n", &spicc->regs->testreg, spicc->regs->testreg);
++}
++
++static void spicc_chip_select(struct spicc *spicc, bool select)
++{
++  u8 chip_select = spicc->spi->chip_select;
++  int cs_gpio = spicc->spi->cs_gpio;
++  bool ss_pol = (spicc->spi->mode & SPI_CS_HIGH) ? 1 : 0;
++
++  if (spicc->spi->mode & SPI_NO_CS) return;
++  if (cs_gpio > 0) {
++    amlogic_gpio_direction_output(cs_gpio, ss_pol ? select : !select, "spicc_cs");
++  }
++  else if (chip_select < spicc->master->num_chipselect) {
++  	cs_gpio = spicc->master->cs_gpios[chip_select];
++	  if ((cs_gpio = spicc->master->cs_gpios[chip_select]) > 0) {
++	    amlogic_gpio_direction_output(cs_gpio, ss_pol ? select : !select, "spicc_cs");
++	  }
++	  else {
++	    spicc->regs->conreg.chip_select = chip_select;
++	    spicc->regs->conreg.ss_pol = ss_pol;
++	    spicc->regs->conreg.ss_ctl = ss_pol;
++	  }
++  }
++}
++
++
++static void spicc_set_mode(struct spicc *spicc, u8 mode) 
++{    
++  spicc->regs->conreg.clk_pha = (mode & SPI_CPHA) ? 1:0;
++  spicc->regs->conreg.clk_pol = (mode & SPI_CPOL) ? 1:0;
++  spicc->regs->conreg.drctl = 0; //data ready, 0-ignore, 1-falling edge, 2-rising edge
++  spicc_dbg("mode = 0x%x\n", mode);
++}
++
++
++static void spicc_set_clk(struct spicc *spicc, int speed) 
++{	
++	struct clk *sys_clk = clk_get_sys("clk81", NULL);
++	unsigned sys_clk_rate = clk_get_rate(sys_clk);
++	unsigned div, mid_speed;
++  
++  // actually, speed = sys_clk_rate / 2^(conreg.data_rate_div+2)
++  mid_speed = (sys_clk_rate * 3) >> 4;
++  for(div=0; div<7; div++) {
++    if (speed >= mid_speed) break;    
++    mid_speed >>= 1;
++  }
++  spicc->regs->conreg.data_rate_div = div;
++  spicc_dbg("sys_clk_rate=%d, speed=%d, div=%d\n", sys_clk_rate, speed, div);
++}
++
++
++static int spicc_hw_xfer(struct spicc *spicc, u8 *txp, u8 *rxp, int len)
++{
++	u8 dat;
++	int i, num,retry;
++	
++	spicc_dbg("length = %d\n", len);
++	while (len > 0) {
++		num = (len > SPICC_FIFO_SIZE) ? SPICC_FIFO_SIZE : len;
++		for (i=0; i<num; i++) {
++			dat = txp ? (*txp++) : 0;
++			spicc->regs->txdata = dat;
++			//spicc_dbg("txdata[%d] = 0x%x\n", i, dat);
++		}
++		for (i=0; i<num; i++) {
++			retry = 100;
++			while (!spicc->regs->statreg.rx_ready && retry--) {udelay(1);}
++			dat = spicc->regs->rxdata;
++			if (rxp) *rxp++ = dat;
++			//spicc_dbg("rxdata[%d] = 0x%x\n", i, dat);
++			if (!retry) {
++			  printk("error: spicc timeout\n");
++			  return -ETIMEDOUT;
++			}
++		}
++		len -= num;
++	}
++	return 0;
++}
++
++/* mode: SPICC_DMA_MODE/SPICC_PIO_MODE
++ */
++static void spicc_hw_init(struct spicc *spicc)
++{
++	spicc_clk_gate_on();
++	udelay(10);
++  spicc->regs->testreg |= 1<<24; //clock free enable
++  spicc->regs->conreg.enable = 0; // disable SPICC
++  spicc->regs->conreg.mode = 1; // 0-slave, 1-master
++  spicc->regs->conreg.xch = 0;
++  spicc->regs->conreg.smc = SPICC_PIO;
++  spicc->regs->conreg.bits_per_word = 7; // default bits width 8
++  spicc_set_mode(spicc, SPI_MODE_0); // default mode 0
++  spicc_set_clk(spicc, 3000000); // default speed 3M
++  spicc->regs->conreg.ss_ctl = 1;
++  spicc_dump(spicc);
++}
++
++
++//setting clock and pinmux here
++static int spicc_setup(struct spi_device	*spi)
++{
++    return 0;
++}
++
++static void spicc_cleanup(struct spi_device *spi)
++{
++	if (spi->modalias)
++		kfree(spi->modalias);
++}
++
++static void spicc_handle_one_msg(struct spicc *spicc, struct spi_message *m)
++{
++	struct spi_device *spi = m->spi;
++	struct spi_transfer *t;
++  int ret = 0;
++
++  // re-set to prevent others from disable the SPICC clk gate
++  spicc_clk_gate_on();
++  if (spicc->spi != spi) {
++    spicc->spi = spi;
++    spicc_set_clk(spicc, spi->max_speed_hz);	    
++	  spicc_set_mode(spicc, spi->mode);
++	}
++  spicc_chip_select(spicc, 1); // select
++  spicc->regs->conreg.enable = 1; // enable spicc
++  
++	list_for_each_entry(t, &m->transfers, transfer_list) {
++  	if((spi->max_speed_hz != t->speed_hz) && t->speed_hz) {
++  	  spicc_set_clk(spicc, t->speed_hz);	    
++  	}  
++		if (spicc_hw_xfer(spicc,(u8 *)t->tx_buf, (u8 *)t->rx_buf, t->len) < 0) {
++			goto spicc_handle_end;
++		}
++		m->actual_length += t->len;
++		if (t->delay_usecs) {
++			udelay(t->delay_usecs);
++		}
++	}
++
++spicc_handle_end:
++  spicc->regs->conreg.enable = 0; // disable spicc
++  spicc_chip_select(spicc, 0); // unselect
++  spicc_clk_gate_off();
++
++  m->status = ret;
++  if(m->context) {
++    m->complete(m->context);
++  }
++}
++
++static int spicc_transfer(struct spi_device *spi, struct spi_message *m)
++{
++	struct spicc *spicc = spi_master_get_devdata(spi->master);
++	unsigned long flags;
++
++	m->actual_length = 0;
++	m->status = -EINPROGRESS;
++
++	spin_lock_irqsave(&spicc->lock, flags);
++	list_add_tail(&m->queue, &spicc->msg_queue);
++	queue_work(spicc->wq, &spicc->work);
++	spin_unlock_irqrestore(&spicc->lock, flags);
++
++	return 0;
++}
++
++static void spicc_work(struct work_struct *work)
++{
++	struct spicc *spicc = container_of(work, struct spicc, work);
++	struct spi_message *m;
++	unsigned long flags;
++
++	spin_lock_irqsave(&spicc->lock, flags);
++	while (!list_empty(&spicc->msg_queue)) {
++		m = container_of(spicc->msg_queue.next, struct spi_message, queue);
++		list_del_init(&m->queue);
++		spin_unlock_irqrestore(&spicc->lock, flags);
++		spicc_handle_one_msg(spicc, m);
++		spin_lock_irqsave(&spicc->lock, flags);
++	}
++	spin_unlock_irqrestore(&spicc->lock, flags);
++}
++
++
++static ssize_t store_test(struct class *class, struct class_attribute *attr,	const char *buf, size_t count)
++{
++	struct spicc *spicc = container_of(class, struct spicc, cls);
++	unsigned int i, cs_gpio, speed, mode, num;
++	u8 wbuf[4]={0}, rbuf[128]={0};
++	unsigned long flags;
++//	unsigned char cs_gpio_name[20];
++
++	if (buf[0] == 'h') {
++		printk("SPI device test help\n");
++		printk("You can test the SPI device even without its driver through this sysfs node\n");
++		printk("echo cs_gpio speed num [wdata1 wdata2 wdata3 wdata4] >test\n");
++		return count;
++	}
++    
++	i = sscanf(buf, "%d%d%d%d%x%x%x%x", &cs_gpio, &speed, &mode, &num, 
++		(unsigned int *)&wbuf[0], (unsigned int *)&wbuf[1], (unsigned int *)&wbuf[2], (unsigned int *)&wbuf[3]);
++	printk("cs_gpio=%d, speed=%d, mode=%d, num=%d\n", cs_gpio, speed, mode, num);
++	if ((i<(num+4)) || (!cs_gpio) || (!speed) || (num > sizeof(wbuf))) {
++		printk("invalid data\n");
++		return -EINVAL;
++	}
++
++	spin_lock_irqsave(&spicc->lock, flags);	
++	amlogic_gpio_request(cs_gpio, "spicc_cs");
++	amlogic_gpio_direction_output(cs_gpio, 0, "spicc_cs");
++  spicc_clk_gate_on();
++ 	spicc_set_clk(spicc, speed);	    
++	spicc_set_mode(spicc, mode);
++  spicc->regs->conreg.enable = 1; // enable spicc
++//	spicc_dump(spicc);
++	
++	spicc_hw_xfer(spicc, wbuf, rbuf, num);
++	printk("read back data: ");
++	for (i=0; i<num; i++) {
++		printk("0x%x, ", rbuf[i]);
++	}
++	printk("\n");
++	
++	spicc->regs->conreg.enable = 0; // disable spicc
++	spicc_clk_gate_off();
++	amlogic_gpio_direction_input(cs_gpio, "spicc_cs");
++	amlogic_gpio_free(cs_gpio, "spicc_cs");
++	spin_unlock_irqrestore(&spicc->lock, flags);
++    
++	return count;
++}
++static struct class_attribute spicc_class_attrs[] = {
++    __ATTR(test,  S_IWUSR, NULL,    store_test),
++    __ATTR_NULL
++};
++
++static int spicc_probe(struct platform_device *pdev)
++{
++	struct spicc_platform_data *pdata;
++	struct spi_master	*master;
++	struct spicc *spicc;
++	int i, gpio, ret;
++	
++#ifdef CONFIG_OF
++	struct spicc_platform_data spicc_pdata;
++	const char *prop_name;
++	
++	BUG_ON(!pdev->dev.of_node);
++	pdata = &spicc_pdata;
++
++	ret = of_property_read_u32(pdev->dev.of_node,"device_id",&pdata->device_id);
++	if(ret) {
++		dev_err(&pdev->dev, "match device_id failed!\n");
++		return -ENODEV;
++	}
++	dev_info(&pdev->dev, "device_id = %d \n", pdata->device_id);
++
++	ret = of_property_read_string(pdev->dev.of_node, "pinctrl-names", &prop_name);
++	if(ret || IS_ERR(prop_name)) {
++		dev_err(&pdev->dev, "match pinctrl-names failed!\n");
++		return -ENODEV;
++	}
++	pdata->pinctrl = devm_pinctrl_get_select(&pdev->dev, prop_name);
++	if(IS_ERR(pdata->pinctrl)) {
++		dev_err(&pdev->dev, "pinmux error\n");
++		return -ENODEV;
++	}
++	dev_info(&pdev->dev, "pinctrl_name = %s\n", prop_name);
++	
++	ret = of_property_read_u32(pdev->dev.of_node,"num_chipselect",&pdata->num_chipselect);
++	if(ret) {
++		dev_err(&pdev->dev, "match num_chipselect failed!\n");
++		return -ENODEV;
++	}
++ 	dev_info(&pdev->dev, "num_chipselect = %d\n", pdata->num_chipselect);
++
++	pdata->cs_gpios = kzalloc(sizeof(int)*pdata->num_chipselect, GFP_KERNEL);
++	for (i=0; i<pdata->num_chipselect; i++) {
++		ret = of_property_read_string_index(pdev->dev.of_node, "cs_gpios", i, &prop_name);
++		if(ret || IS_ERR(prop_name) || ((gpio = amlogic_gpio_name_map_num(prop_name)) < 0)) {
++			dev_err(&pdev->dev, "match cs_gpios[%d](%s) failed!\n", i, prop_name);
++      kzfree(pdata->cs_gpios);
++			return -ENODEV;
++		}
++		else {
++   		*(pdata->cs_gpios+i) = gpio;
++ 			dev_info(&pdev->dev, "cs_gpios[%d] = %s(%d)\n", i, prop_name, gpio);
++		}
++	} 	
++ 	
++  pdata->regs = (struct spicc_regs __iomem *)of_iomap(pdev->dev.of_node, 0);
++	dev_info(&pdev->dev, "regs = %x\n", pdata->regs);
++#else
++	pdata = (struct spicc_platform_data *)pdev->dev.platform_data
++	BUG_ON(!pdata);	
++#endif
++	for (i=0; i<pdata->num_chipselect; i++) {
++		gpio = pdata->cs_gpios[i];
++		if (amlogic_gpio_request(gpio, "spicc_cs")) {
++			dev_err(&pdev->dev, "request chipselect gpio(%d) failed!\n", i);
++      kzfree(pdata->cs_gpios);
++			return -ENODEV;
++		}
++		amlogic_gpio_direction_output(gpio, 1, "spicc_cs");
++	}
++	
++	master = spi_alloc_master(&pdev->dev, sizeof *spicc);
++	if (master == NULL) {
++		dev_err(&pdev->dev, "allocate spi master failed!\n");
++		return -ENOMEM;
++	}
++  master->bus_num = pdata->device_id;
++  master->num_chipselect = pdata->num_chipselect;
++  master->cs_gpios = pdata->cs_gpios;
++	master->setup = spicc_setup;
++	master->transfer = spicc_transfer;
++	master->cleanup = spicc_cleanup;
++	ret = spi_register_master(master);
++	if (ret < 0) {
++			dev_err(&pdev->dev, "register spi master failed! (%d)\n", ret);
++			goto err;
++	}
++	
++	spicc = spi_master_get_devdata(master);
++	spicc->master = master;	
++	spicc->regs = pdata->regs;
++	spicc->pinctrl = pdata->pinctrl;
++	dev_set_drvdata(&pdev->dev, spicc);
++	INIT_WORK(&spicc->work, spicc_work);
++	spicc->wq = create_singlethread_workqueue(dev_name(master->dev.parent));
++	if (spicc->wq == NULL) {
++		ret = -EBUSY;
++		goto err;
++	}		  		  
++	spin_lock_init(&spicc->lock);
++	INIT_LIST_HEAD(&spicc->msg_queue);
++		
++	spicc_hw_init(spicc);
++
++  /*setup class*/
++  spicc->cls.name = kzalloc(10, GFP_KERNEL);
++  sprintf((char*)spicc->cls.name, "spicc%d", master->bus_num);
++  spicc->cls.class_attrs = spicc_class_attrs;
++  if ((ret = class_register(&spicc->cls)) < 0) {
++		dev_err(&pdev->dev, "register class failed! (%d)\n", ret);
++	}
++	
++	dev_info(&pdev->dev, "SPICC init ok \n");
++	return ret;
++err:
++	spi_master_put(master);
++	return ret;
++}
++
++static int spicc_remove(struct platform_device *pdev)
++{
++	struct spicc *spicc;
++
++	spicc = (struct spicc *)dev_get_drvdata(&pdev->dev);
++	spi_unregister_master(spicc->master);
++	destroy_workqueue(spicc->wq);
++#ifdef CONFIG_OF
++	if(spicc->pinctrl) {
++		devm_pinctrl_put(spicc->pinctrl);
++	}
++#else
++    pinmux_clr(&spicc->pinctrl);
++#endif
++	return 0;
++}
++
++#ifdef CONFIG_OF
++static const struct of_device_id spicc_of_match[]={
++	{	.compatible = "amlogic, spicc", },
++	{},
++};
++#else
++#define spicc_of_match NULL
++#endif
++
++static struct platform_driver spicc_driver = { 
++	.probe = spicc_probe, 
++	.remove = spicc_remove, 
++	.driver = {
++			.name = "spicc", 
++      .of_match_table = spicc_of_match,
++			.owner = THIS_MODULE, 
++		}, 
++};
++
++static int __init spicc_init(void) 
++{	
++	return platform_driver_register(&spicc_driver);
++}
++
++static void __exit spicc_exit(void) 
++{	
++	platform_driver_unregister(&spicc_driver);
++} 
++
++subsys_initcall(spicc_init);
++module_exit(spicc_exit);
++
++MODULE_DESCRIPTION("Amlogic SPICC driver");
++MODULE_LICENSE("GPL");
+-- 
+2.19.0
+

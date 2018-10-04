@@ -1,0 +1,637 @@
+From 7fa59c742e825bf70d80380e0a64e5bfa6d36516 Mon Sep 17 00:00:00 2001
+From: "chunxue.yu" <chunxue.yu@amlogic.com>
+Date: Fri, 11 Apr 2014 15:44:37 +0800
+Subject: [PATCH 3893/5965] PD#89453:Squashed commit of the following:
+
+commit cebe75832215df13fd17db32147cf8056b79fcdb
+Author: chunxue.yu <chunxue.yu@amlogic.com>
+Date:   Wed Apr 2 14:50:25 2014 +0800
+
+    PD #89453: fix error read config file,cause touch does not work
+
+commit 6b20ec4bad69122afec7a7f8d99541e400a2116f
+Author: chunxue.yu <chunxue.yu@amlogic.com>
+Date:   Thu Mar 27 17:26:38 2014 +0800
+
+    PD #89453: fix error read config file,cause touch does not work
+
+commit 8bf208335d3583019ecb5574c5f40495866fe532
+Author: chunxue.yu <chunxue.yu@amlogic.com>
+Date:   Wed Mar 26 18:13:59 2014 +0800
+
+    PD #89453: fix error read config file,cause touch does not work
+
+commit 94f490713cdc14b8dbcf1a0f9a03e2dc1fddd8b1
+Author: chunxue.yu <chunxue.yu@amlogic.com>
+Date:   Wed Mar 26 18:13:33 2014 +0800
+
+    PD #89453: fix error read config file,cause touch does not work
+---
+ .../input/touchscreen/ct36x_ts/ct365.c        | 28 ++++----
+ .../input/touchscreen/ct36x_ts/tscore.c       |  5 +-
+ .../input/touchscreen/focaltech_5x06.c        | 15 ++--
+ .../amlogic/input/touchscreen/goodix_gt81xx.c | 15 ++--
+ drivers/amlogic/input/touchscreen/gslx680.c   | 70 +++++++++++++------
+ .../input/touchscreen/gslx680_compatible.c    | 66 +++++++++++------
+ .../amlogic/input/touchscreen/gt9xx/gt9xx.c   | 29 +++++---
+ .../amlogic/input/touchscreen/gt9xx/gt9xx.h   |  2 +-
+ 8 files changed, 152 insertions(+), 78 deletions(-)
+
+diff --git a/drivers/amlogic/input/touchscreen/ct36x_ts/ct365.c b/drivers/amlogic/input/touchscreen/ct36x_ts/ct365.c
+index b691a420f42a..c4bd4b237927 100755
+--- a/drivers/amlogic/input/touchscreen/ct36x_ts/ct365.c
++++ b/drivers/amlogic/input/touchscreen/ct36x_ts/ct365.c
+@@ -462,7 +462,7 @@ void ct36x_upgrade_touch(void)
+ 	u32 offset = 0,count = 0;
+ 	int file_size;
+ 	u8 tmp[READ_COUNT];
+-	int i_ret;
++	int i_ret, i;
+ 
+ 	file_size = touch_open_fw(ts_com->fw_file);
+ 	printk("%s: file_size = %d\n", __func__, file_size);
+@@ -479,23 +479,25 @@ void ct36x_upgrade_touch(void)
+ 	}
+ 
+ 	while (offset < file_size) {
+-    touch_read_fw(offset, READ_COUNT, &tmp[0]);
++	memset(tmp, 0, READ_COUNT);
++    touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+     i_ret = sscanf(&tmp[0],"0x%x,",(int *)(binary_data + count));
+     if (i_ret == 1) {
+ 			count++;
++			offset += READ_COUNT;
+ 		}
++	else
+     offset++;
+ 	}
+-
+-//	int i=0;
+-//	for (i=0; i<10; i++ ) {
+-//		printk("%x ", binary_data[i]);
+-//	}
+-//	printk("\n");
+-//	for (i=count-1; i>count-10; i-- ) {
+-//		printk("%x ", binary_data[i]);
+-//	}
+-//	printk("\n");
++	printk("touch dump fw data:");
++	for (i=0; i<20; i++ ) {
++		printk("%x ", binary_data[i]);
++	}
++	printk("\ntouch dump fw data:");
++	for (i=count-20; i<count; i++) {
++		printk("%x ", binary_data[i]);
++	}
++	printk("\n");
+ 	touch_close_fw();
+ 	/* Hardware reset */
+ 	#ifdef CONFIG_OF
+@@ -550,7 +552,7 @@ int ct36x_late_upgrade(void *p)
+ 	}
+ 	touch_close_fw();
+ 	ct36x_upgrade_touch();
+-	printk("%s :first load firmware\n", ts_com->owner);
++	printk("%s: load firmware\n", ts_com->owner);
+ #if defined(CONFIG_TOUCHSCREEN_CT36X_CHIP_CT365)
+ 	ct36x_check_trim(ct36x_ts.client);
+ #endif
+diff --git a/drivers/amlogic/input/touchscreen/ct36x_ts/tscore.c b/drivers/amlogic/input/touchscreen/ct36x_ts/tscore.c
+index 85b4bce4405d..881fef7edba0 100755
+--- a/drivers/amlogic/input/touchscreen/ct36x_ts/tscore.c
++++ b/drivers/amlogic/input/touchscreen/ct36x_ts/tscore.c
+@@ -572,6 +572,7 @@ int ct36x_ts_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ #endif
+ 	remove_proc_entry(DRIVER_NAME, NULL);
+ 	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return err;
+ }
+ 
+@@ -646,7 +647,6 @@ int ct36x_ts_remove(struct i2c_client *client)
+ 	printk(">>>>> %s() called <<<<< \n", __FUNCTION__);
+ 
+ 	ts = (struct ct36x_ts_info *)i2c_get_clientdata(client);
+-	destroy_remove(client->dev, ts_com);
+ 	/* Driver clean up */
+ 	disable_irq(ts->irq);
+ 	cancel_work_sync(&ts->event_work);
+@@ -660,6 +660,9 @@ int ct36x_ts_remove(struct i2c_client *client)
+ #endif
+ 	remove_proc_entry(DRIVER_NAME, NULL);
+ 
++	destroy_remove(client->dev, ts_com);
++	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/focaltech_5x06.c b/drivers/amlogic/input/touchscreen/focaltech_5x06.c
+index d424761fd6f6..3eb002f1d642 100755
+--- a/drivers/amlogic/input/touchscreen/focaltech_5x06.c
++++ b/drivers/amlogic/input/touchscreen/focaltech_5x06.c
+@@ -693,8 +693,9 @@ E_UPGRADE_ERR_TYPE fts_ctpm_fw_upgrade(void)
+ 	    packet_buf[4] = (FTS_BYTE)(len>>8);
+ 	    packet_buf[5] = (FTS_BYTE)len;
+ 	    i = 0;
+-			while(i < FTS_PACKET_LENGTH) {
+-		    touch_read_fw(offset, READ_COUNT, &tmp[0]);
++			while(i < FTS_PACKET_LENGTH && offset < file_size) {
++			memset(tmp, 0, READ_COUNT);
++		    touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+ 		    i_ret = sscanf(&tmp[0],"0x%c%c",&check_dot[0],&check_dot[1]);
+ 		    if (i_ret == 2) {
+ 			    if (check_dot[1] == ',')
+@@ -702,8 +703,10 @@ E_UPGRADE_ERR_TYPE fts_ctpm_fw_upgrade(void)
+ 			    else
+ 						sscanf(&tmp[0],"0x%x,",(uint *)&packet_buf[6+i]);
+ 			    i ++;
++				offset += READ_COUNT;
+ 				}
+-		    offset++;
++			else
++		    offset ++;
+ 		    if (offset >= file_size) {
+ 					last = i-8;
+ 					break;
+@@ -1202,7 +1205,7 @@ static int ft5x0x_late_upgrade(void *data)
+ 	touch_close_fw();
+ 	fts_ctpm_fw_upgrade_with_i_file();
+ 	enable_irq(ts_com->irq);
+-	printk("%s :first load firmware\n", ts_com->owner);
++	printk("%s: load firmware\n", ts_com->owner);
+ 	//do_exit(0);
+ 	return 0;
+ }
+@@ -1375,6 +1378,7 @@ exit_ft5x06_is_not_exist:
+ exit_alloc_data_failed:
+ exit_check_functionality_failed:
+ 	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	printk("%s: probe failed!\n", __FUNCTION__);
+ 	return err;
+ }
+@@ -1402,6 +1406,9 @@ static int __exit ft5x0x_ts_remove(struct i2c_client *client)
+ 	cancel_work_sync(&ft5x0x_ts->pen_event_work);
+ 	destroy_workqueue(ft5x0x_ts->ts_workqueue);
+ 	i2c_set_clientdata(client, NULL);
++	free_touch_gpio(g_pdata);
++	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/goodix_gt81xx.c b/drivers/amlogic/input/touchscreen/goodix_gt81xx.c
+index ef03f28c6c1f..48e8449a2fd7 100755
+--- a/drivers/amlogic/input/touchscreen/goodix_gt81xx.c
++++ b/drivers/amlogic/input/touchscreen/goodix_gt81xx.c
+@@ -198,11 +198,14 @@ static int goodix_init_panel(struct goodix_ts_data *ts)
+ 	}
+ 
+ 	while (offset < file_size) {
+-    touch_read_fw(offset, READ_COUNT, &tmp[0]);
++	memset(tmp, 0, READ_COUNT);
++    touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+     i_ret = sscanf(&tmp[0],"0x%x,",(int *)(config_info + count));
+     if (i_ret == 1) {
+ 			count++;
++			offset += READ_COUNT;
+ 		}
++	else
+     offset++;
+ 	}
+ 
+@@ -932,7 +935,7 @@ static int gt81xx_late_upgrade(void *p)
+ 	}
+ 	touch_close_fw();
+ 	gt81xx_upgrade_touch();
+-	printk("%s :first load firmware\n", g_pdata->owner);
++	printk("%s: load firmware\n", g_pdata->owner);
+ 	if(ts->use_irq)
+ 		enable_irq(i2c_connect_client->irq);
+ 	return 0;	
+@@ -1213,9 +1216,10 @@ err_i2c_failed:
+ 	kfree(ts);
+ err_goodix_is_not_exist:
+ 	free_touch_gpio(g_pdata);
++	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ //err_alloc_data_failed:
+ err_check_functionality_failed:
+-	ts_com->owner = NULL;
+ 	return ret;
+ }
+ 
+@@ -1239,7 +1243,7 @@ static int goodix_ts_remove(struct i2c_client *client)
+ #ifdef CONFIG_TOUCHSCREEN_GOODIX_IAP
+ 	remove_proc_entry("goodix-update", NULL);
+ #endif
+-	destroy_remove(client->dev, g_pdata);
++	i2c_unregister_device(client);
+ 	goodix_debug_sysfs_deinit();
+ 
+ 	if (ts && ts->use_irq)
+@@ -1257,6 +1261,9 @@ static int goodix_ts_remove(struct i2c_client *client)
+ 	i2c_set_clientdata(client, NULL);
+ 	input_unregister_device(ts->input_dev);
+ 	kfree(ts);
++	destroy_remove(client->dev, g_pdata);
++	free_touch_gpio(g_pdata);
++	ts_com->owner = NULL;
+ 	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/gslx680.c b/drivers/amlogic/input/touchscreen/gslx680.c
+index a9ef4324a6f5..22f4204aeea4 100755
+--- a/drivers/amlogic/input/touchscreen/gslx680.c
++++ b/drivers/amlogic/input/touchscreen/gslx680.c
+@@ -132,8 +132,8 @@ static int MAX_FINGERS;
+ static struct touch_pdata *g_pdata = NULL;
+ extern struct touch_pdata *ts_com;
+ static struct i2c_client *this_client;
+-#ifdef LATE_UPGRADE
+ static struct fw_data *ptr_fw = NULL;
++#ifdef LATE_UPGRADE
+ static u32 fw_len = 0;
+ static struct aml_gsl_api *api = NULL;
+ #endif
+@@ -261,7 +261,16 @@ static void gsl_load_fw(struct i2c_client *client)
+ 	u32 state = 0;
+ 	
+ #ifdef LATE_UPGRADE
+-	if (!ptr_fw) return;
++	if (!ptr_fw) {
++	#ifdef AML_RESUME
++		if (ts->dl_fw && !state) {
++			complete(&ts->fw_completion);
++			state = 1;
++			printk("0000 fw_completion complete\n");
++		}
++	#endif
++		return;
++	}
+ 	source_len = fw_len;
+ #else
+ 	ptr_fw = GSLX680_FW;
+@@ -1192,7 +1201,7 @@ static void gslx680_upgrade_touch(void)
+ }
+ 
+ #ifdef LATE_UPGRADE
+-#define READ_COUNT  20
++#define READ_COUNT  18
+ static int gslx680_late_upgrade(void *data)
+ {
+ 	u32 offset = 0, i = 5;
+@@ -1201,13 +1210,13 @@ static int gslx680_late_upgrade(void *data)
+ 	int ret = 0;
+ 	u32 fw_tmp[2] = {0};
+ //static int count;
++	if (ts_com->ic_type & 1) {
++		while (aml_gsl_get_api() == NULL)
++			schedule_timeout(1);
++		api = aml_gsl_get_api();
++	}
+ 	while(1) {
+-		if (ts_com->ic_type & 1) {
+-			while (aml_gsl_get_api() == NULL)
+-				schedule_timeout(1);
+-			api = aml_gsl_get_api();
+-		}
+-		file_size = touch_open_fw(g_pdata->fw_file);
++		file_size = touch_open_fw(ts_com->fw_file);
+ 		if(file_size < 0) {
+ //			printk("%s: %d\n", __func__, count++);
+ 			msleep(10);
+@@ -1215,38 +1224,50 @@ static int gslx680_late_upgrade(void *data)
+ 		else break;
+ 	}
+ 	printk("%s: file_size = %d\n", __func__, file_size);
+-	ptr_fw = kzalloc(sizeof(struct fw_data)*8192, GFP_KERNEL);
++	ptr_fw = kzalloc(sizeof(struct fw_data)*(max_t(int, file_size/READ_COUNT, 8192)), GFP_KERNEL);
+ 	if (ptr_fw == NULL) {
+ 		printk("%s: Insufficient memory in upgrade!\n",ts_com->owner);
+ 		return -1;
+ 	}
+ 
+ 	while (offset < file_size) {
+-		if (offset >= file_size) break;
+-			touch_read_fw(offset, READ_COUNT, &tmp[0]);
++			memset(tmp, 0, READ_COUNT);
++			touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+ 			if (!strncmp("/*", tmp, 2)) {
++				//printk("%s: %s\n", ts_com->owner, tmp);
++				offset++;
+ 				do {
+-					offset += 2;
+-					touch_read_fw(offset, READ_COUNT, &tmp[0]);
++					offset++;
++					if (offset >= file_size)
++					{
++						touch_close_fw();
++						printk("%s: firmware format error!\n", ts_com->owner);
++						return -1;
++					}
++					memset(tmp, 0, READ_COUNT);
++					touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+ 				}while(strncmp("*/", tmp, 2));
++				offset += 2;
++				//printk("%s: %s\n", ts_com->owner, tmp);
++				continue;
+ 			}
+ 			
+-			touch_read_fw(offset, READ_COUNT, &tmp[0]);
+ 			ret = sscanf(&tmp[0],"{0x%x,0x%lx},",&fw_tmp[0],(long unsigned int*)&fw_tmp[1]);
+-			offset ++;
+ 			if (ret != 2) {
++				offset ++;
+ 				continue;
+ 			}
++			offset += READ_COUNT >> 2;
+ 			(ptr_fw+fw_len)->offset = fw_tmp[0];
+ 			(ptr_fw+fw_len)->val = fw_tmp[1];
+-			if (fw_len < 5)
+-			{
+-				printk("%d %s: {0x%x,0x%lx},\n", fw_len, __func__, (ptr_fw+fw_len)->offset, (long)(ptr_fw+fw_len)->val);
+-			}
+ 			fw_len ++;
+ 	}
+-	for (i=5; i>0; i--)
+-		printk("%d %s: {0x%x,0x%lx},\n",5-i, __func__, (ptr_fw+fw_len-i)->offset, (long)(ptr_fw+fw_len-i)->val);
++	for (i=0; i<10; i++) {
++		printk("%d %s: {0x%x,0x%lx},\n", i, __func__, (ptr_fw+i)->offset, (long)(ptr_fw+i)->val);
++	}
++	for (i=fw_len-10; i<fw_len; i++) {
++		printk("%d %s: {0x%x,0x%lx},\n", i, __func__, (ptr_fw+i)->offset, (long)(ptr_fw+i)->val);
++	}
+ 	touch_close_fw();
+ 	gslx680_upgrade_touch();
+ 	printk("%s load firmware: fw_len = %d\n", g_pdata->owner, fw_len);
+@@ -1370,6 +1391,7 @@ error_mutex_destroy:
+ exit_check_functionality_failed:
+ 	free_touch_gpio(g_pdata);
+ 	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return rc;
+ }
+ 
+@@ -1397,7 +1419,9 @@ static int gsl_ts_remove(struct i2c_client *client)
+ 	if (ptr_fw != NULL)
+ 		kfree(ptr_fw);
+ #endif
+-
++	free_touch_gpio(g_pdata);
++	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/gslx680_compatible.c b/drivers/amlogic/input/touchscreen/gslx680_compatible.c
+index b4758a6e687d..b3062d1f2116 100755
+--- a/drivers/amlogic/input/touchscreen/gslx680_compatible.c
++++ b/drivers/amlogic/input/touchscreen/gslx680_compatible.c
+@@ -159,8 +159,8 @@ static u16 x_old[MAX_CONTACTS+1] = {0};
+ static u16 y_old[MAX_CONTACTS+1] = {0};
+ static u16 x_new = 0;
+ static u16 y_new = 0;
+-#ifdef LATE_UPGRADE
+ static struct fw_data *ptr_fw = NULL;
++#ifdef LATE_UPGRADE
+ static u32 fw_len = 0;
+ static struct aml_gsl_api *api = NULL;
+ #endif
+@@ -310,7 +310,6 @@ static __inline__ void fw2buf(u8 *buf, const u32 *fw)
+ 	u32 *u32_buf = (int *)buf;
+ 	*u32_buf = *fw;
+ }
+-#define READ_COUNT  20
+ static void gsl_load_fw(struct i2c_client *client)
+ {
+ 	u8 buf[DMA_TRANS_LEN*4 + 1] = {0};
+@@ -323,7 +322,16 @@ static void gsl_load_fw(struct i2c_client *client)
+ 	u32 state = 0;
+ #endif
+ #ifdef LATE_UPGRADE
+-	if (!ptr_fw) return;
++	if (!ptr_fw) {
++	#ifdef AML_RESUME
++		if (ts->dl_fw && !state) {
++			complete(&ts->fw_completion);
++			state = 1;
++			printk("0000 fw_completion complete\n");
++		}
++	#endif
++		return;
++	}
+ 	source_len = fw_len;
+ #else
+ 	#ifdef GSL3680_COMPATIBLE
+@@ -1474,6 +1482,7 @@ static void gsl_ts_late_resume(struct early_suspend *h)
+ #endif
+ #endif
+ #ifdef LATE_UPGRADE
++#define READ_COUNT  18
+ static int gslx680_late_upgrade(void *data)
+ {
+ 	u32 offset = 0, i = 5;
+@@ -1482,12 +1491,10 @@ static int gslx680_late_upgrade(void *data)
+ 	int ret = 0;
+ 	u32 fw_tmp[2] = {0};
+ //static int count;
+-	while(1) {
+-
+-		while (aml_gsl_get_api() == NULL)
++	while (aml_gsl_get_api() == NULL)
+ 			schedule_timeout(1);
+ 		api = aml_gsl_get_api();
+-
++	while(1) {
+ 		file_size = touch_open_fw(ts_com->fw_file);
+ 		if(file_size < 0) {
+ //			printk("%s: %d\n", __func__, count++);
+@@ -1496,38 +1503,50 @@ static int gslx680_late_upgrade(void *data)
+ 		else break;
+ 	}
+ 	printk("%s: file_size = %d\n", __func__, file_size);
+-	ptr_fw = kzalloc(sizeof(struct fw_data)*8192, GFP_KERNEL);
++	ptr_fw = kzalloc(sizeof(struct fw_data)*(max_t(int, file_size/READ_COUNT, 8192)), GFP_KERNEL);
+ 	if (ptr_fw == NULL) {
+ 		printk("%s: Insufficient memory in upgrade!\n",ts_com->owner);
+ 		return -1;
+ 	}
+ 
+ 	while (offset < file_size) {
+-		if (offset >= file_size) break;
+-			touch_read_fw(offset, READ_COUNT, &tmp[0]);
++			memset(tmp, 0, READ_COUNT);
++			touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+ 			if (!strncmp("/*", tmp, 2)) {
++				//printk("%s: %s\n", ts_com->owner, tmp);
++				offset++;
+ 				do {
+-					offset += 2;
+-					touch_read_fw(offset, READ_COUNT, &tmp[0]);
++					offset++;
++					if (offset >= file_size)
++					{
++						touch_close_fw();
++						printk("%s: firmware format error!\n", ts_com->owner);
++						return -1;
++					}
++					memset(tmp, 0, READ_COUNT);
++					touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+ 				}while(strncmp("*/", tmp, 2));
++				offset += 2;
++				//printk("%s: %s\n", ts_com->owner, tmp);
++				continue;
+ 			}
+ 			
+-			touch_read_fw(offset, READ_COUNT, &tmp[0]);
+ 			ret = sscanf(&tmp[0],"{0x%x,0x%lx},",&fw_tmp[0],(long unsigned int*)&fw_tmp[1]);
+-			offset ++;
+ 			if (ret != 2) {
++				offset ++;
+ 				continue;
+ 			}
++			offset += READ_COUNT >> 2;
+ 			(ptr_fw+fw_len)->offset = fw_tmp[0];
+ 			(ptr_fw+fw_len)->val = fw_tmp[1];
+-			if (fw_len < 5)
+-			{
+-				printk("%d %s: {0x%x,0x%lx},\n", fw_len, __func__, (ptr_fw+fw_len)->offset, (long)(ptr_fw+fw_len)->val);
+-			}
+ 			fw_len ++;
+ 	}
+-	for (i=5; i>0; i--)
+-		printk("%d %s: {0x%x,0x%lx},\n",5-i, __func__, (ptr_fw+fw_len-i)->offset, (long)(ptr_fw+fw_len-i)->val);
++	for (i=0; i<10; i++) {
++		printk("%d %s: {0x%x,0x%lx},\n", i, __func__, (ptr_fw+i)->offset, (long)(ptr_fw+i)->val);
++	}
++	for (i=fw_len-10; i<fw_len; i++) {
++		printk("%d %s: {0x%x,0x%lx},\n", i, __func__, (ptr_fw+i)->offset, (long)(ptr_fw+i)->val);
++	}
+ 	touch_close_fw();
+ 	init_chip(gsl_client);
+ 	check_mem_data(gsl_client);
+@@ -1663,7 +1682,7 @@ error_mutex_destroy:
+ err_gslX680_is_not_exist:
+ 	free_touch_gpio(ts_com);
+ 	ts_com->owner = NULL;
+-	
++	i2c_unregister_device(client);
+ 	return rc;
+ }
+ 
+@@ -1680,8 +1699,6 @@ static int gsl_ts_remove(struct i2c_client *client)
+ 	cancel_delayed_work_sync(&gsl_monitor_work);
+ 	destroy_workqueue(gsl_monitor_workqueue);
+ #endif
+-	free_touch_gpio(ts_com);
+-	ts_com->owner = NULL;
+ 	device_init_wakeup(&client->dev, 0);
+ 	cancel_work_sync(&ts->work);
+ 	free_irq(ts->irq, ts);
+@@ -1695,6 +1712,9 @@ static int gsl_ts_remove(struct i2c_client *client)
+ 	if (ptr_fw != NULL)
+ 		kfree(ptr_fw);
+ #endif
++	free_touch_gpio(ts_com);
++	ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.c b/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.c
+index 433b24660203..a64d1b21d671 100755
+--- a/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.c
++++ b/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.c
+@@ -1215,11 +1215,14 @@ static int goodix_get_config(void)
+ 	}
+ 
+ 	while (offset < file_size) {
+-    touch_read_fw(offset, READ_COUNT, &tmp[0]);
++	memset(tmp, 0, READ_COUNT);
++    touch_read_fw(offset, min_t(int,file_size-offset,READ_COUNT), &tmp[0]);
+     i_ret = sscanf(&tmp[0],"0x%x,",(int *)(config_info + count));
+     if (i_ret == 1) {
+ 			count++;
++			offset += READ_COUNT; 
+ 		}
++	else
+     offset++;
+ 	}
+ 
+@@ -1271,7 +1274,7 @@ static s32 gtp_init_panel(struct goodix_ts_data *ts)
+                           CFG_GROUP_LEN(cfg_info_group5),
+                           CFG_GROUP_LEN(cfg_info_group6)};
+ 
+-#ifdef CONFIG_OF
++#ifdef LATE_UPGRADE
+     cfg_info_group1 = config_info;
+     cfg_info_group1_len = goodix_get_config();
+     if(cfg_info_group1_len < 0)
+@@ -1283,11 +1286,16 @@ static s32 gtp_init_panel(struct goodix_ts_data *ts)
+     cfg_info_len[0] = cfg_info_group1_len;
+     send_cfg_buf[0] = cfg_info_group1;
+ 
+-//printk("cfg_info_group1_len = %d\n", cfg_info_group1_len);
+-//for( i=0; i<cfg_info_group1_len; i++) {
+-//	printk("0x%x ", cfg_info_group1[i]);
+-//}
+-//printk("\n");
++	printk("cfg_info_group1_len = %d\n", cfg_info_group1_len);
++	printk("cfg_info_group1[%d] = %d\n", cfg_info_group1_len-1, cfg_info_group1[cfg_info_group1_len-1]);
++#if 0
++	for( i=0; i<cfg_info_group1_len; i++) {
++		printk("0x%x ", cfg_info_group1[i]);
++		if (!(i % 10))
++		printk("\n");
++	}
++	printk("\n");
++#endif
+     GTP_DEBUG_FUNC();
+     GTP_DEBUG("Config Groups\' Lengths: %d, %d, %d, %d, %d, %d", 
+         cfg_info_len[0], cfg_info_len[1], cfg_info_len[2], cfg_info_len[3],
+@@ -2231,7 +2239,7 @@ static int gt9xx_late_upgrade(void *data)
+ 	if (count < 10000) {
+ 		touch_close_fw();
+ 		gt9xx_upgrade_touch();
+-		printk("%s :first load firmware\n", ts_com->owner);
++		printk("%s: load firmware\n", ts_com->owner);
+ 		if(ts->use_irq) 
+ 			gtp_irq_enable(ts);
+ 		ts->config_finish = 1;
+@@ -2426,6 +2434,7 @@ err_alloc_data_failed:
+ err_goodix_request_gpio:
+     free_touch_gpio(ts_com);
+     ts_com->owner = NULL;
++	i2c_unregister_device(client);
+ err_check_functionality_failed:
+ 	
+   return ret;
+@@ -2476,7 +2485,9 @@ static int goodix_ts_remove(struct i2c_client *client)
+     i2c_set_clientdata(client, NULL);
+     input_unregister_device(ts->input_dev);
+     kfree(ts);
+-		free_touch_gpio(ts_com);
++    free_touch_gpio(ts_com);
++    ts_com->owner = NULL;
++	i2c_unregister_device(client);
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.h b/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.h
+index 34c2bf725ff3..5d2b7b2e721c 100755
+--- a/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.h
++++ b/drivers/amlogic/input/touchscreen/gt9xx/gt9xx.h
+@@ -245,7 +245,7 @@ extern u16 total_len;
+ #define CFG_GROUP_LEN(p_cfg_grp)  (sizeof(p_cfg_grp) / sizeof(p_cfg_grp[0]))
+ // Log define
+ #define GTP_INFO(fmt,arg...)           printk("<<-GTP-INFO->> "fmt"\n",##arg)
+-#define GTP_ERROR(fmt,arg...)          printk("<<-GTP-ERROR->> "fmt"\n",##arg)
++#define GTP_ERROR(fmt,arg...)          printk("<<-GTP-EINFO->> "fmt"\n",##arg)
+ #define GTP_DEBUG(fmt,arg...)          do{\
+                                          if(GTP_DEBUG_ON)\
+                                          printk("<<-GTP-DEBUG->> [%d]"fmt"\n",__LINE__, ##arg);\
+-- 
+2.19.0
+

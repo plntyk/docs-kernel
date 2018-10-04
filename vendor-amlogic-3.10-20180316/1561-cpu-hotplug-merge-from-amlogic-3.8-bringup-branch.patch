@@ -1,0 +1,245 @@
+From 18b418f0f8151ca79982195c168801378caa77a3 Mon Sep 17 00:00:00 2001
+From: "yan.wang" <yan.wang@amlogic.com>
+Date: Thu, 31 Oct 2013 15:15:33 +0800
+Subject: [PATCH 1561/5965] cpu hotplug: merge from amlogic-3.8-bringup branch
+
+---
+ arch/arm/mach-meson8/Makefile      |  2 +-
+ arch/arm/mach-meson8/hotplug-asm.S | 73 ++++++++++++++++++++++++++++++
+ arch/arm/mach-meson8/hotplug.c     | 32 +++++++------
+ arch/arm/mach-meson8/smp.c         | 47 +------------------
+ 4 files changed, 93 insertions(+), 61 deletions(-)
+ create mode 100755 arch/arm/mach-meson8/hotplug-asm.S
+
+diff --git a/arch/arm/mach-meson8/Makefile b/arch/arm/mach-meson8/Makefile
+index 2600f8f2af2c..5c47dfc66bb4 100755
+--- a/arch/arm/mach-meson8/Makefile
++++ b/arch/arm/mach-meson8/Makefile
+@@ -20,7 +20,7 @@ obj-$(CONFIG_CACHE_L2X0) += cache.o
+ # Power Management
+ obj-$(CONFIG_SUSPEND)		+= pm.o
+ 
+-obj-$(CONFIG_HOTPLUG_CPU) += hotplug.o
++obj-$(CONFIG_HOTPLUG_CPU) += hotplug.o hotplug-asm.o
+ obj-$(CONFIG_SMP) += headsmp.o smp.o
+ 
+ obj-$(CONFIG_AMLOGIC_USB) += usbclock.o
+diff --git a/arch/arm/mach-meson8/hotplug-asm.S b/arch/arm/mach-meson8/hotplug-asm.S
+new file mode 100755
+index 000000000000..9d322fcec5e3
+--- /dev/null
++++ b/arch/arm/mach-meson8/hotplug-asm.S
+@@ -0,0 +1,73 @@
++#include <linux/linkage.h>
++
++#include <asm/assembler.h>
++#include <asm/cache.h>
++#include <asm/cp15.h>
++#include <asm/hardware/cache-l2x0.h>
++
++.macro cpu_id, rd
++	mrc	p15, 0, \rd, c0, c0, 5
++	and	\rd, \rd, #0xF
++.endm
++
++.macro mov32, reg, val
++	movw	\reg, #:lower16:\val
++	movt	\reg, #:upper16:\val
++.endm
++
++.macro exit_smp, tmp1, tmp2
++	mrc	p15, 0, \tmp1, c1, c0, 1	@ ACTLR
++	bic	\tmp1, \tmp1, #(1<<6) | (1<<0)	@ clear ACTLR.SMP | ACTLR.FW
++	mcr	p15, 0, \tmp1, c1, c0, 1	@ ACTLR
++	isb
++	cpu_id	\tmp1
++	mov	\tmp1, \tmp1, lsl #2
++	mov	\tmp2, #0xf
++	mov	\tmp2, \tmp2, lsl \tmp1
++	mov32	\tmp1, 0xFE00100C
++	str	\tmp2, [\tmp1]			@ invalidate SCU tags for CPU
++	dsb
++.endm
++
++ENTRY(meson_cleanup)
++	stmfd	sp!, {r0-r11, lr}
++	
++	@ disable interrupt
++	mrs r4, cpsr
++	orr r5, r4, #0xc0
++	msr cpsr_c, r5
++	
++	@ icache disable
++	mrc p15, 0, r4, c1, c0, 0
++	bic r4, r4, #(CR_I)
++	mcr p15, 0, r4, c1, c0, 0
++	
++	@ invalid i-cache
++	mov r4, #0
++	mcr p15, 0, r4, c7, c5, 6 @invalid BTAC
++	mcr p15, 0, r4, c7, c5, 0 @invalid icache
++	dsb
++	nop
++	nop
++	isb
++	
++	@ dcache disable
++	mrc p15, 0, r4, c1, c0, 0
++	bic r4, r4, #CR_C
++	mcr p15, 0, r4, c1, c0, 0
++	dsb
++	isb
++	
++	/* Flush the D-cache */
++	bl	v7_flush_dcache_louis
++	
++	mov r4, #0
++	mcr p15, 0, r4, c7, c10, 4
++	dsb 
++	isb
++	
++	/* Trun off coherency */
++	exit_smp r4, r5
++		
++	ldmfd	sp!, {r0-r11, pc}
++ENDPROC(meson_cleanup)
+\ No newline at end of file
+diff --git a/arch/arm/mach-meson8/hotplug.c b/arch/arm/mach-meson8/hotplug.c
+index 81472abd5b0e..741051e4faf2 100755
+--- a/arch/arm/mach-meson8/hotplug.c
++++ b/arch/arm/mach-meson8/hotplug.c
+@@ -18,32 +18,34 @@
+ 
+ int meson_cpu_kill(unsigned int cpu)
+ {
+-	//meson_set_cpu_ctrl_reg(cpu, 0);
+-	//meson_set_cpu_power_ctrl(cpu, 0);
+-
++	unsigned int value;
++	unsigned int offset=(cpu<<3);
++	do{
++		udelay(10);
++		value=aml_read_reg32(MESON_CPU_POWER_CTRL_REG);
++	}while((value&(3<<offset)) != (3<<offset));
++
++	udelay(10);
++	meson_set_cpu_power_ctrl(cpu, 0);
+ 	return 1;
+ }
+ 
+ 
+-
+ void meson_cpu_die(unsigned int cpu)
+ {
+ 	meson_set_cpu_ctrl_reg(cpu, 0);
+ 	flush_cache_all();
+ 	dsb();
+ 	dmb();	
+-	for (;;) {
+-	    
+-	    __asm__ __volatile__ ("wfi" : : : "memory");
+-	
+-		if (smp_processor_id() == cpu) {	
+-			if(((aml_read_reg32(MESON_CPU_CONTROL_REG)&0xf) & ((1 << cpu) | 1)) == ((1<<cpu) | 1))
+-			{
+-				break;
+-			}
+-		}	
+-	}
+ 
++	extern meson_cleanup();
++	meson_cleanup();
++	aml_set_reg32_bits(MESON_CPU_POWER_CTRL_REG,0x3,(cpu << 3),2);
++	asm volatile(
++		"dsb\n"
++		"wfi\n"
++	);
++	BUG();
+ }
+ 
+ int meson_cpu_disable(unsigned int cpu)
+diff --git a/arch/arm/mach-meson8/smp.c b/arch/arm/mach-meson8/smp.c
+index 5c55777a40c7..017966a58d01 100755
+--- a/arch/arm/mach-meson8/smp.c
++++ b/arch/arm/mach-meson8/smp.c
+@@ -77,28 +77,6 @@ extern void  init_fiq(void);
+ 	spin_unlock(&boot_lock);
+ }
+ 
+-static void __init wakeup_secondary(unsigned int cpu)
+-{
+-#if 0
+-	meson_set_cpu_power_ctrl(cpu, 1);
+-	//msleep(1);
+-	/*
+-	* Write the address of secondary startup routine into the
+-	* AuxCoreBoot1 where ROM code will jump and start executing
+-	* on secondary core once out of WFE
+-	* A barrier is added to ensure that write buffer is drained
+-	*/
+-	meson_secondary_set(cpu);
+-	/*
+-	 * Send a 'sev' to wake the secondary core from WFE.
+-	 * Drain the outstanding writes to memory
+-	 */
+-	 //mb();
+-	dsb_sev();
+-#endif
+-
+-}
+-unsigned int bootflag[4]={0};
+ int __cpuinit meson_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ {
+ 	unsigned long timeout;
+@@ -108,35 +86,18 @@ int __cpuinit meson_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	* and the secondary one
+ 	*/
+ 	spin_lock(&boot_lock);
+-//	wakeup_secondary(cpu);
+-	
+-	//meson_secondary_set(cpu);
+ 	 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+ 	 * the holding pen - release it, then wait for it to flag
+ 	 * that it has been released by resetting pen_release.
+ 	 */
+-printk("write pen_release: %d\n",cpu_logical_map(cpu));
++	printk("write pen_release: %d\n",cpu_logical_map(cpu));
+ 	write_pen_release(cpu_logical_map(cpu));
+ 
+-#if 0			//hotplug via power off		
+-			meson_set_cpu_power_ctrl(cpu, 1);
+-			meson_secondary_set(cpu);
+-			dsb_sev();
+-
+-#else		// hotplug via wfi
+-
+-	if(bootflag[cpu] == 0){
+-		bootflag[cpu]=1;
+-		printk("first boot secondary! addr=0x%x, value=0x%x\n", &(bootflag[cpu]), bootflag[cpu]);
+-		meson_set_cpu_power_ctrl(cpu, 1);
+-	}
+-
++	meson_set_cpu_power_ctrl(cpu, 1);
+ 	meson_secondary_set(cpu);
+ 	dsb_sev();
+-	//gic_raise_softirq(cpumask_of(cpu), 0);
+-#endif
+ 
+ 	smp_send_reschedule(cpu);
+ 	timeout = jiffies + (10* HZ);
+@@ -186,10 +147,6 @@ void __init meson_smp_prepare_cpus(unsigned int max_cpus)
+ 	* wakeup_secondary().
+ 	*/
+ 	scu_enable((void __iomem *) IO_PERIPH_BASE);
+-	for (i = 1; i < max_cpus; i++)
+-		wakeup_secondary(i);
+-	///    dsb_sev();
+-
+ }
+ 
+ struct smp_operations meson_smp_ops __initdata = {
+-- 
+2.19.0
+

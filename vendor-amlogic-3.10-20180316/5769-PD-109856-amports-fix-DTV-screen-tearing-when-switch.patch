@@ -1,0 +1,171 @@
+From 0074deab94ee9a2ec71d74213dc355a10898515c Mon Sep 17 00:00:00 2001
+From: Rico Yang <wei.yang@amlogic.com>
+Date: Fri, 14 Aug 2015 21:13:05 +0800
+Subject: [PATCH 5769/5965] PD#109856: amports: fix DTV screen tearing when
+ switching chanel
+
+Change-Id: I89bf1d4f948e05167c0939dbbf783a0d13771af2
+---
+ drivers/amlogic/amports/video.c | 98 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 96 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index c5311015fdc5..36a3e839a32c 100644
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -1199,6 +1199,83 @@ static int ge2d_store_frame_YUV420(u32 cur_index)
+     return 0;
+ }
+ 
++static int ge2d_store_frame_YUV422(u32 cur_index)
++{
++    u32 y_index, des_index,src_index;
++    canvas_t cs, cd;
++    ulong yaddr;
++    u32  ydupindex;
++    config_para_ex_t ge2d_config;
++    memset(&ge2d_config, 0, sizeof(config_para_ex_t));
++
++    ydupindex = DISPLAY_CANVAS_YDUP_INDEX;
++
++    printk("ge2d_store_frame_YUV422 cur_index:s:0x%x \n", cur_index);
++    //printk("ge2d_store_frame cur_index:d:0x%x \n", canvas_tab[0]);
++    y_index = cur_index & 0xff;
++    canvas_read(y_index, &cs);
++
++    yaddr = keep_phy_addr(keep_y_addr);
++    canvas_config(ydupindex,
++        (ulong)yaddr,
++        cs.width, cs.height,
++        CANVAS_ADDR_NOWRAP, cs.blkmode);
++
++    canvas_read(ydupindex, &cd);
++    src_index = y_index;
++    des_index = ydupindex;
++
++    printk("ge2d_canvas_dup ADDR srcy[0x%lx] des[0x%lx]\n",
++        cs.addr,
++        cd.addr);
++
++    ge2d_config.alu_const_color = 0;
++    ge2d_config.bitmask_en  = 0;
++    ge2d_config.src1_gb_alpha = 0;
++
++    ge2d_config.src_planes[0].addr = cs.addr;
++    ge2d_config.src_planes[0].w = cs.width;
++    ge2d_config.src_planes[0].h = cs.height;
++
++    ge2d_config.dst_planes[0].addr = cd.addr;
++    ge2d_config.dst_planes[0].w = cd.width;
++    ge2d_config.dst_planes[0].h = cd.height;
++
++    ge2d_config.src_para.canvas_index = src_index;
++    ge2d_config.src_para.mem_type = CANVAS_TYPE_INVALID;
++    ge2d_config.src_para.format = GE2D_FORMAT_M24_YUV422;
++    ge2d_config.src_para.fill_color_en = 0;
++    ge2d_config.src_para.fill_mode = 0;
++    ge2d_config.src_para.color = 0;
++    ge2d_config.src_para.top = 0;
++    ge2d_config.src_para.left = 0;
++    ge2d_config.src_para.width = cs.width;
++    ge2d_config.src_para.height = cs.height;
++
++    ge2d_config.dst_para.canvas_index = des_index;
++    ge2d_config.dst_para.mem_type = CANVAS_TYPE_INVALID;
++    ge2d_config.dst_para.format = GE2D_FORMAT_M24_YUV422;
++    ge2d_config.dst_para.fill_color_en = 0;
++    ge2d_config.dst_para.fill_mode = 0;
++    ge2d_config.dst_para.color = 0;
++    ge2d_config.dst_para.top = 0;
++    ge2d_config.dst_para.left = 0;
++    ge2d_config.dst_para.width = cs.width;
++    ge2d_config.dst_para.height = cs.height;
++
++    if (ge2d_context_config_ex(ge2d_video_context,
++        &ge2d_config) < 0) {
++        printk("ge2d_context_config_ex failed \n");
++        return -1;
++    }
++
++    stretchblt_noalpha(ge2d_video_context,
++        0, 0, cs.width, cs.height,
++        0, 0, cs.width, cs.height);
++
++    return 0;
++}
++
+ static void ge2d_keeplastframe_block(int cur_index, int format)
+ {
+     //u32 cur_index;
+@@ -1249,6 +1326,17 @@ static void ge2d_keeplastframe_block(int cur_index, int format)
+             canvas_update_addr(y_index2, keep_phy_addr(keep_y_addr));
+             canvas_update_addr(u_index2, keep_phy_addr(keep_u_addr));
+             canvas_update_addr(v_index2, keep_phy_addr(keep_v_addr));
++#endif
++            break;
++        case GE2D_FORMAT_M24_YUV422:
++            ge2d_store_frame_YUV422(cur_index);
++            canvas_update_addr(y_index, keep_phy_addr(keep_y_addr));
++            /*canvas_update_addr(u_index, keep_phy_addr(keep_u_addr));*/
++            /*canvas_update_addr(v_index, keep_phy_addr(keep_v_addr));*/
++#ifdef CONFIG_VSYNC_RDMA
++            canvas_update_addr(y_index2, keep_phy_addr(keep_y_addr));
++            /*canvas_update_addr(u_index2, keep_phy_addr(keep_u_addr));*/
++            /*canvas_update_addr(v_index2, keep_phy_addr(keep_v_addr));*/
+ #endif
+             break;
+         default:
+@@ -4010,6 +4098,7 @@ unsigned int get_post_canvas(void)
+     return post_canvas;
+ }
+ 
++/*
+ static int canvas_dup(ulong *dst, ulong src_paddr, ulong size)
+ {
+     void __iomem *p = ioremap_wc(src_paddr, size);
+@@ -4023,6 +4112,7 @@ static int canvas_dup(ulong *dst, ulong src_paddr, ulong size)
+ 
+     return 0;
+ }
++*/
+ 
+ unsigned int vf_keep_current(void)
+ {
+@@ -4053,7 +4143,7 @@ unsigned int vf_keep_current(void)
+     }
+ #ifdef CONFIG_GE2D_KEEP_FRAME
+    //if (!keep_y_addr || (cur_dispbuf->type & VIDTYPE_VIU_NV21) != VIDTYPE_VIU_NV21) {
+-   if (!keep_y_addr || (cur_dispbuf->type & VIDTYPE_VIU_422) == VIDTYPE_VIU_422) {
++   if (!keep_y_addr ){//|| (cur_dispbuf->type & VIDTYPE_VIU_422) == VIDTYPE_VIU_422) {
+     	//no support VIDTYPE_VIU_422...
+     	return -1;
+    }
+@@ -4085,13 +4175,16 @@ unsigned int vf_keep_current(void)
+     }
+ 
+     if ((cur_dispbuf->type & VIDTYPE_VIU_422) == VIDTYPE_VIU_422) {
+-        return -1;  //no VIDTYPE_VIU_422 type frame need keep,avoid memcpy crash
++        //return -1;  //no VIDTYPE_VIU_422 type frame need keep,avoid memcpy crash
+         canvas_read(y_index,&cd);
+         if ((Y_BUFFER_SIZE < (cd.width *cd.height))) {
+             printk("## [%s::%d] error: yuv data size larger than buf size: %x,%x,%x, %x,%x\n", __FUNCTION__,__LINE__,
+             Y_BUFFER_SIZE,U_BUFFER_SIZE, V_BUFFER_SIZE, cd.width,cd.height);
+             return -1;
+         }
++#ifdef CONFIG_GE2D_KEEP_FRAME
++        ge2d_keeplastframe_block(cur_index, GE2D_FORMAT_M24_YUV422);
++#else
+         if (keep_phy_addr(keep_y_addr) != canvas_get_addr(y_index) &&
+             canvas_dup(keep_y_addr_remap, canvas_get_addr(y_index), (cd.width)*(cd.height))) {
+ #ifdef CONFIG_VSYNC_RDMA
+@@ -4104,6 +4197,7 @@ unsigned int vf_keep_current(void)
+                 printk("%s: VIDTYPE_VIU_422\n", __func__);
+             }
+         }
++#endif
+     } else if ((cur_dispbuf->type & VIDTYPE_VIU_444) == VIDTYPE_VIU_444) {
+         canvas_read(y_index,&cd);
+         if ((Y_BUFFER_SIZE < (cd.width *cd.height))) {
+-- 
+2.19.0
+

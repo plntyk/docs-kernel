@@ -1,0 +1,184 @@
+From eefc09c67f9c4a1885dcae0e5389812d17737efc Mon Sep 17 00:00:00 2001
+From: "tao.dong" <tao.dong@amlogic.com>
+Date: Mon, 25 Aug 2014 14:11:43 +0800
+Subject: [PATCH 4777/5965] PD#94202:add interface to get ff/fb vpts:Squashed
+ commit of the following:
+
+commit bf523f47e0032ed3d233ca66603416a16750852a
+Author: chen.zhang <chen.zhang@amlogic.com>
+Date:   Thu Aug 7 08:16:12 2014 -0400
+
+    PD[#94202]set to_notify_trick_wait to false when unreg video
+
+    Change-Id: Ie0eb471b6609f445efa48f9beef8e09b6ac013b9
+
+commit 449924d11380809c3c114215d1d321cb773af4f3
+Author: chen.zhang <chen.zhang@amlogic.com>
+Date:   Sat Aug 2 07:03:38 2014 -0400
+
+    PD[#94202]clear ff/fb done flag after read
+
+commit 64995773b65e425d83868fd523abddb4e90b3d6d
+Author: chen.zhang <chen.zhang@amlogic.com>
+Date:   Sat Jul 26 21:14:51 2014 +0800
+
+    PD[#94202]add an interface to disable slow sync
+
+commit 8e401acb6b0b30537de05be3fce100ee54c186f6
+Author: chen.zhang <chen.zhang@amlogic.com>
+Date:   Fri Jul 25 17:24:49 2014 +0800
+
+    PD[#94202]add interface to get ff/fb vpts
+
+Change-Id: I1a0dde487ac206926e391127e49a7b16f525b583
+---
+ drivers/amlogic/amports/tsync.c          | 16 +++++++++++++++-
+ drivers/amlogic/amports/video.c          | 20 ++++++++++++++++++--
+ include/linux/amlogic/amports/amstream.h |  4 ++++
+ 3 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/amports/tsync.c b/drivers/amlogic/amports/tsync.c
+index 103b219e05df..0c43d022abc2 100755
+--- a/drivers/amlogic/amports/tsync.c
++++ b/drivers/amlogic/amports/tsync.c
+@@ -114,6 +114,7 @@ static int tsync_trickmode = 0;
+ static int vpause_flag = 0;
+ static int apause_flag = 0;
+ static bool dobly_avsync_test = false;
++extern bool disable_slow_sync;
+ 
+ 
+ /*
+@@ -532,13 +533,26 @@ void tsync_avevent_locked(avevent_t event, u32 param)
+                 timestamp_pcrscr_set(param);
+             }
+ #else
+-            timestamp_pcrscr_set(param);
++            if (disable_slow_sync && (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE)) {
++                if (tsync_syncthresh && (tsync_mode == TSYNC_MODE_AMASTER)) {
++                    timestamp_pcrscr_set(param - VIDEO_HOLD_THRESHOLD);
++                } else {
++                    timestamp_pcrscr_set(param);
++                }
++            } else {
++                timestamp_pcrscr_set(param);
++            }
+ #endif
+ 
++#ifdef TSYNC_SLOW_SYNC
++            if (disable_slow_sync && (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE))
++#endif
++            {
+             tsync_stat = TSYNC_STAT_PCRSCR_SETUP_VIDEO;
+             amlog_level(LOG_LEVEL_INFO, "vpts to scr, apts = 0x%x, vpts = 0x%x\n",
+                         timestamp_apts_get(),
+                         timestamp_vpts_get());
++            }
+         }
+ 
+         if (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_AUDIO) {
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 855318d76762..666801f43cc6 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -132,6 +132,7 @@ static struct vframe_provider_s * osd_prov = NULL;
+ 
+ //#define SLOW_SYNC_REPEAT
+ //#define INTERLACE_FIELD_MATCH_PROCESS
++bool disable_slow_sync = 0;
+ 
+ #ifdef INTERLACE_FIELD_MATCH_PROCESS
+ #define FIELD_MATCH_THRESHOLD  10
+@@ -630,6 +631,7 @@ atomic_t video_unreg_flag = ATOMIC_INIT(0);
+ atomic_t video_pause_flag = ATOMIC_INIT(0);
+ int trickmode_duration = 0;
+ int trickmode_duration_count = 0;
++u32 trickmode_vpts = 0;
+ /* last_playback_filename */
+ char file_name[512];
+ 
+@@ -1926,7 +1928,7 @@ static inline bool vpts_expire(vframe_t *cur_vf, vframe_t *next_vf)
+     }
+ 
+     if ((trickmode_i == 1) || ((trickmode_fffb == 1))) {
+-        if (((0 == atomic_read(&trickmode_framedone)) || (trickmode_i == 1)) && (trickmode_duration_count <= 0)) {
++        if (((0 == atomic_read(&trickmode_framedone)) || (trickmode_i == 1)) && (!to_notify_trick_wait) && (trickmode_duration_count <= 0)) {
+             #if 0
+             if (cur_vf) {
+                 pts = timestamp_vpts_get() + trickmode_duration;
+@@ -2475,6 +2477,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 
+             vsync_toggle_frame(vf);
+             if (trickmode_fffb == 1) {
++                trickmode_vpts = vf->pts;
+ #ifdef CONFIG_VSYNC_RDMA
+                 if((VSYNC_RD_MPEG_REG(DI_IF1_GEN_REG)&0x1)==0){
+                     to_notify_trick_wait = true;
+@@ -2509,7 +2512,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+              * you can adjust this array for any slow sync control as you want.
+              * The playback can be smoother than previous method.
+              */
+-            if (duration_expire(cur_dispbuf, vf, frame_repeat_count * vsync_pts_inc) && timestamp_pcrscr_enable_state()) {
++            if (!disable_slow_sync && duration_expire(cur_dispbuf, vf, frame_repeat_count * vsync_pts_inc) && timestamp_pcrscr_enable_state()) {
+                 amlog_mask(LOG_MASK_SLOWSYNC,
+                            "slow sync toggle, frame_repeat_count = %d\n",
+                            frame_repeat_count);
+@@ -3059,6 +3062,7 @@ static void video_vf_unreg_provider(void)
+ 
+     if (trickmode_fffb) {
+         atomic_set(&trickmode_framedone, 0);
++        to_notify_trick_wait = false;
+     }
+ 
+     if (blackout|force_blackout) {
+@@ -3507,6 +3511,7 @@ static long amvideo_ioctl(struct file *file,
+             trickmode_i = 0;
+             trickmode_fffb = 0;
+         }
++        to_notify_trick_wait = false;
+         atomic_set(&trickmode_framedone, 0);
+         tsync_trick_mode(trickmode_fffb);
+         break;
+@@ -3515,6 +3520,10 @@ static long amvideo_ioctl(struct file *file,
+         put_user(atomic_read(&trickmode_framedone),(unsigned long __user *)arg);
+         break;
+ 
++    case AMSTREAM_IOC_GET_TRICK_VPTS:
++        put_user(trickmode_vpts, (unsigned long __user *)arg);
++        break;
++
+     case AMSTREAM_IOC_VPAUSE:
+         tsync_avevent(VIDEO_PAUSE, arg);
+         break;
+@@ -3728,6 +3737,13 @@ static long amvideo_ioctl(struct file *file,
+     case AMSTREAM_IOC_GET_FREERUN_MODE:
+         put_user(freerun_mode,(int *)arg);
+         break;
++
++    case AMSTREAM_IOC_DISABLE_SLOW_SYNC:
++        if (arg)
++            disable_slow_sync = 1;
++        else
++            disable_slow_sync = 0;
++        break;
+     /****************************************************************
+     3d process ioctl
+     *****************************************************************/
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 7138b774ae2d..7e8e642a830d 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -170,6 +170,10 @@
+ #define AMSTREAM_IOC_GET_SUBTITLE_INFO       _IOR(AMSTREAM_IOC_MAGIC, 0xad, unsigned long)
+ #define AMSTREAM_IOC_SET_SUBTITLE_INFO       _IOW(AMSTREAM_IOC_MAGIC, 0xae, unsigned long)
+ #define AMSTREAM_IOC_SET_OMX_VPTS            _IOW(AMSTREAM_IOC_MAGIC, 0xaf, unsigned long)
++
++#define AMSTREAM_IOC_GET_TRICK_VPTS          _IOR(AMSTREAM_IOC_MAGIC, 0xf0, unsigned long)
++#define AMSTREAM_IOC_DISABLE_SLOW_SYNC       _IOR(AMSTREAM_IOC_MAGIC, 0xf1, unsigned long)
++
+ #define TRICKMODE_NONE       0x00
+ #define TRICKMODE_I          0x01
+ #define TRICKMODE_FFFB       0x02
+-- 
+2.19.0
+

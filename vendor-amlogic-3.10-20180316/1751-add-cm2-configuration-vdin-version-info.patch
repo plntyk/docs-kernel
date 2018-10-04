@@ -1,0 +1,104 @@
+From 5f15c16f1cac771a48cde6c6170299c7ee0953db Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Thu, 7 Nov 2013 15:10:57 +0800
+Subject: [PATCH 1751/5965] add cm2 configuration&vdin version info.
+
+---
+ drivers/amlogic/tvin/vdin/vdin_ctl.c |  3 ++-
+ drivers/amlogic/tvin/vdin/vdin_drv.c | 18 +++++++++++++++---
+ drivers/amlogic/tvin/vdin/vdin_drv.h |  2 +-
+ 3 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index 20b946959193..f5832b11f8a2 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -2396,7 +2396,8 @@ static struct vdin_cm2_s vdin_cm2_table[CM2_REG_NUM] = {
+ void vdin_set_cm2(unsigned int offset,unsigned int index)
+ {
+ 	unsigned int i=0,cursor=0;
+-	pr_info("%s:vdin cm2 use %s configuration.\n",index?"optimize":"enhancement");
++	pr_info("%s:vdin.%u cm2 use %s configuration.\n",__func__,offset,index?"optimize":"enhancement");
++	WR_BITS(VDIN_CM_BRI_CON_CTRL,0,CM_TOP_EN_BIT,CM_TOP_EN_WID);
+ 	for(i=0;i<CM2_REG_NUM;i++){
+ 		cursor = i+index*CM2_REG_NUM;
+ 		WR(VDIN_CHROMA_ADDR_PORT,vdin_cm2_table[cursor].addr);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 31b958d7d504..f4a3903af7f6 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -46,6 +46,7 @@
+ #include <linux/amlogic/aml_common.h>
+ #include <mach/irqs.h>
+ #include <mach/mod_gate.h>
++#include <mach/vpu.h>
+ /* Local Headers */
+ #include "../tvin_global.h"
+ #include "../tvin_format_table.h"
+@@ -527,12 +528,14 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+ 	        sm_ops = devp->frontend->sm_ops;
+ 	        sm_ops->get_sig_propery(devp->frontend, &devp->prop);
+         }
++	
+ 	vdin_get_format_convert(devp);
+ 	devp->curr_wr_vfe = NULL;
+ 	/* h_active/v_active will be recalculated by bellow calling */
+ 	vdin_set_decimation(devp);
+ 	vdin_set_cutwin(devp);
+ 	vdin_set_hvscale(devp);
++	vdin_set_cm2(devp->addr_offset,0);
+         /*reverse / disable reverse write buffer*/
+         vdin_wr_reverse(devp->addr_offset,reverse_flag,reverse_flag);
+ 
+@@ -583,6 +586,9 @@ static void vdin_start_dec(struct vdin_dev_s *devp)
+         devp->curr_field_type = vdin_get_curr_field_type(devp);
+ 	//pr_info("start clean_counter is %d\n",clean_counter);
+ 	/* configure regs and enable hw */
++	#ifdef CONFIG_ARCH_MESON8
++	switch_vpu_mem_pd_vmod(devp->addr_offset?VPU_VIU_VDIN1:VPU_VIU_VDIN0,VPU_MEM_POWER_ON);
++	#endif
+ 	vdin_hw_enable(devp->addr_offset);
+ 	vdin_set_all_regs(devp);
+ 
+@@ -628,8 +634,10 @@ static void vdin_stop_dec(struct vdin_dev_s *devp)
+ 	vdin_hw_disable(devp->addr_offset);
+ 	disable_irq_nosync(devp->irq);
+ 	/* reset default canvas  */
+-	vdin_set_def_wr_canvas(devp);
+-
++	vdin_set_def_wr_canvas(devp);	
++	#ifdef CONFIG_ARCH_MESON8
++	switch_vpu_mem_pd_vmod(devp->addr_offset?VPU_VIU_VDIN1:VPU_VIU_VDIN0,VPU_MEM_POWER_DOWN);
++	#endif
+ 	memset(&devp->prop, 0, sizeof(struct tvin_sig_property_s));
+ 	ignore_frames = 0;
+ 	devp->cycle = 0;
+@@ -2507,7 +2515,11 @@ static ssize_t vdin_cm2_store(struct device *dev,
+ 	}else if(!strcmp(parm[0],"config")){
+ 		val = simple_strtol(parm[1],NULL,10);
+ 		vdin_set_cm2(devp->addr_offset,val);
+-	}else {
++	} else if (!strcmp(parm[0],"enable")){
++		WRITE_VCBUS_REG_BITS(VDIN_CM_BRI_CON_CTRL+devp->addr_offset,1,CM_TOP_EN_BIT,CM_TOP_EN_WID);
++	}else if (!strcmp(parm[0],"disable")){
++		WRITE_VCBUS_REG_BITS(VDIN_CM_BRI_CON_CTRL+devp->addr_offset,0,CM_TOP_EN_BIT,CM_TOP_EN_WID);
++	} else {
+ 		pr_info("invalid command\n");
+ 		pr_info("please: cat /sys/class/vdin/vdin0/bit");
+ 	}
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.h b/drivers/amlogic/tvin/vdin/vdin_drv.h
+index a87db0b54a20..4182f87fabd6 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.h
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.h
+@@ -34,7 +34,7 @@
+ #include "../tvin_frontend.h"
+ #include "vdin_vf.h"
+ 
+-#define VDIN_VER "Ref.2013/06/25a"
++#define VDIN_VER "Ref.2013/11/07a"
+ 
+ /*the counter of vdin*/
+ #define VDIN_MAX_DEVS			2
+-- 
+2.19.0
+

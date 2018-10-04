@@ -1,0 +1,80 @@
+From 7004882b2ea8f8d66fac56ce65b68366fef7980a Mon Sep 17 00:00:00 2001
+From: Victor Wan <victor.wan@amlogic.com>
+Date: Mon, 24 Mar 2014 11:15:23 +0800
+Subject: [PATCH 3793/5965] meson8b: time: fix warning of timer_irq
+ enable/disable
+
+Before this bug fix, when CONFIG_DEBUG_ATOMIC_SLEEP is enabled. Below BUG message will occur.
+
+[48944.396342@1] BUG: sleeping function called from invalid context at
+/mnt/fileroot/home/ligeng/kk-amlogic-source/common/mm/slub.c:926
+[48944.410199@1] in_atomic(): 1, irqs_disabled(): 128, pid: 0, name: swapper/1
+[48944.410205@1] CPU: 1 PID: 0 Comm: swapper/1 Not tainted 3.10.10 #3
+[48944.410232@1] [<c00150f8>] (unwind_backtrace+0x0/0xf8) from [<c00120b4>](show_stack+0x10/0x14)
+[48944.410240@1] [<c00120b4>] (show_stack+0x10/0x14) from [<c00b9044>](__kmalloc+0x74/0x17c)
+[48944.410249@1] [<c00b9044>] (__kmalloc+0x74/0x17c) from [<c0110698>](__proc_create+0x94/0xe0)
+[48944.410255@1] [<c0110698>] (__proc_create+0x94/0xe0) from [<c0110a20>](proc_mkdir_data+0x2c/0x64)
+[48944.410262@1] [<c0110a20>] (proc_mkdir_data+0x2c/0x64) from [<c007eda0>](register_handler_proc+0xcc/0xec)
+[48944.410270@1] [<c007eda0>] (register_handler_proc+0xcc/0xec) from[<c007bad8>] (__setup_irq+0x314/0x448)
+[48944.410275@1] [<c007bad8>] (__setup_irq+0x314/0x448) from [<c007bde8>](setup_irq+0x48/0x88)
+[48944.410284@1] [<c007bde8>] (setup_irq+0x48/0x88) from [<c059f910>](meson_local_timer_setup+0x170/0x184)
+[48944.410290@1] [<c059f910>] (meson_local_timer_setup+0x170/0x184) from[<c059f18c>] (percpu_timer_setup+0x88/0xac)
+[48944.410295@1] [<c059f18c>] (percpu_timer_setup+0x88/0xac) from [<c059f534>](secondary_start_kernel+0x100/0x128)
+[48944.410302@1] [<c059f534>] (secondary_start_kernel+0x100/0x128) from[<0059eb04>] (0x59eb04)
+[48944.476708@0] [aml-spdif-dai]aiu 958 playback disable
+[48944.494560@0] aiu i2s playback disable
+---
+ arch/arm/mach-meson8b/time.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/mach-meson8b/time.c b/arch/arm/mach-meson8b/time.c
+index 4ab3d12f09f1..ac9df96243a8 100755
+--- a/arch/arm/mach-meson8b/time.c
++++ b/arch/arm/mach-meson8b/time.c
+@@ -499,7 +499,7 @@ int  __cpuinit meson_local_timer_setup(struct clock_event_device *evt)
+ 		irq_set_affinity(clk->irq.irq, cpumask_of(cpu));
+ 	}
+ 	/* Set up the IRQ handler */
+-	setup_irq(clk->irq.irq, &clk->irq);
++	enable_percpu_irq(clk->irq.irq, 0);
+ 	
+ 	return 0;
+ }
+@@ -515,7 +515,7 @@ void  __cpuinit meson_local_timer_stop(struct clock_event_device *evt)
+ 	clk = clockevent_to_clock(evt);
+ 	evt->set_mode(CLOCK_EVT_MODE_UNUSED, evt);
+ 	aml_clr_reg32_mask(clk->mux_reg,(1 << clk->bit_enable));
+-	remove_irq(clk->irq.irq, &clk->irq);
++	disable_percpu_irq(clk->irq.irq);
+ 
+ 	return;
+ }
+@@ -532,7 +532,6 @@ inline int local_timer_ack(void)
+ 
+ static void __init meson_clockevent_init(void)
+ {
+-
+     /***
+      * Disable Timer A~D, and clean the time base
+      * Now all of the timer is 1us base
+@@ -560,9 +559,17 @@ static void __init meson_clockevent_init(void)
+  */
+ void __init meson_timer_init(void)
+ {
++	int i;
++	struct meson_clock *clk;
+ 	meson_clocksource_init();
+ 	meson_clockevent_init();
++
+ #ifdef CONFIG_SMP
++	for(i=1; i<NR_CPUS; i++){
++		clk = meson8_smp_local_timer[i];
++		/* Set up the IRQ handler */
++		setup_irq(clk->irq.irq, &clk->irq);
++	}
+ 	local_timer_register(&meson_local_timer_ops);
+ #endif
+ 
+-- 
+2.19.0
+

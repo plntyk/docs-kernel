@@ -1,0 +1,153 @@
+From af0391cb219c9c825ae91aebf621854e51b181ce Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Thu, 5 Jun 2014 18:23:33 +0800
+Subject: [PATCH 4295/5965] PD #83628: pmu driver update for AML1216/AML1218,
+ version 0.40
+
+1. open charger detect for usb;
+2. disable charger work around for REVB chip of PMU3 if connect to pc.
+3. increase driver version to 0.40
+---
+ arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd |  1 +
+ arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd   |  1 +
+ drivers/amlogic/power/aml_pmu/aml1216-sply.c    | 14 +++++++++++++-
+ drivers/amlogic/power/aml_pmu/aml1218-sply.c    | 14 +++++++++++++-
+ 4 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+index 5489f20decc0..b67363716d1a 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+@@ -992,6 +992,7 @@ void root_func(){
+ 			port-id-mode = <0>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
+ 			gpio-vbus-power = "PMU";
+ 			gpio-work-mask	= <1>; /**0: work on pulldown,1:work on pullup*/
++            charger_detect = <1>;
+ 			status = "okay";
+ 		};
+ 	};
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+index ebfe7d1ffb86..a4db38eb306f 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+@@ -971,6 +971,7 @@ void root_func(){
+ 			port-id-mode = <0>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
+ 			gpio-vbus-power = "PMU";
+ 			gpio-work-mask	= <1>; /**0: work on pulldown,1:work on pullup*/
++            charger_detect = <1>;
+ 			status = "okay";
+ 		};
+ 	};
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-sply.c b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+index a27b589db6db..30a3f0166190 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+@@ -89,6 +89,7 @@ static int      current_dir    = -1;
+ static int      power_flag     = 0;
+ static int      pmu_version    = 0;
+ static int      chg_status_reg  = 0;
++static int      usb_bc_mode    = 0;
+ 
+ int aml1216_get_battery_voltage(void)
+ {
+@@ -344,6 +345,9 @@ int aml1216_set_charge_enable(int enable)
+     if (otp_version == 0)
+     {   
+         aml1216_set_full_charge_voltage(4050000);
++        if (usb_bc_mode == USB_BC_MODE_SDP) {
++            return aml1216_set_bits(0x0017, 0x00, 0x01);
++        }
+         if (ocv_voltage > 4050)
+         {   
+             printk("%s, otp_version:%d, ocv = %d, do not open charger.\n", __func__, otp_version, ocv_voltage);
+@@ -921,8 +925,13 @@ int aml1216_usb_charger(struct notifier_block *nb, unsigned long value, void *pd
+         aml1216_charger_job.value = value;
+         return 0;
+     }
++    usb_bc_mode = value;
+     switch (value) {
+     case USB_BC_MODE_SDP:                                               // pc
++        if (aml1216_get_otp_version() == 0) {
++            printk("disable charger for REVB chip when connect to PC\n");
++            aml1216_set_charge_enable(0);
++        }
+         if (g_aml1216_init->vbus_dcin_short_connect) {
+             aml1216_set_dcin(0);                            // cut off dcin for single usb port device
+         }
+@@ -938,6 +947,9 @@ int aml1216_usb_charger(struct notifier_block *nb, unsigned long value, void *pd
+         if (aml1216_battery && aml1216_battery->pmu_usbcur_limit) {     // limit usb current
+             aml1216_set_usb_current_limit(aml1216_battery->pmu_usbcur); 
+         }
++        if (aml1216_get_otp_version() == 0) {
++            aml1216_set_charge_enable(1);
++        }
+         break;
+     case USB_BC_MODE_DCP:                                               // charger
+     case USB_BC_MODE_CDP:                                               // PC + charger
+@@ -1489,7 +1501,7 @@ static int aml1216_battery_probe(struct platform_device *pdev)
+     uint32_t tmp2;
+ 
+ 	AML1216_DBG("call %s in", __func__);
+-	AML1216_DBG("AML_PMU driver version:0.30\n");
++	AML1216_DBG("AML_PMU driver version:0.40\n");
+ 
+     g_aml1216_init = pdev->dev.platform_data;
+     if (g_aml1216_init == NULL) {
+diff --git a/drivers/amlogic/power/aml_pmu/aml1218-sply.c b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+index 787f21821dbd..831bbb9681d1 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1218-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+@@ -89,6 +89,7 @@ static int      current_dir    = -1;
+ static int      power_flag     = 0;
+ static int      pmu_version    = 0;
+ static int      chg_status_reg  = 0;
++static int      usb_bc_mode = 0;
+ 
+ int aml1218_get_battery_voltage(void)
+ {
+@@ -344,6 +345,9 @@ int aml1218_set_charge_enable(int enable)
+     if (otp_version == 0)
+     {   
+         aml1218_set_full_charge_voltage(4050000);
++        if (usb_bc_mode == USB_BC_MODE_SDP) {
++            return aml1218_set_bits(0x0017, 0x00, 0x01);
++        }
+         if (ocv_voltage > 4050)
+         {   
+             printk("%s, otp_version:%d, ocv = %d, do not open charger.\n", __func__, otp_version, ocv_voltage);
+@@ -920,8 +924,13 @@ int aml1218_usb_charger(struct notifier_block *nb, unsigned long value, void *pd
+         aml1218_charger_job.value = value;
+         return 0;
+     }
++    usb_bc_mode = value;
+     switch (value) {
+     case USB_BC_MODE_SDP:                                               // pc
++        if (aml1218_get_otp_version() == 0) {
++            printk("disable charger for REVB chip when connect to PC\n");
++            aml1218_set_charge_enable(0);
++        }
+         if (g_aml1218_init->vbus_dcin_short_connect) {
+             aml1218_set_dcin(0);                            // cut off dcin for single usb port device
+         }
+@@ -937,6 +946,9 @@ int aml1218_usb_charger(struct notifier_block *nb, unsigned long value, void *pd
+         if (aml1218_battery && aml1218_battery->pmu_usbcur_limit) {     // limit usb current
+             aml1218_set_usb_current_limit(aml1218_battery->pmu_usbcur); 
+         }
++        if (aml1218_get_otp_version() == 0) {
++            aml1218_set_charge_enable(1);
++        }
+         break;
+ 
+     case USB_BC_MODE_DCP:                                               // charger
+@@ -1481,7 +1493,7 @@ static int aml1218_battery_probe(struct platform_device *pdev)
+     uint32_t tmp2;
+ 
+ 	AML1218_DBG("call %s in", __func__);
+-	AML1218_DBG("AML_PMU driver version:0.30\n");
++	AML1218_DBG("AML_PMU driver version:0.40\n");
+     g_aml1218_init = pdev->dev.platform_data;
+     if (g_aml1218_init == NULL) {
+         AML1218_DBG("%s, NO platform data\n", __func__);
+-- 
+2.19.0
+

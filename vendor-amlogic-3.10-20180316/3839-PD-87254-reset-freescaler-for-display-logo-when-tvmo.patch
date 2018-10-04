@@ -1,0 +1,360 @@
+From 456a03df15af2b082b69858976c257b9afaff086 Mon Sep 17 00:00:00 2001
+From: "wenbiao.zhang" <wenbiao.zhang@amlogic.com>
+Date: Fri, 28 Mar 2014 13:44:23 +0800
+Subject: [PATCH 3839/5965] PD #87254: reset freescaler for display logo when
+ tvmode is different from uboot
+
+---
+ .../aml_logo/logo_display/output_dev_osd.c    | 97 +++++++++++++++++--
+ drivers/amlogic/display/osd/osd_hw.c          | 97 +++++++++++++------
+ include/linux/amlogic/osd/osd_hw.h            |  1 +
+ 3 files changed, 160 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+index 043cd2082f78..ac0a98bdf2d2 100755
+--- a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
++++ b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+@@ -132,9 +132,79 @@ static int osd_hw_setup(logo_object_t *plogo)
+ 	return SUCCESS;
+ 	
+ }
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++void set_osd_freescaler(int index, logo_object_t *plogo, vmode_t new_mode) {
++    vmode_t old_mode = plogo->para.vout_mode & VMODE_MODE_BIT_MASK;
++    printk("aml_logo: outputmode changed(%d->%d), reset osd%d scaler.\n", old_mode, new_mode, index);
++    osd_free_scale_mode_hw(index, 1);
++    osd_free_scale_enable_hw(index, 0);
++    osd_set_color_mode(index, &default_color_format_array[plogo->dev->output_dev.osd.color_depth]);
++    switch(old_mode) {
++        case VMODE_480I:
++        case VMODE_480CVBS:
++        case VMODE_480P:
++        case VMODE_576I:
++        case VMODE_576CVBS:
++        case VMODE_576P:
++        case VMODE_720P:
++        case VMODE_720P_50HZ:
++            osd_set_free_scale_axis_hw(index, 0, 0, 1279, 719);
++            osddev_update_disp_axis_hw(0, 1279, 0, 719, 0, 0, 0, index);
++            break;
++        case VMODE_1080I:
++        case VMODE_1080I_50HZ:
++        case VMODE_1080P:
++        case VMODE_1080P_50HZ:
++        case VMODE_1080P_24HZ:
++        case VMODE_4K2K_24HZ:
++        case VMODE_4K2K_25HZ:
++        case VMODE_4K2K_30HZ:
++        case VMODE_4K2K_SMPTE:
++            osd_set_free_scale_axis_hw(index, 0, 0, 1919, 1079);
++            osddev_update_disp_axis_hw(0, 1919, 0, 1079, 0, 0, 0, index);
++            break;
++   }
++   switch(new_mode) {
++        case VMODE_480I:
++        case VMODE_480CVBS:
++        case VMODE_480P:
++            osd_set_window_axis_hw(index, 0, 0, 719, 479);
++            break;
++        case VMODE_576I:
++        case VMODE_576CVBS:
++        case VMODE_576P:
++            osd_set_window_axis_hw(index, 0, 0, 719, 575);
++            break;
++        case VMODE_720P:
++        case VMODE_720P_50HZ:
++            osd_set_window_axis_hw(index, 0, 0, 1279, 719);
++             break;
++        case VMODE_1080I:
++        case VMODE_1080I_50HZ:
++        case VMODE_1080P:
++        case VMODE_1080P_50HZ:
++        case VMODE_1080P_24HZ:
++            osd_set_window_axis_hw(index, 0, 0, 1919, 1079);
++            break;
++        case VMODE_4K2K_24HZ:
++        case VMODE_4K2K_25HZ:
++        case VMODE_4K2K_30HZ:
++            osd_set_window_axis_hw(index, 0, 0, 3839, 2159);
++            break;
++        case VMODE_4K2K_SMPTE:
++            osd_set_window_axis_hw(index, 0, 0, 4095, 2159);
++            break;
++   }
++   osd_free_scale_enable_hw(index, 0x10001);
++   osd_enable_hw(1, index);
++}
++#endif
++
+ static int osd0_init(logo_object_t *plogo)
+ {
+ 	int hpd_state = 0;
++	vmode_t cur_mode = plogo->para.vout_mode;
+ 
+ 	if(plogo->para.output_dev_type==output_osd0.idx)
+ 	{
+@@ -157,10 +227,13 @@ static int osd0_init(logo_object_t *plogo)
+ 			extern int read_hpd_gpio(void);
+ 			hpd_state = read_hpd_gpio();
+     		
+-			if (hpd_state == 0)
+-			    set_current_vmode(cvbsmode_hdmionly);
+-			else
+-			    set_current_vmode(hdmimode_hdmionly);
++			if (hpd_state == 0){
++			    cur_mode = cvbsmode_hdmionly;
++			}
++			else{
++			    cur_mode = hdmimode_hdmionly;
++			}
++			set_current_vmode(cur_mode);
+ 		}
+ #else
+ 		set_current_vmode(plogo->para.vout_mode);
+@@ -174,6 +247,11 @@ static int osd0_init(logo_object_t *plogo)
+ 		plogo->dev->output_dev.osd.mem_start=plogo->platform_res[LOGO_DEV_OSD0].mem_start;
+ 		plogo->dev->output_dev.osd.mem_end=plogo->platform_res[LOGO_DEV_OSD0].mem_end;
+ 		plogo->dev->output_dev.osd.color_depth=get_curr_color_depth(P_VIU_OSD1_BLK0_CFG_W0);//setup by uboot
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++		if((cur_mode != (plogo->para.vout_mode & VMODE_MODE_BIT_MASK)) && (cur_mode <= VMODE_4K2K_SMPTE)) {
++		    set_osd_freescaler(LOGO_DEV_OSD0, plogo, cur_mode);
++		}
++#endif
+ 		return OUTPUT_DEV_FOUND;
+ 	}
+ 	return OUTPUT_DEV_UNFOUND;
+@@ -181,6 +259,7 @@ static int osd0_init(logo_object_t *plogo)
+ static int osd1_init(logo_object_t *plogo)
+ {
+ 	int hpd_state = 0;
++	vmode_t cur_mode = plogo->para.vout_mode;
+ 
+ 	if(plogo->para.output_dev_type==output_osd1.idx)
+ 	{
+@@ -204,11 +283,12 @@ static int osd1_init(logo_object_t *plogo)
+ 			hpd_state = read_hpd_gpio();
+     		
+ 			if (hpd_state == 0){
+-			    set_current_vmode(cvbsmode_hdmionly);
++			    cur_mode = cvbsmode_hdmionly;
+ 			}
+ 			else{
+-			    set_current_vmode(hdmimode_hdmionly);
++			    cur_mode = hdmimode_hdmionly;
+ 			}
++			set_current_vmode(cur_mode);
+ 		}
+ #else
+ 		set_current_vmode(plogo->para.vout_mode);
+@@ -222,6 +302,11 @@ static int osd1_init(logo_object_t *plogo)
+ 		plogo->dev->output_dev.osd.mem_start=plogo->platform_res[LOGO_DEV_OSD1].mem_start;
+ 		plogo->dev->output_dev.osd.mem_end=plogo->platform_res[LOGO_DEV_OSD1].mem_end;
+ 		plogo->dev->output_dev.osd.color_depth=get_curr_color_depth(P_VIU_OSD2_BLK0_CFG_W0);//setup by uboot
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++		if((cur_mode != (plogo->para.vout_mode & VMODE_MODE_BIT_MASK)) && (cur_mode <= VMODE_4K2K_SMPTE)) {
++		    set_osd_freescaler(LOGO_DEV_OSD1, plogo, cur_mode);
++		}
++#endif
+ 		return OUTPUT_DEV_FOUND;
+ 	}
+ 	return OUTPUT_DEV_UNFOUND;
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index d3575ef94d25..7184dcc54b48 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -512,7 +512,7 @@ void osd_set_scan_mode(int index)
+ 		}
+ 	}
+ 
+-	if(osd_hw.free_scale_enable[OSD1]){
++	if(osd_hw.free_scale_enable[OSD1] || osd_hw.free_scale_enable[OSD2]){
+ 		osd_hw.scan_mode= SCAN_MODE_PROGRESSIVE;
+ 	}
+ }
+@@ -591,6 +591,13 @@ void  osd_srckey_enable_hw(u32  index,u8 enable)
+ 
+ }
+ 
++void osd_set_color_mode(int index, const color_bit_define_t *color) {
++    if(color != osd_hw.color_info[index]) {
++        osd_hw.color_info[index] = color;
++        add_to_update_list(index, OSD_COLOR_MODE);
++    }
++}
++
+ void osddev_update_disp_axis_hw(
+ 		u32 display_h_start,
+ 		u32 display_h_end,
+@@ -785,33 +792,27 @@ void osd_free_scale_enable_hw(u32 index,u32 enable)
+ 			osd_hw.free_scale_enable[index] = 0;
+ 		}
+ 
+-		if (index==OSD1)
++		if (osd_hw.free_scale_enable[index])
+ 		{
+-			if (osd_hw.free_scale_enable[index])
+-			{
+-				if ((osd_hw.free_scale_data[OSD1].x_end > 0) && hfs_enable){
+-					osd_hw.free_scale_width[OSD1] = osd_hw.free_scale_data[OSD1].x_end - \
+-									osd_hw.free_scale_data[OSD1].x_start;
+-				}
++			if ((osd_hw.free_scale_data[index].x_end > 0) && hfs_enable){
++				osd_hw.free_scale_width[index] = osd_hw.free_scale_data[index].x_end - \
++								osd_hw.free_scale_data[index].x_start;
++			}
+ 
+-				if ((osd_hw.free_scale_data[OSD1].y_end > 0) && vfs_enable){
+-					osd_hw.free_scale_height[OSD1] = osd_hw.free_scale_data[OSD1].y_end -\
+-									 osd_hw.free_scale_data[OSD1].y_start;
+-				}
+-				osd_set_scan_mode(index);
+-				add_to_update_list(index,OSD_COLOR_MODE);
+-				add_to_update_list(index,OSD_FREESCALE_COEF);
+-				add_to_update_list(index,DISP_GEOMETRY);
+-				add_to_update_list(index,DISP_FREESCALE_ENABLE);
+-			}else{
+-				osd_set_scan_mode(index);
+-				add_to_update_list(index,OSD_COLOR_MODE);
+-				add_to_update_list(index,DISP_GEOMETRY);
+-				add_to_update_list(index,DISP_FREESCALE_ENABLE);
++			if ((osd_hw.free_scale_data[index].y_end > 0) && vfs_enable){
++				osd_hw.free_scale_height[index] = osd_hw.free_scale_data[index].y_end -\
++								 osd_hw.free_scale_data[index].y_start;
+ 			}
++			osd_set_scan_mode(index);
++			add_to_update_list(index,OSD_COLOR_MODE);
++			add_to_update_list(index,OSD_FREESCALE_COEF);
++			add_to_update_list(index,DISP_GEOMETRY);
++			add_to_update_list(index,DISP_FREESCALE_ENABLE);
+ 		}else{
+-			add_to_update_list(OSD2,DISP_GEOMETRY);
+-			add_to_update_list(OSD2,OSD_COLOR_MODE);
++			osd_set_scan_mode(index);
++			add_to_update_list(index,OSD_COLOR_MODE);
++			add_to_update_list(index,DISP_GEOMETRY);
++			add_to_update_list(index,DISP_FREESCALE_ENABLE);
+ 		}
+ 
+ 		osd_enable_hw(osd_hw.enable[index],index);
+@@ -1548,12 +1549,18 @@ static  void  osd2_update_disp_freescale_enable(void)
+ {
+ 	int hf_phase_step, vf_phase_step;
+ 	int dst_w, dst_h;
++	int bot_ini_phase;
+ 	int vsc_ini_rcv_num, vsc_ini_rpt_p0_num;
++	int vsc_bot_rcv_num = 6, vsc_bot_rpt_p0_num = 2;
+ 	int hsc_ini_rcv_num, hsc_ini_rpt_p0_num;
+ 
+ 	int hf_bank_len = 4;
+ 	int vf_bank_len = 4;
+ 
++	if(osd_hw.scale_workaround){
++		vf_bank_len = 2;
++	}
++    
+ 	hsc_ini_rcv_num = hf_bank_len;
+ 	vsc_ini_rcv_num = vf_bank_len;
+ 	hsc_ini_rpt_p0_num = (hf_bank_len/2 - 1) > 0 ?  (hf_bank_len/2 - 1): 0;
+@@ -1565,6 +1572,11 @@ static  void  osd2_update_disp_freescale_enable(void)
+ 
+ 	dst_h = osd_hw.free_dst_data[OSD2].y_end - osd_hw.free_dst_data[OSD2].y_start+1;
+ 	vf_phase_step = ((osd_hw.free_scale_height[OSD2]+1) << 20) / dst_h;
++	if (osd_hw.field_out_en){  //interface output
++		bot_ini_phase = ((vf_phase_step/2) >> 4);
++	}else{
++		bot_ini_phase = 0;
++	}
+ 	vf_phase_step = (vf_phase_step << 4);
+ 
+ 	VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_SC_DUMMY_DATA, 0x00808000, 0, 32);
+@@ -1574,7 +1586,9 @@ static  void  osd2_update_disp_freescale_enable(void)
+ 		VSYNCOSD_WR_MPEG_REG_BITS (VPP_OSD_SC_CTRL0, OSD2, 0, 2);
+ 		VSYNCOSD_WR_MPEG_REG_BITS (VPP_OSD_SC_CTRL0, 0, 4, 8);
+ 	}else{
+-		VSYNCOSD_CLR_MPEG_REG_MASK (VPP_OSD_SC_CTRL0, 1<<3);
++		if (!osd_hw.free_scale_enable[OSD1]){
++		    VSYNCOSD_CLR_MPEG_REG_MASK (VPP_OSD_SC_CTRL0, 1<<3);
++		}
+ 	}
+ 
+ 	if (osd_hw.free_scale_enable[OSD2]){
+@@ -1594,16 +1608,36 @@ static  void  osd2_update_disp_freescale_enable(void)
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_HSC_CTRL0, hsc_ini_rpt_p0_num, 8, 2);
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_HSC_CTRL0, 1, 22, 1);
+ 	}else{
+-		VSYNCOSD_CLR_MPEG_REG_MASK(VPP_OSD_HSC_CTRL0, 1<<22);
++		if (!osd_hw.free_scale[OSD1].hfs_enable){
++		    VSYNCOSD_CLR_MPEG_REG_MASK(VPP_OSD_HSC_CTRL0, 1<<22);
++		}
+ 	}
+ 
+ 	if (osd_hw.free_scale[OSD2].vfs_enable){
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, vf_bank_len, 0, 3);
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, vsc_ini_rcv_num, 3, 3);
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, vsc_ini_rpt_p0_num, 8, 2);
++		if (osd_hw.field_out_en){  //interface output
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, vsc_bot_rcv_num, 11, 4);
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, vsc_bot_rpt_p0_num, 16, 2);
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 1, 23, 1);
++		}else{
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 0, 11, 4);
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 0, 16, 2);
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 0, 23, 1);
++		}
++
++		if(osd_hw.scale_workaround){
++			VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 0x1, 21, 1);
++		} else {
++			VSYNCOSD_CLR_MPEG_REG_MASK(VPP_OSD_VSC_CTRL0, 1<<21);
++		}
++        
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_CTRL0, 1, 24, 1);
+ 	}else{
+-		VSYNCOSD_CLR_MPEG_REG_MASK(VPP_OSD_VSC_CTRL0, 1<<24);
++		if (!osd_hw.free_scale[OSD1].vfs_enable){
++		    VSYNCOSD_CLR_MPEG_REG_MASK(VPP_OSD_VSC_CTRL0, 1<<24);
++		}
+ 	}
+ 
+ 	if (osd_hw.free_scale_enable[OSD2]){
+@@ -1612,6 +1646,7 @@ static  void  osd2_update_disp_freescale_enable(void)
+ 
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_PHASE_STEP, vf_phase_step, 0, 28);
+ 		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_INI_PHASE, 0, 0, 16);
++		VSYNCOSD_WR_MPEG_REG_BITS(VPP_OSD_VSC_INI_PHASE, bot_ini_phase, 16, 16);
+ 	}
+ 	remove_from_update_list(OSD2,DISP_FREESCALE_ENABLE);
+ }
+@@ -1756,10 +1791,14 @@ static   void  osd2_update_enable(void)
+ {
+ 	if (osd_hw.free_scale_mode[OSD2]){
+ 		if (osd_hw.enable[OSD2] == ENABLE){
+-			VSYNCOSD_SET_MPEG_REG_MASK(VPP_MISC,VPP_OSD2_POSTBLEND);
++			VSYNCOSD_SET_MPEG_REG_MASK(VPP_MISC,VPP_OSD1_POSTBLEND);
+ 			VSYNCOSD_SET_MPEG_REG_MASK(VPP_MISC,VPP_POSTBLEND_EN);
+ 		}else{
+-			VSYNCOSD_CLR_MPEG_REG_MASK(VPP_MISC,VPP_OSD2_POSTBLEND);
++			if (osd_hw.enable[OSD1] == ENABLE){
++			    VSYNCOSD_CLR_MPEG_REG_MASK(VPP_MISC,VPP_OSD2_POSTBLEND);
++			} else {
++			    VSYNCOSD_CLR_MPEG_REG_MASK(VPP_MISC,VPP_OSD1_POSTBLEND|VPP_OSD2_POSTBLEND);
++			}
+ 		}
+ 	}else{
+ 		u32  video_enable;
+diff --git a/include/linux/amlogic/osd/osd_hw.h b/include/linux/amlogic/osd/osd_hw.h
+index bdd5a67bf382..eb1d76850cba 100755
+--- a/include/linux/amlogic/osd/osd_hw.h
++++ b/include/linux/amlogic/osd/osd_hw.h
+@@ -51,6 +51,7 @@ extern void  osd_set_colorkey_hw(u32 index,u32 bpp,u32 colorkey ) ;
+ extern void  osd_srckey_enable_hw(u32  index,u8 enable);
+ extern void  osd_set_gbl_alpha_hw(u32 index,u32 gbl_alpha);
+ extern u32  osd_get_gbl_alpha_hw(u32  index);
++extern void osd_set_color_mode(int index, const color_bit_define_t *color);
+ extern void osd_setup(struct osd_ctl_s *osd_ctl,
+                 u32 xoffset,
+                 u32 yoffset,
+-- 
+2.19.0
+

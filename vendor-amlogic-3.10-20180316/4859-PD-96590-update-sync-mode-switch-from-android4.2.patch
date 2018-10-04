@@ -1,0 +1,371 @@
+From 16e60d3234d7656397b66d649ec2cf686c4937b8 Mon Sep 17 00:00:00 2001
+From: "jiwei.sun" <jiwei.sun@amlogic.com>
+Date: Mon, 8 Sep 2014 22:50:24 +0800
+Subject: [PATCH 4859/5965] PD #96590: update sync mode switch from android4.2
+
+---
+ drivers/amlogic/amports/tsync.c | 113 ++++++++++++++++++++++++--------
+ drivers/amlogic/amports/video.c | 103 +++++++++++++++++------------
+ 2 files changed, 148 insertions(+), 68 deletions(-)
+
+diff --git a/drivers/amlogic/amports/tsync.c b/drivers/amlogic/amports/tsync.c
+index 6a6db54c8366..c9df54042068 100755
+--- a/drivers/amlogic/amports/tsync.c
++++ b/drivers/amlogic/amports/tsync.c
+@@ -115,7 +115,8 @@ static int vpause_flag = 0;
+ static int apause_flag = 0;
+ static bool dobly_avsync_test = false;
+ extern bool disable_slow_sync;
+-
++static int slowsync_enable = 0;
++static int startsync_mode = 2; // used to set player start sync mode, 0-none; 1-smoothsync; 2-droppcm;  default drop pcm
+ 
+ /*
+                   threshold_min              threshold_max
+@@ -522,39 +523,26 @@ void tsync_avevent_locked(avevent_t event, u32 param)
+             tsync_dec_reset_video_start = 1;
+         }
+ 
+-#ifndef TSYNC_SLOW_SYNC
+-        if (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE)
+-#endif
++        if(slowsync_enable == 1) // slow sync enable
+         {
+-#ifndef TSYNC_SLOW_SYNC
+-            if (tsync_syncthresh && (tsync_mode == TSYNC_MODE_AMASTER)) {
+-                timestamp_pcrscr_set(param - VIDEO_HOLD_THRESHOLD);
+-            } else {
+-                timestamp_pcrscr_set(param);
+-            }
+-#else
+-            if (disable_slow_sync && (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE)) {
++            timestamp_pcrscr_set(param);
++            tsync_stat = TSYNC_STAT_PCRSCR_SETUP_VIDEO;
++        }
++        else
++        {
++            if (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE) {
+                 if (tsync_syncthresh && (tsync_mode == TSYNC_MODE_AMASTER)) {
+                     timestamp_pcrscr_set(param - VIDEO_HOLD_THRESHOLD);
+                 } else {
+                     timestamp_pcrscr_set(param);
+                 }
+-            } else {
+-                timestamp_pcrscr_set(param);
+-            }
+-#endif
+-
+-#ifdef TSYNC_SLOW_SYNC
+-            if (disable_slow_sync && (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_NONE))
+-#endif
+-            {
+-            tsync_stat = TSYNC_STAT_PCRSCR_SETUP_VIDEO;
+-            amlog_level(LOG_LEVEL_INFO, "vpts to scr, apts = 0x%x, vpts = 0x%x\n",
+-                        timestamp_apts_get(),
+-                        timestamp_vpts_get());
++                tsync_stat = TSYNC_STAT_PCRSCR_SETUP_VIDEO;
+             }
+         }
+-
++        amlog_level(LOG_LEVEL_INFO, "vpts to scr, apts = 0x%x, vpts = 0x%x\n",
++                timestamp_apts_get(),
++                timestamp_vpts_get());
++ 
+         if (tsync_stat == TSYNC_STAT_PCRSCR_SETUP_AUDIO) {
+             t = timestamp_pcrscr_get();
+             if (abs(param - t) > tsync_av_threshold_max) {
+@@ -1051,6 +1039,30 @@ int tsync_set_vpause_flag(int mode)
+ }
+ EXPORT_SYMBOL(tsync_set_vpause_flag);
+ 
++int tsync_get_slowsync_enable(void)
++{
++    return slowsync_enable;
++}
++EXPORT_SYMBOL(tsync_get_slowsync_enable);
++
++int tsync_set_slowsync_enable(int enable)
++{
++    return slowsync_enable=enable;
++}
++EXPORT_SYMBOL(tsync_set_slowsync_enable);
++
++int tsync_get_startsync_mode(void)
++{
++    return startsync_mode;
++}
++EXPORT_SYMBOL(tsync_get_startsync_mode);
++
++int tsync_set_startsync_mode(int mode)
++{
++    return startsync_mode=mode;
++}
++EXPORT_SYMBOL(tsync_set_startsync_mode);
++
+ static ssize_t store_pcr_recover(struct class *class,
+                                  struct class_attribute *attr,
+                                  const char *buf,
+@@ -1538,6 +1550,53 @@ static ssize_t store_vpause_flag(struct class *class,
+     return size;
+ }
+ 
++static ssize_t show_slowsync_enable(struct class *class,
++        struct class_attribute *attr,
++        char *buf)
++{
++    return sprintf(buf, "slowsync enable:0x%x\n", tsync_get_slowsync_enable());
++}
++
++static ssize_t store_slowsync_enable(struct class *class,
++        struct class_attribute *attr,
++        const char *buf,
++        size_t size)
++{
++    unsigned mode;
++    ssize_t r;
++    r = sscanf(buf, "%d", &mode);
++    if (r != 1) {
++        return -EINVAL;
++    }
++
++    tsync_set_slowsync_enable(mode);
++    return size;
++}
++
++static ssize_t show_startsync_mode(struct class *class,
++        struct class_attribute *attr,
++        char *buf)
++{
++    return sprintf(buf, "0x%x\n", tsync_get_startsync_mode());
++}
++
++static ssize_t store_startsync_mode(struct class *class,
++        struct class_attribute *attr,
++        const char *buf,
++        size_t size)
++{
++    unsigned mode;
++    ssize_t r;
++
++    r = sscanf(buf, "%d", &mode);
++    if (r != 1) {
++        return -EINVAL;
++    }
++
++    tsync_set_startsync_mode(mode);
++    return size;
++}
++
+ static struct class_attribute tsync_class_attrs[] = {
+     __ATTR(pts_video,  S_IRUGO | S_IWUSR | S_IWGRP, show_vpts,    store_vpts),
+     __ATTR(pts_audio,  S_IRUGO | S_IWUSR | S_IWGRP, show_apts,    store_apts),
+@@ -1557,6 +1616,8 @@ static struct class_attribute tsync_class_attrs[] = {
+     __ATTR(last_checkin_apts, S_IRUGO | S_IWUSR, show_last_checkin_apts, NULL),
+     __ATTR(firstvpts, S_IRUGO | S_IWUSR, show_firstvpts, NULL),
+     __ATTR(vpause_flag, S_IRUGO | S_IWUSR, show_vpause_flag, store_vpause_flag),
++    __ATTR(slowsync_enable, S_IRUGO | S_IWUSR, show_slowsync_enable, store_slowsync_enable),
++    __ATTR(startsync_mode, S_IRUGO | S_IWUSR, show_startsync_mode, store_startsync_mode),
+     __ATTR_NULL
+ };
+ 
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index c38bbf1579c2..cd61275abfbc 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -595,10 +595,8 @@ static u32 disable_video = VIDEO_DISABLE_NONE;
+ /* test screen*/
+ static u32 test_screen = 0;
+ 
+-#ifdef SLOW_SYNC_REPEAT
+ /* video frame repeat count */
+ static u32 frame_repeat_count = 0;
+-#endif
+ 
+ /* vout */
+ static const vinfo_t *vinfo = NULL;
+@@ -652,6 +650,7 @@ char file_name[512];
+ #define FREERUN_NODUR   1   // freerun without duration
+ #define FREERUN_DUR     2   // freerun with duration
+ static u32 freerun_mode;
++static u32 slowsync_repeat_enable = 0;
+ 
+ void set_freerun_mode(int mode){
+ 	freerun_mode = mode;
+@@ -1899,7 +1898,6 @@ static int calc_hold_line(void)
+     }
+ }
+ 
+-#ifdef SLOW_SYNC_REPEAT
+ /* add a new function to check if current display frame has been
+ displayed for its duration */
+ static inline bool duration_expire(vframe_t *cur_vf, vframe_t *next_vf, u32 dur)
+@@ -1927,7 +1925,6 @@ static inline bool duration_expire(vframe_t *cur_vf, vframe_t *next_vf, u32 dur)
+         return false;
+     }
+ }
+-#endif
+ 
+ #define VPTS_RESET_THRO
+ 
+@@ -2367,10 +2364,9 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 	    vpts_chase_counter--;
+     }
+ #endif
+-
+-#ifdef SLOW_SYNC_REPEAT
+-    frame_repeat_count++;
+-#endif
++    
++    if(slowsync_repeat_enable)
++        frame_repeat_count++;
+ 
+     if(smooth_sync_enable){
+         if(video_frame_repeat_count){
+@@ -2437,9 +2433,8 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+             tsync_avevent_locked(VIDEO_START,
+                           (vf->pts) ? vf->pts : timestamp_vpts_get());
+ 
+-#ifdef SLOW_SYNC_REPEAT
+-            frame_repeat_count = 0;
+-#endif
++            if(slowsync_repeat_enable)
++                frame_repeat_count = 0;
+ 
+         } else if ((cur_dispbuf == &vf_local) && (video_property_changed)) {
+             if (!(blackout|force_blackout)) {
+@@ -2516,10 +2511,8 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ #endif
+                 break;
+             }
+-
+-#ifdef SLOW_SYNC_REPEAT
+-            frame_repeat_count = 0;
+-#endif
++            if(slowsync_repeat_enable)
++                frame_repeat_count = 0;
+             vf = video_vf_peek();
+             if (!vf) {
+                 next_peek_underflow++;
+@@ -2529,42 +2522,41 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                break;
+            }
+         } else {
+-#ifdef SLOW_SYNC_REPEAT
+             /* check if current frame's duration has expired, in this example
+              * it compares current frame display duration with 1/1/1/1.5 frame duration
+              * every 4 frames there will be one frame play longer than usual.
+              * you can adjust this array for any slow sync control as you want.
+              * The playback can be smoother than previous method.
+              */
+-            if (!disable_slow_sync && duration_expire(cur_dispbuf, vf, frame_repeat_count * vsync_pts_inc) && timestamp_pcrscr_enable_state()) {
+-                amlog_mask(LOG_MASK_SLOWSYNC,
+-                           "slow sync toggle, frame_repeat_count = %d\n",
+-                           frame_repeat_count);
+-                amlog_mask(LOG_MASK_SLOWSYNC,
+-                           "system time = 0x%x, video time = 0x%x\n",
+-                           timestamp_pcrscr_get(), timestamp_vpts_get());
+-#if 0 //def CONFIG_VSYNC_RDMA
+-                if(dispbuf_to_put){
+-                    video_vf_put(dispbuf_to_put);
+-                    dispbuf_to_put = NULL;
++            if(slowsync_repeat_enable)
++            {
++                if (duration_expire(cur_dispbuf, vf, frame_repeat_count * vsync_pts_inc) && timestamp_pcrscr_enable_state()) {
++                    amlog_mask(LOG_MASK_SLOWSYNC,
++                            "slow sync toggle, frame_repeat_count = %d\n",
++                            frame_repeat_count); 
++                    amlog_mask(LOG_MASK_SLOWSYNC, 
++                            "system time = 0x%x, video time = 0x%x\n",
++                             timestamp_pcrscr_get(), timestamp_vpts_get());
++                    vf = video_vf_get();
++                    if (!vf) break;
++                    vsync_toggle_frame(vf);
++                    frame_repeat_count = 0;
++
++                    vf = video_vf_peek();
++                } else if ((cur_dispbuf) && (cur_dispbuf->duration_pulldown > vsync_pts_inc)) {
++                    frame_count++; 
++                    cur_dispbuf->duration_pulldown -= PTS2DUR(vsync_pts_inc);
+                 }
+-#endif
+-                vf = video_vf_get();
+-                if (!vf) break;
+-
+-                vsync_toggle_frame(vf);
+-                frame_repeat_count = 0;
+-
+-                vf = video_vf_peek();
+-            } else
+-#endif
+-                if ((cur_dispbuf) && (cur_dispbuf->duration_pulldown > vsync_pts_inc)) {
++            }
++            else
++            {
++                if ((cur_dispbuf) && (cur_dispbuf->duration_pulldown > vsync_pts_inc)) { 
+                     frame_count++;
+                     cur_dispbuf->duration_pulldown -= PTS2DUR(vsync_pts_inc);
+                 }
+-
+-                /* setting video display property in pause mode */
+-                if (video_property_changed && cur_dispbuf) {
++            }
++                /*  setting video display property in pause mode */
++                if (video_property_changed && cur_dispbuf) { 
+                     if (blackout|force_blackout) {
+                         if (cur_dispbuf != &vf_local) {
+                             vsync_toggle_frame(cur_dispbuf);
+@@ -2573,9 +2565,10 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+                         vsync_toggle_frame(cur_dispbuf);
+                     }
+                 }
+-
++                
+             break;
+         }
++
+ #ifdef CONFIG_AM_VIDEO_LOG
+         toggle_cnt++;
+ #endif
+@@ -4837,6 +4830,28 @@ static ssize_t video_vsync_pts_inc_upint_store(struct class *cla, struct class_a
+     return count;
+ }
+ 
++static ssize_t slowsync_repeat_enable_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++    return sprintf(buf, "slowsync repeate enable = %d\n",slowsync_repeat_enable);
++}
++
++static ssize_t slowsync_repeat_enable_store(struct class *cla, struct class_attribute *attr, const char *buf,
++        size_t count)
++{
++    size_t r;
++    r = sscanf(buf, "%d", &slowsync_repeat_enable);
++
++    if(debug_flag){
++        printk("%s(%d)\n", __func__, slowsync_repeat_enable);
++    }
++
++    if (r != 1) {
++        return -EINVAL;
++    }
++
++    return count;
++}
++
+ static ssize_t video_vsync_slow_factor_show(struct class *cla, struct class_attribute *attr, char *buf)
+ {
+     return sprintf(buf, "%d\n", vsync_slow_factor);
+@@ -5009,6 +5024,10 @@ static struct class_attribute amvideo_class_attrs[] = {
+     __ATTR(stereo_scaler,
+     S_IRUGO|S_IWUSR,NULL,
+     video_3d_scale_store),
++    __ATTR(slowsync_repeat_enable,
++    S_IRUGO | S_IWUSR,
++    slowsync_repeat_enable_show,
++    slowsync_repeat_enable_store),
+     __ATTR_RO(device_resolution),
+     __ATTR_RO(frame_addr),
+     __ATTR_RO(frame_canvas_width),
+-- 
+2.19.0
+

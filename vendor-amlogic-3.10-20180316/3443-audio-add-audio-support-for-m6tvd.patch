@@ -1,0 +1,2880 @@
+From 58f5a6a60d98f89a117071ce897a83bdc6213e97 Mon Sep 17 00:00:00 2001
+From: "bo.yang" <bo.yang@amlogic.com>
+Date: Mon, 17 Feb 2014 22:09:14 +0800
+Subject: [PATCH 3443/5965] audio: add audio support for m6tvd
+
+by wanhu.zheng@amlogic.com
+from shuai.li@amlogic.com
+---
+ arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd |  39 +-
+ arch/arm/configs/meson6tvd_defconfig        |   3 +
+ include/sound/aml_m6tv_audio.h              |  13 +
+ include/sound/tas57xx.h                     |  78 ++
+ sound/soc/aml/m6/Kconfig                    |  32 +-
+ sound/soc/aml/m6/Makefile                   |   5 +-
+ sound/soc/aml/m6/aml_audio_codec_probe.h    |  41 +
+ sound/soc/aml/m6/aml_audio_hw.c             |   2 +-
+ sound/soc/aml/m6/aml_m6tv_audio.c           | 139 ++--
+ sound/soc/aml/m6/aml_syno9629_codec.c       | 158 ++--
+ sound/soc/codecs/Kconfig                    |  10 +-
+ sound/soc/codecs/Makefile                   |   6 +-
+ sound/soc/codecs/tas5707.c                  | 685 +++++++++++++++++
+ sound/soc/codecs/tas5707.h                  | 109 +++
+ sound/soc/codecs/tas5711.c                  | 783 ++++++++++++++++++++
+ sound/soc/codecs/tas5711.h                  | 109 +++
+ 16 files changed, 2047 insertions(+), 165 deletions(-)
+ create mode 100644 include/sound/aml_m6tv_audio.h
+ create mode 100644 include/sound/tas57xx.h
+ mode change 100644 => 100755 sound/soc/aml/m6/Kconfig
+ mode change 100644 => 100755 sound/soc/aml/m6/Makefile
+ create mode 100644 sound/soc/aml/m6/aml_audio_codec_probe.h
+ mode change 100644 => 100755 sound/soc/aml/m6/aml_m6tv_audio.c
+ mode change 100644 => 100755 sound/soc/aml/m6/aml_syno9629_codec.c
+ create mode 100644 sound/soc/codecs/tas5707.c
+ create mode 100644 sound/soc/codecs/tas5707.h
+ create mode 100644 sound/soc/codecs/tas5711.c
+ create mode 100644 sound/soc/codecs/tas5711.h
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+index e05037a76374..3fe9311efb72 100755
+--- a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+@@ -289,18 +289,49 @@
+ 
+ 
+ 	dummy_codec_audio {
+-		status = "okay";
++		status = "disabled";
+ 		compatible = "amlogic,aml_dummy_codec_audio";
+ 		dev_name = "aml_dummy_codec_audio.0";
+ 		pinctrl-names = "dummy_codec_audio";
+-		pinctrl-0 = <&aml_dummy_codec_pins>;
++		pinctrl-0 = <&aml_i2s_pins>;
+ 	};
+ 
+ 	dummy_codec {
+-		status = "okay";
++		status = "disabled";
+ 		compatible = "amlogic,aml_dummy_codec";
+ 		dev_name = "dummy_codec.0";
+ 	};
++	syno9629_codec {
++		status = "okay";
++		compatible = "amlogic,syno9629";
++		dev_name = "syno9629.0";
++	};
++
++	aml_audio_codec{
++        compatible = "amlogic,audio_codec";
++        tas5711:tas5711{
++            codec_name = "tas5711";
++            i2c_addr = <0x1B>;
++            i2c_bus = "i2c_bus_a";
++            status = "okay";
++        };
++        tas5707:tas5707{
++            codec_name = "tas5707";
++            i2c_addr = <0x1B>;
++            i2c_bus = "i2c_bus_a";
++            status = "disabled";
++        };
++    };
++	m6tv_audio {
++		status = "okay";
++		compatible = "sound_card,aml_m6tv_audio";
++		aml,sound_card = "AML-M6TV";
++		//aml,codec_dai = "tas5711-","rt5616-aif1","rt5631-hifi","wm8960-hifi";
++		dev_name = "aml_m6tv_audio.0";
++		mute_gpio = "GPIOW_19";
++		pinctrl-names = "aml_m6tv_audio";
++		pinctrl-0 = <&aml_i2s_pins>;
++	};
+ 
+ 	sdio {
+ 		compatible = "amlogic,aml_sdio";
+@@ -434,7 +465,7 @@
+ 			amlogic,pins = "GPIOZ_8","GPIOZ_9";
+ 		};
+ 
+-		aml_dummy_codec_pins:aml_dummy_codec_pins {
++		aml_i2s_pins:aml_i2s_pins {
+ 			amlogic,setmask = <8 0x6A00000
+ 					   3 0x800000>;
+ 			amlogic,clrmask = <8 0x1461000
+diff --git a/arch/arm/configs/meson6tvd_defconfig b/arch/arm/configs/meson6tvd_defconfig
+index 2e5779757043..1ea80d0ca2f6 100755
+--- a/arch/arm/configs/meson6tvd_defconfig
++++ b/arch/arm/configs/meson6tvd_defconfig
+@@ -206,6 +206,9 @@ CONFIG_SND=y
+ CONFIG_SND_SOC=y
+ CONFIG_SND_AML_M6_SOC=y
+ CONFIG_SND_AML_M_DUMMY_CODEC=y
++CONFIG_SND_AML_M6TV_AUDIO_CODEC=y
++CONFIG_SND_AML_M6TV_SYNOPSYS9629_CODEC=y
++CONFIG_SND_AML_M6TV_TAS5711=y
+ # CONFIG_HID_GENERIC is not set
+ CONFIG_USB=y
+ CONFIG_USB_ACM=y
+diff --git a/include/sound/aml_m6tv_audio.h b/include/sound/aml_m6tv_audio.h
+new file mode 100644
+index 000000000000..58de53fcb12f
+--- /dev/null
++++ b/include/sound/aml_m6tv_audio.h
+@@ -0,0 +1,13 @@
++/**
++ * struct syno9629_codec_platform_data - platform-specific data
++ */
++
++#ifndef _AML_M6TV_AUDIO_H_
++#define _AML_M6TV_AUDIO_H_
++
++struct m6tv_audio_codec_platform_data {
++    void (*device_init)(void);
++    void (*device_uninit)(void);
++};
++
++#endif
+diff --git a/include/sound/tas57xx.h b/include/sound/tas57xx.h
+new file mode 100644
+index 000000000000..4a4e569552ec
+--- /dev/null
++++ b/include/sound/tas57xx.h
+@@ -0,0 +1,78 @@
++#ifndef _TAS57xx_H
++#define _TAS57xx_H
++
++#define TAS57XX_EQ_REGS 20
++#define TAS57XX_EQ_BQS 9
++#define TAS57XX_EQ_CHNLS 2
++#define TAS57XX_EQ_BYTES (TAS57XX_EQ_REGS * TAS57XX_EQ_BQS * TAS57XX_EQ_CHNLS)
++
++struct tas57xx_reg_cfg {
++    const char *reg_data;
++};
++
++struct tas5711_eq_cfg {
++	const char *name;
++	const char *regs;
++	int reg_bytes;
++};
++
++struct tas5711_platform_data {
++    int (*init_func)(void);
++    int (*early_suspend_func)();
++    int (*suspend_func)();
++    int (*resume_func)();
++    int (*late_resume_func)();
++    char *custom_init_value_table;
++    int init_value_table_len;
++    struct tas57xx_reg_cfg *init_regs;
++    int num_init_regs;
++    char *custom_drc1_table;
++    int custom_drc1_table_len;
++    char *custom_drc1_tko_table;
++    int custom_drc1_tko_table_len;
++    char *custom_drc2_table;
++    int custom_drc2_table_len;
++    char*custom_drc2_tko_table;
++    int custom_drc2_tko_table_len;
++    int num_eq_cfgs;
++    struct tas5711_eq_cfg *eq_cfgs;
++    char *custom_sub_bq_table;
++    int custom_sub_bq_table_len;
++    char custom_master_vol;
++
++    int enable_ch1_drc;
++    int enable_ch2_drc;
++    int enable_hardmute;
++    int i2c_addr;
++};
++
++struct tas5707_eq_cfg {
++	const char *name;
++	const char *regs;
++	int reg_bytes;
++};
++
++struct tas5707_platform_data {
++    int (*init_func)(void);
++    int (*early_suspend_func)();
++    int (*suspend_func)();
++    int (*resume_func)();
++    int (*late_resume_func)();
++    char *custom_init_value_table;
++    int init_value_table_len;
++    struct tas57xx_reg_cfg *init_regs;
++    int num_init_regs;
++    char *custom_drc1_table;
++    int custom_drc1_table_len;
++    char *custom_drc1_tko_table;
++    int custom_drc1_tko_table_len;
++    int num_eq_cfgs;
++    struct tas5707_eq_cfg *eq_cfgs;
++    char custom_master_vol;
++
++    int enable_ch1_drc;
++    int enable_hardmute;
++    int i2c_addr;
++};
++
++#endif
+diff --git a/sound/soc/aml/m6/Kconfig b/sound/soc/aml/m6/Kconfig
+old mode 100644
+new mode 100755
+index 48f2722d57a6..b7018fa40c8d
+--- a/sound/soc/aml/m6/Kconfig
++++ b/sound/soc/aml/m6/Kconfig
+@@ -21,7 +21,7 @@ config SND_AML_M6_PCM2BT
+ 	tristate "M6 evaluation board with PCM2BT"
+ 	depends on SND_AML_M6_SOC
+ 	select SND_SOC_PCM2BT
+-	
++
+ config SND_AML_M_DUMMY_CODEC
+     tristate "AML M series board with DUMMY_CODEC"
+     depends on SND_AML_M6_SOC
+@@ -31,42 +31,38 @@ config SND_AML_M6TV_AUDIO_CODEC
+ 	depends on SND_AML_M6_SOC
+ config SND_AML_M6TV_SYNOPSYS9629_CODEC
+ 	tristate "AML M6TV  board with internal syno9629 codec"
+-	depends on SND_AML_M6TV_AUDIO_CODEC 
+-config SND_AML_M6TV_RT5631
+-	tristate "AML M6TV board with RT5631 codec"
+ 	depends on SND_AML_M6TV_AUDIO_CODEC
+-	select SND_SOC_RT5631 if SND_AML_M6TV_RT5631	
+ config SND_AML_M6TV_STA380
+ 	tristate "AML M6TV board with STA380 codec"
+ 	depends on SND_AML_M6TV_AUDIO_CODEC
+-	select SND_SOC_STA380 if SND_AML_M6TV_STA380	
++	select SND_SOC_STA380 if SND_AML_M6TV_STA380
+ config SND_AML_M6TV_TAS5711
+-	tristate "AML M6TV board with TAS5711 codec"	
+-	depends on SND_AML_M6TV_AUDIO_CODEC	
++	tristate "AML M6TV board with TAS5711 codec"
++	depends on SND_AML_M6TV_AUDIO_CODEC
+ 	select SND_SOC_TAS5711 if SND_AML_M6TV_TAS5711
+ if SND_AML_M6TV_TAS5711
+-choice        
+-	prompt "TAS5711 work mode"        
++choice
++	prompt "TAS5711 work mode"
+ 	default TAS5711_2_CHANNEL
+-config TAS5711_2_CHANNEL        
++config TAS5711_2_CHANNEL
+ 	bool "2 BTL channel mode"
+ config TAS5711_2_PLUS_1_CHANNEL
+ 	bool "2.1 channel mode"
+-config TAS5711_2_SUBWOOFER_CHANNEL        
++config TAS5711_2_SUBWOOFER_CHANNEL
+ 	bool "2 BTL subwoofer channel"
+ endchoice
+ endif
+ config SND_AML_M6TV_TAS5707
+-	tristate "AML M6TV board with TAS5707 codec"	
+-	depends on SND_AML_M6TV_AUDIO_CODEC	
++	tristate "AML M6TV board with TAS5707 codec"
++	depends on SND_AML_M6TV_AUDIO_CODEC
+ 	select SND_SOC_TAS5707 if SND_AML_M6TV_TAS5707
+ if SND_AML_M6TV_TAS5707
+-choice        
+-	prompt "TAS5707 work mode"        
++choice
++	prompt "TAS5707 work mode"
+ 	default TAS5707_2_CHANNEL
+-config TAS5707_2_CHANNEL        
++config TAS5707_2_CHANNEL
+ 	bool "2 BTL channel mode"
+-config TAS5707_2_SUBWOOFER_CHANNEL        
++config TAS5707_2_SUBWOOFER_CHANNEL
+ 	bool "2 BTL subwoofer channel"
+ endchoice
+ endif
+diff --git a/sound/soc/aml/m6/Makefile b/sound/soc/aml/m6/Makefile
+old mode 100644
+new mode 100755
+index 65f03fb43455..8efab55853d8
+--- a/sound/soc/aml/m6/Makefile
++++ b/sound/soc/aml/m6/Makefile
+@@ -34,9 +34,10 @@ snd-soc-aml-m-dummy-objs := aml_m_dummy.o
+ obj-$(CONFIG_SND_AML_M_DUMMY_CODEC) += snd-soc-aml-m-dummy.o
+ 
+ # AML M6TV Machine support
+-snd-soc-aml-m6tv-audio-objs := aml_m6tv_audio.o
+ snd-soc-aml-syno9629-codec-objs := aml_syno9629_codec.o
+-obj-$(CONFIG_SND_AML_M6TV_AUDIO_CODEC) += snd-soc-aml-m6tv-audio.o
++snd-soc-aml-m6tv-audio-objs := aml_m6tv_audio.o
+ obj-$(CONFIG_SND_AML_M6TV_SYNOPSYS9629_CODEC) += snd-soc-aml-syno9629-codec.o
++obj-$(CONFIG_SND_AML_M6TV_AUDIO_CODEC) += snd-soc-aml-m6tv-audio.o
++
+ 
+ 
+diff --git a/sound/soc/aml/m6/aml_audio_codec_probe.h b/sound/soc/aml/m6/aml_audio_codec_probe.h
+new file mode 100644
+index 000000000000..19dabdce1e3f
+--- /dev/null
++++ b/sound/soc/aml/m6/aml_audio_codec_probe.h
+@@ -0,0 +1,41 @@
++#ifndef __AML_AUDIO_CODEC_DEV__
++#define __AML_AUDIO_CODEC_DEV__
++#include <linux/list.h>
++#include <linux/i2c.h>
++
++#define AML_I2C_BUS_AO 0
++#define AML_I2C_BUS_A 1
++#define AML_I2C_BUS_B 2
++#define AML_I2C_BUS_C 3
++#define AML_I2C_BUS_D 4
++
++#define NAME_SIZE 32
++
++typedef int(*aml_audio_codec_probe_fun_t)(struct i2c_adapter *);
++
++typedef struct {
++	const char* name;
++	const char* status;
++	unsigned i2c_bus_type;
++	unsigned short i2c_addr;
++	unsigned id_reg;
++	unsigned id_val;
++    unsigned capless;
++}aml_audio_codec_info_t;
++
++enum codecs_enum{
++	aml_codec = 0,
++	rt5616,
++	rt5631,
++	wm8960,
++};
++
++typedef struct {
++	enum codecs_enum codec_index;
++	char name[NAME_SIZE];
++	char name_bus[NAME_SIZE];
++}codec_info_t;
++
++extern codec_info_t codec_info;
++
++#endif
+diff --git a/sound/soc/aml/m6/aml_audio_hw.c b/sound/soc/aml/m6/aml_audio_hw.c
+index 4cc8cb0a6b1f..34692c9f48c8 100755
+--- a/sound/soc/aml/m6/aml_audio_hw.c
++++ b/sound/soc/aml/m6/aml_audio_hw.c
+@@ -724,7 +724,7 @@ void audio_set_clk(unsigned freq, unsigned fs_config)
+ 	// gate the clock on
+ 	WRITE_MPEG_REG( HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) | (1 << 8));
+ 
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TV
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TV
+ 	//Audio DAC Clock enable
+ 	WRITE_MPEG_REG(HHI_AUD_CLK_CNTL, READ_MPEG_REG(HHI_AUD_CLK_CNTL) |(1<<23));
+ /* ADC clock  configuration */
+diff --git a/sound/soc/aml/m6/aml_m6tv_audio.c b/sound/soc/aml/m6/aml_m6tv_audio.c
+old mode 100644
+new mode 100755
+index 79fb11041787..6dcc8691841a
+--- a/sound/soc/aml/m6/aml_m6tv_audio.c
++++ b/sound/soc/aml/m6/aml_m6tv_audio.c
+@@ -31,9 +31,24 @@
+ #include "aml_audio_hw.h"
+ #include <sound/aml_m6tv_audio.h>
+ 
++#ifdef CONFIG_USE_OF
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/of_gpio.h>
++#include <mach/pinmux.h>
++#include <plat/io.h>
++#endif
++
+ static struct platform_device *m6tv_audio_snd_device = NULL;
+ static struct m6tv_audio_codec_platform_data *m6tv_audio_snd_pdata = NULL;
+ //static struct m6tv_audio_private_data* m6tv_audio_snd_priv = NULL;
++struct aml_audio_private_data {
++	struct pinctrl *pin_ctl;
++	int gpio_mute;
++	bool mute_inv;
++};
++
+ #define CODEC_DEBUG  printk
+ static void m6tv_audio_dev_init(void)
+ {
+@@ -97,11 +112,12 @@ static int m6tv_audio_hw_params(struct snd_pcm_substream *substream,
+ static struct snd_soc_ops m6tv_audio_soc_ops = {
+     .prepare   = m6tv_audio_prepare,
+     .hw_params = m6tv_audio_hw_params,
+-};	
++};
+ 
+ 
+ static int m6tv_audio_set_bias_level(struct snd_soc_card *card,
+-					enum snd_soc_bias_level level)
++						struct snd_soc_dapm_context *dapm,
++						enum snd_soc_bias_level level)
+ {
+ 	int ret = 0;
+     	CODEC_DEBUG( "enter %s level: %d\n", __func__, level);
+@@ -141,13 +157,6 @@ static int m6tv_audio_resume_post(struct snd_soc_card *card)
+ 
+ static int m6tv_audio_codec_init(struct snd_soc_pcm_runtime *rtd)
+ {
+-    struct snd_soc_codec *codec = rtd->codec;
+-    struct snd_soc_dapm_context *dapm = &codec->dapm;
+-    int ret = 0;
+-
+-    CODEC_DEBUG( "enter %s\n", __func__);
+-
+-  
+     return 0;
+ }
+ #ifdef CONFIG_SND_AML_M6TV_STA380
+@@ -162,7 +171,6 @@ static int m6tv_sta381xx_init(struct snd_soc_dapm_context *dapm)
+ #ifdef CONFIG_SND_AML_M6TV_TAS5711
+ static int m6tv_tas5711_init(struct snd_soc_dapm_context *dapm)
+ {
+-	struct snd_soc_codec *codec = dapm->codec;
+ 	CODEC_DEBUG("~~~~%s\n", __func__);
+ 
+ 	return 0;
+@@ -180,16 +188,16 @@ static struct snd_soc_dai_link m6tv_audio_dai_link[] = {
+         .codec_name = "syno9629.0",
+         .ops = &m6tv_audio_soc_ops,
+     },
+-#endif    
++#endif
+ };
+ struct snd_soc_aux_dev m6tv_audio_aux_dev[] = {
+-#ifdef CONFIG_SND_AML_M6TV_RT5631	
++#ifdef CONFIG_SND_AML_M6TV_RT5631
+ 	{
+ 		.name = "rt5631",
+ 		.codec_name = "rt5631.0-001a",
+ 		.init = NULL,
+ 	},
+-#endif	
++#endif
+ #ifdef CONFIG_SND_AML_M6TV_STA380
+ 	{
+ 		.name = "sta381xx",
+@@ -200,29 +208,22 @@ struct snd_soc_aux_dev m6tv_audio_aux_dev[] = {
+ #ifdef CONFIG_SND_AML_M6TV_TAS5711
+ 	{
+ 		.name = "tas5711",
+-		.codec_name = "tas5711.0-001b",
++		.codec_name = "tas5711.1-001b",
+ 		.init = m6tv_tas5711_init,
+ 	},
+ #endif
+ };
+ 
+ static struct snd_soc_codec_conf m6tv_audio_codec_conf[] = {
+-#ifdef CONFIG_SND_AML_M6TV_RT5631	
+-	
+-	{
+-		.dev_name = "rt5631.0-001a",
+-		.name_prefix = "b",
+-	},
+-#endif
+-#ifdef CONFIG_SND_AML_M6TV_STA380	
++#ifdef CONFIG_SND_AML_M6TV_STA380
+ 	{
+ 		.dev_name = "sta381xx.0-001c",
+ 		.name_prefix = "AMP",
+ 	},
+ #endif
+-#ifdef CONFIG_SND_AML_M6TV_TAS5711	
++#ifdef CONFIG_SND_AML_M6TV_TAS5711
+ 	{
+-		.dev_name = "tas5711.0-001b",
++		.dev_name = "tas5711.1-001b",
+ 		.name_prefix = "AMP",
+ 	},
+ #endif
+@@ -237,7 +238,7 @@ static struct snd_soc_card snd_soc_m6tv_audio = {
+     .num_aux_devs = ARRAY_SIZE(m6tv_audio_aux_dev),
+     .codec_conf = m6tv_audio_codec_conf,
+     .num_configs = ARRAY_SIZE(m6tv_audio_codec_conf),
+-    
++
+ #ifdef CONFIG_PM_SLEEP
+ 	.suspend_pre    = m6tv_audio_suspend_pre,
+ 	.suspend_post   = m6tv_audio_suspend_post,
+@@ -246,53 +247,74 @@ static struct snd_soc_card snd_soc_m6tv_audio = {
+ #endif
+ };
+ 
++static void aml_m6_pinmux_init(struct snd_soc_card *card)
++{
++	struct aml_audio_private_data *p_aml_audio;
++	const char *str=NULL;
++	int ret = 0;
+ 
++	p_aml_audio = snd_soc_card_get_drvdata(card);
++	p_aml_audio->pin_ctl = devm_pinctrl_get_select(card->dev, "aml_m6tv_audio");
++
++	ret = of_property_read_string(card->dev->of_node, "mute_gpio", &str);
++	if (ret < 0) {
++		printk("aml_snd_m6tv: failed to get mute_gpio!\n");
++	}else{
++		p_aml_audio->gpio_mute = amlogic_gpio_name_map_num(str);
++		p_aml_audio->mute_inv = of_property_read_bool(card->dev->of_node,"mute_inv");
++		amlogic_gpio_request_one(p_aml_audio->gpio_mute,GPIOF_OUT_INIT_LOW,"mute_spk");
++		amlogic_set_value(p_aml_audio->gpio_mute, 1, "mute_spk");
++	}
+ 
+ 
++	printk("=%s=,aml_m6tv_pinmux_init done\n",__func__);
++}
++
++static void aml_m6_pinmux_deinit(struct snd_soc_card *card)
++{
++	struct aml_audio_private_data *p_aml_audio;
++
++	p_aml_audio = snd_soc_card_get_drvdata(card);
++
++	//amlogic_gpio_free(p_aml_audio->gpio_hp_det,"rt5631");
++	devm_pinctrl_put(p_aml_audio->pin_ctl);
++}
+ 
+ 
+ static int m6tv_audio_audio_probe(struct platform_device *pdev)
+ {
+ 	int ret = 0;
++	struct snd_soc_card *card = &snd_soc_m6tv_audio;
++	struct aml_audio_private_data *p_aml_audio;
+ 
+ 	CODEC_DEBUG( "enter %s\n", __func__);
+-
+-	m6tv_audio_snd_pdata = pdev->dev.platform_data;
+-	snd_BUG_ON(!m6tv_audio_snd_pdata);
+-#if 0
+-	m6tv_audio_snd_priv = (struct m6tv_audio_private_data*)kzalloc(sizeof(struct m6tv_audio_private_data), GFP_KERNEL);
+-	if (!m6tv_audio_snd_priv) {
+-		CODEC_DEBUG(KERN_ERR "ASoC: Platform driver data allocation failed\n");
+-		return -ENOMEM;
+-	}
+-#endif
+-	m6tv_audio_snd_device = platform_device_alloc("soc-audio", -1);
+-	if (!m6tv_audio_snd_device) {
+-		CODEC_DEBUG(KERN_ERR "ASoC: Platform device allocation failed\n");
++	p_aml_audio = devm_kzalloc(&pdev->dev,
++			sizeof(struct aml_audio_private_data), GFP_KERNEL);
++	if (!p_aml_audio) {
++		dev_err(&pdev->dev, "Can't allocate aml_audio_private_data\n");
+ 		ret = -ENOMEM;
+ 		goto err;
+ 	}
+ 
+-	platform_set_drvdata(m6tv_audio_snd_device, &snd_soc_m6tv_audio);
+-	m6tv_audio_snd_device->dev.platform_data = m6tv_audio_snd_pdata;
+-
+-	ret = platform_device_add(m6tv_audio_snd_device);
++	card->dev = &pdev->dev;
++	platform_set_drvdata(pdev, card);
++	snd_soc_card_set_drvdata(card, p_aml_audio);
++	if (!(pdev->dev.of_node)) {
++		dev_err(&pdev->dev, "Must be instantiated using device tree\n");
++		ret = -EINVAL;
++		goto err;
++	}
++	ret = snd_soc_register_card(card);
+ 	if (ret) {
+-		CODEC_DEBUG(KERN_ERR "ASoC: Platform device allocation failed\n");
+-		goto err_device_add;
++		dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n",
++			ret);
++		goto err;
+ 	}
+ 
+-//	m6tv_audio_snd_priv->bias_level = SND_SOC_BIAS_OFF;
+-//	m6tv_audio_snd_priv->clock_en = 0;
+-
+-	m6tv_audio_dev_init();
+-	return ret;
+-err_device_add:
+-	platform_device_put(m6tv_audio_snd_device);
++	aml_m6_pinmux_init(card);
+ 
+ err:
+ //	kfree(m6tv_audio_snd_priv);
+-
+ 	return ret;
+ }
+ 
+@@ -308,12 +330,23 @@ static int m6tv_audio_audio_remove(struct platform_device *pdev)
+     return ret;
+ }
+ 
++#ifdef CONFIG_USE_OF
++static const struct of_device_id amlogic_audio_dt_match[]={
++	{	.compatible = "sound_card,aml_m6tv_audio",
++	},
++	{},
++};
++#else
++#define amlogic_audio_dt_match NULL
++#endif
++
+ static struct platform_driver aml_m6tv_audio_driver = {
+     .probe  = m6tv_audio_audio_probe,
+-    .remove = __devexit_p(m6tv_audio_audio_remove),
++    .remove = m6tv_audio_audio_remove,
+     .driver = {
+         .name = "aml_m6tv_audio",
+         .owner = THIS_MODULE,
++        .of_match_table = amlogic_audio_dt_match,
+     },
+ };
+ 
+diff --git a/sound/soc/aml/m6/aml_syno9629_codec.c b/sound/soc/aml/m6/aml_syno9629_codec.c
+old mode 100644
+new mode 100755
+index 88911db98db2..d24bd2b3d7f6
+--- a/sound/soc/aml/m6/aml_syno9629_codec.c
++++ b/sound/soc/aml/m6/aml_syno9629_codec.c
+@@ -26,8 +26,6 @@
+ #define Rd  READ_MPEG_REG
+ static struct snd_soc_codec *aml_syno9629_codec;
+ 
+-static int (*is_hp_pluged)(void) = NULL;
+-static void (*mute_spk)(struct snd_soc_codec* codec, int flag) = NULL;
+ static void latch (void);
+ static void acodec_delay_us (int us);
+ 
+@@ -51,7 +49,7 @@ static const unsigned int linein_values[] = {
+     };
+ 
+ unsigned long aml_rate_table[] = {
+-    8000, 11025, 12000, 16000, 22050, 24000, 32000, 
++    8000, 11025, 12000, 16000, 22050, 24000, 32000,
+     44100, 48000, 88200, 96000, 192000
+ };
+ static unsigned int acodec_regbank[ADAC_MAXREG] = {
+@@ -93,7 +91,7 @@ static void set_acodec_source (unsigned int src)
+ {
+     unsigned long data32;
+     unsigned int i;
+-    
++
+     // Disable acodec clock input and its DAC input
+     data32  = 0;
+     data32 |= 0     << 4;   // [5:4]    acodec_data_sel: 00=disable acodec_sdin; 01=Select pcm data; 10=Select AIU I2S data; 11=Not allowed.
+@@ -105,7 +103,7 @@ static void set_acodec_source (unsigned int src)
+     data32 |= 0      << 4;  // [5:4]    acodec_data_sel: 00=disable acodec_sdin; 01=Select pcm data; 10=Select AIU I2S data; 11=Not allowed.
+     data32 |= src   << 0;   // [1:0]    acodec_clk_sel: 00=Disable acodec_sclk; 01=Select pcm clock; 10=Select AIU aoclk; 11=Not allowed.
+     Wr(AIU_CODEC_CLK_DATA_CTRL, data32);
+-    
++
+     // Wait until clock change is settled
+     i = 0;
+     while ( (((Rd(AIU_CODEC_CLK_DATA_CTRL)) >> 8) & 0x3) != src ) {
+@@ -154,7 +152,7 @@ static void adac_rd_check_reg (unsigned long addr, unsigned long exp_data, unsig
+ static void acodec_startup_sequence (void)
+ {
+     stimulus_print("[TEST.C] audio CODEC Startup Sequence -- Begin\n");
+-/*  
++/*
+ 1.	select the master clock mode mclksel[3:0] bit
+ 2.	start the master clock
+ 3.	set pdz bit to high
+@@ -163,12 +161,12 @@ static void acodec_startup_sequence (void)
+ 6.	start the individual codec blocks
+ 
+ 	7.1.1	Pop free start up recommendations
+-	To obtain a pop-free start-up for the playback channel, the corresponding 
++	To obtain a pop-free start-up for the playback channel, the corresponding
+ 	blocks in the desired playback signal path must also be enable when setting
+-	the master power up control active, as per the start-up sequence step 3 
++	the master power up control active, as per the start-up sequence step 3
+ 	(above).
+ 
+-	For example, when setting pdz bit to high, pddacl/rz bit, pdhsdrvl/rz bit 
++	For example, when setting pdz bit to high, pddacl/rz bit, pdhsdrvl/rz bit
+ 	and/or pdauxdrvl/rz bit should also be set to high at the same time to
+ 	obtain a clean, pop-free start up.
+ 	By using the latch signal properly, it is possible to guarantee that all the
+@@ -187,11 +185,11 @@ static void acodec_startup_sequence (void)
+ //    adac_wr_reg(0x15, 0x00);
+ //    latch();
+     acodec_delay_us(3000);
+-    
++
+     // Disable system reset (In power Down and Out of Reset)
+     Wr(AIU_AUDAC_CTRL0, Rd(AIU_AUDAC_CTRL0) & (~(1<<15)));
+     acodec_delay_us(3000);
+-    
++
+     stimulus_print("[TEST.C] audio CODEC Startup Sequence -- End\n");
+ } /* acodec_startup_sequence */
+ 
+@@ -222,7 +220,7 @@ static void acodec_config (unsigned long mclkseladc,   // [3:0]: 0=256*Fs; 1=384
+     adac_wr_reg(DAC_MCLK_SEL, mclkseldac); //256fs
+     adac_wr_reg(ADC_I2S_FS_SEL, i2sfsadc);
+     adac_wr_reg(DAC_I2S_FS_SEL, i2sfsdac); //48k
+-    adac_wr_reg(ADAC_I2S_MODE_SEL, (i2smsmode<<3) | i2smode); //slave mode ,i2s 
++    adac_wr_reg(ADAC_I2S_MODE_SEL, (i2smsmode<<3) | i2smode); //slave mode ,i2s
+     adac_wr_reg(ADAC_MUTE_CTRL0, (pgamute<<2) | recmute); //un mute
+     adac_wr_reg(ADAC_MUTE_CTRL2, (hs1mute<<4) | lmmute);  //un mute
+     adac_wr_reg(ADAC_MUTE_CTRL4, (ldr1outmute<<2));
+@@ -263,7 +261,7 @@ static void acodec_prepare_register (void)
+     //acodec_delay_us(4000); // wait for 4 ms.
+ 
+     // Set bias current to 1/40 of the nominal current
+-    adac_wr_reg(ADAC_POWER_CUM_CTRL, 0x0b); 
++    adac_wr_reg(ADAC_POWER_CUM_CTRL, 0x0b);
+     latch();
+     stimulus_print("[TEST.C] acodec_prepare_register -- End\n");
+ } /* acodec_prepare_register */
+@@ -320,7 +318,7 @@ static void acodec_powerup_bypassfastcharge (void)
+     adac_wr_reg(ADAC_RESET, 0x00);
+     latch();
+     adac_wr_reg(ADAC_RESET, 0x03);
+-    latch();	
++    latch();
+     //acodec_delay_us(4000); // wait for 4 ms.
+     adac_wr_reg(ADAC_POWER_CTRL0, 0x0f);
+     latch();
+@@ -359,26 +357,26 @@ static void aml_reset_path(struct snd_soc_codec* codec, AML_PATH_SET_TYPE type)
+     CODEC_DEBUG( "enter %s\n", __func__);
+ 
+     return ;
+-#if 0	
++#if 0
+     unsigned int pwr_reg2 = snd_soc_read(codec, ADAC_POWER_CTRL_REG2);
+     latch_(codec);
+     snd_soc_write(codec, ADAC_POWER_CTRL_REG2, pwr_reg2&(~(1<<7)));
+     latch_(codec);
+     snd_soc_write(codec, ADAC_POWER_CTRL_REG2, pwr_reg2|(1<<7));
+     latch_(codec);
+-     
++
+     if (AML_PWR_DOWN == type)
+     {
+         snd_soc_write(codec, ADAC_POWER_CTRL_REG2, pwr_reg2&(~(1<<7)));
+         latch_(codec);
+     }
+-    
++
+     if (AML_PWR_KEEP == type)
+     {
+         snd_soc_write(codec, ADAC_POWER_CTRL_REG2, pwr_reg2);
+         latch_(codec);
+     }
+-#endif	
++#endif
+ }
+ 
+ static void aml_syno9629_reset(struct snd_soc_codec* codec, bool first_time)
+@@ -390,7 +388,7 @@ static void aml_syno9629_reset(struct snd_soc_codec* codec, bool first_time)
+ 	if (first_time)
+ 	{
+ 		CODEC_DEBUG( " first time enter %s\n", __func__);
+-	
++
+ 		audio_set_clk(AUDIO_CLK_FREQ_48,0);
+ 		set_acodec_source(2);
+ 		WRITE_MPEG_REG(AUDIN_SOURCE_SEL, (1<<0)); // select audio codec output as I2S source
+@@ -453,8 +451,8 @@ static void aml_syno9629_reset(struct snd_soc_codec* codec, bool first_time)
+ 		    0x0404, // pgavol[15:0]: Input PGA volume control. [7:0] Left; [15:8] Right. 0x04=0dB.
+ 		    0x5454, // lmvol[15:0]: Digital playback master volume control. [7:0] Left; [15:8] Right. 0x54=0dB.
+ 		    0x2828, // hs1vol[15:0]: Headset analog volume control. [7:0] Left; [15:8] Right. 0x28=0dB.
+-		    0x0909, // pgasel[15:0]: Left PGA input selection. [7:0] Left; [15:8] Right. 0x01=Input1, 0x03=Input2, 0x05=Input3, 0x09=Input4, 0x11=Input5, 0x21=Input6, 0x41=Input7, 0x81=Input8, others=Rsrv.
+-		    0x0202, // ldr1sel[15:0]: Playback analog mixer input selection. [7:0] Left; [15:8] Right. [0]:1=Enable left DAC output; [1]:1=Enable left PGA; [2]:1=Enable right DAC output.
++		    0x0101, // pgasel[15:0]: Left PGA input selection. [7:0] Left; [15:8] Right. 0x01=Input1, 0x03=Input2, 0x05=Input3, 0x09=Input4, 0x11=Input5, 0x21=Input6, 0x41=Input7, 0x81=Input8, others=Rsrv.
++		    0x0101, // ldr1sel[15:0]: Playback analog mixer input selection. [7:0] Left; [15:8] Right. [0]:1=Enable left DAC output; [1]:1=Enable left PGA; [2]:1=Enable right DAC output.
+ 		    0,      // ctr[1:0]: test mode sel. 0=Normal, 1=Digital filter loopback, 2=Digital filter bypass, 3=Digital audio I/F loopback.
+ 		    0,      // recmix[1:0]: Record digital mixer sel.
+ 		    0,      // enhp: Record channel high pass filter enable.
+@@ -462,38 +460,15 @@ static void aml_syno9629_reset(struct snd_soc_codec* codec, bool first_time)
+ 		acodec_prepare_register();
+ 
+ 		acodec_powerup_bypassfastcharge();
+-		//acodec_powerup_fastcharge();	
++		//acodec_powerup_fastcharge();
+ 		// Check audio DAC register read-back values
+ 		stimulus_print("[TEST.C] Checking audio DAC register read-back values ...\n");
+ 		for (i = 0; i < 252; i ++) {
+ 			adac_rd_check_reg(i, acodec_regbank[i], 0);
+ 		}
+-#if 0		
+-		adac_wr_reg(0,  0); //rstadzpdz,rstdaczpdz  low
+-		latch();
+-		adac_wr_reg(0, 3);//rstadzpdz,rstdaczpdz  high
+-		latch();
+-#endif		
++
+ 		stimulus_print("[TEST.C] ... Done audio CODEC power-up bypass fast charge\n");
+ 	}
+-	if (0)
+-	{
+-		CODEC_DEBUG( "  enter %s\n", __func__);	
+-	//	snd_soc_write(codec, ADAC_LS_MIX_CTRL_LSB, 1);
+-	//	snd_soc_write(codec, ADAC_LS_MIX_CTRL_MSB, 0);
+-		aml_reset_path(codec, AML_PWR_UP);
+-
+-		latch_(codec);
+-		snd_soc_write(codec, ADAC_RESET, (0<<1));
+-		latch_(codec);
+-		latch_(codec);
+-		latch_(codec);
+-		snd_soc_write(codec, ADAC_RESET, (1<<1));
+-		latch_(codec);
+-		latch_(codec);
+-	}
+-
+-	//msleep(200);
+ }
+ 
+ 
+@@ -521,7 +496,7 @@ static int post_reset(struct snd_soc_dapm_widget *w,
+ static int aml_switch_get_enum(struct snd_kcontrol *kcontrol,
+ 	struct snd_ctl_elem_value *ucontrol)
+ {
+-	CODEC_DEBUG( "enter %s\n", __func__);
++	//CODEC_DEBUG( "enter %s\n", __func__);
+ #if 0
+ 	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+@@ -558,7 +533,7 @@ static int aml_switch_get_enum(struct snd_kcontrol *kcontrol,
+     default:
+     break;
+     }
+-    
++
+ 	list_for_each_entry(w, &codec->card->widgets, list) {
+         if (lname && !strcmp(lname, w->name))
+             ucontrol->value.enumerated.item[0] = w->connected;
+@@ -572,7 +547,7 @@ static int aml_switch_get_enum(struct snd_kcontrol *kcontrol,
+ static int aml_switch_put_enum(struct snd_kcontrol *kcontrol,
+ 	struct snd_ctl_elem_value *ucontrol)
+ {
+-	CODEC_DEBUG( "enter %s\n", __func__);
++	//CODEC_DEBUG( "enter %s\n", __func__);
+ #if 0
+ 	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+@@ -653,16 +628,16 @@ static int aml_ai_source_get_enum(struct snd_kcontrol *kcontrol,
+ {
+     //struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+     //struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+-	CODEC_DEBUG( "enter %s\n", __func__);
++	//CODEC_DEBUG( "enter %s\n", __func__);
+ 
+     if (READ_MPEG_REG(AUDIN_SOURCE_SEL) == 0)
+         WRITE_MPEG_REG(AUDIN_SOURCE_SEL, (1<<0)); // select audio codec output as I2S source
+-    
+-    if (READ_MPEG_REG(AUDIN_SOURCE_SEL) == 1) 
++
++    if (READ_MPEG_REG(AUDIN_SOURCE_SEL) == 1)
+         ucontrol->value.enumerated.item[0] = 0;// linein
+     else
+         ucontrol->value.enumerated.item[0] = 1;//hdmi
+-        
++
+     return 0;
+ }
+ 
+@@ -671,11 +646,11 @@ static int aml_ai_source_put_enum(struct snd_kcontrol *kcontrol,
+ {
+     struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+     //struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+-    
++
+     if (ucontrol->value.enumerated.item[0] == 0)
+         WRITE_MPEG_REG(AUDIN_SOURCE_SEL, (1<<0)); // select audio codec output as I2S source
+     else{
+-  	 WRITE_MPEG_REG(AUDIN_SOURCE_SEL,(0  <<12)   | // [14:12]cntl_hdmirx_chsts_sel: 0=Report chan1 status; 1=Report chan2 status; ...; 
++  	 WRITE_MPEG_REG(AUDIN_SOURCE_SEL,(0  <<12)   | // [14:12]cntl_hdmirx_chsts_sel: 0=Report chan1 status; 1=Report chan2 status; ...;
+ 
+                                             (0xf<<8)    | // [11:8] cntl_hdmirx_chsts_en
+ 
+@@ -683,11 +658,11 @@ static int aml_ai_source_put_enum(struct snd_kcontrol *kcontrol,
+ 
+                                             (2 << 0));    // [1:0]  i2sin_src_sel: 2=Select HDMIRX I2S output as AUDIN source
+ 
+-    }    
++    }
+ 	// reset adc data path
+     snd_soc_write(codec, ADAC_RESET, 1);
+     snd_soc_write(codec, ADAC_RESET, 3);
+-    
++
+     return 0;
+ }
+ 
+@@ -762,7 +737,7 @@ static const struct soc_enum audio_in_source_enum =
+ static const struct snd_kcontrol_new amlsyno9629_snd_controls[] = {
+ 	SOC_DOUBLE_R_EXT_TLV("LINEOUT Playback Volume", DAC_PLYBACK_MVOL_LSB_CTRL, DAC_PLYBACK_MVOL_MSB_CTRL,
+ 	       0, 84, 0, snd_soc_get_volsw_2r, aml_put_volsw_2r, lineout_volume),
+-	      
++
+ 	 SOC_DOUBLE_R_EXT_TLV("HeadSet Playback Volume", DAC_HS_VOL_LSB_CTRL, DAC_HS_VOL_MSB_CTRL,
+ 	       0, 46, 0, snd_soc_get_volsw_2r, aml_put_volsw_2r, hs_volume),
+ 
+@@ -775,19 +750,24 @@ static const struct snd_kcontrol_new amlsyno9629_snd_controls[] = {
+ 
+     SOC_ENUM_EXT("LOUT Playback Switch", lineout_op_modes_enum,
+ 		aml_switch_get_enum,aml_switch_put_enum),
+-		
++
+     SOC_ENUM_EXT("HP Playback Switch", hp_op_modes_enum,
+ 		aml_switch_get_enum,aml_switch_put_enum),
+-		
++
+ 	SOC_ENUM_EXT("LIN Capture Switch", linein_op_modes_enum,
+ 		aml_switch_get_enum,aml_switch_put_enum),
+-		
++
+ 	SOC_ENUM_EXT("SP Playback Switch", sp_op_modes_enum,
+ 		aml_switch_get_enum,aml_switch_put_enum),
+ 
+     SOC_ENUM_EXT("Audio In Source", audio_in_source_enum,
+         aml_ai_source_get_enum,aml_ai_source_put_enum),
+ 
++	SOC_DOUBLE_R("Output Mixer DAC Switch", DAC_PLYBACK_MIXER_LSB_CTRL,
++					DAC_PLYBACK_MIXER_MSB_CTRL, 0, 1, 0),
++	SOC_DOUBLE_R("Output Mixer Bypass Switch", DAC_PLYBACK_MIXER_LSB_CTRL,
++					DAC_PLYBACK_MIXER_MSB_CTRL, 1, 1, 0),
++	SOC_SINGLE("Left Right Line Out Mute",ADAC_MUTE_CTRL0,0,0xff,0)
+ };
+ #if 0
+ static const struct snd_kcontrol_new lineoutl_switch_controls =
+@@ -815,7 +795,7 @@ static const struct snd_soc_dapm_widget aml_syno9629_dapm_widgets[] = {
+ 
+ 	SND_SOC_DAPM_INPUT("LINEINL"),
+ 	SND_SOC_DAPM_INPUT("LINEINR"),
+-	
++
+ 	SND_SOC_DAPM_DAC("DACL", "Left DAC Playback", ADAC_POWER_CTRL_REG1, 0, 0),
+ 	SND_SOC_DAPM_DAC("DACR", "Right DAC Playback", ADAC_POWER_CTRL_REG1, 1, 0),
+ 	SND_SOC_DAPM_ADC("ADCL", "Left ADC Capture", ADAC_POWER_CTRL_REG2, 0, 0),
+@@ -838,10 +818,10 @@ static const struct snd_soc_dapm_widget aml_syno9629_dapm_widgets[] = {
+ 			    &lineinr_switch_controls),
+ 
+        SND_SOC_DAPM_POST("RESET", post_reset),
+-	
++
+ 	//SND_SOC_DAPM_PGA("HSL", ADAC_POWER_CTRL_REG1, 4, 0, NULL, 0),
+ 	//SND_SOC_DAPM_PGA("HSR", ADAC_POWER_CTRL_REG1, 5, 0, NULL, 0),
+-	
++
+ 	//SND_SOC_DAPM_PGA("PDZ", ADAC_POWER_CTRL_REG2, 7, 0, NULL, 0),
+ 	SND_SOC_DAPM_MICBIAS("MICBIAS", ADAC_POWER_CTRL_REG2, 5, 0)
+ };
+@@ -853,7 +833,7 @@ static const struct snd_soc_dapm_route aml_syno9629_audio_map[] = {
+ 	{"LINEOUTL Switch", NULL, "DACL"},
+ 	{"LINEOUTR", NULL, "LINEOUTR Switch"},
+ 	{"LINEOUTR Switch", NULL, "DACR"},
+-	
++
+ 	{"HP_L", NULL, "HP_L Switch"},
+ 	{"HP_L Switch", NULL, "DACL"},
+ 	{"HP_R", NULL, "HP_R Switch"},
+@@ -891,7 +871,7 @@ static unsigned int aml_syno9629_read(struct snd_soc_codec *codec,
+ 	//u16 *reg_cache = codec->reg_cache;
+ 	if (reg >= codec->reg_size/sizeof(u16))
+ 		return -EINVAL;
+-	
++
+ 	return READ_APB_REG(APB_BASE+(reg<<2));
+ 	//return reg_cache[reg];
+ }
+@@ -910,11 +890,11 @@ static int aml_syno9629_codec_hw_params(struct snd_pcm_substream *substream,
+ 	for (rate_idx = 0; rate_idx < ARRAY_SIZE(aml_rate_table); rate_idx++){
+ 		if (aml_rate_table[rate_idx] == rate)
+ 			break;
+-	}	
++	}
+ 	if (ARRAY_SIZE(aml_rate_table) == rate_idx){
+ 		printk(" sample rate not supported by codec \n");
+ 		rate_idx = 0x8; //48k
+-	}	
++	}
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+ 		snd_soc_write(codec, DAC_I2S_FS_SEL, rate_idx);
+ 	else
+@@ -931,7 +911,7 @@ static int aml_syno9629_codec_pcm_prepare(struct snd_pcm_substream *substream,
+ 
+ 	//struct snd_soc_codec *codec = dai->codec;
+ 	/* set active */
+-	
++
+ 	// TODO
+ 
+ 	return 0;
+@@ -946,7 +926,7 @@ static void aml_syno9629_codec_shutdown(struct snd_pcm_substream *substream,
+ 	/* deactivate */
+ 	if (!codec->active) {
+ 		udelay(50);
+-		
++
+ 		// TODO
+ 	}
+ }
+@@ -978,7 +958,7 @@ static int aml_syno9629_codec_set_dai_sysclk(struct snd_soc_dai *codec_dai,
+ 
+ 	//struct snd_soc_codec *codec = codec_dai->codec;
+ 	unsigned long data = 0;
+-	
++
+ 	switch (freq) {
+ 	case 32000:
+ 		data = 6;
+@@ -1058,9 +1038,9 @@ static int aml_syno9629_codec_set_dai_fmt(struct snd_soc_dai *codec_dai,
+ 	}
+ 
+ 	/* set iface */
+-	
++
+ 	// TODO
+-	
++
+ 	return 0;
+ }
+ 
+@@ -1119,19 +1099,19 @@ static int aml_syno9629_set_bias_level(struct snd_soc_codec *codec,
+ 
+ static int aml_syno9629_soc_probe(struct snd_soc_codec *codec){
+ 	struct snd_soc_dapm_context *dapm = &codec->dapm;
+-	CODEC_DEBUG( "enter %s\n", __func__);	
++	CODEC_DEBUG( "enter %s\n", __func__);
+ 	aml_syno9629_reset(codec, true);
+ 	aml_syno9629_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
+-	
+-	snd_soc_add_controls(codec, amlsyno9629_snd_controls,
++
++	snd_soc_add_codec_controls(codec, amlsyno9629_snd_controls,
+ 				ARRAY_SIZE(amlsyno9629_snd_controls));
+-#if 0	
++#if 0
+ 	snd_soc_dapm_new_controls(dapm, aml_syno9629_dapm_widgets,
+ 				  ARRAY_SIZE(aml_syno9629_dapm_widgets));
+ 
+ 	snd_soc_dapm_add_routes(dapm, aml_syno9629_audio_map, ARRAY_SIZE(aml_syno9629_audio_map));
+-#endif	
+-      aml_syno9629_codec = codec;                
++#endif
++      aml_syno9629_codec = codec;
+     return 0;
+ }
+ static int aml_syno9629_soc_remove(struct snd_soc_codec *codec){
+@@ -1140,7 +1120,7 @@ static int aml_syno9629_soc_remove(struct snd_soc_codec *codec){
+ static int aml_syno9629_soc_suspend(struct snd_soc_codec *codec,	pm_message_t state){
+ 	CODEC_DEBUG( "enter %s\n", __func__);
+ 	WRITE_MPEG_REG( HHI_GCLK_MPEG1, READ_MPEG_REG(HHI_GCLK_MPEG1)&~(1 << 2));
+-	aml_reset_path(codec, AML_PWR_DOWN);	
++	aml_reset_path(codec, AML_PWR_DOWN);
+ 	return 0;
+ }
+ 
+@@ -1148,7 +1128,7 @@ static int aml_syno9629_soc_resume(struct snd_soc_codec *codec){
+ 	CODEC_DEBUG( "enter %s\n", __func__);
+ 
+ 	WRITE_MPEG_REG( HHI_GCLK_MPEG1, READ_MPEG_REG(HHI_GCLK_MPEG1)|(1 << 2));
+-	aml_syno9629_reset(codec, true);	
++	aml_syno9629_reset(codec, true);
+ 	return 0;
+ }
+ 
+@@ -1173,21 +1153,31 @@ static struct snd_soc_codec_driver soc_codec_dev_syno9629 = {
+ static int aml_syno9629_codec_platform_probe(struct platform_device *pdev)
+ {
+ 	CODEC_DEBUG( "enter %s\n", __func__);
+-	return snd_soc_register_codec(&pdev->dev, 
++	return snd_soc_register_codec(&pdev->dev,
+ 		&soc_codec_dev_syno9629, &aml_syno9629_codec_dai, 1);
+ }
+ 
+ static int __exit aml_syno9629_codec_platform_remove(struct platform_device *pdev)
+-{	
++{
+ 	snd_soc_unregister_codec(&pdev->dev);
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_USE_OF
++static const struct of_device_id amlogic_audio_codec_dt_match[]={
++    { .compatible = "amlogic,syno9629", },
++    {},
++};
++#else
++#define amlogic_audio_dt_match NULL
++#endif
++
+ static struct platform_driver aml_syno9629_codec_platform_driver = {
+ 	.driver = {
+ 		.name = "syno9629",
+ 		.owner = THIS_MODULE,
+-		},
++		.of_match_table = amlogic_audio_codec_dt_match,
++	},
+ 	.probe = aml_syno9629_codec_platform_probe,
+ 	.remove = __exit_p(aml_syno9629_codec_platform_remove),
+ };
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index 895b9dc7c200..e3264eeaa9f3 100755
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -126,6 +126,8 @@ config SND_SOC_ALL_CODECS
+ 	select SND_SOC_WM9705 if SND_SOC_AC97_BUS
+ 	select SND_SOC_WM9712 if SND_SOC_AC97_BUS
+ 	select SND_SOC_WM9713 if SND_SOC_AC97_BUS
++	select SND_SOC_TAS5711 if I2C
++	select SND_SOC_TAS5707 if I2C
+ 	select SND_SOC_DUMMY_CODEC
+ 	select SND_SOC_AML_M8_CODEC
+         help
+@@ -514,7 +516,13 @@ config SND_SOC_WM9713
+ 
+ config SND_SOC_AML_M8_CODEC
+ 	tristate
+-	
++
++config SND_SOC_TAS5711
++        tristate
++
++config SND_SOC_TAS5707
++        tristate
++
+ # Amp
+ config SND_SOC_LM4857
+ 	tristate
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 709ecf5f8c41..68d448f510a5 100755
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -121,8 +121,9 @@ snd-soc-wm9713-objs := wm9713.o
+ snd-soc-wm-hubs-objs := wm_hubs.o
+ snd-soc-dummy_codec-objs := dummy_codec.o
+ snd-soc-aml-m8-codec-objs := aml_m8_codec.o
+-aml_audio_codec_probe-objs := common/aml_audio_codec_probe.o
+ snd-soc-pcm2bt-objs  := pcm2bt.o
++snd-soc-tas5711-objs := tas5711.o
++snd-soc-tas5707-objs := tas5707.o
+ 
+ # Amp
+ snd-soc-max9877-objs := max9877.o
+@@ -250,8 +251,9 @@ obj-$(CONFIG_SND_SOC_WM_ADSP)	+= snd-soc-wm-adsp.o
+ obj-$(CONFIG_SND_SOC_WM_HUBS)	+= snd-soc-wm-hubs.o
+ obj-$(CONFIG_SND_SOC_DUMMY_CODEC)   += snd-soc-dummy_codec.o
+ obj-$(CONFIG_SND_SOC_AML_M8_CODEC)	+= snd-soc-aml-m8-codec.o
+-#obj-y += aml_audio_codec_probe.o
+ obj-$(CONFIG_SND_SOC_PCM2BT)    += snd-soc-pcm2bt.o
++obj-$(CONFIG_SND_SOC_TAS5711)   += snd-soc-tas5711.o
++obj-$(CONFIG_SND_SOC_TAS5707)   += snd-soc-tas5707.o
+ 
+ # Amp
+ obj-$(CONFIG_SND_SOC_MAX9877)	+= snd-soc-max9877.o
+diff --git a/sound/soc/codecs/tas5707.c b/sound/soc/codecs/tas5707.c
+new file mode 100644
+index 000000000000..27446dde35f0
+--- /dev/null
++++ b/sound/soc/codecs/tas5707.c
+@@ -0,0 +1,685 @@
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/slab.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/tlv.h>
++#include <sound/tas57xx.h>
++
++#include "tas5707.h"
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++#include <linux/earlysuspend.h>
++static struct early_suspend early_suspend;
++static void tas5707_early_suspend(struct early_suspend *h);
++static void tas5707_late_resume(struct early_suspend *h);
++#endif
++
++#define CODEC_DEBUG printk
++
++#define tas5707_RATES (SNDRV_PCM_RATE_8000 | \
++		      SNDRV_PCM_RATE_11025 | \
++		      SNDRV_PCM_RATE_16000 | \
++		      SNDRV_PCM_RATE_22050 | \
++		      SNDRV_PCM_RATE_32000 | \
++		      SNDRV_PCM_RATE_44100 | \
++		      SNDRV_PCM_RATE_48000)
++
++#define tas5707_FORMATS \
++	(SNDRV_PCM_FMTBIT_S16_LE  | SNDRV_PCM_FMTBIT_S16_BE  | \
++	 SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S20_3BE | \
++	 SNDRV_PCM_FMTBIT_S24_LE  | SNDRV_PCM_FMTBIT_S24_BE)
++
++/* Power-up register defaults */
++static const u8 tas5707_regs[DDX_NUM_BYTE_REG] = {
++	0x6c, 0x70, 0x00, 0xA0, 0x05, 0x40, 0x00, 0xFF,
++	0x30, 0x30,	0xFF, 0x00, 0x00, 0x00, 0x91, 0x00,//0x0F
++	0x02, 0xAC, 0x54, 0xAC,	0x54, 0x00, 0x00, 0x00,//0x17
++	0x00, 0x30, 0x0F, 0x82, 0x02,
++};
++
++static u8 TAS5707_drc1_table[3][9]={
++	//0x3A   drc1_ae
++	{0x3A,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3B   drc1_aa
++	{0x3B,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3C   drc1_ad
++	{0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}
++};
++static u8 tas5707_drc1_tko_table[3][5]={
++	//0x40   drc1_t
++	{0x40,0x00,0x00,0x00,0x00},
++	//0x41   drc1_k
++	{0x41,0x00,0x00,0x00,0x00},
++	//0x42   drc1_o
++	{0x42,0x00,0x00,0x00,0x00}
++};
++
++/* codec private data */
++struct tas5707_priv {
++	struct snd_soc_codec *codec;
++	struct tas5707_platform_data *pdata;
++
++	enum snd_soc_control_type control_type;
++	void *control_data;
++
++	//Platform provided EQ configuration
++	int num_eq_conf_texts;
++	const char **eq_conf_texts;
++	int eq_cfg;
++	struct soc_enum eq_conf_enum;
++        unsigned char Ch1_vol;
++        unsigned char Ch2_vol;
++	unsigned mclk;
++};
++
++static const DECLARE_TLV_DB_SCALE(mvol_tlv, -12700, 50, 1);
++static const DECLARE_TLV_DB_SCALE(chvol_tlv, -10300, 50, 1);
++
++static const struct snd_kcontrol_new tas5707_snd_controls[] = {
++	SOC_SINGLE_TLV("Master Volume", DDX_MASTER_VOLUME, 0, 0xff, 1, mvol_tlv),
++	SOC_SINGLE_TLV("Ch1 Volume", DDX_CHANNEL1_VOL, 0, 0xff, 1, chvol_tlv),
++	SOC_SINGLE_TLV("Ch2 Volume", DDX_CHANNEL2_VOL, 0, 0xff, 1, chvol_tlv),
++	SOC_SINGLE("Ch1 Switch", DDX_SOFT_MUTE, 0, 1, 1),
++	SOC_SINGLE("Ch2 Switch", DDX_SOFT_MUTE, 1, 1, 1),
++};
++
++static int tas5707_set_dai_sysclk(struct snd_soc_dai *codec_dai,
++		int clk_id, unsigned int freq, int dir)
++{
++	//struct snd_soc_codec *codec = codec_dai->codec;
++	struct snd_soc_codec *codec = codec_dai->codec;
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	tas5707->mclk = freq;
++	if(freq == 512* 48000)
++		snd_soc_write(codec, DDX_CLOCK_CTL, 0x74);//0x74 = 512fs; 0x6c = 256fs
++	else
++		snd_soc_write(codec, DDX_CLOCK_CTL, 0x6c);//0x74 = 512fs; 0x6c = 256fs
++	return 0;
++}
++
++static int tas5707_set_dai_fmt(struct snd_soc_dai *codec_dai,
++				  unsigned int fmt)
++{
++	//struct snd_soc_codec *codec = codec_dai->codec;
++	CODEC_DEBUG("~~~~%s\n", __func__);
++
++	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
++	case SND_SOC_DAIFMT_CBS_CFS:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
++	case SND_SOC_DAIFMT_I2S:
++	case SND_SOC_DAIFMT_RIGHT_J:
++	case SND_SOC_DAIFMT_LEFT_J:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
++	case SND_SOC_DAIFMT_NB_NF:
++		break;
++	case SND_SOC_DAIFMT_NB_IF:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int tas5707_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params,
++				struct snd_soc_dai *dai)
++{
++	//struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	//struct snd_soc_codec *codec = rtd->codec;
++	unsigned int rate;
++	CODEC_DEBUG("~~~~%s\n", __func__);
++
++	rate = params_rate(params);
++	pr_debug("rate: %u\n", rate);
++
++	switch (params_format(params)) {
++	case SNDRV_PCM_FORMAT_S24_LE:
++	case SNDRV_PCM_FORMAT_S24_BE:
++		pr_debug("24bit\n");
++		/* fall through */
++	case SNDRV_PCM_FORMAT_S32_LE:
++	case SNDRV_PCM_FORMAT_S20_3LE:
++	case SNDRV_PCM_FORMAT_S20_3BE:
++		pr_debug("20bit\n");
++
++		break;
++	case SNDRV_PCM_FORMAT_S16_LE:
++	case SNDRV_PCM_FORMAT_S16_BE:
++		pr_debug("16bit\n");
++
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static int tas5707_set_bias_level(struct snd_soc_codec *codec,
++				 enum snd_soc_bias_level level)
++{
++	pr_debug("level = %d\n", level);
++	switch (level) {
++	case SND_SOC_BIAS_ON:
++		break;
++
++	case SND_SOC_BIAS_PREPARE:
++		/* Full power on */
++
++		break;
++
++	case SND_SOC_BIAS_STANDBY:
++		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
++		}
++
++		/* Power up to mute */
++		/* FIXME */
++		break;
++
++	case SND_SOC_BIAS_OFF:
++		/* The chip runs through the power down sequence for us. */
++		break;
++	}
++	codec->dapm.bias_level = level;
++	return 0;
++}
++
++static const struct snd_soc_dai_ops tas5707_dai_ops = {
++	.hw_params	= tas5707_hw_params,
++	.set_sysclk	= tas5707_set_dai_sysclk,
++	.set_fmt	= tas5707_set_dai_fmt,
++};
++
++static struct snd_soc_dai_driver tas5707_dai = {
++	.name = "tas5707",
++	.playback = {
++		.stream_name = "HIFI Playback",
++		.channels_min = 2,
++		.channels_max = 2,
++		.rates = tas5707_RATES,
++		.formats = tas5707_FORMATS,
++	},
++	.ops = &tas5707_dai_ops,
++};
++static int tas5707_set_master_vol(struct snd_soc_codec *codec)
++{
++	struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined master vol config;
++	if(pdata && pdata->custom_master_vol){
++		CODEC_DEBUG("tas5707_set_master_vol::using BSP defined master vol config\n");
++		snd_soc_write(codec, DDX_MASTER_VOLUME, pdata->custom_master_vol);
++	}
++	else
++		snd_soc_write(codec, DDX_MASTER_VOLUME, 0x00);
++	return 0;
++}
++
++//tas5707 DRC for channel L/R
++static int tas5707_set_drc1(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0;
++	u8 *p = NULL;
++	struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined drc1 config;
++	if(pdata && pdata->custom_drc1_table && pdata->custom_drc1_table_len == 24){
++		p = pdata->custom_drc1_table;
++		CODEC_DEBUG("tas5707_set_drc1::using BSP defined drc1 config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 8;j++)
++				TAS5707_drc1_table[i][j+1] = p[i*8 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC1_AE+i, TAS5707_drc1_table[i], 9);
++		}
++	}
++	if(pdata && pdata->custom_drc1_tko_table && pdata->custom_drc1_tko_table_len == 12){
++		p = pdata->custom_drc1_tko_table;
++		CODEC_DEBUG("tas5707_set_drc1::using BSP defined drc1 TKO config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 4;j++)
++				tas5707_drc1_tko_table[i][j+1]= p[i*4 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC1_T+i, tas5707_drc1_tko_table[i], 5);
++		}
++	}
++	return 0;
++}
++
++static int tas5707_set_drc(struct snd_soc_codec *codec)
++{
++	struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++	char drc_mask = 0;
++	u8 tas5707_drc_ctl_table[] = {0x46,0x00,0x00,0x00,0x00};
++	if(pdata && pdata->enable_ch1_drc){
++		drc_mask |= 0x01;
++		tas5707_set_drc1(codec);
++	}
++	tas5707_drc_ctl_table[4] = drc_mask;
++	snd_soc_bulk_write_raw(codec, DDX_DRC_CTL, tas5707_drc_ctl_table, 5);
++	return 0;
++}
++
++static int tas5707_set_eq_biquad(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0, k = 0;
++	u8 *p = NULL;
++	u8 addr;
++	u8 tas5707_bq_table[21];
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	struct tas5707_platform_data *pdata = tas5707->pdata;
++	struct tas5707_eq_cfg *cfg = pdata->eq_cfgs;
++
++	CODEC_DEBUG("tas5707_set_eq_biquad::using \
++		BSP defined EQ biquad config::%s\n", cfg[tas5707->eq_cfg].name);
++	p = cfg[tas5707->eq_cfg].regs;
++
++	for(i = 0;i < 2;i++){
++		for(j = 0;j < 7;j++){
++			addr = (DDX_CH1_BQ_0 + i*7 + j);
++			tas5707_bq_table[0] = addr;
++			for(k = 0;k < 20;k++){
++				tas5707_bq_table[k+1]= p[i*7*20 + j*20 + k];
++				printk(KERN_DEBUG "[%d]=%#x\n",k,tas5707_bq_table[k+1]);
++			}
++			printk(KERN_DEBUG "\n");
++			snd_soc_bulk_write_raw(codec, addr, tas5707_bq_table, 21);
++		}
++	}
++	return 0;
++}
++
++static int tas5707_put_eq_enum(struct snd_kcontrol *kcontrol,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	struct tas5707_platform_data *pdata = tas5707->pdata;
++	int value = ucontrol->value.integer.value[0];
++
++	if (value >= pdata->num_eq_cfgs)
++		return -EINVAL;
++
++	tas5707->eq_cfg = value;
++	tas5707_set_eq_biquad(codec);
++
++	return 0;
++}
++
++static int tas5707_get_eq_enum(struct snd_kcontrol *kcontrol,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	ucontrol->value.enumerated.item[0] = tas5707->eq_cfg;
++
++	return 0;
++}
++static int tas5707_set_eq(struct snd_soc_codec *codec)
++{
++	int i = 0, ret = 0;
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	struct tas5707_platform_data *pdata = tas5707->pdata;
++	u8 tas5707_eq_ctl_table[] = {0x50,0x00,0x00,0x00,0x80};
++	struct tas5707_eq_cfg *cfg = pdata->eq_cfgs;
++
++	if(!pdata)
++		return -ENOENT;
++
++	if(pdata->num_eq_cfgs){
++		struct snd_kcontrol_new control =
++			SOC_ENUM_EXT("EQ Mode", tas5707->eq_conf_enum,
++					tas5707_get_eq_enum, tas5707_put_eq_enum);
++
++		tas5707->eq_conf_texts = kmalloc(sizeof(char *) * pdata->num_eq_cfgs, GFP_KERNEL);
++		if(!tas5707->eq_conf_texts){
++			dev_err(codec->dev,
++				"Fail to allocate %d EQ config tests\n",
++				pdata->num_eq_cfgs);
++			return -ENOMEM;
++		}
++
++		for (i = 0; i < pdata->num_eq_cfgs; i++)
++			tas5707->eq_conf_texts[i] = cfg[i].name;
++
++		tas5707->eq_conf_enum.max = pdata->num_eq_cfgs;
++		tas5707->eq_conf_enum.texts = tas5707->eq_conf_texts;
++
++		ret = snd_soc_add_controls(codec, &control, 1);
++		if (ret != 0)
++			dev_err(codec->dev, "Fail to add EQ mode control: %d\n", ret);
++	}
++
++	tas5707_set_eq_biquad(codec);
++
++	tas5707_eq_ctl_table[4] &= 0x7F;
++	snd_soc_bulk_write_raw(codec, DDX_BANKSWITCH_AND_EQCTL,
++						tas5707_eq_ctl_table, 5);
++	return 0;
++}
++
++static int getRegConfigDataIndex(struct snd_soc_codec *codec, unsigned int reg) {
++    int i = 0;
++    struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++    struct tas57xx_reg_cfg *reg_cfgs = NULL;
++
++    if (pdata && pdata->init_regs) {
++        reg_cfgs = pdata->init_regs;
++        for (i = 0; i < pdata->num_init_regs; i++) {
++            if (reg_cfgs[i].reg_data[0] == reg) {
++                break;
++            }
++        }
++    }
++
++    if (i < pdata->num_init_regs) {
++        return i;
++    }
++
++    return -1;
++}
++
++static int init_reg_write(struct snd_soc_codec *codec, unsigned int reg, const void *data, size_t len) {
++    int i = 0, tmp_index = 0;
++    unsigned char data_buf[64] = { 0 };
++    struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++    struct tas57xx_reg_cfg *reg_cfgs = NULL;
++
++    tmp_index = getRegConfigDataIndex(codec, reg);
++    if (tmp_index < 0) {
++        if (len == 2) {
++            return snd_soc_write(codec, *((unsigned char *) data), *((unsigned char *) data + 1));
++        } else {
++            return snd_soc_bulk_write_raw(codec, reg, data, len);
++        }
++    } else {
++        if (pdata && pdata->init_regs) {
++            reg_cfgs = pdata->init_regs;
++
++            data_buf[0] = reg_cfgs[tmp_index].reg_data[0];
++            memcpy(&data_buf[1], &reg_cfgs[tmp_index].reg_data[2], reg_cfgs[tmp_index].reg_data[1]);
++#if 0
++            CODEC_DEBUG("%s, addr = 0x%x, bytes = 0x%x\n", __func__, data_buf[0], reg_cfgs[tmp_index].reg_data[1]);
++            for (i = 0; i < reg_cfgs[tmp_index].reg_data[1]; i++) {
++                CODEC_DEBUG("%s, data[%d] = 0x%02x\n", __func__, i, data_buf[i + 1]);
++            }
++#endif
++            if (len == 2) {
++                return snd_soc_write(codec, data_buf[0], data_buf[1]);
++            } else {
++                return snd_soc_bulk_write_raw(codec, reg, data_buf, reg_cfgs[tmp_index].reg_data[1] + 1);
++            }
++        }
++    }
++}
++
++static int init_snd_soc_bulk_write_raw(struct snd_soc_codec *codec, unsigned int reg, const void *data, size_t len) {
++    return init_reg_write(codec, reg, data, len);
++}
++
++static int init_snd_soc_write(struct snd_soc_codec *codec, unsigned int reg, unsigned int val) {
++    unsigned char data_buf[16] = { 0 };
++
++    data_buf[0] = reg;
++    data_buf[1] = val;
++    return init_reg_write(codec, reg, data_buf, 2);
++}
++
++static int tas5707_init(struct snd_soc_codec *codec)
++{
++	int ret = 0;
++	unsigned char burst_data[][5]= {
++		{DDX_INPUT_MUX,0x00,0x01,0x77,0x72},
++		{DDX_CH4_SOURCE_SELECT,0x00,0x00,0x42,0x03},
++		{DDX_PWM_MUX,0x01,0x02,0x13,0x45},
++	};
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	struct tas5707_platform_data *pdata = tas5707->pdata;
++	CODEC_DEBUG("tas5707_init\n");
++	init_snd_soc_write(codec, DDX_OSC_TRIM, 0x00);
++	msleep(50);
++	init_snd_soc_write(codec, DDX_CLOCK_CTL, 0x6c);//0x74 = 512fs; 0x6c = 256fs
++	init_snd_soc_write(codec, DDX_SYS_CTL_1, 0xa0);
++	init_snd_soc_write(codec, DDX_SERIAL_DATA_INTERFACE, 0x05);
++
++/*	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_1, 0xac);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_2, 0x54);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_3, 0xac);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_4, 0x54);
++*/
++	init_snd_soc_write(codec, DDX_BKND_ERR, 0x02);
++
++	init_snd_soc_bulk_write_raw(codec, DDX_INPUT_MUX, burst_data[0], 5);
++	init_snd_soc_bulk_write_raw(codec, DDX_CH4_SOURCE_SELECT, burst_data[1], 5);
++	init_snd_soc_bulk_write_raw(codec, DDX_PWM_MUX, burst_data[2], 5);
++
++	//drc
++	if((ret = tas5707_set_drc(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5707 drc\n");
++	//eq
++	if((ret = tas5707_set_eq(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5707 eq\n");
++
++	init_snd_soc_write(codec, DDX_VOLUME_CONFIG, 0xD1);
++	init_snd_soc_write(codec, DDX_SYS_CTL_2, 0x84);
++	init_snd_soc_write(codec, DDX_START_STOP_PERIOD, 0x95);
++	init_snd_soc_write(codec, DDX_PWM_SHUTDOWN_GROUP, 0x30);
++	init_snd_soc_write(codec, DDX_MODULATION_LIMIT, 0x02);
++	//normal operation
++	if((ret = tas5707_set_master_vol(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5707 master vol\n");
++
++	init_snd_soc_write(codec, DDX_CHANNEL1_VOL, tas5707->Ch1_vol);
++	init_snd_soc_write(codec, DDX_CHANNEL2_VOL, tas5707->Ch2_vol);
++	init_snd_soc_write(codec, DDX_SOFT_MUTE, 0x00);
++
++	return ret;
++}
++static int tas5707_probe(struct snd_soc_codec *codec)
++{
++	int ret = 0;
++	struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++	struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++        early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN;
++        early_suspend.suspend = tas5707_early_suspend;
++        early_suspend.resume = tas5707_late_resume;
++        early_suspend.param = codec;
++        register_early_suspend(&early_suspend);
++#endif
++
++	tas5707->pdata = pdata;
++	//codec->control_data = tas5707->control_data;
++	codec->control_type = tas5707->control_type;
++    ret = snd_soc_codec_set_cache_io(codec, 8, 8, tas5707->control_type);
++    if (ret != 0) {
++        dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
++        return ret;
++    }
++
++	//TODO: set the DAP
++	tas5707_init(codec);
++
++	return 0;
++}
++
++static int tas5707_remove(struct snd_soc_codec *codec)
++{
++	CODEC_DEBUG("~~~~~~~~~~~~%s", __func__);
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    unregister_early_suspend(&early_suspend);
++#endif
++
++	return 0;
++}
++
++#ifdef CONFIG_PM
++static int tas5707_suspend(struct snd_soc_codec *codec,pm_message_t state) {
++    struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++    struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++
++    CODEC_DEBUG("sound::tas5707_suspend\n");
++
++    if (pdata && pdata->suspend_func) {
++        pdata->suspend_func();
++    }
++
++    //save volume
++    tas5707->Ch1_vol = snd_soc_read(codec, DDX_CHANNEL1_VOL);
++    tas5707->Ch2_vol = snd_soc_read(codec, DDX_CHANNEL2_VOL);
++    tas5707_set_bias_level(codec, SND_SOC_BIAS_OFF);
++    return 0;
++}
++
++static int tas5707_resume(struct snd_soc_codec *codec) {
++    struct tas5707_priv *tas5707 = snd_soc_codec_get_drvdata(codec);
++    struct tas5707_platform_data *pdata = dev_get_platdata(codec->dev);
++
++    CODEC_DEBUG("sound::tas5707_resume\n");
++
++    if (pdata && pdata->resume_func) {
++        pdata->resume_func();
++    }
++
++    tas5707_init(codec);
++    snd_soc_write(codec, DDX_CHANNEL1_VOL, tas5707->Ch1_vol);
++    snd_soc_write(codec, DDX_CHANNEL2_VOL, tas5707->Ch2_vol);
++    tas5707_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
++    return 0;
++}
++#else
++#define tas5707_suspend NULL
++#define tas5707_resume NULL
++#endif
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static void tas5707_early_suspend(struct early_suspend *h) {
++    struct snd_soc_codec *codec = NULL;
++    struct tas5707_platform_data *pdata = NULL;
++
++    CODEC_DEBUG("sound::tas5707_early_suspend\n");
++
++    codec = (struct snd_soc_codec *)(h->param);
++    pdata = dev_get_platdata(codec->dev);
++
++    if (pdata && pdata->early_suspend_func) {
++        pdata->early_suspend_func();
++    }
++
++    snd_soc_write(codec, DDX_MASTER_VOLUME, 0xFF);
++}
++
++static void tas5707_late_resume(struct early_suspend *h) {
++    struct snd_soc_codec *codec = NULL;
++    struct tas5707_platform_data *pdata = NULL;
++
++    CODEC_DEBUG("sound::tas5707_late_resume\n");
++
++    codec = (struct snd_soc_codec *)(h->param);
++    pdata = dev_get_platdata(codec->dev);
++
++    if (pdata && pdata->late_resume_func) {
++        pdata->late_resume_func();
++    }
++
++    tas5707_set_master_vol(codec);
++}
++#endif
++
++static const struct snd_soc_dapm_widget tas5707_dapm_widgets[] = {
++SND_SOC_DAPM_DAC("DAC", "HIFI Playback", SND_SOC_NOPM, 0, 0),
++};
++
++static const struct snd_soc_dapm_route tas5707_dapm_routes[] = {
++	{ "LEFT", NULL, "DAC" },
++	{ "RIGHT", NULL, "DAC" },
++};
++static const struct snd_soc_codec_driver tas5707_codec = {
++	.probe =		tas5707_probe,
++	.remove =		tas5707_remove,
++	.suspend =		tas5707_suspend,
++	.resume =		tas5707_resume,
++	.reg_cache_size = DDX_NUM_BYTE_REG,
++	.reg_word_size = sizeof(u8),
++	.reg_cache_default = tas5707_regs,
++	//.volatile_register =	tas5707_reg_is_volatile,
++	.set_bias_level = tas5707_set_bias_level,
++	.controls =		tas5707_snd_controls,
++	.num_controls =		ARRAY_SIZE(tas5707_snd_controls),
++	.dapm_widgets =		tas5707_dapm_widgets,
++	.num_dapm_widgets =	ARRAY_SIZE(tas5707_dapm_widgets),
++	.dapm_routes =		tas5707_dapm_routes,
++	.num_dapm_routes =	ARRAY_SIZE(tas5707_dapm_routes),
++};
++
++static __devinit int tas5707_i2c_probe(struct i2c_client *i2c,
++				      const struct i2c_device_id *id)
++{
++	struct tas5707_priv *tas5707;
++	int ret;
++	tas5707 = devm_kzalloc(&i2c->dev, sizeof(struct tas5707_priv),
++			      GFP_KERNEL);
++	if (!tas5707)
++		return -ENOMEM;
++
++	i2c_set_clientdata(i2c, tas5707);
++	tas5707->control_type = SND_SOC_I2C;
++	//tas5707->control_data = i2c;
++
++	ret = snd_soc_register_codec(&i2c->dev, &tas5707_codec,
++			&tas5707_dai, 1);
++	if (ret != 0){
++		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
++	}
++	return ret;
++}
++
++static __devexit int tas5707_i2c_remove(struct i2c_client *client)
++{
++	//snd_soc_unregister_codec(&client->dev);
++	devm_kfree(&client->dev, i2c_get_clientdata(client));
++	return 0;
++}
++
++static const struct i2c_device_id tas5707_i2c_id[] = {
++	{ "tas5707", 0 },
++	{ }
++};
++
++static struct i2c_driver tas5707_i2c_driver = {
++	.driver = {
++		.name = "tas5707",
++		.owner = THIS_MODULE,
++	},
++	.probe =    tas5707_i2c_probe,
++	.remove =   __devexit_p(tas5707_i2c_remove),
++	.id_table = tas5707_i2c_id,
++};
++
++static int __init TAS5707_init(void)
++{
++	return i2c_add_driver(&tas5707_i2c_driver);
++}
++
++static void __exit TAS5707_exit(void)
++{
++	i2c_del_driver(&tas5707_i2c_driver);
++}
++module_init(TAS5707_init);
++module_exit(TAS5707_exit);
+diff --git a/sound/soc/codecs/tas5707.h b/sound/soc/codecs/tas5707.h
+new file mode 100644
+index 000000000000..e03d308c9195
+--- /dev/null
++++ b/sound/soc/codecs/tas5707.h
+@@ -0,0 +1,109 @@
++#ifndef _TAS5707_H
++#define _TAS5707_H
++
++#define DDX_I2C_ADDR								0x36
++
++#define DDX_CLOCK_CTL                               0x00
++#define DDX_DEVICE_ID                               0x01
++#define DDX_ERROR_STATUS                            0x02
++#define DDX_SYS_CTL_1                               0x03
++#define DDX_SERIAL_DATA_INTERFACE                   0x04
++#define DDX_SYS_CTL_2                               0x05
++#define DDX_SOFT_MUTE                               0x06
++#define DDX_MASTER_VOLUME                           0x07
++#define DDX_CHANNEL1_VOL							0x08
++#define DDX_CHANNEL2_VOL							0x09
++#define DDX_CHANNEL3_VOL							0x0A
++#define DDX_VOLUME_CONFIG                           0x0E
++
++#define DDX_MODULATION_LIMIT                        0x10
++#define DDX_IC_DELAY_CHANNEL_1                      0x11
++#define DDX_IC_DELAY_CHANNEL_2                      0x12
++#define DDX_IC_DELAY_CHANNEL_3                      0x13
++#define DDX_IC_DELAY_CHANNEL_4                      0x14
++#define DDX_PWM_SHUTDOWN_GROUP                      0x19
++#define DDX_START_STOP_PERIOD                       0x1A
++#define DDX_OSC_TRIM                                0x1B
++#define DDX_BKND_ERR                                0x1C
++#define DDX_NUM_BYTE_REG                            0x1D
++
++#define DDX_INPUT_MUX                               0x20
++#define DDX_CH4_SOURCE_SELECT                       0x21
++
++#define DDX_PWM_MUX                                 0x25
++
++#define DDX_CH1_BQ_0								0x29
++#define DDX_CH1_BQ_1                                0x2A
++#define DDX_CH1_BQ_2                                0x2B
++#define DDX_CH1_BQ_3                                0x2C
++#define DDX_CH1_BQ_4                                0x2D
++#define DDX_CH1_BQ_5                                0x2E
++#define DDX_CH1_BQ_6                                0x2F
++
++#define DDX_CH2_BQ_0								0x30
++#define DDX_CH2_BQ_1								0x31
++#define DDX_CH2_BQ_2								0x32
++#define DDX_CH2_BQ_3								0x33
++#define DDX_CH2_BQ_4								0x34
++#define DDX_CH2_BQ_5								0x35
++#define DDX_CH2_BQ_6								0x36
++
++#define DDX_DRC1_AE                                 0x3A
++#define DDX_DRC1_AA                                 0x3B
++#define DDX_DRC1_AD                                 0x3C
++#define DDX_DRC2_AE                                 0x3D
++#define DDX_DRC2_AA                                 0x3E
++#define DDX_DRC2_AD                                 0x3F
++#define DDX_DRC1_T                                  0x40
++#define DDX_DRC1_K                                  0x41
++#define DDX_DRC1_O                                  0x42
++#define DDX_DRC2_T                                  0x43
++#define DDX_DRC2_K                                  0x44
++#define DDX_DRC2_O                                  0x45
++#define DDX_DRC_CTL                                 0x46
++
++#define DDX_BANKSWITCH_AND_EQCTL                    0x50
++#define DDX_CH_1_OUTPUT_MIXER                       0x51
++#define DDX_CH_2_OUTPUT_MIXER                       0x52
++#define DDX_CH_1_INPUT_MIXER                        0x53
++#define DDX_CH_2_INPUT_MIXER                        0x54
++#define DDX_CH_3_INPUT_MIXER                        0x55
++#define DDX_OUTPUT_POST_SCALE                       0x56
++#define DDX_OUTPUT_PRE_SCALE                        0x57
++
++#define DDX_CH1_BQ_7                                0x58
++#define DDX_CH1_BQ_8                                0x59
++#define DDX_SUBCHANNEL_BQ_0							0x5A
++#define DDX_SUBCHANNEL_BQ_1							0x5B
++#define DDX_CH2_BQ_7                                0x5C
++#define DDX_CH2_BQ_8                                0x5D
++#define DDX_PSEUDO_CH2_BQ_0                         0x5E
++
++#define DDX_CH_4_OUTPUT_MIXER                       0x60
++#define DDX_CH_4_INPUT_MIXER                        0x61
++#define DDX_CH_IDF_POST_SCALE                       0x62
++#define DDX_CH_DEV_ADDR_ENABLE                      0xF8
++#define DDX_CH_DEV_ADDR_UPDATE                      0xF9
++
++
++
++
++#define DDX_DRC_BYTES                               (8)
++#define DDX_BQ_BYTES								(20)
++extern int tas5707_add_i2c_device(struct platform_device *pdev);
++extern void TAS5707_SetLeftVolume(unsigned char LeftVolume);
++extern unsigned char TAS5707_GetLeftVolume(void);
++extern void TAS5707_SetRightVolume(unsigned char RightVolume);
++extern unsigned char TAS5707_GetRightVolume(void);
++extern void TAS5707_SetMasterMute(unsigned char Mute);
++extern unsigned char TAS5707_GetMasterMute(void);
++extern void TAS5707_SetSubWooferBQ(void);
++extern void TAS5707_SetSubWooferVolume(unsigned char SubWooferVolume);
++extern unsigned char TAS5707_GetSubWooferVolume(void);
++extern void TAS5707_SetSubwooferMute(unsigned char Mute);
++extern unsigned char TAS5707_GetSubwooferMute(void);
++extern void TAS5707_SetHardMute(unsigned char Mute);
++extern unsigned char TAS5707_GetHardMute(void);
++
++
++#endif
+diff --git a/sound/soc/codecs/tas5711.c b/sound/soc/codecs/tas5711.c
+new file mode 100644
+index 000000000000..a4f00851155f
+--- /dev/null
++++ b/sound/soc/codecs/tas5711.c
+@@ -0,0 +1,783 @@
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/slab.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/tlv.h>
++#include <sound/tas57xx.h>
++
++#include "tas5711.h"
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++#include <linux/earlysuspend.h>
++static struct early_suspend early_suspend;
++static void tas5711_early_suspend(struct early_suspend *h);
++static void tas5711_late_resume(struct early_suspend *h);
++#endif
++
++#define CODEC_DEBUG printk
++
++#define tas5711_RATES (SNDRV_PCM_RATE_8000 | \
++		      SNDRV_PCM_RATE_11025 | \
++		      SNDRV_PCM_RATE_16000 | \
++		      SNDRV_PCM_RATE_22050 | \
++		      SNDRV_PCM_RATE_32000 | \
++		      SNDRV_PCM_RATE_44100 | \
++		      SNDRV_PCM_RATE_48000)
++
++#define tas5711_FORMATS \
++	(SNDRV_PCM_FMTBIT_S16_LE  | SNDRV_PCM_FMTBIT_S16_BE  | \
++	 SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S20_3BE | \
++	 SNDRV_PCM_FMTBIT_S24_LE  | SNDRV_PCM_FMTBIT_S24_BE)
++
++/* Power-up register defaults */
++static const u8 tas5711_regs[DDX_NUM_BYTE_REG] = {
++	0x6c, 0x70, 0x00, 0xA0, 0x05, 0x40, 0x00, 0xFF,
++	0x30, 0x30,	0xFF, 0x00, 0x00, 0x00, 0x91, 0x00,//0x0F
++	0x02, 0xAC, 0x54, 0xAC,	0x54, 0x00, 0x00, 0x00,//0x17
++	0x00, 0x30, 0x0F, 0x82, 0x02,
++};
++
++static u8 TAS5711_subwoofer_table[2][21]={
++	//0x5A   150Hz-lowpass
++	{0x5A,
++	 0x00,0x00,0x03,0x1D,
++	 0x00,0x00,0x06,0x3A,
++	 0x00,0x00,0x03,0x1D,
++	 0x00,0xFC,0x72,0x05,
++	 0x0F,0x83,0x81,0x85},
++	//0x5B   150HZ-10dB
++	{0x5B,
++	 0x00,0x81,0x50,0x89,
++	 0x0F,0x03,0x68,0x8C,
++	 0x00,0x7B,0x6A,0x2F,
++	 0x00,0xFC,0xA3,0x83,
++	 0x0F,0x83,0x51,0x56}
++};
++static u8 TAS5711_drc1_table[3][9]={
++	//0x3A   drc1_ae
++	{0x3A,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3B   drc1_aa
++	{0x3B,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3C   drc1_ad
++	{0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}
++};
++static u8 tas5711_drc1_tko_table[3][5]={
++	//0x40   drc1_t
++	{0x40,0x00,0x00,0x00,0x00},
++	//0x41   drc1_k
++	{0x41,0x00,0x00,0x00,0x00},
++	//0x42   drc1_o
++	{0x42,0x00,0x00,0x00,0x00}
++};
++
++static u8 TAS5711_drc2_table[3][9]={
++	//0x3D   drc2_ae
++	{0x3D,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3E   drc2_aa
++	{0x3E,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
++	//0x3F   drc2_ad
++	{0x3D,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}
++};
++static u8 tas5711_drc2_tko_table[3][5]={
++	//0x43   drc2_t
++	{0x43,0x00,0x00,0x00,0x00},
++	//0x44   drc2_k
++	{0x44,0x00,0x00,0x00,0x00},
++	//0x45   drc2_o
++	{0x45,0x00,0x00,0x00,0x00}
++};
++
++/* codec private data */
++struct tas5711_priv {
++	struct snd_soc_codec *codec;
++	struct tas5711_platform_data *pdata;
++
++	enum snd_soc_control_type control_type;
++	void *control_data;
++
++	//Platform provided EQ configuration
++	int num_eq_conf_texts;
++	const char **eq_conf_texts;
++	int eq_cfg;
++	struct soc_enum eq_conf_enum;
++        unsigned char Ch1_vol;
++        unsigned char Ch2_vol;
++        unsigned char Sub_vol;
++        unsigned char soft_mute;
++	unsigned mclk;
++};
++
++static const DECLARE_TLV_DB_SCALE(mvol_tlv, -12700, 50, 1);
++static const DECLARE_TLV_DB_SCALE(chvol_tlv, -10300, 50, 1);
++
++static const struct snd_kcontrol_new tas5711_snd_controls[] = {
++	SOC_SINGLE_TLV("Master Volume", DDX_MASTER_VOLUME, 0, 0xff, 1, mvol_tlv),
++	SOC_SINGLE_TLV("Ch1 Volume", DDX_CHANNEL1_VOL, 0, 0xff, 1, chvol_tlv),
++	SOC_SINGLE_TLV("Ch2 Volume", DDX_CHANNEL2_VOL, 0, 0xff, 1, chvol_tlv),
++	SOC_SINGLE_TLV("Ch3 Volume", DDX_CHANNEL3_VOL, 0, 0xff, 1, chvol_tlv),
++	SOC_SINGLE("Ch1 Switch", DDX_SOFT_MUTE, 0, 1, 1),
++	SOC_SINGLE("Ch2 Switch", DDX_SOFT_MUTE, 1, 1, 1),
++	SOC_SINGLE("Ch3 Switch", DDX_SOFT_MUTE, 2, 1, 1),
++};
++
++static int tas5711_set_dai_sysclk(struct snd_soc_dai *codec_dai,
++		int clk_id, unsigned int freq, int dir)
++{
++	//struct snd_soc_codec *codec = codec_dai->codec;
++	struct snd_soc_codec *codec = codec_dai->codec;
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	tas5711->mclk = freq;
++	if(freq == 512* 48000)
++		snd_soc_write(codec, DDX_CLOCK_CTL, 0x74);//0x74 = 512fs; 0x6c = 256fs
++	else
++		snd_soc_write(codec, DDX_CLOCK_CTL, 0x6c);//0x74 = 512fs; 0x6c = 256fs
++	return 0;
++}
++
++static int tas5711_set_dai_fmt(struct snd_soc_dai *codec_dai,
++				  unsigned int fmt)
++{
++	//struct snd_soc_codec *codec = codec_dai->codec;
++	CODEC_DEBUG("~~~~%s\n", __func__);
++
++	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
++	case SND_SOC_DAIFMT_CBS_CFS:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
++	case SND_SOC_DAIFMT_I2S:
++	case SND_SOC_DAIFMT_RIGHT_J:
++	case SND_SOC_DAIFMT_LEFT_J:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
++	case SND_SOC_DAIFMT_NB_NF:
++		break;
++	case SND_SOC_DAIFMT_NB_IF:
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int tas5711_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params,
++				struct snd_soc_dai *dai)
++{
++	//struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	//struct snd_soc_codec *codec = rtd->codec;
++	unsigned int rate;
++	CODEC_DEBUG("~~~~%s\n", __func__);
++
++	rate = params_rate(params);
++	pr_debug("rate: %u\n", rate);
++
++	switch (params_format(params)) {
++	case SNDRV_PCM_FORMAT_S24_LE:
++	case SNDRV_PCM_FORMAT_S24_BE:
++		pr_debug("24bit\n");
++		/* fall through */
++	case SNDRV_PCM_FORMAT_S32_LE:
++	case SNDRV_PCM_FORMAT_S20_3LE:
++	case SNDRV_PCM_FORMAT_S20_3BE:
++		pr_debug("20bit\n");
++
++		break;
++	case SNDRV_PCM_FORMAT_S16_LE:
++	case SNDRV_PCM_FORMAT_S16_BE:
++		pr_debug("16bit\n");
++
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static int tas5711_set_bias_level(struct snd_soc_codec *codec,
++				 enum snd_soc_bias_level level)
++{
++	pr_debug("level = %d\n", level);
++	switch (level) {
++	case SND_SOC_BIAS_ON:
++		break;
++
++	case SND_SOC_BIAS_PREPARE:
++		/* Full power on */
++
++		break;
++
++	case SND_SOC_BIAS_STANDBY:
++		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
++		}
++
++		/* Power up to mute */
++		/* FIXME */
++		break;
++
++	case SND_SOC_BIAS_OFF:
++		/* The chip runs through the power down sequence for us. */
++		break;
++	}
++	codec->dapm.bias_level = level;
++	return 0;
++}
++
++static const struct snd_soc_dai_ops tas5711_dai_ops = {
++	.hw_params	= tas5711_hw_params,
++	.set_sysclk	= tas5711_set_dai_sysclk,
++	.set_fmt	= tas5711_set_dai_fmt,
++};
++
++static struct snd_soc_dai_driver tas5711_dai = {
++	.name = "tas5711",
++	.playback = {
++		.stream_name = "HIFI Playback",
++		.channels_min = 2,
++		.channels_max = 2,
++		.rates = tas5711_RATES,
++		.formats = tas5711_FORMATS,
++	},
++	.ops = &tas5711_dai_ops,
++};
++static int tas5711_set_master_vol(struct snd_soc_codec *codec)
++{
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined master vol config;
++	if(pdata && pdata->custom_master_vol) {
++		CODEC_DEBUG("tas5711_set_master_vol::using BSP defined master vol config\n");
++		snd_soc_write(codec, DDX_MASTER_VOLUME, pdata->custom_master_vol);
++	}
++	else
++		snd_soc_write(codec, DDX_MASTER_VOLUME, 0x00);
++	return 0;
++}
++static int tas5711_set_subwoofer(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0;
++	u8 *p = NULL;
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined subwoofer config;
++	if(pdata && pdata->custom_sub_bq_table && pdata->custom_sub_bq_table_len == 40){
++		p = pdata->custom_sub_bq_table;
++		CODEC_DEBUG("tas5711_set_subwoofer::using BSP defined subwoofer config\n");
++		for(i = 0;i < 2;i++)
++			for(j = 0;j < 20;j++)
++				TAS5711_subwoofer_table[i][j+1] = p[i*20 + j];
++	}
++	snd_soc_bulk_write_raw(codec, DDX_SUBCHANNEL_BQ_0, TAS5711_subwoofer_table[0], 21);
++	snd_soc_bulk_write_raw(codec, DDX_SUBCHANNEL_BQ_1, TAS5711_subwoofer_table[1], 21);
++	return 0;
++}
++//tas5711 DRC for channel L/R
++static int tas5711_set_drc1(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0;
++	u8 *p = NULL;
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined drc1 config;
++	if(pdata && pdata->custom_drc1_table && pdata->custom_drc1_table_len == 24){
++		p = pdata->custom_drc1_table;
++		CODEC_DEBUG("tas5711_set_drc1::using BSP defined drc1 config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 8;j++)
++				TAS5711_drc1_table[i][j+1] = p[i*8 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC1_AE+i, TAS5711_drc1_table[i], 9);
++		}
++	}
++	if(pdata && pdata->custom_drc1_tko_table && pdata->custom_drc1_tko_table_len == 12){
++		p = pdata->custom_drc1_tko_table;
++		CODEC_DEBUG("tas5711_set_drc1::using BSP defined drc1 TKO config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 4;j++)
++				tas5711_drc1_tko_table[i][j+1]= p[i*4 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC1_T+i, tas5711_drc1_tko_table[i], 5);
++		}
++	}
++	return 0;
++}
++//tas5711 DRC for sub channel
++static int tas5711_set_drc2(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0;
++	u8 *p = NULL;
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++	//using user BSP defined drc2 config;
++	if(pdata && pdata->custom_drc2_table && pdata->custom_drc2_table_len == 24){
++		p = pdata->custom_drc2_table;
++		CODEC_DEBUG("tas5711_set_drc2::using BSP defined drc2 config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 8;j++)
++				TAS5711_drc2_table[i][j+1] = p[i*8 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC2_AE+i, TAS5711_drc2_table[i], 9);
++		}
++	}
++	if(pdata && pdata->custom_drc2_tko_table && pdata->custom_drc2_tko_table_len == 12){
++		p = pdata->custom_drc2_tko_table;
++		CODEC_DEBUG("tas5711_set_drc2::using BSP defined drc2 TKO config\n");
++		for(i = 0;i < 3;i++){
++			for(j = 0;j < 4;j++)
++				tas5711_drc2_tko_table[i][j+1] = p[i*4 + j];
++			snd_soc_bulk_write_raw(codec, DDX_DRC2_T+i, tas5711_drc2_tko_table[i], 5);
++		}
++	}
++	return 0;
++}
++
++static int tas5711_set_drc(struct snd_soc_codec *codec)
++{
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++	char drc_mask = 0;
++	u8 tas5711_drc_ctl_table[] = {0x46,0x00,0x00,0x00,0x00};
++	if(pdata && pdata->enable_ch1_drc){
++		drc_mask |= 0x01;
++		tas5711_set_drc1(codec);
++	}
++	if(pdata && pdata->enable_ch2_drc){
++		drc_mask |= 0x02;
++		tas5711_set_drc2(codec);
++	}
++	tas5711_drc_ctl_table[4] = drc_mask;
++	snd_soc_bulk_write_raw(codec, DDX_DRC_CTL, tas5711_drc_ctl_table, 5);
++	return 0;
++}
++
++static int tas5711_set_eq_biquad(struct snd_soc_codec *codec)
++{
++	int i = 0, j = 0, k = 0;
++	u8 *p = NULL;
++	u8 addr;
++	u8 tas5711_bq_table[21];
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	struct tas5711_platform_data *pdata = tas5711->pdata;
++	struct tas5711_eq_cfg *cfg = pdata->eq_cfgs;
++
++	CODEC_DEBUG("tas5711_set_eq_biquad::using \
++		BSP defined EQ biquad config::%s\n", cfg[tas5711->eq_cfg].name);
++	p = cfg[tas5711->eq_cfg].regs;
++
++	for(i = 0;i < 2;i++){
++		for(j = 0;j < 9;j++){
++			if(j < 7)
++				addr = (DDX_CH1_BQ_0 + i*7 + j);
++			else
++				addr = (DDX_CH1_BQ_7 + i*4 + j - 7);
++			tas5711_bq_table[0] = addr;
++			for(k = 0;k < 20;k++){
++				tas5711_bq_table[k+1]= p[i*9*20 + j*20 + k];
++				printk(KERN_DEBUG "[%d]=%#x\n",k,tas5711_bq_table[k+1]);
++			}
++			printk(KERN_DEBUG "\n");
++			snd_soc_bulk_write_raw(codec, addr, tas5711_bq_table, 21);
++		}
++	}
++	return 0;
++}
++
++static int tas5711_put_eq_enum(struct snd_kcontrol *kcontrol,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	struct tas5711_platform_data *pdata = tas5711->pdata;
++	int value = ucontrol->value.integer.value[0];
++
++	if (value >= pdata->num_eq_cfgs)
++		return -EINVAL;
++
++	tas5711->eq_cfg = value;
++	tas5711_set_eq_biquad(codec);
++
++	return 0;
++}
++
++static int tas5711_get_eq_enum(struct snd_kcontrol *kcontrol,
++			       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	ucontrol->value.enumerated.item[0] = tas5711->eq_cfg;
++
++	return 0;
++}
++static int tas5711_set_eq(struct snd_soc_codec *codec)
++{
++	int i = 0, ret = 0;
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	struct tas5711_platform_data *pdata = tas5711->pdata;
++	u8 tas5711_eq_ctl_table[] = {0x50,0x00,0x00,0x00,0x80};
++	struct tas5711_eq_cfg *cfg = pdata->eq_cfgs;
++
++	if(!pdata)
++		return -ENOENT;
++
++	if(pdata->num_eq_cfgs){
++		struct snd_kcontrol_new control =
++			SOC_ENUM_EXT("EQ Mode", tas5711->eq_conf_enum,
++					tas5711_get_eq_enum, tas5711_put_eq_enum);
++
++		tas5711->eq_conf_texts = kmalloc(sizeof(char *) * pdata->num_eq_cfgs, GFP_KERNEL);
++		if(!tas5711->eq_conf_texts){
++			dev_err(codec->dev,
++				"Fail to allocate %d EQ config tests\n",
++				pdata->num_eq_cfgs);
++			return -ENOMEM;
++		}
++
++		for (i = 0; i < pdata->num_eq_cfgs; i++)
++			tas5711->eq_conf_texts[i] = cfg[i].name;
++
++		tas5711->eq_conf_enum.max = pdata->num_eq_cfgs;
++		tas5711->eq_conf_enum.texts = tas5711->eq_conf_texts;
++
++		ret = snd_soc_add_codec_controls(codec, &control, 1);
++		if (ret != 0)
++			dev_err(codec->dev, "Fail to add EQ mode control: %d\n", ret);
++	}
++
++	tas5711_set_eq_biquad(codec);
++
++	tas5711_eq_ctl_table[4] &= 0x7F;
++	snd_soc_bulk_write_raw(codec, DDX_BANKSWITCH_AND_EQCTL,
++						tas5711_eq_ctl_table, 5);
++	return 0;
++}
++
++static int getRegConfigDataIndex(struct snd_soc_codec *codec, unsigned int reg) {
++    int i = 0;
++    struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++    struct tas57xx_reg_cfg *reg_cfgs = NULL;
++	printk("5711 %s\n", __func__);
++
++    if (pdata && pdata->init_regs) {
++        reg_cfgs = pdata->init_regs;
++        for (i = 0; i < pdata->num_init_regs; i++) {
++            if (reg_cfgs[i].reg_data[0] == reg) {
++                break;
++            }
++        }
++    }
++
++    if (i < pdata->num_init_regs) {
++        return i;
++    }
++
++    return -1;
++}
++
++static int init_reg_write(struct snd_soc_codec *codec, unsigned int reg, const void *data, size_t len) {
++    int i = 0, tmp_index = 0;
++    unsigned char data_buf[64] = { 0 };
++    struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++    struct tas57xx_reg_cfg *reg_cfgs = NULL;
++printk("5711 %s\n", __func__);
++    tmp_index = getRegConfigDataIndex(codec, reg);
++    if (tmp_index < 0) {
++        if (len == 2) {
++            return snd_soc_write(codec, *((unsigned char *) data), *((unsigned char *) data + 1));
++        } else {
++            return snd_soc_bulk_write_raw(codec, reg, data, len);
++        }
++    } else {
++        if (pdata && pdata->init_regs) {
++            reg_cfgs = pdata->init_regs;
++
++            data_buf[0] = reg_cfgs[tmp_index].reg_data[0];
++            memcpy(&data_buf[1], &reg_cfgs[tmp_index].reg_data[2], reg_cfgs[tmp_index].reg_data[1]);
++#if 0
++            CODEC_DEBUG("%s, addr = 0x%x, bytes = 0x%x\n", __func__, data_buf[0], reg_cfgs[tmp_index].reg_data[1]);
++            for (i = 0; i < reg_cfgs[tmp_index].reg_data[1]; i++) {
++                CODEC_DEBUG("%s, data[%d] = 0x%02x\n", __func__, i, data_buf[i + 1]);
++            }
++#endif
++            if (len == 2) {
++                return snd_soc_write(codec, data_buf[0], data_buf[1]);
++            } else {
++                return snd_soc_bulk_write_raw(codec, reg, data_buf, reg_cfgs[tmp_index].reg_data[1] + 1);
++            }
++        }
++    }
++}
++
++static int init_snd_soc_bulk_write_raw(struct snd_soc_codec *codec, unsigned int reg, const void *data, size_t len) {
++    return init_reg_write(codec, reg, data, len);
++}
++
++static int init_snd_soc_write(struct snd_soc_codec *codec, unsigned int reg, unsigned int val) {
++    unsigned char data_buf[16] = { 0 };
++
++    data_buf[0] = reg;
++    data_buf[1] = val;
++    return init_reg_write(codec, reg, data_buf, 2);
++}
++
++static int tas5711_init(struct snd_soc_codec *codec)
++{
++	int ret = 0;
++	unsigned char burst_data[][5]= {
++		{DDX_INPUT_MUX,0x00,0x01,0x77,0x72},
++		{DDX_CH4_SOURCE_SELECT,0x00,0x00,0x42,0x03},
++		{DDX_PWM_MUX,0x01,0x01,0x32,0x45},
++	};
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	struct tas5711_platform_data *pdata = tas5711->pdata;
++	CODEC_DEBUG("tas5711_init\n");
++	snd_soc_write(codec, DDX_OSC_TRIM, 0x00);
++	msleep(50);
++	snd_soc_write(codec, DDX_CLOCK_CTL, 0x6c);//0x74 = 512fs; 0x6c = 256fs
++	snd_soc_write(codec, DDX_SYS_CTL_1, 0xa0);
++	snd_soc_write(codec, DDX_SERIAL_DATA_INTERFACE, 0x05);
++
++/*	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_1, 0xac);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_2, 0x54);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_3, 0xac);
++	init_snd_soc_write(codec, DDX_IC_DELAY_CHANNEL_4, 0x54);
++*/
++	snd_soc_write(codec, DDX_BKND_ERR, 0x02);
++
++	snd_soc_bulk_write_raw(codec, DDX_INPUT_MUX, burst_data[0], 5);
++	snd_soc_bulk_write_raw(codec, DDX_CH4_SOURCE_SELECT, burst_data[1], 5);
++	snd_soc_bulk_write_raw(codec, DDX_PWM_MUX, burst_data[2], 5);
++
++	//subwoofer
++	if((ret = tas5711_set_subwoofer(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5711 subwoofer\n");
++	//drc
++	if((ret = tas5711_set_drc(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5711 drc\n");
++	//eq
++	//if((ret = tas5711_set_eq(codec)) < 0)
++	//	CODEC_DEBUG("fail to set tas5711 eq\n");
++
++	snd_soc_write(codec, DDX_VOLUME_CONFIG, 0xD1);
++	snd_soc_write(codec, DDX_SYS_CTL_2, 0x84);
++	snd_soc_write(codec, DDX_START_STOP_PERIOD, 0x95);
++	snd_soc_write(codec, DDX_PWM_SHUTDOWN_GROUP, 0x30);
++	snd_soc_write(codec, DDX_MODULATION_LIMIT, 0x02);
++	//normal operation
++	if((ret = tas5711_set_master_vol(codec)) < 0)
++		CODEC_DEBUG("fail to set tas5711 master vol\n");
++
++	snd_soc_write(codec, DDX_CHANNEL1_VOL, tas5711->Ch1_vol);
++	snd_soc_write(codec, DDX_CHANNEL2_VOL, tas5711->Ch2_vol);
++	snd_soc_write(codec, DDX_CHANNEL3_VOL, tas5711->Sub_vol);
++	snd_soc_write(codec, DDX_SOFT_MUTE, 0x00);
++
++	return ret;
++}
++static int tas5711_probe(struct snd_soc_codec *codec)
++{
++	int ret = 0;
++	struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++	struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++        early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN;
++        early_suspend.suspend = tas5711_early_suspend;
++        early_suspend.resume = tas5711_late_resume;
++        early_suspend.param = codec;
++        register_early_suspend(&early_suspend);
++#endif
++
++	tas5711->pdata = pdata;
++	//codec->control_data = tas5711->control_data;
++	codec->control_type = tas5711->control_type;
++    ret = snd_soc_codec_set_cache_io(codec, 8, 8, tas5711->control_type);
++    if (ret != 0) {
++        dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
++        return ret;
++    }
++
++	//TODO: set the DAP
++	tas5711_init(codec);
++
++	return 0;
++}
++
++static int tas5711_remove(struct snd_soc_codec *codec)
++{
++	CODEC_DEBUG("~~~~~~~~~~~~%s", __func__);
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    unregister_early_suspend(&early_suspend);
++#endif
++
++	return 0;
++}
++
++#ifdef CONFIG_PM
++static int tas5711_suspend(struct snd_soc_codec *codec,pm_message_t state) {
++    struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++    struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++    CODEC_DEBUG("sound::tas5711_suspend\n");
++
++    if (pdata && pdata->suspend_func) {
++        pdata->suspend_func();
++    }
++
++    //save volume
++    tas5711->Ch1_vol = snd_soc_read(codec, DDX_CHANNEL1_VOL);
++    tas5711->Ch2_vol = snd_soc_read(codec, DDX_CHANNEL2_VOL);
++    tas5711->Sub_vol = snd_soc_read(codec, DDX_CHANNEL3_VOL);
++    tas5711->soft_mute = snd_soc_read(codec, DDX_SOFT_MUTE);
++    tas5711_set_bias_level(codec, SND_SOC_BIAS_OFF);
++    return 0;
++}
++
++static int tas5711_resume(struct snd_soc_codec *codec) {
++    struct tas5711_priv *tas5711 = snd_soc_codec_get_drvdata(codec);
++    struct tas5711_platform_data *pdata = dev_get_platdata(codec->dev);
++
++    CODEC_DEBUG("sound::tas5711_resume\n");
++
++    if (pdata && pdata->resume_func) {
++        pdata->resume_func();
++    }
++
++    tas5711_init(codec);
++    snd_soc_write(codec, DDX_CHANNEL1_VOL, tas5711->Ch1_vol);
++    snd_soc_write(codec, DDX_CHANNEL2_VOL, tas5711->Ch2_vol);
++    snd_soc_write(codec, DDX_CHANNEL3_VOL, tas5711->Sub_vol);
++    snd_soc_write(codec, DDX_SOFT_MUTE, tas5711->soft_mute);
++    tas5711_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
++    return 0;
++}
++#else
++#define tas5711_suspend NULL
++#define tas5711_resume NULL
++#endif
++
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static void tas5711_early_suspend(struct early_suspend *h) {
++    struct snd_soc_codec *codec = NULL;
++    struct tas5711_platform_data *pdata = NULL;
++
++    CODEC_DEBUG("sound::tas5711_early_suspend\n");
++
++    codec = (struct snd_soc_codec *)(h->param);
++    pdata = dev_get_platdata(codec->dev);
++
++    if (pdata && pdata->early_suspend_func) {
++        pdata->early_suspend_func();
++    }
++
++    snd_soc_write(codec, DDX_MASTER_VOLUME, 0xFF);
++}
++
++static void tas5711_late_resume(struct early_suspend *h) {
++    struct snd_soc_codec *codec = NULL;
++    struct tas5711_platform_data *pdata = NULL;
++
++    CODEC_DEBUG("sound::tas5711_late_resume\n");
++
++    codec = (struct snd_soc_codec *)(h->param);
++    pdata = dev_get_platdata(codec->dev);
++
++    if (pdata && pdata->late_resume_func) {
++        pdata->late_resume_func();
++    }
++
++    tas5711_set_master_vol(codec);
++}
++#endif
++
++static const struct snd_soc_dapm_widget tas5711_dapm_widgets[] = {
++SND_SOC_DAPM_DAC("DAC", "HIFI Playback", SND_SOC_NOPM, 0, 0),
++};
++
++static const struct snd_soc_dapm_route tas5711_dapm_routes[] = {
++	{ "LEFT", NULL, "DAC" },
++	{ "RIGHT", NULL, "DAC" },
++};
++static const struct snd_soc_codec_driver tas5711_codec = {
++	.probe =		tas5711_probe,
++	.remove =		tas5711_remove,
++	.suspend =		tas5711_suspend,
++	.resume =		tas5711_resume,
++	.reg_cache_size = DDX_NUM_BYTE_REG,
++	.reg_word_size = sizeof(u8),
++	.reg_cache_default = tas5711_regs,
++	//.volatile_register =	tas5711_reg_is_volatile,
++	.set_bias_level = tas5711_set_bias_level,
++	.controls =		tas5711_snd_controls,
++	.num_controls =		ARRAY_SIZE(tas5711_snd_controls),
++	.dapm_widgets =		tas5711_dapm_widgets,
++	.num_dapm_widgets =	ARRAY_SIZE(tas5711_dapm_widgets),
++	.dapm_routes =		tas5711_dapm_routes,
++	.num_dapm_routes =	ARRAY_SIZE(tas5711_dapm_routes),
++};
++
++static int tas5711_i2c_probe(struct i2c_client *i2c,
++				      const struct i2c_device_id *id)
++{
++	struct tas5711_priv *tas5711;
++	int ret;
++	tas5711 = devm_kzalloc(&i2c->dev, sizeof(struct tas5711_priv),
++			      GFP_KERNEL);
++	if (!tas5711)
++		return -ENOMEM;
++
++	i2c_set_clientdata(i2c, tas5711);
++	tas5711->control_type = SND_SOC_I2C;
++	//tas5711->control_data = i2c;
++
++	ret = snd_soc_register_codec(&i2c->dev, &tas5711_codec,
++			&tas5711_dai, 1);
++	if (ret != 0){
++		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
++	}
++	return ret;
++}
++
++static int tas5711_i2c_remove(struct i2c_client *client)
++{
++	//snd_soc_unregister_codec(&client->dev);
++	devm_kfree(&client->dev, i2c_get_clientdata(client));
++	return 0;
++}
++
++static const struct i2c_device_id tas5711_i2c_id[] = {
++	{ "tas5711", 0 },
++	{ }
++};
++
++static struct i2c_driver tas5711_i2c_driver = {
++	.driver = {
++		.name = "tas5711",
++		.owner = THIS_MODULE,
++	},
++	.probe =    tas5711_i2c_probe,
++	.remove =   tas5711_i2c_remove,
++	.id_table = tas5711_i2c_id,
++};
++
++static int __init TAS5711_init(void)
++{
++	return i2c_add_driver(&tas5711_i2c_driver);
++}
++
++static void __exit TAS5711_exit(void)
++{
++	i2c_del_driver(&tas5711_i2c_driver);
++}
++module_init(TAS5711_init);
++module_exit(TAS5711_exit);
+diff --git a/sound/soc/codecs/tas5711.h b/sound/soc/codecs/tas5711.h
+new file mode 100644
+index 000000000000..56f0a52751a6
+--- /dev/null
++++ b/sound/soc/codecs/tas5711.h
+@@ -0,0 +1,109 @@
++#ifndef _TAS5711_H
++#define _TAS5711_H
++
++#define DDX_I2C_ADDR								0x36
++
++#define DDX_CLOCK_CTL                               0x00
++#define DDX_DEVICE_ID                               0x01
++#define DDX_ERROR_STATUS                            0x02
++#define DDX_SYS_CTL_1                               0x03
++#define DDX_SERIAL_DATA_INTERFACE                   0x04
++#define DDX_SYS_CTL_2                               0x05
++#define DDX_SOFT_MUTE                               0x06
++#define DDX_MASTER_VOLUME                           0x07
++#define DDX_CHANNEL1_VOL							0x08
++#define DDX_CHANNEL2_VOL							0x09
++#define DDX_CHANNEL3_VOL							0x0A
++#define DDX_VOLUME_CONFIG                           0x0E
++
++#define DDX_MODULATION_LIMIT                        0x10
++#define DDX_IC_DELAY_CHANNEL_1                      0x11
++#define DDX_IC_DELAY_CHANNEL_2                      0x12
++#define DDX_IC_DELAY_CHANNEL_3                      0x13
++#define DDX_IC_DELAY_CHANNEL_4                      0x14
++#define DDX_PWM_SHUTDOWN_GROUP                      0x19
++#define DDX_START_STOP_PERIOD                       0x1A
++#define DDX_OSC_TRIM                                0x1B
++#define DDX_BKND_ERR                                0x1C
++#define DDX_NUM_BYTE_REG                            0x1D
++
++#define DDX_INPUT_MUX                               0x20
++#define DDX_CH4_SOURCE_SELECT                       0x21
++
++#define DDX_PWM_MUX                                 0x25
++
++#define DDX_CH1_BQ_0								0x29
++#define DDX_CH1_BQ_1                                0x2A
++#define DDX_CH1_BQ_2                                0x2B
++#define DDX_CH1_BQ_3                                0x2C
++#define DDX_CH1_BQ_4                                0x2D
++#define DDX_CH1_BQ_5                                0x2E
++#define DDX_CH1_BQ_6                                0x2F
++
++#define DDX_CH2_BQ_0								0x30
++#define DDX_CH2_BQ_1								0x31
++#define DDX_CH2_BQ_2								0x32
++#define DDX_CH2_BQ_3								0x33
++#define DDX_CH2_BQ_4								0x34
++#define DDX_CH2_BQ_5								0x35
++#define DDX_CH2_BQ_6								0x36
++
++#define DDX_DRC1_AE                                 0x3A
++#define DDX_DRC1_AA                                 0x3B
++#define DDX_DRC1_AD                                 0x3C
++#define DDX_DRC2_AE                                 0x3D
++#define DDX_DRC2_AA                                 0x3E
++#define DDX_DRC2_AD                                 0x3F
++#define DDX_DRC1_T                                  0x40
++#define DDX_DRC1_K                                  0x41
++#define DDX_DRC1_O                                  0x42
++#define DDX_DRC2_T                                  0x43
++#define DDX_DRC2_K                                  0x44
++#define DDX_DRC2_O                                  0x45
++#define DDX_DRC_CTL                                 0x46
++
++#define DDX_BANKSWITCH_AND_EQCTL                    0x50
++#define DDX_CH_1_OUTPUT_MIXER                       0x51
++#define DDX_CH_2_OUTPUT_MIXER                       0x52
++#define DDX_CH_1_INPUT_MIXER                        0x53
++#define DDX_CH_2_INPUT_MIXER                        0x54
++#define DDX_CH_3_INPUT_MIXER                        0x55
++#define DDX_OUTPUT_POST_SCALE                       0x56
++#define DDX_OUTPUT_PRE_SCALE                        0x57
++
++#define DDX_CH1_BQ_7                                0x58
++#define DDX_CH1_BQ_8                                0x59
++#define DDX_SUBCHANNEL_BQ_0							0x5A
++#define DDX_SUBCHANNEL_BQ_1							0x5B
++#define DDX_CH2_BQ_7                                0x5C
++#define DDX_CH2_BQ_8                                0x5D
++#define DDX_PSEUDO_CH2_BQ_0                         0x5E
++
++#define DDX_CH_4_OUTPUT_MIXER                       0x60
++#define DDX_CH_4_INPUT_MIXER                        0x61
++#define DDX_CH_IDF_POST_SCALE                       0x62
++#define DDX_CH_DEV_ADDR_ENABLE                      0xF8
++#define DDX_CH_DEV_ADDR_UPDATE                      0xF9
++
++
++
++
++#define DDX_DRC_BYTES                               (8)
++#define DDX_BQ_BYTES								(20)
++extern int tas5711_add_i2c_device(struct platform_device *pdev);
++extern void TAS5711_SetLeftVolume(unsigned char LeftVolume);
++extern unsigned char TAS5711_GetLeftVolume(void);
++extern void TAS5711_SetRightVolume(unsigned char RightVolume);
++extern unsigned char TAS5711_GetRightVolume(void);
++extern void TAS5711_SetMasterMute(unsigned char Mute);
++extern unsigned char TAS5711_GetMasterMute(void);
++extern void TAS5711_SetSubWooferBQ(void);
++extern void TAS5711_SetSubWooferVolume(unsigned char SubWooferVolume);
++extern unsigned char TAS5711_GetSubWooferVolume(void);
++extern void TAS5711_SetSubwooferMute(unsigned char Mute);
++extern unsigned char TAS5711_GetSubwooferMute(void);
++extern void TAS5711_SetHardMute(unsigned char Mute);
++extern unsigned char TAS5711_GetHardMute(void);
++
++
++#endif
+-- 
+2.19.0
+

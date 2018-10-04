@@ -1,0 +1,191 @@
+From e21c6520955709e6ce693710ccd2cdd18b8511a1 Mon Sep 17 00:00:00 2001
+From: Zhe Wang <zhe.wang@amlogic.com>
+Date: Fri, 25 Sep 2015 17:10:06 +0800
+Subject: [PATCH 5866/5965] PD#113200: audio: reset amaudio2, when audio buffer
+ level too high
+
+Change-Id: I9ec55b4fc65d0b2168c83c8b58358f9f525d49b9
+---
+ drivers/amlogic/amaudio2/amaudio2.c | 37 +++++++++++++++--------------
+ sound/soc/aml/m8/aml_i2s.c          | 21 +++++++++-------
+ 2 files changed, 31 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/amlogic/amaudio2/amaudio2.c b/drivers/amlogic/amaudio2/amaudio2.c
+index cf2d7992b117..671952fff07b 100755
+--- a/drivers/amlogic/amaudio2/amaudio2.c
++++ b/drivers/amlogic/amaudio2/amaudio2.c
+@@ -108,14 +108,16 @@ int android_right_gain = 256;
+ int set_android_gain_enable = 0;
+ int softbuffer_level = 0;
+ int soft_buffer_reset = 0;
+-int soft_buffer_threshold = 10240;
+-int soft_latency = 1024;
++#define BUFFER_THRESHOLD_DEFAULT 10240
++#define LATENCY_DEFAULT 2048
++int soft_buffer_threshold = BUFFER_THRESHOLD_DEFAULT;
++int soft_latency = LATENCY_DEFAULT;
+ 
+ static irqreturn_t i2s_out_callback(int irq, void* data);
+ static unsigned get_i2s_out_size(void);
+ static unsigned get_i2s_out_ptr(void);
+ 
+-#define SOFT_BUFFER_SIZE (PAGE_SIZE*16)
++#define SOFT_BUFFER_SIZE (PAGE_SIZE*8)
+ #define MAX_LATENCY (64*32*3)
+ #define MIN_LATENCY (64*32)
+ static unsigned latency = MIN_LATENCY*2; //20ms
+@@ -162,7 +164,6 @@ static int amaudio_open(struct inode *inode, struct file *file)
+   	amaudio->hw.paddr = aml_i2s_playback_phy_start_addr;
+   	amaudio->hw.size = get_i2s_out_size();
+   	amaudio->hw.rd = get_i2s_out_ptr();
+-	soft_latency = 1024;
+ 
+ 	printk(KERN_DEBUG "sw.addr=%08x,sw.paddr=%08x \n hw.addr=%08x,hw.paddr=%08x\n hw.size=%08x,hw.rd=%08x\n",
+ 						(unsigned int)amaudio->sw.addr,amaudio->sw.paddr,
+@@ -183,6 +184,8 @@ static int amaudio_open(struct inode *inode, struct file *file)
+   		res = -EINVAL;
+   		goto error;
+   	}
++	soft_buffer_threshold = BUFFER_THRESHOLD_DEFAULT;
++
+   }else if(iminor(inode) == 1){
+   	printk(KERN_DEBUG "amaudio2_in opened\n");
+   	if(!this->dev->dma_mask)
+@@ -382,25 +385,28 @@ static void i2s_copy(amaudio_t* amaudio)
+ 
+ 	hw->rd = i2s_out_ptr;
+ 	hw->level = amaudio_delay;
+-	if(hw->level <= INT_BLOCK || alsa_delay < amaudio_delay){
++	if (hw->level <= INT_BLOCK || (alsa_delay - amaudio_delay) < INT_BLOCK) {
++		printk(KERN_DEBUG "Reset hw: hw->wr = %x,hw->rd = %x,hw->level = %x,"
++			"alsa_delay:%x,sw->wr = %x,sw->rd = %x,sw->level = %x\n",
++			hw->wr,hw->rd,hw->level,alsa_delay,sw->wr,sw->rd,sw->level);
+ 		hw->wr = (hw->rd+latency)%hw->size;
+ 		hw->wr /= INT_BLOCK;
+ 		hw->wr *= INT_BLOCK;
+ 		hw->level = latency;
+-		printk(KERN_DEBUG "hw reset: hw->wr = %x,hw->rd = %x,alsa_delay:%x,amaudio_delay = %x,hw->level = %x,sw->level = %x\n",
+-			hw->wr,hw->rd,alsa_delay,amaudio_delay,hw->level,sw->level);
+ 		goto EXIT;
+ 	}
+ 
+-	if (sw->level < soft_latency) {
+-		printk(KERN_DEBUG "i2s copy: sw->wr = %x, sw->rd = %x, sw->level = %x\n",
+-			sw->wr,sw->rd,sw->level);
++	if (sw->level > BUFFER_THRESHOLD_DEFAULT /*|| soft_buffer_reset == 1*/) {
++		printk(KERN_DEBUG "Reset sw: hw->wr = %x,hw->rd = %x,hw->level = %x,"
++			"alsa_delay:%x,sw->wr = %x,sw->rd = %x,sw->level = %x\n",
++			hw->wr,hw->rd,hw->level,alsa_delay,sw->wr,sw->rd,sw->level);
++		sw->rd = (sw->wr + 1024)%sw->size;
++		sw->level = sw->size - 1024;
++		soft_buffer_reset = 0;
+ 		goto EXIT;
+ 	}
+ 
+-	if((alsa_delay - amaudio_delay) < INT_BLOCK){
+-		printk(KERN_DEBUG "alsa_delay:%x, amaudio_delay:%x, sw->level = %x\n",
+-			alsa_delay,amaudio_delay,sw->level);
++	if (sw->level < INT_BLOCK) {
+ 		goto EXIT;
+ 	}
+ 
+@@ -431,11 +437,6 @@ static void i2s_copy(amaudio_t* amaudio)
+ 	spin_lock_irqsave(&sw->lock,swirqflags);
+ 	sw->rd = (sw->rd + INT_BLOCK)%sw->size;
+ 	sw->level = (sw->size + sw->wr - sw->rd)%sw->size;
+-	if (soft_buffer_reset == 1 || sw->level > soft_buffer_threshold) {
+-		sw->rd = (sw->size + sw->wr - soft_latency)%sw->size;
+-		sw->level = soft_latency;
+-		soft_buffer_reset = 0;
+-	}
+ 	softbuffer_level = sw->level;
+ 	spin_unlock_irqrestore(&sw->lock,swirqflags);
+ 	
+diff --git a/sound/soc/aml/m8/aml_i2s.c b/sound/soc/aml/m8/aml_i2s.c
+index b628b0214ab0..49597317f813 100644
+--- a/sound/soc/aml/m8/aml_i2s.c
++++ b/sound/soc/aml/m8/aml_i2s.c
+@@ -731,6 +731,7 @@ static int aml_i2s_copy_playback(struct snd_pcm_runtime *runtime, int channel,
+ 
+             if (pos % align) {
+                 printk("audio data unaligned: pos=%d, n=%d, align=%d\n", (int)pos, n, align);
++                return -EPIPE;
+             }
+             for (j = 0; j < n; j += 64) {
+                 for (i = 0; i < 8; i++) {
+@@ -751,6 +752,7 @@ static int aml_i2s_copy_playback(struct snd_pcm_runtime *runtime, int channel,
+ 
+             if (pos % align) {
+                 printk("audio data unaligned: pos=%d, n=%d, align=%d\n", (int)pos, n, align);
++                return -EPIPE;
+             }
+ 
+             if (runtime->channels == 8) {
+@@ -801,10 +803,10 @@ static int aml_i2s_copy_playback(struct snd_pcm_runtime *runtime, int channel,
+     return res;
+ }
+ 
+-static unsigned int aml_get_in_wr_ptr(void)
++/*static unsigned int aml_get_in_wr_ptr(void)
+ {
+     return (audio_in_i2s_wr_ptr() - aml_i2s_capture_phy_start_addr);
+-}
++}*/
+ 
+ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+                                 snd_pcm_uframes_t pos,
+@@ -812,23 +814,22 @@ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+ {
+     unsigned int *tfrom, *left, *right;
+     unsigned short *to;
+-    int res = 0, n = 0, i = 0, j = 0, size = 0;
++    int res = 0, n = 0, i = 0, j = 0;
++    //int size = 0;
+     unsigned int t1, t2;
+     unsigned char r_shift = 8;
+-    int i2s_hw_ptr_move = 1;
+     struct aml_runtime_data *prtd = runtime->private_data;
+     audio_stream_t *s = &prtd->s;
+     char *hwbuf = runtime->dma_area + frames_to_bytes(runtime, pos) * 2;
+     struct snd_dma_buffer *buffer = &substream->dma_buffer;
+     struct aml_audio_buffer *tmp_buf = buffer->private_data;
+     void *ubuf = tmp_buf->buffer_start;
+-    if (s->device_type == AML_AUDIO_I2SIN) {
++    /*if (s->device_type == AML_AUDIO_SPDIFIN) {
+         unsigned int buffersize = (unsigned int)runtime->buffer_size * 8; //framesize*8
+         unsigned int hw_ptr = aml_get_in_wr_ptr();
+         unsigned int alsa_read_ptr = frames_to_bytes(runtime, pos) * 2;
+-        i2s_hw_ptr_move = (s->last_ptr != hw_ptr);
+         size = (buffersize + hw_ptr - alsa_read_ptr) % buffersize;
+-    }
++    }*/
+     if (s->device_type == AML_AUDIO_SPDIFIN) { //spdif in
+         r_shift = 12;
+     }
+@@ -836,19 +837,21 @@ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+     tfrom = (unsigned int *)hwbuf;  // 32bit buffer
+     n = frames_to_bytes(runtime, count);
+     // for low latency amaudio2 mode, check the hw ptr overrun  state machine
+-    if (size < 2 * n && s->device_type == AML_AUDIO_I2SIN && amaudio2_enable && i2s_hw_ptr_move) {
++    /*if (size < 2 * n && s->device_type == AML_AUDIO_SPDIFIN && amaudio2_enable) {
+         printk("Alsa ptr is too close to HW ptr, Reset ALSA!\n");
+         return -EPIPE;
+-    }
++    }*/
+     if (access_ok(VERIFY_WRITE, buf, frames_to_bytes(runtime, count))) {
+         if (runtime->channels == 2) {
+             left = tfrom;
+             right = tfrom + 8;
+             if (pos % 8) {
+                 printk("audio data unligned\n");
++                return -EPIPE;
+             }
+             if ((n * 2) % 64) {
+                 printk("audio data unaligned 64 bytes\n");
++                return -EPIPE;
+             }
+             for (j = 0; j < n * 2 ; j += 64) {
+                 for (i = 0; i < 8; i++) {
+-- 
+2.19.0
+

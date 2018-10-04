@@ -1,0 +1,113 @@
+From e8b7daf01e2b4c8ac82af82862c082e9ef106056 Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Thu, 10 Apr 2014 15:19:47 +0800
+Subject: [PATCH 3898/5965] PD #90198: eMMC switches to main md before access
+ to emmc_key or emmc_secure_storage
+
+---
+ drivers/mmc/card/block.c       | 7 +++++++
+ drivers/mmc/card/emmc_key.c    | 7 +++++++
+ drivers/mmc/card/mmc_storage.c | 9 ++++++++-
+ include/linux/mmc/card.h       | 1 +
+ 4 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index 4d480488fe0e..ab50c98dc292 100755
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -658,6 +658,13 @@ static inline int mmc_blk_part_switch(struct mmc_card *card,
+ 	return 0;
+ }
+ 
++int mmc_blk_main_md_part_switch(struct mmc_card *card)
++{
++	struct mmc_blk_data *main_md = mmc_get_drvdata(card);
++    
++    return mmc_blk_part_switch(card, main_md);
++}
++
+ static u32 mmc_sd_num_wr_blocks(struct mmc_card *card)
+ {
+ 	int err;
+diff --git a/drivers/mmc/card/emmc_key.c b/drivers/mmc/card/emmc_key.c
+index e84368874c83..e9bb0ee1116b 100755
+--- a/drivers/mmc/card/emmc_key.c
++++ b/drivers/mmc/card/emmc_key.c
+@@ -7,6 +7,7 @@
+ #include <linux/mtd/partitions.h>
+ #include <linux/slab.h>
+ 
++#include <linux/mmc/card.h>
+ #include <linux/mmc/emmc_partitions.h>
+ #include "emmc_key.h"
+ 
+@@ -64,6 +65,11 @@ static int emmc_key_kernel_rw (struct mmc_card *card, struct emmckey_valid_node_
+     int ret = -1;
+ 
+ 	mmc_claim_host(card->host);
++    ret = mmc_blk_main_md_part_switch(card);
++    if (ret) {
++        pr_err("%s: error %d mmc_blk_main_md_part_switch\n", __FUNCTION__, ret);
++        goto exit_err;
++    }
+ 
+ 	blk = emmckey_valid_node->phy_addr >> bit;
+ 	cnt = emmckey_valid_node->phy_size >> bit;
+@@ -74,6 +80,7 @@ static int emmc_key_kernel_rw (struct mmc_card *card, struct emmckey_valid_node_
+         ret = mmc_read_internal(card, blk, cnt, buf);
+ 	}
+ 
++exit_err: 
+     mmc_release_host(card->host);
+ 
+ 	return ret;
+diff --git a/drivers/mmc/card/mmc_storage.c b/drivers/mmc/card/mmc_storage.c
+index 7730d5163563..645833a5ef9b 100644
+--- a/drivers/mmc/card/mmc_storage.c
++++ b/drivers/mmc/card/mmc_storage.c
+@@ -14,6 +14,7 @@
+ #include <linux/err.h>
+ #include <linux/mtd/mtd.h>
+ #include <linux/list.h>
++#include <linux/mmc/card.h>
+ 
+ #include "mmc_storage.h"
+ 
+@@ -140,6 +141,12 @@ int mmc_storage_rw_kernel(struct mmc_card *device, struct storage_node_t * stora
+     
+ 	mmc_claim_host(device->host);
+ 
++    ret = mmc_blk_main_md_part_switch(device);
++    if (ret) {
++        pr_err("%s: error %d mmc_blk_main_md_part_switch\n", __FUNCTION__, ret);
++        goto exit_err;
++    }
++
+ 	start_blk = (storage_node->offset_addr >> bit);
+ 	size =len >> bit;
+ 	force_size = MMC_STORAGE_DEFAULT_SIZE >> bit;
+@@ -165,9 +172,9 @@ int mmc_storage_rw_kernel(struct mmc_card *device, struct storage_node_t * stora
+ 			size -=force_size;
+ 		}
+ 	}
+-	  mmc_release_host(device->host);
+ 
+ exit_err: 
++    mmc_release_host(device->host);
+ 	return ret;
+ }
+ 
+diff --git a/include/linux/mmc/card.h b/include/linux/mmc/card.h
+index f31725ba49f3..5476d27316cb 100644
+--- a/include/linux/mmc/card.h
++++ b/include/linux/mmc/card.h
+@@ -519,5 +519,6 @@ extern void mmc_unregister_driver(struct mmc_driver *);
+ 
+ extern void mmc_fixup_device(struct mmc_card *card,
+ 			     const struct mmc_fixup *table);
++extern int mmc_blk_main_md_part_switch(struct mmc_card *card);
+ 
+ #endif /* LINUX_MMC_CARD_H */
+-- 
+2.19.0
+

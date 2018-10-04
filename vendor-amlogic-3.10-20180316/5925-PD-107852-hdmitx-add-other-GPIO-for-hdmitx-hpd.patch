@@ -1,0 +1,143 @@
+From bc10c2626278962d88a167d381c56e5f709a960d Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Thu, 2 Jul 2015 19:50:27 +0800
+Subject: [PATCH 5925/5965] PD#107852: hdmitx: add other GPIO for hdmitx hpd
+
+HDMITX_HPD is always dedicated for hdmitx hot plug detect.
+However, we can use other GPIOs for the same purpose.
+Before use the GPIO, clear the pinmux at proper places.
+
+Change-Id: Id4916c7f9efc78a33390cadae492951e2c4504b4
+---
+ arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd  |  2 +
+ .../mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_hw.c | 41 +++++++++++++++++--
+ drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c | 17 ++++++++
+ .../linux/amlogic/hdmi_tx/hdmi_tx_module.h    |  1 +
+ 4 files changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+index fe3e1151c2a4..8c43b22e5a9a 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9bb_n302.dtd
+@@ -382,6 +382,8 @@
+ 		vend-data = <&vend_data>;
+ 		pwr-ctrl = <&pwr_ctrl>;
+ 
++		/* hpd-gpio-int = "GPIOH_9"; */
++
+ 		//$$ MATCH "HDMI_vend-data_match" = <&vend_data>
+ 		//$$ L2 PROP_STR = "vendor_name"
+ 		//$$ L2 PROP_U32 = "vendor_id"
+diff --git a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_hw.c b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_hw.c
+index 6ef75ef963b1..87bda76076b4 100644
+--- a/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_hw.c
++++ b/arch/arm/mach-mesong9bb/hdmi_tx_hw_20/hdmi_tx_hw.c
+@@ -41,6 +41,7 @@
+ #include <linux/amlogic/vout/enc_clk_config.h>
+ #include <mach/io.h>
+ #include <mach/register.h>
++#include <linux/amlogic/aml_gpio_consumer.h>
+ 
+ #include <linux/amlogic/hdmi_tx/hdmi_info_global.h>
+ #include <linux/amlogic/hdmi_tx/hdmi_tx_module.h>
+@@ -2220,13 +2221,47 @@ static int hdmitx_set_audmode(struct hdmi_tx_dev_s* hdev, Hdmi_tx_audio_para_t*
+     return 1;
+ }
+ 
++static irqreturn_t intr_gpio_hpd_handler(int irq, void *dev)
++{
++    unsigned int data32 = 0;
++    hdmitx_dev_t *hdev = (hdmitx_dev_t *)dev;
++    /* get GPIO status */
++    data32 = amlogic_get_value(hdev->gpio_hpd_int, "hdmitx_gpio_hpd");
++    hdmi_print(IMP, SYS "gpio hpd irq %x\n", data32);
++    if (hdev->hpd_lock == 1) {
++        hdmi_print(IMP, HPD "HDMI hpd locked\n");
++        return IRQ_HANDLED;
++    }
++    /* HPD rising */
++    if (data32 == 1) {
++        hdev->hdmitx_event |= HDMI_TX_HPD_PLUGIN;
++        hdev->hdmitx_event &= ~HDMI_TX_HPD_PLUGOUT;
++        PREPARE_DELAYED_WORK(&hdev->work_hpd_plugin,
++            hdmitx_hpd_plugin_handler);
++        queue_delayed_work(hdev->hdmi_wq, &hdev->work_hpd_plugin, HZ / 3);
++    } else {    /* HPD falling */
++        hdev->hdmitx_event |= HDMI_TX_HPD_PLUGOUT;
++        hdev->hdmitx_event &= ~HDMI_TX_HPD_PLUGIN;
++        PREPARE_DELAYED_WORK(&hdev->work_hpd_plugout,
++            hdmitx_hpd_plugout_handler);
++        queue_delayed_work(hdev->hdmi_wq, &hdev->work_hpd_plugout, HZ / 3);
++    }
++    return IRQ_HANDLED;
++}
++
+ static void hdmitx_setupirq(hdmitx_dev_t* hdmitx_device)
+ {
+     int r;
+     hdmitx_wr_reg(HDMITX_TOP_INTR_STAT_CLR, 0x7);
+-    r = request_irq(INT_HDMI_TX, &intr_handler,
+-                    IRQF_SHARED, "hdmitx",
+-                    (void *)hdmitx_device);
++    if (hdmitx_device->gpio_hpd_int == -1)
++        r = request_irq(INT_HDMI_TX, &intr_handler,
++            IRQF_SHARED, "hdmitx", (void *)hdmitx_device);
++    else {
++        r = request_irq(INT_GPIO_0, &intr_gpio_hpd_handler,
++            IRQF_SHARED, "hdmitx_gpio_hpd", (void *)hdmitx_device);
++        r = request_irq(INT_GPIO_1, &intr_gpio_hpd_handler,
++        IRQF_SHARED, "hdmitx_gpio_hpd", (void *)hdmitx_device);
++    }
+ }
+ 
+ static void hdmitx_uninit(hdmitx_dev_t* hdmitx_device)
+diff --git a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+index 548f7c15cd7d..e62fc5eec96b 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
++++ b/drivers/amlogic/hdmi/hdmi_tx_2/hdmi_tx_main.c
+@@ -1551,6 +1551,8 @@ static int amhdmitx_probe(struct platform_device *pdev)
+     extern struct switch_dev lang_dev;
+     int r,ret=0;
+ 
++    const char *str;
++
+ #ifdef CONFIG_USE_OF
+     int psize, val;
+     phandle phandle;
+@@ -1645,6 +1647,21 @@ static int amhdmitx_probe(struct platform_device *pdev)
+                 }
+             }
+         }
++/* GET GPIO HPD */
++        hdmitx_device.gpio_hpd_int = -1;
++        ret = of_property_read_string(pdev->dev.of_node, "hpd-gpio-int", &str);
++        if (!ret) {
++            hdmitx_device.gpio_hpd_int = amlogic_gpio_name_map_num(str);
++            amlogic_gpio_request(hdmitx_device.gpio_hpd_int,
++                "hdmitx_gpio_hpd");
++            amlogic_gpio_to_irq(hdmitx_device.gpio_hpd_int,
++                "hdmitx_gpio_hpd",
++            AML_GPIO_IRQ(GPIO_IRQ0, FILTER_NUM7, GPIO_IRQ_RISING));
++            amlogic_gpio_to_irq(hdmitx_device.gpio_hpd_int,
++                "hdmitx_gpio_hpd",
++            AML_GPIO_IRQ(GPIO_IRQ1, FILTER_NUM7, GPIO_IRQ_FALLING));
++        }
++        pr_info("gpio_hpd_int = %d\n", hdmitx_device.gpio_hpd_int);
+ // Get vendor information
+         ret = of_property_read_u32(pdev->dev.of_node,"vend-data",&val);
+         if(ret) {
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+index 5c73194ac5a8..792a7fe032e6 100644
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+@@ -160,6 +160,7 @@ typedef struct hdmi_tx_dev_s {
+     unsigned int  tv_no_edid;           // For some un-well-known TVs, no edid at all
+     unsigned int  hpd_lock;
+     unsigned int  mode420;
++	unsigned int  gpio_hpd_int; /* Used for other GPIO as HPD */
+     unsigned int  output_blank_flag;    // if equals to 1, means current video & audio output are blank
+     unsigned int  audio_notify_flag;
+     unsigned int  audio_step;
+-- 
+2.19.0
+

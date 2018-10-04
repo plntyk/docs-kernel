@@ -1,0 +1,546 @@
+From 54102206478776bc83b02d7ed830a8f57aae2a33 Mon Sep 17 00:00:00 2001
+From: "shanwu.hu" <shanwu.hu@amlogic.com>
+Date: Thu, 20 Nov 2014 19:08:33 +0800
+Subject: [PATCH 5118/5965] g9tv:dvb: modify dvb_tv driver to adapt that the
+ tuner exists as ko
+
+---
+ drivers/amlogic/dvb_tv/amldemod/Makefile      |   7 +-
+ drivers/amlogic/dvb_tv/amldemod/aml_demod.c   |  46 ++++----
+ drivers/amlogic/dvb_tv/amldemod/amlfrontend.c |  13 +--
+ drivers/amlogic/dvb_tv/amldemod/amlfrontend.h |   1 +
+ drivers/amlogic/dvb_tv/amldemod/demod_func.c  |  23 ++--
+ drivers/amlogic/dvb_tv/amldemod/demod_func.h  |   8 +-
+ drivers/amlogic/dvb_tv/amldemod/dvbc_func.c   |   5 +-
+ drivers/amlogic/dvb_tv/amldemod/dvbt_func.c   |   2 +-
+ drivers/amlogic/dvb_tv/amldemod/i2c_func.c    |   2 +-
+ drivers/amlogic/dvb_tv/amldemod/tuner_func.c  | 103 ++----------------
+ drivers/media/dvb-core/dvb_frontend.c         |  14 ++-
+ drivers/media/dvb-core/dvb_frontend.h         |   5 +
+ .../uapi/linux/dvb}/aml_demod.h               |   0
+ 13 files changed, 71 insertions(+), 158 deletions(-)
+ rename {drivers/amlogic/dvb_tv/amldemod => include/uapi/linux/dvb}/aml_demod.h (100%)
+
+diff --git a/drivers/amlogic/dvb_tv/amldemod/Makefile b/drivers/amlogic/dvb_tv/amldemod/Makefile
+index b71227331fdc..243b0a1b250b 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/Makefile
++++ b/drivers/amlogic/dvb_tv/amldemod/Makefile
+@@ -1,5 +1,5 @@
+ 
+-obj-$(CONFIG_AM_M6_DEMOD) += aml_fe.o
++obj-$(CONFIG_AM_DTVDEMOD) += aml_fe.o
+ 
+ aml_fe-objs := demod_func.o  dvbc_func.o i2c_func.o tuner_func.o #dvbt_func.o
+ 
+@@ -23,9 +23,12 @@ aml_fe-objs	+= aml_demod.o
+ ##endif
+ 
+ ifeq ($(CONFIG_AM_SI2177), y)
+-##EXTRA_CFLAGS += -I../../../../hardware/dvb/silabs/drivers/si2177/
++EXTRA_CFLAGS += -Idrivers/../../hardware/dvb/silabs/drivers/si2177/
+ endif
+ 
++ifeq ($(CONFIG_AM_SI2157), y)
++EXTRA_CFLAGS += -Idrivers/../../hardware/dvb/silabs/drivers/si2157/
++endif
+ 
+ EXTRA_CFLAGS += -I.
+ EXTRA_CFLAGS += -Idrivers/media/dvb-core
+diff --git a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+index 5fac3281521c..b4c4a3e10024 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
++++ b/drivers/amlogic/dvb_tv/amldemod/aml_demod.c
+@@ -25,7 +25,7 @@
+ 
+ #include <asm/fiq.h>
+ #include <asm/uaccess.h>
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+ 
+ #include <linux/slab.h>
+@@ -290,42 +290,36 @@ void mem_read(struct aml_demod_mem* arg)
+ //	memcpy(mem_buf[addr],data,1);
+ 	printk("[addr %x] data is %x\n",addr,data);
+ }
+-#ifdef CONFIG_AM_SI2176
+-extern	int si2176_get_strength(void);
+-#endif
+-
+-#ifdef CONFIG_AM_SI2177
+-extern	int si2177_get_strength(void);
+-#endif
+ 
+ static long aml_demod_ioctl(struct file *file,
+                         unsigned int cmd, unsigned long arg)
+ {
+ 	int i=0;
+ 	int step;
+-	int strength;
+ 
+-	strength=0;
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++	int strength=0;
++	struct dvb_frontend *dvbfe;
++#endif
+ 
+     switch (cmd) {
+-
+-		case AML_DEMOD_GET_RSSI :
+-			printk("Ioctl Demod GET_RSSI. \n");
+-			#ifdef CONFIG_AM_SI2176
+-			 strength=si2176_get_strength();
+-			 printk("[si2176] strength is %d\n",strength-256);
+-			#endif
+-
+-			#ifdef CONFIG_AM_SI2177
+-			 strength=si2177_get_strength();
+-			 printk("[si2177] strength is %d\n",strength-256);
+-			#endif
+-
+-			break;
++	case AML_DEMOD_GET_RSSI :
++		printk("Ioctl Demod GET_RSSI. \n");
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++		dvbfe = get_si2177_tuner();
++		if (dvbfe != NULL)
++			strength=dvbfe->ops.tuner_ops.get_strength(dvbfe);
++		 printk("[si2177] strength is %d\n",strength-256);
++#endif
++		break;
+ 
+ 	case AML_DEMOD_SET_TUNER :
+-	     printk("Ioctl Demod Set Tuner.\n");
+-		  demod_set_tuner(&demod_sta, &demod_i2c, (struct aml_tuner_sys *)arg);
++		 printk("Ioctl Demod Set Tuner.\n");
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++		dvbfe = get_si2177_tuner();
++		if (dvbfe != NULL)
++			dvbfe->ops.tuner_ops.set_tuner(dvbfe, &demod_sta, &demod_i2c, (struct aml_tuner_sys *)arg);
++#endif
+ 		break;
+ 
+     	case AML_DEMOD_SET_SYS :
+diff --git a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
+index 02bead3024e9..10e69d789e6b 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
++++ b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.c
+@@ -33,7 +33,7 @@
+ #include <linux/gpio.h>
+ #include "../aml_fe.h"
+ 
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+ #include "../aml_dvb.h"
+ #include "amlfrontend.h"
+@@ -97,9 +97,7 @@ static ssize_t dvbc_auto_sym_store(struct class *cls, struct class_attribute *at
+ 
+ }
+ 
+-#ifdef CONFIG_AM_SI2176
+-extern	int si2176_get_strength(void);
+-#endif
++
+ static ssize_t dvbc_para_show(struct class *cls,struct class_attribute *attr,char *buf)
+ {
+ 	struct aml_demod_sts demod_sts;
+@@ -110,9 +108,6 @@ static ssize_t dvbc_para_show(struct class *cls,struct class_attribute *attr,cha
+ 	mutex_lock(&aml_lock);
+ 
+ 	dvbc_status(&demod_status,&demod_i2c, &demod_sts);
+-	#ifdef CONFIG_AM_SI2176
+-			 strength=si2176_get_strength();
+-	#endif
+ 	pbuf+=sprintf(pbuf, "dvbc_para: ch_sts is %d", demod_sts.ch_sts);
+ 	pbuf+=sprintf(pbuf, "snr %d dB \n", demod_sts.ch_snr/100);
+ 	pbuf+=sprintf(pbuf, "ber %d", demod_sts.ch_ber);
+@@ -1096,7 +1091,11 @@ int M6_Demod_Dtmb_Init(struct aml_fe_dev *dev)
+ 	// 0 -DVBC, 1-DVBT, ISDBT, 2-ATSC
+ 	demod_status.dvb_mode = M6_Dtmb;
+ 	sys.adc_clk=Adc_Clk_25M;//Adc_Clk_26M;
++	#ifdef dtmb_mobile_mode
++	sys.demod_clk=Demod_Clk_180M;
++	#else
+ 	sys.demod_clk=Demod_Clk_100M;
++	#endif
+ 	demod_status.ch_if=Si2176_5M_If;
+ 	demod_status.tmp=Adc_mode;
+ 	demod_set_sys(&demod_status, &i2c, &sys);;
+diff --git a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.h b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.h
+index 6f68ba476f11..f7c30aa62cf7 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/amlfrontend.h
++++ b/drivers/amlogic/dvb_tv/amldemod/amlfrontend.h
+@@ -54,6 +54,7 @@ enum M6_Demod_Dvb_Mode
+ 
+ #define Adc_Clk_25M			25000   //dtmb
+ #define Demod_Clk_100M 	  100000//
++#define Demod_Clk_180M 	  180000//
+ 
+ 
+ 
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.c b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+index a2f45176fa73..e7b3cb09e21c 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+@@ -6,7 +6,7 @@
+ //#include "a9_l2_func.h"
+ 
+ #include "demod_func.h"
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include <linux/string.h>
+ #include <linux/kernel.h>
+ #include "acf_filter_coefficient.h"
+@@ -281,15 +281,13 @@ static atsc_cfg_t list_qam256[113] = {
+ 	{0x0001, 0x05, 1},
+ 	{0x0000, 0x00, 1}};
+ 
+-
++#if 0 
+ #if (defined CONFIG_AM_SI2176)
+-#include "si2176_func.h"
++#include "../si2176/si2176_func.h"
+ extern struct si2176_device_s *si2176_devp;
+ extern void si2176_set_frequency(unsigned int freq);
+-#elif (defined CONFIG_AM_SI2177)
+-//#include "si2177_func.h"
+-#include "../../../../hardware/dvb/silabs/drivers/si2177/si2177_func.h"
+-
++#elif ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++#include "si2177_func.h"
+ extern struct si2177_device_s *si2177_devp;
+ extern void si2177_set_frequency(unsigned int freq);
+ #endif
+@@ -336,7 +334,7 @@ int demod_set_tuner(struct aml_demod_sta *demod_sta,
+ 		tuner_sys->rssi=si2176_get_strength();
+ 		return 0;
+ }
+-#elif (defined CONFIG_AM_SI2177)
++#elif ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
+ int demod_set_tuner(struct aml_demod_sta *demod_sta,
+ 		  struct aml_demod_i2c *demod_i2c,
+ 		  struct aml_tuner_sys *tuner_sys)
+@@ -375,6 +373,7 @@ int demod_set_tuner(struct aml_demod_sta *demod_sta,
+ }
+ 
+ 
++#endif
+ #endif
+ 
+ #ifndef G9_TV
+@@ -1225,13 +1224,17 @@ int dtmb_read_snr(void){
+              	  if(mobi_det_power > 10) {
+              	      mobile_times = 8;
+              	      dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9) + (1 << 1)); // set mobile mode
+-             	   //   dtmb_write_reg(0x50, 0x1241);
++             	      #ifdef dtmb_mobile_mode
++             	      dtmb_write_reg(0x50, 0x1241);	//180m mobile mode
++             	      #endif
+              	  }
+              	  else {
+              	      mobile_times -= 1;
+              	      if(mobile_times <= 0) {
+              	          dtmb_write_reg(0x46, (dtmb_read_reg(0x46) & 0xfffffff9)); // set static mode
+-             	       //   dtmb_write_reg(0x50, 0x1120);
++             	          #ifdef dtmb_mobile_mode
++             	          dtmb_write_reg(0x50, 0x1120);	//180m mobile mode
++             	          #endif
+              	          mobile_times = 0;
+              	      }
+              	  }
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.h b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+index 8e6dab71408c..0d3840693743 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.h
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.h
+@@ -8,7 +8,7 @@
+ /*#include <mach/register.h>
+ #include <mach/avosstyle_io.h>
+ #include <mach/io.h>*/
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "../aml_fe.h"
+ #include "amlfrontend.h"
+ #define G9_TV
+@@ -16,6 +16,8 @@
+ #define PWR_ON    1
+ #define PWR_OFF   0
+ 
++#define dtmb_mobile_mode
++
+ 
+ //#define DEMOD_BASE     APB_REG_ADDR(0x20000)
+ #define DEMOD_BASE DEMOD_REG_ADDR(0x0) //0xc8020000 //APB_REG_ADDR(0x20000)      0xd0020000
+@@ -112,10 +114,6 @@ int tda18273_tuner_set_frequncy(unsigned int dwFrequency,unsigned int dwStandard
+ 
+ int tuner_set_ch (struct aml_demod_sta *demod_sta,
+ 		  struct aml_demod_i2c *demod_i2c);
+-int demod_set_tuner(struct aml_demod_sta *demod_sta,
+-		  struct aml_demod_i2c *demod_i2c,
+-		  struct aml_tuner_sys *tuner_sys);
+-
+ 
+ //dvbt
+ int dvbt_set_ch(struct aml_demod_sta *demod_sta,
+diff --git a/drivers/amlogic/dvb_tv/amldemod/dvbc_func.c b/drivers/amlogic/dvb_tv/amldemod/dvbc_func.c
+index 97902c829af8..993355d55d26 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/dvbc_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/dvbc_func.c
+@@ -1,7 +1,7 @@
+ #include <linux/kernel.h>
+ #include <linux/i2c.h>
+ #include <linux/delay.h>
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+ #include <linux/kthread.h>
+ 
+@@ -18,8 +18,6 @@ static void dvbc_cci_timer(unsigned long data)
+ 	int maxCCI_p,re,im,j,i,times,maxCCI,sum,sum1,reg_0xf0,tmp1,tmp,tmp2,reg_0xa8,reg_0xac;
+ 	int reg_0xa8_t, reg_0xac_t;
+ 	count=100;
+-//	while(1){
+-		    // search cci((si2176_get_strength()-256)<(-85))
+ 		if((((apb_read_reg(QAM_BASE+0x18))&0x1)==1)){
+ 				printk("[cci]lock ");
+ 				if(cciflag==0){
+@@ -140,7 +138,6 @@ int dvbc_cci_task(void *data)
+ 	count=100;
+ 	while(1){
+ 			msleep(200);
+-		    // search cci((si2176_get_strength()-256)<(-85))
+ 		if((((apb_read_reg(QAM_BASE+0x18))&0x1)==1)){
+ 				printk("[cci]lock ");
+ 				if(cciflag==0){
+diff --git a/drivers/amlogic/dvb_tv/amldemod/dvbt_func.c b/drivers/amlogic/dvb_tv/amldemod/dvbt_func.c
+index df99e358ad05..35db8661eb1b 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/dvbt_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/dvbt_func.c
+@@ -1,7 +1,7 @@
+ #include <linux/kernel.h>
+ #include <linux/i2c.h>
+ #include <linux/delay.h>
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+ 
+ static int debug_amldvbt;
+diff --git a/drivers/amlogic/dvb_tv/amldemod/i2c_func.c b/drivers/amlogic/dvb_tv/amldemod/i2c_func.c
+index adca6757cc60..2fb1bee610b5 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/i2c_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/i2c_func.c
+@@ -1,7 +1,7 @@
+ #include <linux/kernel.h>
+ #include <linux/i2c.h>
+ #include <linux/delay.h>
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+ 
+ // basic functions
+diff --git a/drivers/amlogic/dvb_tv/amldemod/tuner_func.c b/drivers/amlogic/dvb_tv/amldemod/tuner_func.c
+index 22ba4fbb2ca5..37ce63dfe421 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/tuner_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/tuner_func.c
+@@ -1,107 +1,18 @@
+ #include <linux/kernel.h>
+ #include <linux/i2c.h>
+-
+-//#include <dvb_frontend.h>
+-
+-#include "aml_demod.h"
++#include <linux/dvb/aml_demod.h>
+ #include "demod_func.h"
+-
+-
+-//#include "mxl/MxL5007_API.h"
+-//#include "../tuners/si2176_func.h"
+-
+-//static int configure_first=-1;
+-#if 0
+-static int set_tuner_DCT7070X(struct aml_demod_sta *demod_sta,
+-			      struct aml_demod_i2c *adap)
+-{
+-    int ret = 0;
+-    unsigned char data[6];
+-    unsigned long ch_freq, ftmp;
+-    struct i2c_msg msg;
+-
+-    ch_freq = demod_sta->ch_freq;
+-    //printk("Set Tuner DCT7070X to %ld kHz\n", ch_freq);
+-
+-    ftmp = (ch_freq+36125)*10/625;  // ftmp=(ch_freq+GX_IF_FREQUENCY)
+-    data[0] = ftmp>>8&0xff;
+-    data[1] = ftmp&0xff;
+-    data[2] = 0x8b;              // 62.5 kHz
+-
+-    if (ch_freq < 153000)
+-	data[3] = 0x01;
+-    else if (ch_freq < 430000)
+-	data[3] = 0x06;
+-    else
+-	data[3] = 0x0c;
+-
+-    data[4] = 0xc3;
+-
+-    msg.addr = adap->addr;
+-    msg.flags = 0; // I2C_M_IGNORE_NAK;
+-    msg.len = 5;
+-    msg.buf = data;
+-
+-    ret = am_demod_i2c_xfer(adap, &msg, 1);
+-
+-    return ret;
+-}
+-#endif
+-
+-/*int tuner_set_ch(struct aml_demod_sta *demod_sta, struct aml_demod_i2c *adap)
+-{
+-    int ret = 0;
+-    printk("Set tuner: 1 is DCT70707, 1 is Mxl5007, 3 is FJ2207, 4 is TD1316, 5 is XUGUAN DMTX-6A, 6 is Si2176\n");
+-    switch (adap->tuner) {
+-    case 0 : // NULL
+-	printk("Warning: NULL Tuner\n");
+-	break;
+-
+-    case 1 : // DCT
+-	ret = set_tuner_DCT7070X(demod_sta, adap);
+-	break;
+-
+-    case 2 : // Maxliner
+-	ret = set_tuner_MxL5007(demod_sta, adap);
+-	break;
+-
+-    case 3 : // NXP
+-	ret = set_tuner_fj2207(demod_sta, adap);
+-	break;
+-
+-    case 4 : // TD1316
+-	ret = set_tuner_TD1316(demod_sta, adap);
+-	break;
+-
+-    case 5 :
+-	ret = set_tuner_xuguan(demod_sta, adap);
+-	break;
+-
+-    case 6 : //Si2176
+-	ret = set_tuner_si2176(demod_sta, adap);
+-	break;
+-
+-    default :
+-	return -1;
+-    }
+-
+-    return 0;
+-}*/
+-#if (defined CONFIG_AM_SI2176)
+-extern	int si2176_get_strength(void);
+-#elif (defined CONFIG_AM_SI2177)
+-extern	int si2177_get_strength(void);
+-#endif
++#include "../aml_fe.h"
+ 
+ int tuner_get_ch_power(struct aml_fe_dev *adap)
+ {
+-//    int ret = 0;
+ 	int strength=0;
+ 
+-#if (defined CONFIG_AM_SI2176)
+-	 strength=si2176_get_strength();
+-#elif (defined CONFIG_AM_SI2177)
+-	 strength=si2177_get_strength();
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++	struct dvb_frontend *dvbfe;
++	dvbfe = get_si2177_tuner();
++	if (dvbfe != NULL)
++		strength=dvbfe->ops.tuner_ops.get_strength(dvbfe);
+ #endif
+ 
+ 	 return strength;
+diff --git a/drivers/media/dvb-core/dvb_frontend.c b/drivers/media/dvb-core/dvb_frontend.c
+index 770523fc73c5..7187ba9793cc 100755
+--- a/drivers/media/dvb-core/dvb_frontend.c
++++ b/drivers/media/dvb-core/dvb_frontend.c
+@@ -562,13 +562,15 @@ extern u32 dvbc_get_status(void);
+ extern unsigned long atsc_read_iqr_reg(void);
+ 
+ #endif
++
++#if 0 
+ #if (defined CONFIG_AM_SI2176)
+ int si2176_get_strength(void);
+ #endif
+-#if (defined CONFIG_AM_SI2177)
++#if ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
+ int si2177_get_strength(void);
+ #endif
+-
++#endif
+ 
+ static void dvb_frontend_swzigzag(struct dvb_frontend *fe)
+ {
+@@ -577,7 +579,7 @@ static void dvb_frontend_swzigzag(struct dvb_frontend *fe)
+ 	int time;
+ 	struct dvb_frontend_private *fepriv = fe->frontend_priv;
+ 	struct dtv_frontend_properties *c = &fe->dtv_property_cache, tmp;
+-#if ((defined CONFIG_AM_SI2176) || (defined CONFIG_AM_SI2177))&&(defined CONFIG_AM_M6_DEMOD)
++#if ((defined CONFIG_AM_SI2176) || (defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))&&(defined CONFIG_AM_M6_DEMOD)
+ 	int strength;
+ #endif
+ #if (defined CONFIG_AM_M6_DEMOD)
+@@ -692,7 +694,7 @@ static void dvb_frontend_swzigzag(struct dvb_frontend *fe)
+ 	//	fepriv->parameters_out = fepriv->parameters_in;
+ 		msleep(100);
+ 		#if (defined CONFIG_AM_SI2176)
+-		strength=si2176_get_strength()-256;
++		strength=fe->ops.tuner_ops.get_strength(fe)-256;
+ 		if(strength<=(-85)){
+ 			s=32;
+ 			printk("5-strength is %d\n",strength);
+@@ -705,8 +707,8 @@ static void dvb_frontend_swzigzag(struct dvb_frontend *fe)
+ 			return;
+ 
+ 		}
+-		#elif (defined CONFIG_AM_SI2177)
+-		strength=si2177_get_strength()-256;
++		#elif ((defined CONFIG_AM_SI2177) || (defined CONFIG_AM_SI2157))
++		strength=fe->ops.tuner_ops.get_strength(fe)-256;
+ 		if(strength<=(-85)){
+ 			s=32;
+ 			printk("5-strength is %d\n",strength);
+diff --git a/drivers/media/dvb-core/dvb_frontend.h b/drivers/media/dvb-core/dvb_frontend.h
+index 49e79d5ce478..ecb401147d6a 100755
+--- a/drivers/media/dvb-core/dvb_frontend.h
++++ b/drivers/media/dvb-core/dvb_frontend.h
+@@ -38,6 +38,7 @@
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
+ 
++#include <linux/dvb/aml_demod.h>
+ #include <linux/dvb/frontend.h>
+ 
+ #include "dvbdev.h"
+@@ -226,12 +227,16 @@ struct dvb_tuner_ops {
+ 	void (*get_pll_status)(struct dvb_frontend *fe, void *status);
+ 	int (*get_rf_strength)(struct dvb_frontend *fe, u16 *strength);
+ 	int (*get_afc)(struct dvb_frontend *fe, s32 *afc);
++	int  (*get_snr)(struct dvb_frontend *fe);
+ 
+ 	/** These are provided separately from set_params in order to facilitate silicon
+ 	 * tuners which require sophisticated tuning loops, controlling each parameter separately. */
+ 	int (*set_frequency)(struct dvb_frontend *fe, u32 frequency);
+ 	int (*set_bandwidth)(struct dvb_frontend *fe, u32 bandwidth);
+ 
++	int (*set_tuner)(struct dvb_frontend *fe, struct aml_demod_sta *demod_sta, struct aml_demod_i2c *demod_i2c, struct aml_tuner_sys *tuner_sys);
++	int (*get_strength)(struct dvb_frontend *fe);
++
+ 	/*
+ 	 * These are provided separately from set_params in order to facilitate silicon
+ 	 * tuners which require sophisticated tuning loops, controlling each parameter separately.
+diff --git a/drivers/amlogic/dvb_tv/amldemod/aml_demod.h b/include/uapi/linux/dvb/aml_demod.h
+similarity index 100%
+rename from drivers/amlogic/dvb_tv/amldemod/aml_demod.h
+rename to include/uapi/linux/dvb/aml_demod.h
+-- 
+2.19.0
+

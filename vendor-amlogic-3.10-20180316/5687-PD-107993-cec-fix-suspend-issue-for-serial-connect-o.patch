@@ -1,0 +1,257 @@
+From 5d6495a7f556a4d73789cf6645e00d1fa86f5e5e Mon Sep 17 00:00:00 2001
+From: Tao Zeng <tao.zeng@amlogic.com>
+Date: Wed, 24 Jun 2015 10:45:15 +0800
+Subject: [PATCH 5687/5965] PD#107993: cec: fix suspend issue for serial
+ connect of CEC
+
+1. clear tx buffer and unlock wakelock if cec hw reset;
+2. register reboot notifier to inactive source if power off;
+3. change message process logic if suspend.
+4. using physial address to detect serial-connect of CEC and try
+   to wake up middle-part of cec-devices during resume.
+
+Change-Id: I785c63dc436018fe6aac749a8627ecee66d87863
+---
+ .../mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c   |  2 +
+ .../mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c  |  2 +
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c   |  1 -
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c    | 84 +++++++++++++++----
+ 4 files changed, 70 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 1748144f4f55..4515585fda59 100755
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -81,6 +81,7 @@ void cec_hw_reset(void)
+     cec_arbit_bit_time_set(5, 0x000, 0);
+     cec_arbit_bit_time_set(7, 0x2aa, 0);
+ 
++    memset(&cec_tx_msgs, 0, sizeof(struct cec_tx_msg));
+     hdmi_print(INF, CEC "hw reset :logical addr:0x%x\n", aocec_rd_reg(CEC_LOGICAL_ADDR0));
+ 
+ }
+@@ -457,6 +458,7 @@ void ao_cec_init(void)
+     // Device 0 config
+     aocec_wr_reg(CEC_LOGICAL_ADDR0, (0x1 << 4) | 0x4);
+     memset(&cec_tx_msgs, 0, sizeof(struct cec_tx_msg));
++    cec_wake_unlock();
+ }
+ 
+ 
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 60a1b44ea5a3..8c311c5683d6 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -106,6 +106,7 @@ void cec_hw_reset(void)
+     cec_arbit_bit_time_set(5, 0x000, 0);
+     cec_arbit_bit_time_set(7, 0x2aa, 0);
+ 
++    memset(&cec_tx_msgs, 0, sizeof(struct cec_tx_msg));
+     hdmi_print(INF, CEC "hw reset :logical addr:0x%x\n", aocec_rd_reg(CEC_LOGICAL_ADDR0));
+ 
+ }
+@@ -483,6 +484,7 @@ void ao_cec_init(void)
+     // Device 0 config
+     aocec_wr_reg(CEC_LOGICAL_ADDR0, (0x1 << 4) | 0x4);
+     memset(&cec_tx_msgs, 0, sizeof(struct cec_tx_msg));
++    cec_wake_unlock();    // unlock
+ }
+ 
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
+index a74e2b4e5a69..660e9792067c 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
+@@ -209,7 +209,6 @@ void cec_standby(cec_rx_message_t* pcec_message)
+         input_sync(cec_global_info.remote_cec_dev);
+         input_event(cec_global_info.remote_cec_dev, EV_KEY, KEY_POWER, 0);
+         input_sync(cec_global_info.remote_cec_dev);
+-        //cec_disable_irq();
+     }
+     last_standby = cur_time;
+ }
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index e624d5656261..2dd4e6129041 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -56,6 +56,8 @@
+ #include <linux/amlogic/hdmi_tx/hdmi_tx_module.h>
+ #include <mach/hdmi_tx_reg.h>
+ #include <linux/amlogic/hdmi_tx/hdmi_tx_cec.h>
++#include <linux/notifier.h>
++#include <linux/reboot.h>
+ extern hdmitx_dev_t * get_hdmitx_device(void);
+ static hdmitx_dev_t* hdmitx_device = NULL;
+ static struct workqueue_struct *cec_workqueue = NULL;
+@@ -63,6 +65,7 @@ static struct hrtimer cec_late_timer;
+ static unsigned char rx_msg[MAX_MSG];
+ static unsigned char rx_len;
+ static int cec_suspend = 0;
++static int cec_enter_standby = 0;
+ 
+ DEFINE_SPINLOCK(cec_input_key);
+ 
+@@ -112,13 +115,21 @@ static irqreturn_t cec_isr_handler(int irq, void *dev_instance);
+ static struct early_suspend hdmitx_cec_early_suspend_handler;
+ static void hdmitx_cec_early_suspend(struct early_suspend *h)
+ {
++    int phy_addr = 0;
+     hdmi_print(INF, CEC "early suspend!\n");
+-    if (!hdmitx_device->hpd_state)
++    cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_STANDBY;
++    cec_enter_standby = 1;
++    phy_addr = aml_read_reg32(P_AO_DEBUG_REG1) & 0xffff;
++    /*
++     * if phy_addr show device is serial connected to tv
++     * (such as TV <-> hdmi switch <-> mbox), we should try to wake up
++     * other devices connected between tv and mbox
++     */
++    if (!hdmitx_device->hpd_state && !(phy_addr & 0xfff))
+     { //if none HDMI out,no CEC features.
+         hdmi_print(INF, CEC "HPD low!\n");
+         return;
+     }
+-    cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_STANDBY;
+     printk("CEC return, power status:%d\n", cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status);
+     if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))
+     {
+@@ -137,17 +148,27 @@ static void hdmitx_cec_early_suspend(struct early_suspend *h)
+ 
+ static void hdmitx_cec_late_resume(struct early_suspend *h)
+ {
++    int phy_addr = 0;
+     cec_enable_irq();
+     if (cec_rx_buf_check()) {
+         cec_rx_buf_clear();
+     }
+     hdmitx_device->hpd_state = hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_HPD_GPI_ST, 0);
+-    if (!hdmitx_device->hpd_state)
+-    { //if none HDMI out,no CEC features.
+-        hdmi_print(INF, CEC "HPD low!\n");
+-        return;
+-    }
+-
++    cec_suspend = 0;
++    cec_enter_standby = 0;
++    cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_ON;
++    phy_addr = aml_read_reg32(P_AO_DEBUG_REG1) & 0xffff;
++    /*
++     * if phy_addr show device is serial connected to tv
++     * (such as TV <-> hdmi switch <-> mbox), we should try to wake up
++     * other devices connected between tv and mbox
++     */
++    if (!hdmitx_device->hpd_state && !(phy_addr & 0xfff))
++    { //if none HDMI out,no CEC features.
++        hdmi_print(INF, CEC "HPD low!\n");
++        return;
++    }
++
+     if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))
+     {
+         cec_hw_reset();//for M8 CEC standby.
+@@ -157,8 +178,6 @@ static void hdmitx_cec_late_resume(struct early_suspend *h)
+     }
+ 
+     hdmi_print(INF, CEC "late resume\n");
+-    cec_suspend = 0;
+-    cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_ON;
+ }
+ 
+ #endif
+@@ -178,7 +197,15 @@ void cec_wake_unlock(void)
+ 
+ void cec_isr_post_process(void)
+ {
+-    if (!hdmitx_device->hpd_state)
++    int phy_addr = 0;
++
++    phy_addr = aml_read_reg32(P_AO_DEBUG_REG1) & 0xffff;
++    /*
++     * if phy_addr show device is serial connected to tv
++     * (such as TV <-> hdmi switch <-> mbox), we should try to wake up
++     * other devices connected between tv and mbox
++     */
++    if (!hdmitx_device->hpd_state && !(phy_addr & 0xfff))
+     { //if none HDMI out,no CEC features.
+         return;
+     }
+@@ -515,7 +542,7 @@ void cec_input_handle_message(void)
+             default:
+                 break;
+         }
+-    } else if (!cec_suspend){
++    } else if (cec_suspend){
+         /*
+          * Panasonic tv will send key power and power on for resume devices
+          * we should avoid send key again when device is resuming from uboot
+@@ -768,9 +795,11 @@ static irqreturn_t cec_isr_handler(int irq, void *dev_instance)
+         return IRQ_HANDLED;
+     }
+ 
+-    hdmitx = (hdmitx_dev_t*)dev_instance;
+-    register_cec_rx_msg(rx_msg, rx_len);
+-    queue_work(cec_workqueue, &hdmitx->cec_work);
++    if (!cec_suspend) {      // do not process messages if suspend
++        hdmitx = (hdmitx_dev_t*)dev_instance;
++        register_cec_rx_msg(rx_msg, rx_len);
++        queue_work(cec_workqueue, &hdmitx->cec_work);
++    }
+     //cec_rx_buf_check();
+ 
+     //cec_enable_irq();
+@@ -1314,9 +1343,10 @@ void cec_handle_message(cec_rx_message_t* pcec_message)
+             case CEC_OC_STANDBY:
+                 cec_inactive_source_rx(pcec_message);
+                 /* platform already enter standby state, ignore this meesage */
+-                if (cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status == POWER_STANDBY)
+-                    break;
+-                cec_standby(pcec_message);
++                if (!cec_enter_standby) {
++                    cec_enter_standby = 1;
++                    cec_standby(pcec_message);
++                }
+                 break;
+             case CEC_OC_SET_STREAM_PATH:
+                 cec_set_stream_path(pcec_message);
+@@ -1724,6 +1754,21 @@ void cec_routing_information(cec_rx_message_t* pcec_message)
+     }
+ }
+ /***************************** cec middle level code end *****************************/
++
++static struct notifier_block cec_reboot_nb;
++static int cec_reboot(struct notifier_block *nb, unsigned long state, void *cmd)
++{
++    if (!hdmitx_device->hpd_state) {
++        return 0;
++    }
++    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) {
++        hdmi_print(INF, CEC "%s, notify reboot\n",INT_HDMI_CEC);
++        cec_menu_status_smp(DEVICE_MENU_INACTIVE);
++        cec_inactive_source();
++    }
++    return 0;
++}
++
+ /***************************** cec high level code *****************************/
+ static int aml_cec_probe(struct platform_device *pdev)
+ {
+@@ -1807,6 +1852,8 @@ static int aml_cec_probe(struct platform_device *pdev)
+     cec_global_info.cec_flag.cec_init_flag = 0;
+     hdmi_print(INF, CEC "hdmitx_device->cec_init_ready:0x%x", hdmitx_device->cec_init_ready);
+     queue_work(cec_workqueue, &hdmitx_device->cec_work);    // for init
++    cec_reboot_nb.notifier_call = cec_reboot;
++    register_reboot_notifier(&cec_reboot_nb);
+     return 0;
+ }
+ 
+@@ -1837,6 +1884,7 @@ static int aml_cec_remove(struct platform_device *dev)
+     hdmitx_device->cec_init_ready = 0;
+     input_unregister_device(cec_global_info.remote_cec_dev);
+     cec_global_info.cec_flag.cec_fiq_flag = 0;
++    unregister_reboot_notifier(&cec_reboot_nb);
+     return 0;
+ }
+ 
+-- 
+2.19.0
+

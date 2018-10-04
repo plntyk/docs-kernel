@@ -1,0 +1,622 @@
+From c76db4b49fbc380244e8946342ecebac5d1abf6a Mon Sep 17 00:00:00 2001
+From: Baocheng Sun <baocheng.sun@amlogic.com>
+Date: Thu, 23 Mar 2017 17:07:33 +0800
+Subject: [PATCH 5961/5965] PD#141398: drm: GEM use non-contiguous memory
+
+GEM use ion system heap
+
+Change-Id: Id385d058c6adbe03eb4bb02794f007da6bf3e04c
+Signed-off-by: Baocheng Sun <baocheng.sun@amlogic.com>
+---
+ arch/arm/configs/meson8_defconfig  |   2 +
+ arch/arm/configs/meson8b_defconfig |   2 +
+ drivers/amlogic/drm/Makefile       |   4 +-
+ drivers/amlogic/drm/meson_dmabuf.c |  80 ++++++++
+ drivers/amlogic/drm/meson_dmabuf.h |  29 +++
+ drivers/amlogic/drm/meson_drv.c    |  23 ++-
+ drivers/amlogic/drm/meson_gem.c    | 307 +++++++++++++++++++++++++++++
+ drivers/amlogic/drm/meson_gem.h    |  67 +++++++
+ include/drm/drmP.h                 |   1 +
+ 9 files changed, 502 insertions(+), 13 deletions(-)
+ create mode 100644 drivers/amlogic/drm/meson_dmabuf.c
+ create mode 100644 drivers/amlogic/drm/meson_dmabuf.h
+ create mode 100644 drivers/amlogic/drm/meson_gem.c
+ create mode 100644 drivers/amlogic/drm/meson_gem.h
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 3d14992060ee..1caf28f53686 100644
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -508,3 +508,5 @@ CONFIG_CRYPTO_USER_API_SKCIPHER=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
+ CONFIG_FIX_SYSPLL=y
++CONFIG_DRM_MESON=y
++CONFIG_DRM=y
+diff --git a/arch/arm/configs/meson8b_defconfig b/arch/arm/configs/meson8b_defconfig
+index 3922695e3b19..4386e3ab4558 100644
+--- a/arch/arm/configs/meson8b_defconfig
++++ b/arch/arm/configs/meson8b_defconfig
+@@ -484,3 +484,5 @@ CONFIG_CRYPTO_TWOFISH=y
+ CONFIG_CRYPTO_USER_API_SKCIPHER=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
++CONFIG_DRM_MESON=y
++CONFIG_DRM=y
+diff --git a/drivers/amlogic/drm/Makefile b/drivers/amlogic/drm/Makefile
+index eb7fafc61b7d..d5d220239dd1 100644
+--- a/drivers/amlogic/drm/Makefile
++++ b/drivers/amlogic/drm/Makefile
+@@ -1,4 +1,6 @@
+-meson-y := meson_drv.o
++meson-y := meson_drv.o  meson_gem.o meson_dmabuf.o
+ #meson-y += meson_viu.o meson_vpp.o meson_venc.o meson_vclk.o meson_canvas.o meson_plane.o meson_crtc.o meson_venc_cvbs.o
+ 
+ obj-$(CONFIG_DRM_MESON) += meson.o
++ccflags-y += -Idrivers/amlogic/ion_dev/
++ccflags-y += -Idrivers/staging/android/
+diff --git a/drivers/amlogic/drm/meson_dmabuf.c b/drivers/amlogic/drm/meson_dmabuf.c
+new file mode 100644
+index 000000000000..e8d3d59e418c
+--- /dev/null
++++ b/drivers/amlogic/drm/meson_dmabuf.c
+@@ -0,0 +1,80 @@
++/*
++ * Copyright (C) 2017 Amlogic
++ * Author: Baocheng Sun <baocheng.sun@amlogic.com>
++ * Copyright (C) 2017 by Amlogic
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <drm/drmP.h>
++#include <linux/dma-buf.h>
++#include <ion/ion.h>
++
++#include "meson_gem.h"
++#include "meson_dmabuf.h"
++
++struct dma_buf *meson_dmabuf_prime_export(struct drm_device *drm_dev,
++				struct drm_gem_object *obj, int flags)
++{
++	struct meson_gem_object *meson_gem_obj;
++	struct ion_handle *handle;
++
++	meson_gem_obj = container_of(obj, struct meson_gem_object, base);
++	handle = meson_gem_obj->handle;
++
++	if (!handle)
++		return ERR_PTR(-EINVAL);
++
++	return ion_share_dma_buf(handle->client, handle);
++}
++
++struct drm_gem_object *meson_dmabuf_prime_import(struct drm_device *drm_dev,
++						struct dma_buf *dma_buf)
++{
++	struct dma_buf_attachment *attach;
++	struct sg_table *sgt;
++	struct meson_gem_object *meson_gem_obj;
++	int ret;
++
++	attach = dma_buf_attach(dma_buf, drm_dev->dev);
++	if (IS_ERR(attach))
++		return ERR_PTR(-EINVAL);
++
++	get_dma_buf(dma_buf);
++
++	sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
++	if (IS_ERR_OR_NULL(sgt)) {
++		ret = PTR_ERR(sgt);
++		goto err_buf_detach;
++	}
++
++	meson_gem_obj = meson_drm_gem_init(drm_dev, dma_buf->size);
++	if (!meson_gem_obj) {
++		ret = -ENOMEM;
++		goto err_unmap_attach;
++	}
++
++	meson_gem_obj->sgt = sgt;
++	meson_gem_obj->base.import_attach = attach;
++
++	return &meson_gem_obj->base;
++
++err_unmap_attach:
++	dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
++err_buf_detach:
++	dma_buf_detach(dma_buf, attach);
++	dma_buf_put(dma_buf);
++
++	return ERR_PTR(ret);
++}
+diff --git a/drivers/amlogic/drm/meson_dmabuf.h b/drivers/amlogic/drm/meson_dmabuf.h
+new file mode 100644
+index 000000000000..70465ebce4e3
+--- /dev/null
++++ b/drivers/amlogic/drm/meson_dmabuf.h
+@@ -0,0 +1,29 @@
++/*
++ * Copyright (C) 2017 Amlogic
++ * Author: Baocheng Sun <baocheng.sun@amlogic.com>
++ * Copyright (C) 2017 by Amlogic
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _MESON_DRM_DMABUF_H_
++#define _MESON_DRM_DMABUF_H_
++
++struct dma_buf *meson_dmabuf_prime_export(struct drm_device *drm_dev,
++				struct drm_gem_object *obj, int flags);
++
++struct drm_gem_object *meson_dmabuf_prime_import(struct drm_device *drm_dev,
++						struct dma_buf *dma_buf);
++
++#endif /* MESON_DRM_DMABUF_H */
+diff --git a/drivers/amlogic/drm/meson_drv.c b/drivers/amlogic/drm/meson_drv.c
+index 54c00c8d7eeb..b8e58dba63e2 100644
+--- a/drivers/amlogic/drm/meson_drv.c
++++ b/drivers/amlogic/drm/meson_drv.c
+@@ -52,6 +52,8 @@
+ #include "meson_venc.h"
+ #include "meson_canvas.h"
+ #include "meson_registers.h"
++#include "meson_gem.h"
++#include "meson_dmabuf.h"
+ 
+ #define DRIVER_NAME "meson"
+ #define DRIVER_DESC "Amlogic Meson DRM driver"
+@@ -147,20 +149,17 @@ static struct drm_driver meson_driver = {
+ 	/* PRIME Ops */
+ 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
+ 	.prime_fd_to_handle	= drm_gem_prime_fd_to_handle,
+-	.gem_prime_import	= drm_gem_prime_import,
+-	.gem_prime_export	= drm_gem_prime_export,
+-	.gem_prime_get_sg_table	= drm_gem_cma_prime_get_sg_table,
+-	.gem_prime_import_sg_table = drm_gem_cma_prime_import_sg_table,
+-	.gem_prime_vmap		= drm_gem_cma_prime_vmap,
+-	.gem_prime_vunmap	= drm_gem_cma_prime_vunmap,
+-	.gem_prime_mmap		= drm_gem_cma_prime_mmap,
++	.gem_prime_import	= meson_dmabuf_prime_import,
++	.gem_prime_export	= meson_dmabuf_prime_export,
+ 
+ 	/* GEM Ops */
+-	.dumb_create		= drm_gem_cma_dumb_create,
+-	.dumb_destroy		= drm_gem_dumb_destroy,
+-	.dumb_map_offset	= drm_gem_cma_dumb_map_offset,
+-	.gem_free_object	= drm_gem_cma_free_object,
+-	.gem_vm_ops		= &drm_gem_cma_vm_ops,
++	.open				= meson_drm_gem_open,
++	.postclose			= meson_drm_gem_close,
++	.dumb_create		= meson_drm_gem_dumb_create,
++	.dumb_destroy		= meson_drm_gem_dumb_destroy,
++	.dumb_map_offset	= meson_drm_gem_dumb_map_offset,
++	.gem_free_object	= meson_drm_gem_free_object,
++	.gem_vm_ops			= &drm_gem_cma_vm_ops,
+ 
+ 	/* Misc */
+ 	.fops			= &fops,
+diff --git a/drivers/amlogic/drm/meson_gem.c b/drivers/amlogic/drm/meson_gem.c
+new file mode 100644
+index 000000000000..9afd95e3fa6a
+--- /dev/null
++++ b/drivers/amlogic/drm/meson_gem.c
+@@ -0,0 +1,307 @@
++/*
++ * Copyright (C) 2017 Amlogic
++ * Author: Sky Zhou <sky.zhou@amlogic.com>
++ * Copyright (C) 2017 by Amlogic
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ * Written by:
++ *        Baocheng Sun <baocheng.sun@amlogic.com>
++ */
++
++#include <drm/drmP.h>
++#include <drm/drm_vma_manager.h>
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <ion/ion.h>
++#include <meson_ion.h>
++
++#include "meson_drv.h"
++#include "meson_gem.h"
++
++
++struct meson_gem_object *meson_drm_gem_init(struct drm_device *dev,
++						      unsigned long size)
++{
++	struct meson_gem_object *meson_gem_obj;
++	struct drm_gem_object *obj;
++	int ret;
++
++	meson_gem_obj = kzalloc(sizeof(*meson_gem_obj), GFP_KERNEL);
++	if (!meson_gem_obj)
++		return NULL;
++
++	meson_gem_obj->size = size;
++	obj = &meson_gem_obj->base;
++
++	ret = drm_gem_object_init(dev, obj, size);
++	if (ret < 0) {
++		DRM_ERROR("failed to initialize gem object\n");
++		kfree(meson_gem_obj);
++		return NULL;
++	}
++
++	DRM_DEBUG("created file object = 0x%lx\n", (unsigned long)obj->filp);
++
++	return meson_gem_obj;
++}
++
++static int meson_drm_alloc_buf(struct ion_client *client,
++		struct meson_gem_object *meson_gem_obj, int flags)
++{
++	if (!client)
++		return -EINVAL;
++
++	if (!meson_gem_obj)
++		return -EINVAL;
++
++	meson_gem_obj->handle = ion_alloc(client,
++			meson_gem_obj->size,
++			0,
++			ION_HEAP_SYSTEM_MASK,
++			0);
++
++	if (!meson_gem_obj->handle)
++		return -ENOMEM;
++
++	return 0;
++}
++
++static struct meson_gem_object *meson_drm_gem_create(struct drm_device *dev,
++						unsigned int flags,
++						unsigned long size,
++						struct ion_client *client)
++{
++	struct meson_gem_object *meson_gem_obj;
++	int ret;
++
++	if (!size) {
++		DRM_ERROR("invalid size.\n");
++		return ERR_PTR(-EINVAL);
++	}
++
++	size = round_up(size, PAGE_SIZE);
++	meson_gem_obj = meson_drm_gem_init(dev, size);
++	if (!meson_gem_obj) {
++		ret = -ENOMEM;
++		return ERR_PTR(ret);
++	}
++
++	ret = meson_drm_alloc_buf(client, meson_gem_obj, flags);
++	if (ret < 0)
++		goto err_gem_fini;
++
++	return meson_gem_obj;
++
++err_gem_fini:
++	drm_gem_object_release(&meson_gem_obj->base);
++	kfree(meson_gem_obj);
++	return ERR_PTR(ret);
++}
++
++static int meson_drm_gem_handle_create(struct drm_gem_object *obj,
++					struct drm_file *file_priv,
++					unsigned int *handle)
++{
++	int ret;
++
++	/*
++	 * allocate a id of idr table where the obj is registered
++	 * and handle has the id what user can see.
++	 */
++	ret = drm_gem_handle_create(file_priv, obj, handle);
++	if (ret)
++		return ret;
++
++	DRM_DEBUG("gem handle = 0x%x\n", *handle);
++
++	/* drop reference from allocate - handle holds it now. */
++	drm_gem_object_unreference_unlocked(obj);
++
++	return 0;
++}
++
++static void meson_drm_free_buf(struct drm_device *dev,
++		struct meson_gem_object *meson_gem_obj)
++{
++	struct ion_client *client = NULL;
++	if (meson_gem_obj->handle) {
++		client = meson_gem_obj->handle->client;
++		ion_free(client, meson_gem_obj->handle);
++	} else {
++		DRM_ERROR("meson_gem_obj handle is null\n");
++	}
++}
++
++void meson_drm_gem_destroy(struct meson_gem_object *meson_gem_obj)
++{
++	struct drm_gem_object *obj;
++
++	obj = &meson_gem_obj->base;
++
++	DRM_DEBUG("handle count = %d\n", obj->handle_count);
++
++	/*
++	 * do not release memory region from exporter.
++	 *
++	 * the region will be released by exporter
++	 * once dmabuf's refcount becomes 0.
++	 */
++	if (obj->import_attach)
++		goto out;
++
++	meson_drm_free_buf(obj->dev, meson_gem_obj);
++
++out:
++
++	drm_gem_free_mmap_offset(obj);
++
++	/* release file pointer to gem object. */
++	drm_gem_object_release(obj);
++
++	kfree(meson_gem_obj);
++	meson_gem_obj = NULL;
++}
++
++int meson_drm_gem_dumb_create(struct drm_file *file_priv,
++		struct drm_device *dev, struct drm_mode_create_dumb *args)
++{
++	int ret = 0;
++	struct meson_gem_object *meson_gem_obj;
++	struct ion_client *client = NULL;
++	int min_pitch = DIV_ROUND_UP(args->width * args->bpp, 8);
++
++	args->pitch = ALIGN(min_pitch, 64);
++	if (args->size < args->pitch * args->height)
++		args->size = args->pitch * args->height;
++
++	client = (struct ion_client *) file_priv->client;
++	meson_gem_obj = meson_drm_gem_create(dev, 0, args->size, client);
++
++	if (IS_ERR(meson_gem_obj))
++		return PTR_ERR(meson_gem_obj);
++
++	ret = meson_drm_gem_handle_create(&meson_gem_obj->base, file_priv,
++			&args->handle);
++	if (ret) {
++		meson_drm_gem_destroy(meson_gem_obj);
++		return ret;
++	}
++
++	return 0;
++}
++
++int meson_drm_gem_dumb_map_offset(struct drm_file *file_priv,
++				   struct drm_device *dev, uint32_t handle,
++				   uint64_t *offset)
++{
++	struct drm_gem_object *obj;
++	int ret = 0;
++
++	mutex_lock(&dev->struct_mutex);
++
++	/*
++	 * get offset of memory allocated for drm framebuffer.
++	 * - this callback would be called by user application
++	 *	with DRM_IOCTL_MODE_MAP_DUMB command.
++	 */
++
++	obj = drm_gem_object_lookup(dev, file_priv, handle);
++	if (!obj) {
++		DRM_ERROR("failed to lookup gem object.\n");
++		ret = -EINVAL;
++		goto unlock;
++	}
++
++	ret = drm_gem_create_mmap_offset(obj);
++	if (ret)
++		goto out;
++
++	*offset = drm_vma_node_offset_addr(&obj->vma_node);
++	DRM_DEBUG("offset = 0x%lx\n", (unsigned long)*offset);
++
++out:
++	drm_gem_object_unreference(obj);
++unlock:
++	mutex_unlock(&dev->struct_mutex);
++	return ret;
++}
++
++void meson_drm_gem_free_object(struct drm_gem_object *obj)
++{
++	struct meson_gem_object *meson_gem_obj;
++	meson_gem_obj = container_of(obj, struct meson_gem_object, base);
++
++	if (obj->import_attach)
++		drm_prime_gem_destroy(obj, meson_gem_obj->sgt);
++
++	meson_drm_gem_destroy(meson_gem_obj);
++}
++
++int meson_drm_gem_dumb_destroy(struct drm_file *file,
++		 struct drm_device *dev,
++		 uint32_t handle)
++{
++	struct drm_gem_object *obj;
++
++	spin_lock(&file->table_lock);
++	obj = idr_find(&file->object_idr, handle);
++	if (obj == NULL) {
++		spin_unlock(&file->table_lock);
++		return -EINVAL;
++	}
++	spin_unlock(&file->table_lock);
++
++	drm_gem_handle_delete(file, handle);
++
++	/*
++	 * we still have a reference to dma_buf because the ion_handle,
++	 * when gem obj handle count become zero and refcount is 1.
++	 * It will not release when dma_buf_ops.release is called.
++	 * we have to drop it here.
++	 * drop the reference on the export fd holds
++	 */
++
++	if (obj->handle_count == 0 &&
++			atomic_read(&obj->refcount.refcount) == 1)
++		drm_gem_object_unreference_unlocked(obj);
++
++	return 0;
++}
++
++int meson_drm_gem_open(struct drm_device *dev, struct drm_file *file)
++{
++	struct ion_client *gem_ion_client = NULL;
++	gem_ion_client = meson_ion_client_create(-1, "meson-gem");
++	if (!gem_ion_client) {
++		DRM_ERROR("open ion client error\n");
++		return -EFAULT;
++	}
++
++	DRM_DEBUG("open ion client: %p\n", gem_ion_client);
++	file->client = (void *) gem_ion_client;
++	return 0;
++}
++
++void meson_drm_gem_close(struct drm_device *dev, struct drm_file *file)
++{
++	struct ion_client *gem_ion_client = NULL;
++	gem_ion_client = (struct ion_client *) file->client;
++
++	if (gem_ion_client) {
++		DRM_DEBUG(" destroy ion client: %p\n", gem_ion_client);
++		ion_client_destroy(gem_ion_client);
++	}
++}
+diff --git a/drivers/amlogic/drm/meson_gem.h b/drivers/amlogic/drm/meson_gem.h
+new file mode 100644
+index 000000000000..fe40cacdbab4
+--- /dev/null
++++ b/drivers/amlogic/drm/meson_gem.h
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2017 Amlogic
++ * Author: Sky Zhou <sky.zhou@amlogic.com>
++ * Copyright (C) 2017 by Amlogic
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ * Written by:
++ *        Baocheng Sun <baocheng.sun@amlogic.com>
++ */
++
++
++#ifndef __MESON_GEM_H
++#define __MESON_GEM_H
++
++struct ion_handle {
++	struct kref ref;
++	struct ion_client *client;
++	struct ion_buffer *buffer;
++	struct rb_node node;
++	unsigned int kmap_cnt;
++	int id;
++};
++
++struct meson_gem_object {
++	struct drm_gem_object base;
++	struct ion_handle *handle;
++	struct sg_table *sgt;
++	unsigned long size;
++	unsigned int flags;
++};
++
++/* create memory region for drm */
++int meson_drm_gem_dumb_create(struct drm_file *file_priv,
++		 struct drm_device *dev,
++		 struct drm_mode_create_dumb *args);
++
++/* map memory region for drm to user space. */
++int meson_drm_gem_dumb_map_offset(struct drm_file *file_priv,
++		 struct drm_device *dev, uint32_t handle,
++		 uint64_t *offset);
++
++/* free gem object. */
++void meson_drm_gem_free_object(struct drm_gem_object *gem_obj);
++
++struct meson_gem_object *meson_drm_gem_init(struct drm_device *dev,
++		 unsigned long size);
++
++int meson_drm_gem_dumb_destroy(struct drm_file *file,
++		 struct drm_device *dev,
++		 uint32_t handle);
++
++int meson_drm_gem_open(struct drm_device *dev, struct drm_file *file);
++void meson_drm_gem_close(struct drm_device *dev, struct drm_file *file);
++
++#endif /* __MESON_GEM_H */
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 112edab2d46e..9f9eed97e189 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -465,6 +465,7 @@ struct drm_file {
+ 	int event_space;
+ 
+ 	struct drm_prime_file_private prime;
++	void *client;
+ };
+ 
+ /** Wait queue */
+-- 
+2.19.0
+

@@ -1,0 +1,2470 @@
+From 533da4e7fb1f12ef3fb07d9e04cd106f8b04ace7 Mon Sep 17 00:00:00 2001
+From: Jets Yan <jets.yan@amlogic.com>
+Date: Tue, 4 Aug 2015 13:49:23 +0800
+Subject: [PATCH 5748/5965] PD#110367: sii9293: more resolutions supported for
+ input signal
+
+Change-Id: Icca920dc2ce82bee76d396376c17128f29d31b6d
+---
+ .../component/rx/si_rx_video_mode_detection.c | 108 ++-
+ .../component/video_tables/si_video_tables.c  | 278 ++++++
+ .../component/video_tables/si_video_tables.h  |   2 +
+ .../sii9293/driver/rx_drv/si_drv_rx.c         |  20 +
+ .../linux_driver/application/mhl_linuxdrv.h   | 135 +++
+ .../application/mhl_linuxdrv_main.c           | 833 ++++++++++++++----
+ .../application/sii5293_interface.c           | 190 +++-
+ .../application/sii5293_interface.h           |  26 +
+ .../linux_driver/application/vdin_interface.c | 283 +++---
+ .../linux_driver/application/vdin_interface.h |   4 +-
+ 10 files changed, 1523 insertions(+), 356 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.c
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx.c
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+ mode change 100755 => 100644 drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
+
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+old mode 100755
+new mode 100644
+index 057edc75f4c2..fa1a0dfde453
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/rx/si_rx_video_mode_detection.c
+@@ -198,6 +198,107 @@ static void verify_cea861vic(uint8_t vid_idx)
+ #endif // SI_USE_DEBUG_PRINT
+ }
+ 
++static uint8_t search_other_video_mode(sync_info_type *p_sync_info)
++{
++	int i, max = NMB_OF_VIDEO_OTHER_MODES;
++	uint8_t detected_video_idx = SI_VIDEO_MODE_NON_STD;
++	int16_t range;
++
++	enum
++	{
++		not_found = 0,
++		found_not_exact = 1,
++		found_exact = 2
++	}
++	search_result = not_found;
++
++	for (i=0; i<max; i++)
++	{
++		const videoMode_t *p_video_table = &VideoModeTableOther[i];
++		bool_t interlaced = p_sync_info->Interlaced;
++		uint16_t total_V_lines_measured =
++			(interlaced ?
++			(p_sync_info->TotalLines * 2)
++			: p_sync_info->TotalLines);
++
++		// check progressive/interlaced
++		if (interlaced != p_video_table->Interlaced)
++			continue;
++
++		// check number of lines
++		if (ABS_DIFF(total_V_lines_measured, p_video_table->Total.V) > LINES_TOLERANCE)
++			continue;
++
++		// check number of clocks per line (it works for all possible replications)
++		if (ABS_DIFF(p_sync_info->ClocksPerLine, p_video_table->Total.H) > PIXELS_TOLERANCE)
++			continue;
++
++		// check Pixel Freq (in 10kHz units)
++//		if(ABS_DIFF(p_sync_info->PixelFreq, p_video_table->PixClk) > FPIX_TOLERANCE)  // tolerance based on fixed bandwidth
++                if (0 != ABS_DIFF(p_sync_info->PixelFreq, p_video_table->PixClk))  // tolerance based on dynamic bandwidth (fixed ratio)
++                {
++                    range = p_video_table->PixClk / ABS_DIFF(p_sync_info->PixelFreq, p_video_table->PixClk);
++
++                    if ((range) < FPIX_TOLERANCE_RANGE)    // per PLL range
++                        continue;
++                }
++
++#if 0        // enable it for mode search tuning
++                DEBUG_PRINT(MSG_STAT,
++                "Index in table: %d, interlaced: %d, range: %d",
++                (int) i, (int) interlaced, (int)range);
++
++                DEBUG_PRINT(MSG_STAT,
++                "Pixel Freq detected: %d, Pixel Freq in video table: %d",
++                (int) p_sync_info->PixelFreq, (int) p_video_table->PixClk);
++
++                DEBUG_PRINT(MSG_STAT,
++                "clock per lines detected: %d, lines detected: %d",
++                (int) p_sync_info->ClocksPerLine, (int) total_V_lines_measured);
++
++                DEBUG_PRINT(MSG_STAT,
++                "clock per lines in video table: %d, lines in video table: %d\n",
++                (int) p_video_table->Total.H, (int) p_video_table->Total.V);
++#endif
++
++		// if all previous tests passed, then we found at least one mode even polarity is mismatched
++		if (search_result == not_found)
++		{
++			search_result = found_not_exact;
++			detected_video_idx = i;
++		}
++
++		// check exact number of lines
++		if (ABS_DIFF(total_V_lines_measured, p_video_table->Total.V) > 1)
++			continue;
++
++		// check polarities
++		if (
++			(p_sync_info->HPol == p_video_table->HPol) &&
++			(p_sync_info->VPol == p_video_table->VPol)
++			)
++		{
++			// if all previous checks passed
++			search_result = found_exact;
++			detected_video_idx = i;
++			break;
++		}
++	}
++
++	switch (search_result)
++	{
++	case not_found:
++		break;
++	case found_exact:
++		break;
++	case found_not_exact:
++		DEBUG_PRINT(MSG_STAT, ("RX: Warning: not exact video mode found\n"));
++		break;
++	}
++
++	return detected_video_idx;
++}
++
+ static bool_t is_video_in_range(sync_info_type *p_sync_info)
+ {
+ 	bool_t test_passed = false;
+@@ -468,7 +569,12 @@ static uint8_t detect_video_resolution(sync_info_type *p_sync_info)
+ 				// In other words, consider any non- CEA-861D or non-3D
+ 				// format as a PC resolution if video timing parameters
+ 				// are within allowed range.
+-				detected_video_idx = SI_VIDEO_MODE_PC_OTHER;
++				detected_video_idx = search_other_video_mode(p_sync_info);
++				if ( detected_video_idx != SI_VIDEO_MODE_NON_STD )
++				{
++					gDriverContext.input_video_mode_other = detected_video_idx;
++					detected_video_idx = SI_VIDEO_MODE_PC_OTHER;
++				}
+ #endif // SI_ALLOW_PC_MODES
+ 			}
+ 		}
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.c b/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.c
+old mode 100755
+new mode 100644
+index 07efc8752596..27218454d402
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.c
+@@ -52,6 +52,7 @@ ROM const videoMode_t VideoModeTable[NMB_OF_VIDEO_MODES + 1] =
+ 	{29,30, 0, {1440, 576 }, {1728, 625 }, {288, 49}, {24 ,  5}, {128, 5}, 31 , 50 , 54 ,  5400, PROG, NEG,  POS,  PAL , RP1|RP2                     ,  96}, // H-neg, V-pos
+ 	// 24, 1080p50
+ 	{0,31,  0, {1920, 1080}, {2640, 1125}, {720, 45}, {528,  4}, {44 , 5}, 56 , 50 , 148, 14850, PROG, POS,  POS,  0   , RP1                         , 192},
++	// 25, 1080p24
+ 	{0,32,  0, {1920, 1080}, {2750, 1125}, {830, 45}, {638,  4}, {44 , 5}, 27 , 24 , 74 ,  7425, PROG, POS,  POS,  0   , RP1                         , 192},
+ 	{0,33,  0, {1920, 1080}, {2640, 1125}, {720, 45}, {528,  4}, {44 , 5}, 28 , 25 , 74 ,  7425, PROG, POS,  POS,  0   , RP1                         , 192},
+ 	// 27, 1080p30
+@@ -175,4 +176,281 @@ ROM const uint8_t  hdmiVicToVideoTableIndex[LAST_KNOWN_HDMI_VIC + 1] =
+     NMB_OF_CEA861_VIDEO_MODES + 3,  // HDMI VIC=4
+ };
+ 
++ROM const videoMode_t VideoModeTableOther[NMB_OF_VIDEO_OTHER_MODES+1] =
++{
++//{VIC, HVIC {H/V active}, {H/V  total},{H/V blank),{HVSyncO}, {HVSyncW},Fh , Fv , Fpix, Pclk, I/P , HPol, VPol, syst, repetition                  ,audio},
++// CEA-861D video modes
++{
++// 640*480 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 640,
++.Active.V = 480,
++.Total.H = 800,
++.Total.V = 525,
++.Blank.H = 160, // right_border=8, front_porch=8, sync=96,back_porch=40,left_border=8
++.Blank.V = 45, // bottom_border=8, front_porch = 2, sync=2, back_porch=25, top_border=8
++.SyncOffset.H = 16,
++.SyncOffset.V = 10,
++.SyncWidth.H = 96,
++.SyncWidth.V = 2,
++.HFreq = 31, // 31.469 kHz
++.VFreq = 60, // 59.940 Hz
++.PixFreq = 25, // 25.175 MHz
++.PixClk = 2517, // 2517.5 10kHz
++.Interlaced = PROG,
++.HPol = NEG,
++.VPol = NEG,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 800*600 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 800,
++.Active.V = 600,
++.Total.H = 1056,
++.Total.V = 628,
++.Blank.H = 256, // right_border=0, front_porch=40, sync=128,back_porch=88,left_border=0
++.Blank.V = 28, // bottom_border=0, front_porch = 1, sync=4, back_porch=23, top_border=0
++.SyncOffset.H = 40,
++.SyncOffset.V = 1,
++.SyncWidth.H = 128,
++.SyncWidth.V = 4,
++.HFreq = 38, // 37.879 kHz
++.VFreq = 60, // 60.317 Hz
++.PixFreq = 40, // 40.000 MHz
++.PixClk = 4000, // 4000 10kHz
++.Interlaced = PROG,
++.HPol = POS,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1024*768 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1024,
++.Active.V = 768,
++.Total.H = 1344,
++.Total.V = 806,
++.Blank.H = 320, // right_border=0, front_porch=24, sync=136,back_porch=160,left_border=0
++.Blank.V = 38, // bottom_border=0, front_porch = 3, sync=6, back_porch=29, top_border=0
++.SyncOffset.H = 24,
++.SyncOffset.V = 3,
++.SyncWidth.H = 136,
++.SyncWidth.V = 6,
++.HFreq = 48, // 48.363 kHz
++.VFreq = 60, // 60.004 Hz
++.PixFreq = 65, // 65.000 MHz
++.PixClk = 6500, // 6500 10kHz
++.Interlaced = PROG,
++.HPol = NEG,
++.VPol = NEG,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1152*864 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1152,
++.Active.V = 864,
++.Total.H = 1600,
++.Total.V = 900,
++.Blank.H = 448, // right_border=0, front_porch=64, sync=128,back_porch=256,left_border=0
++.Blank.V = 36, // bottom_border=0, front_porch = 1, sync=3, back_porch=32, top_border=0
++.SyncOffset.H = 64,
++.SyncOffset.V = 1,
++.SyncWidth.H = 128,
++.SyncWidth.V = 3,
++.HFreq = 54, // 54.000 kHz = 900*60
++.VFreq = 60, // 60.000 Hz
++.PixFreq = 86, // 86.400 MHz = 1600*900*60
++.PixClk = 8640, // 8640 10kHz
++.Interlaced = PROG,
++.HPol = NEG,
++.VPol = NEG,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1280*768 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1280,
++.Active.V = 768,
++.Total.H = 1664,
++.Total.V = 798,
++.Blank.H = 384, // right_border=0, front_porch=64, sync=128,back_porch=192,left_border=0
++.Blank.V = 30, // bottom_border=0, front_porch = 3, sync=7, back_porch=20, top_border=0
++.SyncOffset.H = 64,
++.SyncOffset.V = 3,
++.SyncWidth.H = 128,
++.SyncWidth.V = 7,
++.HFreq = 48, // 47.776 kHz
++.VFreq = 60, // 59.870 Hz
++.PixFreq = 79, // 79.500 MHz
++.PixClk = 7950, // 7950 10kHz
++.Interlaced = PROG,
++.HPol = NEG,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1280*800 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1280,
++.Active.V = 800,
++.Total.H = 1680,
++.Total.V = 831,
++.Blank.H = 400, // right_border=0, front_porch=72, sync=128,back_porch=200,left_border=0
++.Blank.V = 31, // bottom_border=0, front_porch = 3, sync=6, back_porch=22, top_border=0
++.SyncOffset.H = 72,
++.SyncOffset.V = 3,
++.SyncWidth.H = 128,
++.SyncWidth.V = 6,
++.HFreq = 50, // 49.702 kHz
++.VFreq = 60, // 59.810 Hz
++.PixFreq = 83, // 83.500 MHz
++.PixClk = 8350, // 8350 10kHz
++.Interlaced = PROG,
++.HPol = NEG,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1280*960 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1280,
++.Active.V = 960,
++.Total.H = 1800,
++.Total.V = 1000,
++.Blank.H = 520, // right_border=0, front_porch=96, sync=112,back_porch=312,left_border=0
++.Blank.V = 40, // bottom_border=0, front_porch = 1, sync=3, back_porch=36, top_border=0
++.SyncOffset.H = 96,
++.SyncOffset.V = 1,
++.SyncWidth.H = 112,
++.SyncWidth.V = 3,
++.HFreq = 60, // 60.000 kHz
++.VFreq = 60, // 60.000 Hz
++.PixFreq = 108, // 108.000 MHz
++.PixClk = 10800, // 10800 10kHz
++.Interlaced = PROG,
++.HPol = POS,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1280*1024 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1280,
++.Active.V = 1024,
++.Total.H = 1688,
++.Total.V = 1066,
++.Blank.H = 408, // right_border=0, front_porch=48, sync=112,back_porch=248,left_border=0
++.Blank.V = 42, // bottom_border=0, front_porch = 1, sync=3, back_porch=38, top_border=0
++.SyncOffset.H = 48,
++.SyncOffset.V = 1,
++.SyncWidth.H = 112,
++.SyncWidth.V = 3,
++.HFreq = 64, // 63.981 kHz
++.VFreq = 60, // 60.020 Hz
++.PixFreq = 108, // 108.00 MHz
++.PixClk = 10800, // 10800 10kHz
++.Interlaced = PROG,
++.HPol = POS,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1366*768 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1366,
++.Active.V = 768,
++.Total.H = 1792,
++.Total.V = 798,
++.Blank.H = 426, // right_border=0, front_porch=70, sync=143,back_porch=213,left_border=0
++.Blank.V = 30, // bottom_border=0, front_porch = 3, sync=3, back_porch=24, top_border=0
++.SyncOffset.H = 70,
++.SyncOffset.V = 3,
++.SyncWidth.H = 143,
++.SyncWidth.V = 3,
++.HFreq = 48, // 47.712 kHz
++.VFreq = 60, // 59.790 Hz
++.PixFreq = 85, // 85.500 MHz
++.PixClk = 8550, // 8550 10kHz
++.Interlaced = PROG,
++.HPol = POS,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{
++// 1600*1200 P 60hz
++.Vic4x3 = 0,
++.Vic16x9 = 0,
++.HdmiVic = 0,
++.Active.H = 1600,
++.Active.V = 1200,
++.Total.H = 2160,
++.Total.V = 1250,
++.Blank.H = 560, // right_border=0, front_porch=64, sync=192,back_porch=304,left_border=0
++.Blank.V = 50, // bottom_border=0, front_porch = 1, sync=3, back_porch=46, top_border=0
++.SyncOffset.H = 64,
++.SyncOffset.V = 1,
++.SyncWidth.H = 192,
++.SyncWidth.V = 3,
++.HFreq = 75, // 75.000 kHz
++.VFreq = 60, // 60.000 Hz
++.PixFreq = 162, // 162.000 MHz
++.PixClk = 16200, // 16200 10kHz
++.Interlaced = PROG,
++.HPol = POS,
++.VPol = POS,
++.NtscPal = NTSC,
++.Repetition = RP1,
++.MaxAudioSR8Ch = 0
++},
++
++{0,0  , 0, {0   , 0   }, {0   , 0   }, {0  , 0 }, {0  ,  0}, {0  , 0}, 0  , 0  , 0  ,     0, 0   , 0  ,  0  ,  0   , 0  ,   0}
++};
++
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.h b/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.h
+index 7ae92cd9c6a0..b28bbf058595 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/component/video_tables/si_video_tables.h
+@@ -49,6 +49,7 @@ typedef struct
+ #define NMB_OF_HDMI_VIDEO_MODES     4
+ #define NMB_OF_VIDEO_MODES          (NMB_OF_CEA861_VIDEO_MODES + NMB_OF_HDMI_VIDEO_MODES)
+ 
++#define NMB_OF_VIDEO_OTHER_MODES	48
+ // repetition factor
+ #define	RP1		0x01	// x1 (no repetition)
+ #define	RP2		0x02	// x2 (doubled)
+@@ -72,6 +73,7 @@ typedef struct
+ 
+ 
+ extern ROM const videoMode_t VideoModeTable[NMB_OF_VIDEO_MODES + 1];
++extern ROM const videoMode_t VideoModeTableOther[NMB_OF_VIDEO_OTHER_MODES+1];
+ 
+ #define LAST_KNOWN_HDMI_VIC 4
+ extern ROM const uint8_t hdmiVicToVideoTableIndex[LAST_KNOWN_HDMI_VIC + 1];
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx.c b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx.c
+old mode 100755
+new mode 100644
+index a35fe4da4461..9520068457d5
+--- a/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/driver/rx_drv/si_drv_rx.c
+@@ -104,6 +104,7 @@ uint16_t SiiDrvRxGetPixelFreq(void)
+  *  @param[in]		p_sync_info		pointer to return data buffer for sync information
+  *
+  *****************************************************************************/
++extern int debug_level;
+ void SiiDrvRxGetSyncInfo(sync_info_type *p_sync_info)
+ {
+ 	uint8_t d[4];
+@@ -123,6 +124,25 @@ void SiiDrvRxGetSyncInfo(sync_info_type *p_sync_info)
+ 	p_sync_info->Interlaced = (vid_stat_reg & RX_M__VID_STAT__INTERLACE) ? INTL : PROG;
+ 	p_sync_info->HPol = (vid_stat_reg & RX_M__VID_STAT__HSYNC_POL) ? POS : NEG;
+ 	p_sync_info->VPol = (vid_stat_reg & RX_M__VID_STAT__VSYNC_POL) ? POS : NEG;
++
++	if (debug_level > 0)
++		printk("sii9293 GetSyncInfo:\n\
++		ClocksPerLine = %d\n\
++		TotalLines = %d\n\
++		PixelFreq = %d\n\
++		Interlaced = %s:%s\n\
++		HPol = %s:%s\n\
++		VPol = %s:%s\n",
++		p_sync_info->ClocksPerLine,
++		p_sync_info->TotalLines,
++		p_sync_info->PixelFreq,
++		(p_sync_info->Interlaced==INTL)?"1":"0",
++		(p_sync_info->Interlaced==INTL)?"INTL":"PROG",
++		(p_sync_info->HPol==POS)?"0":"1",
++		(p_sync_info->HPol==POS)?"POS":"NEG",
++		(p_sync_info->VPol==POS)?"0":"1",
++		(p_sync_info->VPol==POS)?"POS":"NEG" );
++
+ }
+ 
+ /*****************************************************************************/
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+old mode 100755
+new mode 100644
+index 8debb10ba0bc..6abd24255101
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv.h
+@@ -98,6 +98,14 @@ typedef struct {
+     bool_t  mhl_cable_state;    // mhl cable state
+     SourceConnection_t connection_state;
+     uint8_t input_video_mode;       // last determined video mode
++
++    // "input_video_mode_other" is for vesa video mode idx,
++    // i don't want to change "input_video_mode" from uint8_t to uint32_t
++    // because the original sii5923 driver has too many association with the type "uint8_t input_video_mode"
++    // so if input_video_mode is evaluated to SI_VIDEO_MODE_PC_OTHER, then "input_video_mode_other"
++    // will has the index of vesa mode in array VideoModeTableOther[].
++    uint32_t input_video_mode_other;
++
+     uint8_t debug_i2c_address;
+     uint8_t debug_i2c_offset;
+     uint8_t debug_i2c_xfer_length;
+@@ -159,6 +167,133 @@ typedef struct
+ 	unsigned int	vdin_started;
+ }sii5293_vdin;
+ 
++/*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
++// for video mode of hdmiin, it maybe not wholly same with sii9293 chip and vdin driver.
++typedef enum
++{
++	HDMIIN_CEA_480P60	= 2,
++	HDMIIN_CEA_720P60	= 4,
++	HDMIIN_CEA_1080I60	= 5,
++	HDMIIN_CEA_480I60	= 6,
++	HDMIIN_CEA_1080P60	= 16,
++	HDMIIN_CEA_576P50	= 17,
++	HDMIIN_CEA_720P50	= 19,
++	HDMIIN_CEA_1080I50	= 20,
++	HDMIIN_CEA_576I50	= 21,
++	HDMIIN_CEA_1080P50	= 31,
++	HDMIIN_CEA_1080P24	= 32,
++	HDMIIN_CEA_1080P30	= 34,
++	HDMIIN_CEA_MAX 		= 60,
++
++	HDMIIN_640X480_P_60		= 100,
++	HDMIIN_800X600_P_60,
++	HDMIIN_1024X768_P_60,
++	HDMIIN_1152X864_P_60,
++	HDMIIN_1280X768_P_60,
++	HDMIIN_1280X800_P_60,
++	HDMIIN_1280X960_P_60,
++	HDMIIN_1280X1024_P_60,
++	HDMIIN_1366X768_P_60,
++	HDMIIN_1600X1200_P_60,
++
++	HDMIIN_VMODE_MAX
++}sii9293_vmode_e;
++
++typedef struct
++{
++	char*				name;
++	sii9293_vmode_e		vmode;
++
++	unsigned int		h_active;
++	unsigned int		h_total;
++	unsigned int		v_active;
++	unsigned int		v_total;
++	unsigned int		frame_rate;
++	unsigned int		interlaced;
++
++	// Invert HS polarity, for HW regards HS active high.
++	unsigned int hs_pol_inv;
++
++	// Invert VS polarity, for HW regards VS active high.
++	unsigned int vs_pol_inv;
++
++	// Invert DE polarity, for HW regards DE active high.
++	unsigned int de_pol_inv;
++
++	// Invert FIELD polarity, for HW regards odd field when high.
++	unsigned int field_pol_inv;
++
++	// FIELD source select:
++	// 1=Use external FIELD signal, ignore internal FIELD detection result;
++	// 0=Use internal FIELD detection result, ignore external input FIELD signal.
++	unsigned int ext_field_sel;
++
++	// DE mode control:
++	// 0=Ignore input DE signal, use internal detection to to determine active pixel;
++	// 1=Rsrv;
++	// 2=During internal detected active region, if input DE goes low, replace input data with the last good data;
++	// 3=Active region is determined by input DE, no internal detection.
++	unsigned int de_mode;
++
++	// Map input data to form YCbCr.
++	// Use 0 if input is YCbCr;
++	// Use 1 if input is YCrCb;
++	// Use 2 if input is CbCrY;
++	// Use 3 if input is CbYCr;
++	// Use 4 if input is CrYCb;
++	// Use 5 if input is CrCbY;
++	// 6,7=Rsrv.
++	unsigned int data_comp_map;
++
++	// 422 to 444 conversion control:
++	// 0=No convertion; 1=Rsrv;
++	// 2=Convert 422 to 444, use previous C value;
++	// 3=Convert 422 to 444, use average C value.
++	unsigned int mode_422to444;
++
++	// Invert dvin_clk_in for ease of data capture.
++	unsigned int dvin_clk_inv;
++
++	// Controls which edge of HS/VS (post polarity control) the active pixel/line is related:
++	// Bit 0: HS and active pixel relation.
++	//  0=Start of active pixel is counted from the rising edge of HS;
++	//  1=Start of active pixel is counted from the falling edge of HS;
++	// Bit 1: VS and active line relation.
++	//  0=Start of active line is counted from the rising edge of VS;
++	//  1=Start of active line is counted from the falling edge of VS.
++	unsigned int vs_hs_tim_ctrl;
++
++	// For internal FIELD detection:
++	// Minimum clock cycles allowed for HS active edge to lead before VS active edge in odd field. Failing it the field is even.
++	unsigned int hs_lead_vs_odd_min;
++
++	// For internal FIELD detection:
++	// Maximum clock cycles allowed for HS active edge to lead before VS active edge in odd field. Failing it the field is even.
++	unsigned int hs_lead_vs_odd_max;
++
++	// Number of clock cycles between HS active edge to first active pixel, in even field.
++	unsigned int active_start_pix_fe;
++
++	// Number of clock cycles between HS active edge to first active pixel, in odd field.
++	unsigned int active_start_pix_fo;
++
++	// Number of clock cycles between VS active edge to first active line, in even field.
++	unsigned int active_start_line_fe;
++
++	// Number of clock cycles between VS active edge to first active line, in odd field.
++	unsigned int active_start_line_fo;
++
++	tvin_sig_fmt_t		tvin_mode;
++}sii_video_timming_link;
++
++typedef struct
++{
++	tvin_frontend_t	tvin_frontend;
++	vdin_parm_t		vdin_param;
++	unsigned int	vdin_started;
++	sii9293_vmode_e	vmode;
++}sii9293_tvin_t;
++
+ typedef struct
+ {
+     unsigned int        user_cmd; // 0 to disable from user
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+old mode 100755
+new mode 100644
+index 1aa15e24d374..03876935bbcd
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/mhl_linuxdrv_main.c
+@@ -82,6 +82,7 @@ module_param(input_dev_ucp, int, S_IRUGO);
+ MODULE_PARM_DESC(input_dev_ucp, "UCP Input Device (default: 1)");
+ 
+ 
++extern uint8_t SiiDrvRxGetPixelReplicate(void);
+ 
+ const char strVersion[] = "CP5293-v0.90.01";
+ 
+@@ -1466,180 +1467,656 @@ static struct attribute_group sii5293_debug_attr_group = {
+ };
+ #endif
+ 
+-/*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+-// according to the <<CEA-861-D>>
+-typedef enum
++static sii_video_timming_link sii_video_mode_map[] =
+ {
+-	CEA_480P60	= 2,
+-	CEA_720P60	= 4,
+-	CEA_1080I60	= 5,
+-	CEA_480I60	= 6,
++	{
++		.name	= "480p",
++		.vmode	= HDMIIN_CEA_480P60,
++		.h_active = 720,				.h_total = 858,
++		.v_active = 480,				.v_total = 525,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0,				.de_mode = 3,
++		.data_comp_map = 0,				.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 60,		.active_start_pix_fo = 60,
++		.active_start_line_fe = 31,		.active_start_line_fo = 31,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_720X480P_60HZ
++	},
++
++	{
++		.name	= "720p",
++		.vmode	= HDMIIN_CEA_720P60,
++		.h_active = 1280,				.h_total = 1650,
++		.v_active = 720,				.v_total = 750,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0,				.de_mode = 3,
++		.data_comp_map = 0,				.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 260,		.active_start_pix_fo = 260,
++		.active_start_line_fe = 25,		.active_start_line_fo = 25,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X720P_60HZ
++	},
++
++	{
++		.name	= "1080i",
++		.vmode	= HDMIIN_CEA_1080I60,
++		.h_active = 1920,				.h_total = 2200,
++		.v_active = 1080,				.v_total = 1125,
++		.frame_rate = 60,				.interlaced = 1,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 1,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, 	.active_start_pix_fo = 192,
++		.active_start_line_fe = 20, 	.active_start_line_fo = 21,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080I_60HZ
++	},
++
++	{
++		.name	= "480i",
++		.vmode	= HDMIIN_CEA_480I60,
++		.h_active = 720,				.h_total = 1716,
++		.v_active = 240,				.v_total = 525,
++		.frame_rate = 60,				.interlaced = 1,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 400,		.hs_lead_vs_odd_max = 1200,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 114, 	.active_start_pix_fo = 114,
++		.active_start_line_fe = 14, 	.active_start_line_fo = 15,
++
++		.tvin_mode = TVIN_SIG_FMT_MAX
++	},
++
++	{
++		.name	= "1080p",
++		.vmode	= HDMIIN_CEA_1080P60,
++		.h_active = 1920,				.h_total = 2200,
++		.v_active = 1080,				.v_total = 1125,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, 	.active_start_pix_fo = 192,
++		.active_start_line_fe = 41, 	.active_start_line_fo = 41,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ
++	},
++
++	{
++		.name	= "576p",
++		.vmode	= HDMIIN_CEA_576P50,
++		.h_active = 720,				.h_total = 864,
++		.v_active = 576,				.v_total = 625,
++		.frame_rate = 50,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 68, 	.active_start_pix_fo = 68,
++		.active_start_line_fe = 39, 	.active_start_line_fo = 39,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_720X576P_50HZ
++	},
++
++	{
++		.name	= "720p50",
++		.vmode	= HDMIIN_CEA_720P50,
++		.h_active = 1280,				.h_total = 1980,
++		.v_active = 720,				.v_total = 750,
++		.frame_rate = 50,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 260,	.active_start_pix_fo = 260,
++		.active_start_line_fe = 25, 	.active_start_line_fo = 25,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X720P_50HZ
++	},
++
++	{
++		.name	= "1080i50",
++		.vmode	= HDMIIN_CEA_1080I50,
++		.h_active = 1920,				.h_total = 2640,
++		.v_active = 1080,				.v_total = 1125,
++		.frame_rate = 50,				.interlaced = 1,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 1,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, .active_start_pix_fo = 192,
++		.active_start_line_fe = 20, 	.active_start_line_fo = 21,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080I_50HZ_A
++	},
++
++	{
++		.name	= "576i",
++		.vmode	= HDMIIN_CEA_576I50,
++		.h_active = 720,				.h_total = 1728,
++		.v_active = 288,				.v_total = 625,
++		.frame_rate = 50,				.interlaced = 1,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 400,		.hs_lead_vs_odd_max = 1200,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 138, .active_start_pix_fo = 138,
++		.active_start_line_fe = 19, 	.active_start_line_fo = 20,
++
++		.tvin_mode = TVIN_SIG_FMT_MAX
++	},
++
++	{
++		.name	= "1080p50",
++		.vmode	= HDMIIN_CEA_1080P50,
++		.h_active = 1920,				.h_total = 2640,
++		.v_active = 1080,				.v_total = 1125,
++		.frame_rate = 50,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, .active_start_pix_fo = 192,
++		.active_start_line_fe = 41, 	.active_start_line_fo = 41,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080P_50HZ
++	},
++
++	{
++		.name	= "1080p24",
++		.vmode	= HDMIIN_CEA_1080P24,
++		.h_active = 1920,				.h_total = 2750,
++		.v_active = 1080,				.v_active = 1125,
++		.frame_rate = 24,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0,				.de_mode = 3,
++		.data_comp_map = 0,				.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, .active_start_pix_fo = 192,
++		.active_start_line_fe = 41, 	.active_start_line_fo = 41,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080P_24HZ,
++	},
++
++	{
++		.name	= "1080p30",
++		.vmode	= HDMIIN_CEA_1080P30,
++		.h_active = 1920,				.h_total = 2200,
++		.v_active = 1080,				.v_total = 1125,
++		.frame_rate = 30,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, .active_start_pix_fo = 192,
++		.active_start_line_fe = 41, 	.active_start_line_fo = 41,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1920X1080P_30HZ,
++	},
++
++	{
++		.name	= "640x480p60",
++		.vmode	= HDMIIN_640X480_P_60,
++		.h_active = 640,				.h_total = 800,
++		.v_active = 480,				.v_total = 525,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 48, .active_start_pix_fo = 48,
++		.active_start_line_fe = 33, 	.active_start_line_fo = 33,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_640X480P_60HZ
++	},
++
++	{
++		.name	= "800x600p60",
++		.vmode	= HDMIIN_800X600_P_60,
++		.h_active = 800,				.h_total = 1056,
++		.v_active = 600,				.v_total = 628,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 216, .active_start_pix_fo = 216,
++		.active_start_line_fe = 27, 	.active_start_line_fo = 27,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_800X600_00HZ
++	},
++
++	{
++		.name	= "1024x768p60",
++		.vmode	= HDMIIN_1024X768_P_60,
++		.h_active = 1024,				.h_total = 1344,
++		.v_active = 768,				.v_total = 806,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 160, .active_start_pix_fo = 160,
++		.active_start_line_fe = 29, 	.active_start_line_fo = 29,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1024X768_00HZ
++	},
++
++	{
++		.name	= "1152x864p60",
++		.vmode	= HDMIIN_1152X864_P_60,
++		.h_active = 1152,				.h_total = 1600,
++		.v_active = 864,				.v_total = 900,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 1,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 256, .active_start_pix_fo = 256,
++		.active_start_line_fe = 32, 	.active_start_line_fo = 32,
++
++		.tvin_mode = TVIN_SIG_FMT_VGA_1152X864P_60HZ_D000
++	},
++
++	{
++		.name	= "1280x768p60",
++		.vmode	= HDMIIN_1280X768_P_60,
++		.h_active = 1280,				.h_total = 1664,
++		.v_active = 768,				.v_total = 798,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 192, 	.active_start_pix_fo = 192,
++		.active_start_line_fe = 27, 	.active_start_line_fo = 27,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X768_00HZ
++	},
++
++	{
++		.name	= "1280x800p60",
++		.vmode	= HDMIIN_1280X800_P_60,
++		.h_active = 1280,				.h_total = 1680,
++		.v_active = 800,				.v_total = 831,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 1,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 200, 	.active_start_pix_fo = 200,
++		.active_start_line_fe = 28, 	.active_start_line_fo = 28,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X800_00HZ
++	},
++
++	{
++		.name	= "1280x960p60",
++		.vmode	= HDMIIN_1280X960_P_60,
++		.h_active = 1280,				.h_total = 1800,
++		.v_active = 960,				.v_total = 1000,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 424, 	.active_start_pix_fo = 424,
++		.active_start_line_fe = 39, 	.active_start_line_fo = 39,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X960_00HZ
++	},
++
++	{
++		.name	= "1280x1024p60",
++		.vmode	= HDMIIN_1280X1024_P_60,
++		.h_active = 1280,				.h_total = 1688,
++		.v_active = 1024,				.v_total = 1066,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 360, 	.active_start_pix_fo = 360,
++		.active_start_line_fe = 41, 	.active_start_line_fo = 41,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1280X1024_00HZ
++	},
+ 
+-	CEA_1080P60	= 16,
+-	CEA_576P50	= 17,
+-	CEA_720P50	= 19,
+-	CEA_1080I50	= 20,
+-	CEA_576I50	= 21,
++	{
++		.name	= "1366x768p60",
++		.vmode	= HDMIIN_1366X768_P_60,
++		.h_active = 1366,				.h_total = 1792,
++		.v_active = 768,				.v_total = 798,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 356, 	.active_start_pix_fo = 356,
++		.active_start_line_fe = 27, 	.active_start_line_fo = 27,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1366X768_00HZ
++	},
++
++	{
++		.name	= "1600x1200p60",
++		.vmode	= HDMIIN_1600X1200_P_60,
++		.h_active = 1600,				.h_total = 2160,
++		.v_active = 1200,				.v_total = 1250,
++		.frame_rate = 60,				.interlaced = 0,
++		.hs_pol_inv = 0,				.vs_pol_inv = 0,
++		.de_pol_inv = 0,				.field_pol_inv = 0,
++
++		.ext_field_sel = 0, 			.de_mode = 3,
++		.data_comp_map = 0, 			.mode_422to444 = 0,
++		.dvin_clk_inv = 0,				.vs_hs_tim_ctrl = 0,
++		.hs_lead_vs_odd_min = 0,		.hs_lead_vs_odd_max = 0,
++
++		//according to vs_hs_tim_ctrl
++		.active_start_pix_fe = 496, 	.active_start_pix_fo = 496,
++		.active_start_line_fe = 40, 	.active_start_line_fo = 40,
++
++		.tvin_mode = TVIN_SIG_FMT_HDMI_1600X1200_00HZ
++	},
++};
+ 
+-	CEA_1080P50	= 31,
+-	CEA_1080P30 = 34,
++static char* sii_get_mode_name(sii9293_vmode_e mode)
++{
++	int i = 0, max = sizeof(sii_video_mode_map)/sizeof(sii_video_timming_link);
+ 
+-	CEA_MAX = 60
+-}SII5293_VIDEO_MODE;
++	for (i=0; i<max; i++)
++	{
++		if (mode == sii_video_mode_map[i].vmode)
++			return sii_video_mode_map[i].name;
++	}
+ 
++	return "invalid";
++}
+ //static unsigned int vdin_state = 0;
+-sii5293_vdin sii5293_vdin_info;
++sii9293_tvin_t	sii9293_tvin_info;
+ sii9293_info_t sii9293_info;
+ 
+ void dump_input_video_info(void)
+ {
+ 	unsigned char index = 0;
++	int height,width,h_total,v_total;
++	int hs_fp,hs_width,hs_bp;
++	int vs_fp,vs_width,vs_bp;
++	int clk,h_freq,v_freq,interlaced;
+ 
+ 	index = gDriverContext.input_video_mode;
+ 
+-	if (0 == index)
+-    {
++	if (0 == index) {
+         printk("sii5293 input video not stable!\n");
+-    }
+-    else if (SI_VIDEO_MODE_NON_STD == index)
+-    {
++    } else if (SI_VIDEO_MODE_NON_STD == index) {
+         printk("sii5293 input video out of range!\n");
+-    }
+-    else if (SI_VIDEO_MODE_PC_OTHER == index)
+-    {
+-        printk("sii5293 input pc resolution!\n");
+-    }
+-    else
+-    {
+-    	index = gDriverContext.input_video_mode & 0x7f;
+-    	if( index >= NMB_OF_CEA861_VIDEO_MODES )
+-    		printk("sii5293 input video index = %d\n", index);
+-    	else
+-    	{
+-			int height,width,h_total,v_total;
+-			int hs_fp,hs_width,hs_bp;
+-			int vs_fp,vs_width,vs_bp;
+-			int clk,h_freq,v_freq,interlaced;
+-
+-			height = sii_get_h_active();
+-			width = sii_get_v_active();
+-
+-			h_total = sii_get_h_total();
+-			v_total = sii_get_v_total();
+-
+-			hs_fp = sii_get_hs_frontporch();
+-			hs_width = sii_get_hs_width();
+-			hs_bp = sii_get_hs_backporch();
+-
+-			vs_fp = sii_get_vs_frontporch();
+-			vs_width = sii_get_vs_width();
+-			vs_bp = sii_get_vs_backporch();
+-			clk = sii_get_pixel_clock();
+-			h_freq = sii_get_h_freq();
+-			v_freq = sii_get_v_freq();
+-			interlaced = sii_get_interlaced();
+-
+-			printk("sii5293 hdmi-in video info:\n\n\
+-	height * width = %4d x %4d, ( %4d x %4d )\n\
+-	h sync = %4d, %4d, %4d\n\
+-	v sync = %4d, %4d, %4d\n\
+-	pixel_clk = %9d, h_freq = %5d, v_freq = %2d\n\
+-	interlaced = %d\n",
+-				height,width,h_total,v_total,
+-				hs_fp,hs_width,hs_bp,
+-				vs_fp,vs_width,vs_bp,
+-				clk,h_freq,v_freq,interlaced
+-				);
+-		}
++    } else {
++		if (SI_VIDEO_MODE_PC_OTHER == index)
++printk("sii5293 input pc resolution!\n");
++
++index = gDriverContext.input_video_mode & 0x7f;
++		if ( index >= NMB_OF_CEA861_VIDEO_MODES )
++printk("sii5293 input video index = %d\n", index);
+ 	}
++
++	height = sii_get_h_active();
++	width = sii_get_v_active();
++
++	h_total = sii_get_h_total();
++	v_total = sii_get_v_total();
++
++	hs_fp = sii_get_hs_frontporch();
++	hs_width = sii_get_hs_width();
++	hs_bp = sii_get_hs_backporch();
++
++	vs_fp = sii_get_vs_frontporch();
++	vs_width = sii_get_vs_width();
++	vs_bp = sii_get_vs_backporch();
++	clk = sii_get_pixel_clock();
++	h_freq = sii_get_h_freq();
++	v_freq = sii_get_v_freq();
++	interlaced = sii_get_interlaced();
++
++	printk("sii5293 hdmi-in video info:\n\n\
++		height * width = %4d x %4d, ( %4d x %4d )\n\
++		h sync = %4d, %4d, %4d\n\
++		v sync = %4d, %4d, %4d\n\
++		pixel_clk = %9d, h_freq = %5d, v_freq = %2d\n\
++		interlaced = %d\n",
++	height,width,h_total,v_total,
++	hs_fp,hs_width,hs_bp,
++	vs_fp,vs_width,vs_bp,
++	clk,h_freq,v_freq,interlaced);
++
+ }
+ 
+ unsigned int sii5293_get_output_mode(void)
+ {
+ 	unsigned int mode = 0;
+ 
+-	if (debug_level & 0x1)
+-		printk("sii9293 output mode index = %d\n", gDriverContext.input_video_mode);
++//	printk("sii9293 output mode = %d, %d\n", gDriverContext.input_video_mode, gDriverContext.input_video_mode_other);
++	if (gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER)
++	{
++		// index of array VideoModeTableOther[]
++		switch (gDriverContext.input_video_mode_other)
++		{
++			case 0:		mode = HDMIIN_640X480_P_60;		break;
++			case 1:		mode = HDMIIN_800X600_P_60;		break;
++			case 2:		mode = HDMIIN_1024X768_P_60;	break;
++			case 3:		mode = HDMIIN_1152X864_P_60;	break;
++			case 4:		mode = HDMIIN_1280X768_P_60;	break;
++			case 5:		mode = HDMIIN_1280X800_P_60;	break;
++			case 6:		mode = HDMIIN_1280X960_P_60;	break;
++			case 7:		mode = HDMIIN_1280X1024_P_60;	break;
++			case 8:		mode = HDMIIN_1366X768_P_60;	break;
++			case 9:		mode = HDMIIN_1600X1200_P_60;	break;
++			default:
++				break;
++		}
++
++		return mode;
++	}
+ 
+ 	if( (gDriverContext.input_video_mode == 0) || (gDriverContext.input_video_mode >= NMB_OF_CEA861_VIDEO_MODES) )
+ 		return mode;
+ 
+ 	switch( gDriverContext.input_video_mode & 0x7f )
+ 	{
+-		case 11:		mode = CEA_1080P60;		break;
+-		case 24:		mode = CEA_1080P50;		break;
+-		case 27:		mode = CEA_1080P30;		break;
+-		case  3:		mode = CEA_1080I60;		break;
+-		case 14:		mode = CEA_1080I50;		break;
+-		case  2:		mode = CEA_720P60;		break;
+-		case 13:		mode = CEA_720P50;		break;
+-		case 12:		mode = CEA_576P50;		break;
+-		case  1:		mode = CEA_480P60;		break;
+-		case 15:		mode = CEA_576I50;		break;
+-		case  4:		mode = CEA_480I60;		break;
++		case 11:		mode = HDMIIN_CEA_1080P60;		break;
++		case 24:		mode = HDMIIN_CEA_1080P50;		break;
++		case 25:		mode = HDMIIN_CEA_1080P24;		break;
++		case 27:		mode = HDMIIN_CEA_1080P30;		break;
++		case  3:		mode = HDMIIN_CEA_1080I60;		break;
++		case 14:		mode = HDMIIN_CEA_1080I50;		break;
++		case  2:		mode = HDMIIN_CEA_720P60;		break;
++		case 13:		mode = HDMIIN_CEA_720P50;		break;
++		case 12:		mode = HDMIIN_CEA_576P50;		break;
++		case  1:		mode = HDMIIN_CEA_480P60;		break;
++		case 15:		mode = HDMIIN_CEA_576I50;		break;
++		case  4:		mode = HDMIIN_CEA_480I60;		break;
++		default:
++			break;
+ 	}
+ 
+ 	return mode;
+ }
+ 
+-static void sii5293_start_vdin_mode(unsigned int mode)
++static void sii5293_start_vdin_mode(sii9293_vmode_e mode)
+ {
+-	unsigned int height = 0, width = 0, frame_rate = 0, field_flag = 0;
++	int i = 0, max = sizeof(sii_video_mode_map)/sizeof(sii_video_timming_link);
++	sii_video_timming_link timming;
++	int found = 0;
++
++	memset(&timming, 0x00, sizeof(sii_video_timming_link));
+ 
+ 	printk("[%s], start with mode = %d\n", __FUNCTION__, mode);
+-	switch(mode)
++	for (i=0; i<max; i++)
+ 	{
+-		case CEA_480I60:
+-			width = 720;	height = 240;	frame_rate = 60;	field_flag = 1;		
+-			break;
+-		
+-		case CEA_480P60:
+-			width = 720;	height = 480;	frame_rate = 60;	field_flag = 0;		
+-			break;
+-		
+-		case CEA_576I50:
+-			width = 720;	height = 288;	frame_rate = 50;	field_flag = 1;		
+-			break;
+-		
+-		case CEA_576P50:
+-			width = 720;	height = 576;	frame_rate = 50;	field_flag = 0;		
+-			break;
+-		
+-		case CEA_720P50:
+-			width = 1280;	height = 720;	frame_rate = 50;	field_flag = 0;		
+-			break;
+-		
+-		case CEA_720P60:
+-			width = 1280;	height = 720;	frame_rate = 60;	field_flag = 0;		
+-			break;
+-		
+-		case CEA_1080I60:
+-			width = 1920;	height = 1080;	frame_rate = 60;	field_flag = 1;		
+-			break;
+-		
+-		case CEA_1080P60:
+-			width = 1920;	height = 1080;	frame_rate = 60;	field_flag = 0;		
+-			break;
+-		
+-		case CEA_1080I50:
+-			width = 1920;	height = 1080;	frame_rate = 50;	field_flag = 1;		
+-			break;
+-		
+-		case CEA_1080P50:
+-			width = 1920;	height = 1080;	frame_rate = 50;	field_flag = 0;		
+-			break;
++		if ( mode == sii_video_mode_map[i].vmode )
++		{
++			memcpy(&timming, &sii_video_mode_map[i], sizeof(sii_video_timming_link));
++			found = 1;
++		}
++	}
+ 
+-		case CEA_1080P30:
+-			width = 1920;	height = 1080;	frame_rate = 30;	field_flag = 0;
+-			break;
++	if (1 != found)
++	{
++		printk("[%s], don't start vdin for invalid mode = %d\n", __FUNCTION__, mode);
++		return;
++	}
+ 
+-		default:
+-			printk("[%s], invalid video mode!\n",__FUNCTION__);
+-			return ;
++	if ((mode == HDMIIN_CEA_480I60) || (mode == HDMIIN_CEA_576I50))
++	{
++		// if it is repeated signal, then set h_active as default 720
++		// if it is not repeated signal, then set h_active as 1440
++		uint8_t pix_repl = SiiDrvRxGetPixelReplicate();
++
++		if (0 == pix_repl)
++			timming.h_active = 1440;
+ 	}
++	else //get sync info from original signal
++	{
++		timming.hs_pol_inv = (sii_get_hs_polar()==POS)?0:1;
++		timming.vs_pol_inv = (sii_get_vs_polar()==POS)?0:1;
+ 
+-	sii5293_start_vdin(&sii5293_vdin_info,width,height,frame_rate,field_flag);
++		// active_start_pix_fe/fo is based on vs_hs_tim_ctrl, currently is 0 (rising edge)
++		if ( timming.hs_pol_inv == 0 )
++		{
++			timming.active_start_pix_fe = sii_get_hs_backporch()+sii_get_hs_width();
++			timming.active_start_pix_fo = sii_get_hs_backporch()+sii_get_hs_width();
++		}
++		else
++		{
++			timming.active_start_pix_fe = sii_get_hs_backporch();
++			timming.active_start_pix_fo = sii_get_hs_backporch();
++		}
+ 
++		// active_start_line_fe/fo is based on vs_hs_tim_ctrl, currently is 0 (rising edge)
++		if ( timming.vs_pol_inv == 0 )
++		{
++			timming.active_start_line_fe = sii_get_vs_backporch()+sii_get_vs_width();
++			timming.active_start_line_fo = sii_get_vs_backporch()+sii_get_vs_width();
++		}
++		else
++		{
++			timming.active_start_line_fe = sii_get_vs_backporch();
++			timming.active_start_line_fo = sii_get_vs_backporch();
++		}
++	}
++
++	sii9293_start_tvin(&sii9293_tvin_info, &timming);
+ 	return ;
+ }
+ 
+@@ -1649,7 +2126,7 @@ void sii5293_output_mode_trigger(unsigned int flag)
+ 	unsigned int mode = 0xff;
+ 
+ 	sii9293_info.signal_status = flag;
+-	printk("[%s] set signal_status = %d\n", __FUNCTION__, sii9293_info.signal_status);
++	//printk("[%s] set signal_status = %d\n", __FUNCTION__, sii9293_info.signal_status);
+ 
+ 	if( (sii9293_info.user_cmd==0) || (sii9293_info.user_cmd==0x4) || (sii9293_info.user_cmd==0xff) )
+ 		return ;
+@@ -1658,17 +2135,17 @@ void sii5293_output_mode_trigger(unsigned int flag)
+ 	{
+ 		printk("[%s], lost signal, stop vdin!\n", __FUNCTION__);
+ 		sii_output_mode = 0xff;
+-		sii5293_stop_vdin(&sii5293_vdin_info);
++		sii9293_stop_tvin(&sii9293_tvin_info);
+ 		return ;
+ 	}
+ 
+ 	if( (1==flag) && ((sii9293_info.user_cmd==2)||(sii9293_info.user_cmd==3)) )
+ 	{
+ 		mode = sii5293_get_output_mode();
+-		if( mode != sii_output_mode )
++		if ( mode != sii_output_mode )
+ 		{
+ 			printk("[%s], trigger new mode = %d, old mode = %d\n", __FUNCTION__, mode, sii_output_mode);
+-			if( mode < CEA_MAX )
++			if ( mode < HDMIIN_VMODE_MAX )
+ 			{
+ 				sii5293_start_vdin_mode(mode);
+ 				sii_output_mode = mode;
+@@ -1707,7 +2184,8 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 	int argn;
+ 	char *p=NULL, *para=NULL, *argv[5] = {NULL,NULL,NULL,NULL,NULL};
+ 	unsigned int mode = 0, enable=0;
+-	char *vmode[10] = {"480i\n","480p\n","576i\n","576p\n","720p50\n","720p\n","1080i\n","1080p\n","1080i50\n","1080p50\n"};
++	char *vmode[] = {"480i\n","480p\n","576i\n","576p\n","720p50\n","720p\n","1080i\n","1080p\n","1080i50\n","1080p50\n","1080p24\n","1080p30\n",
++						"640x480\n","800x600\n","1024x768\n","1152x864\n", "1280x768\n","1280x800\n","1280x960\n","1280x1024\n","1366x768\n","1600x1200\n"};
+ 	int i = 0;
+ 
+ 	p = kstrdup(buf, GFP_KERNEL);
+@@ -1732,9 +2210,10 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 		enable = 4;
+ 	else
+ 	{
+-		for( i=0; i<10; i++ )
++		int max = sizeof(vmode);
++		for ( i=0; i<max; i++ )
+ 		{
+-			if( !strcmp(argv[0], vmode[i]) )
++			if ( !strcmp(argv[0], vmode[i]) )
+ 			{
+ 				mode = i;
+ 				enable = 0xff;
+@@ -1744,49 +2223,74 @@ static ssize_t user_enable_store(struct class *class, struct class_attribute *at
+ 
+ 	sii9293_info.user_cmd = enable;
+ 
+-	if( (enable==1) && (argn!=5) && (argn!=1) )
++	if ( (enable == 1) && (argn != 5) && (argn != 1) )
+ 	{
+ 		printk("invalid parameters to enable cmd !\n");
+ 		return count;
+ 	}
+ 
+-	if( (enable==0) && (sii5293_vdin_info.vdin_started==1) )
++	if ( (enable == 0) && (sii9293_tvin_info.vdin_started == 1) )
+ 	{
+-		sii5293_stop_vdin(&sii5293_vdin_info);
++		sii9293_stop_tvin(&sii9293_tvin_info);
+ 		printk("sii9293 disable dvin !\n");
+ 	}
+-	else if( ( (enable==1)||(enable==2)||(enable==3)||(enable==4) ) && (sii5293_vdin_info.vdin_started==0) )
++	else if ( ( (enable == 1)||(enable == 2)||(enable == 3)||(enable == 4) ) && (sii9293_tvin_info.vdin_started == 0) )
+ 	{
+ 		mode = sii5293_get_output_mode();
+ 		sii5293_start_vdin_mode(mode);
+ 		printk("sii9293 enable(0x%x) dvin !\n", enable);
+ 	}
+-	else if( (enable==0xff) && (sii5293_vdin_info.vdin_started==0) )
++	else if ( (enable == 0xff) && (sii9293_tvin_info.vdin_started == 0) )
+ 	{
+ 		
+-		switch(mode)
++		switch (mode)
+ 		{
+ 			case 0: // 480i
+-				mode = CEA_480I60;		break;
++				mode = HDMIIN_CEA_480I60;		break;
+ 			case 1: // 480p
+-				mode = CEA_480P60;		break;
++				mode = HDMIIN_CEA_480P60;		break;
+ 			case 2: // 576i
+-				mode = CEA_576I50;		break;
++				mode = HDMIIN_CEA_576I50;		break;
+ 			case 3: // 576p
+-				mode = CEA_576P50;		break;
++				mode = HDMIIN_CEA_576P50;		break;
+ 			case 4: // 720p50
+-				mode = CEA_720P50;		break;
++				mode = HDMIIN_CEA_720P50;		break;
+ 			case 5: // 720p60
+-			default:
+-				mode = CEA_720P60;		break;
++				mode = HDMIIN_CEA_720P60;		break;
+ 			case 6: // 1080i60
+-				mode = CEA_1080I60;		break;
++				mode = HDMIIN_CEA_1080I60;		break;
+ 			case 7: // 1080p60
+-				mode = CEA_1080P60;		break;
++				mode = HDMIIN_CEA_1080P60;		break;
+ 			case 8: // 1080i50
+-				mode = CEA_1080I50;		break;
++				mode = HDMIIN_CEA_1080I50;		break;
+ 			case 9: // 1080p50
+-				mode = CEA_1080P50;		break;
++				mode = HDMIIN_CEA_1080P50;		break;
++			case 10: // 1080p24
++				mode = HDMIIN_CEA_1080P24;		break;
++			case 11: // 1080p30
++				mode = HDMIIN_CEA_1080P30;		break;
++			case 12: // 640x480 p60
++				mode = HDMIIN_640X480_P_60;		break;
++			case 13: // 800x600 p60
++				mode = HDMIIN_800X600_P_60;		break;
++			case 14: // 1024x768 p60
++				mode = HDMIIN_1024X768_P_60;	break;
++			case 15: // 1152x864 p60
++				mode = HDMIIN_1152X864_P_60;	break;
++			case 16: // 1280x768 p60
++				mode = HDMIIN_1280X768_P_60;	break;
++			case 17: // 1280x800 p60
++				mode = HDMIIN_1280X800_P_60;	break;
++			case 18: // 1280x960 p60
++				mode = HDMIIN_1280X960_P_60;	break;
++			case 19: // 1280x1024 p60
++				mode = HDMIIN_1280X1024_P_60;	break;
++			case 20: // 1366x768 p60
++				mode = HDMIIN_1366X768_P_60;	break;
++			case 21: // 1600x1200 p60
++				mode = HDMIIN_1600X1200_P_60;	break;
++			default: // default 720p
++				mode = HDMIIN_CEA_720P60;		break;
+ 		}
+ 
+ 		sii5293_start_vdin_mode(mode);
+@@ -1967,22 +2471,7 @@ static ssize_t sii5293_input_mode_show(struct class *class, struct class_attribu
+ 	strcpy(hdmi_mode_str,(value==0)?"DVI:":"HDMI:");
+ 
+ 	mode = sii5293_get_output_mode();
+-
+-	switch(mode)
+-	{
+-		case CEA_480I60:	strcpy(mode_str, "480i");		break;
+-		case CEA_480P60:	strcpy(mode_str, "480p");		break;
+-		case CEA_576I50:	strcpy(mode_str, "576i");		break;
+-		case CEA_576P50:	strcpy(mode_str, "576p");		break;
+-		case CEA_720P60:	strcpy(mode_str, "720p");		break;
+-		case CEA_720P50:	strcpy(mode_str, "720p50hz");	break;
+-		case CEA_1080I60:	strcpy(mode_str, "1080i");		break;
+-		case CEA_1080I50:	strcpy(mode_str, "1080i50hz");	break;
+-		case CEA_1080P60:	strcpy(mode_str, "1080p");		break;
+-		case CEA_1080P50:	strcpy(mode_str, "1080p50hz");	break;
+-		case CEA_1080P30:	strcpy(mode_str, "1080p30hz");	break;
+-		default:			strcpy(mode_str, "invalid");	break;
+-	}
++	strcpy(mode_str, sii_get_mode_name(mode));
+ 
+ 	if( strcmp(mode_str, "invalid") != 0 )
+ 		strcat(hdmi_mode_str, mode_str);
+@@ -2343,7 +2832,7 @@ static int sii5293_probe(struct platform_device *pdev)
+ 
+ 	//amlogic_gpio_request(hdmirx_info.gpio_reset, HDMIRX_SII9233A_NAME);
+ 
+-	ret = sii5293_register_tvin_frontend(&(sii5293_vdin_info.tvin_frontend));
++	ret = sii5293_register_tvin_frontend(&(sii9293_tvin_info.tvin_frontend));
+ 	if( ret < 0 )
+ 	{
+ 		printk("[%s] register tvin frontend failed !\n", __FUNCTION__);
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+old mode 100755
+new mode 100644
+index 6623b38ff24e..855463b401bb
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.c
+@@ -1,6 +1,7 @@
+ 
+ #include "mhl_linuxdrv.h"
+ #include "../../driver/cra_drv/si_cra.h"
++#include "../../component/rx/si_rx_video_mode_detection.h"
+ 
+ #define GET_VIDEO_INFO_FROM_TABLE
+ 
+@@ -54,6 +55,14 @@ int sii_get_h_active(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if (gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER)
++	{
++		index = gDriverContext.input_video_mode_other;
++		if (index >= NMB_OF_VIDEO_OTHER_MODES)
++			return -1;
++		return VideoModeTableOther[index].Active.H;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -65,6 +74,14 @@ int sii_get_h_total(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Total.H;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -76,6 +93,14 @@ int sii_get_hs_width(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].SyncWidth.H;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -87,6 +112,14 @@ int sii_get_hs_frontporch(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].SyncOffset.H;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -98,6 +131,14 @@ int sii_get_hs_backporch(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Blank.H - VideoModeTableOther[index].SyncOffset.H - VideoModeTableOther[index].SyncWidth.H;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -112,6 +153,14 @@ int sii_get_v_active(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Active.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -123,6 +172,14 @@ int sii_get_v_total(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Total.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -134,6 +191,14 @@ int sii_get_vs_width(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].SyncWidth.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -145,6 +210,14 @@ int sii_get_vs_frontporch(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].SyncOffset.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -156,6 +229,14 @@ int sii_get_vs_backporch(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Blank.V - VideoModeTableOther[index].SyncOffset.V - VideoModeTableOther[index].SyncWidth.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -167,6 +248,14 @@ int sii_get_vs_to_de(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Blank.V - VideoModeTableOther[index].SyncOffset.V;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -181,6 +270,14 @@ int sii_get_pixel_clock(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].PixClk*10000;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -192,6 +289,14 @@ int sii_get_h_freq(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].HFreq*10000;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -203,6 +308,14 @@ int sii_get_v_freq(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].VFreq;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -214,6 +327,14 @@ int sii_get_interlaced(void)
+ {
+ 	unsigned char index = 0;
+ 
++	if ( gDriverContext.input_video_mode == SI_VIDEO_MODE_PC_OTHER )
++	{
++		index = gDriverContext.input_video_mode_other;
++		if ( index >= NMB_OF_VIDEO_OTHER_MODES )
++			return -1;
++		return VideoModeTableOther[index].Interlaced;
++	}
++
+ 	index = gDriverContext.input_video_mode & 0x7f;
+ 	if ( (index==0) || (index>=NMB_OF_CEA861_VIDEO_MODES) )
+ 		return -1;
+@@ -221,7 +342,27 @@ int sii_get_interlaced(void)
+ 	return VideoModeTable[index].Interlaced;
+ }
+ 
++extern void SiiDrvRxGetSyncInfo(sync_info_type *p_sync_info);
++int sii_get_hs_polar(void)
++{
++	sync_info_type sync_info;
++
++	SiiDrvRxGetSyncInfo(&sync_info);
++
++	return sync_info.HPol;
++}
++
++int sii_get_vs_polar(void)
++{
++	sync_info_type sync_info;
++
++	SiiDrvRxGetSyncInfo(&sync_info);
++
++	return sync_info.VPol;
++}
++
+ #else
++
+ // !!! read h/v/sync info from 5293 registers, but the value seems not stable.
+ 
+ // offset definitions for registers.
+@@ -238,7 +379,7 @@ int sii_get_interlaced(void)
+ /*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+ // sii5293 output signal horizontal parameters
+ 
+-int sii_get_h_active(void)
++static int sii_get_h_active_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -248,7 +389,7 @@ int sii_get_h_active(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_h_total(void)
++static int sii_get_h_total_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -258,7 +399,7 @@ int sii_get_h_total(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_hs_width(void)
++static int sii_get_hs_width_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -268,7 +409,7 @@ int sii_get_hs_width(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_hs_frontporch(void)
++static int sii_get_hs_frontporch_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -278,11 +419,11 @@ int sii_get_hs_frontporch(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_hs_backporch(void)
++static int sii_get_hs_backporch_reg(void)
+ {
+ 	int backporch = 0;
+ 
+-	backporch = sii_get_h_total() - sii_get_h_active() - sii_get_hs_frontporch() - sii_get_hs_width();
++	backporch = sii_get_h_total_reg() - sii_get_h_active_reg() - sii_get_hs_frontporch_reg() - sii_get_hs_width_reg();
+ 
+ 	return backporch;
+ }
+@@ -290,7 +431,7 @@ int sii_get_hs_backporch(void)
+ /*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+ // sii5293 output signal vertical parameters
+ 
+-int sii_get_v_active(void)
++static int sii_get_v_active_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -300,7 +441,7 @@ int sii_get_v_active(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_v_total(void)
++static int sii_get_v_total_reg(void)
+ {
+ 	unsigned char high,low;
+ 
+@@ -310,12 +451,12 @@ int sii_get_v_total(void)
+ 	return ( (high<<8) | low );
+ }
+ 
+-int sii_get_vs_width(void)
++static int sii_get_vs_width_reg(void)
+ {
+ 	return 0;
+ }
+ 
+-int sii_get_vs_frontporch(void)
++static int sii_get_vs_frontporch_reg(void)
+ {
+ 	unsigned char low;
+ 
+@@ -324,12 +465,12 @@ int sii_get_vs_frontporch(void)
+ 	return low;
+ }
+ 
+-int sii_get_vs_backporch(void)
++static int sii_get_vs_backporch_reg(void)
+ {
+ 	return 0;
+ }
+ 
+-int sii_get_vs_to_de(void)
++static int sii_get_vs_to_de_reg(void)
+ {
+ 	unsigned char low;
+ 
+@@ -338,5 +479,30 @@ int sii_get_vs_to_de(void)
+ 	return low;
+ }
+ 
++extern uint16_t SiiDrvRxGetPixelFreq(void);
++extern uint8_t SiiDrvRxGetVideoStatus();
++int sii_get_video_timming(sii_video_timming_t *timming)
++{
++	uint8_t vid_stat_reg = SiiDrvRxGetVideoStatus();
++
++	timming->h_active	= sii_get_h_active_reg();
++	timming->h_total	= sii_get_h_total_reg();
++	timming->hs_fp		= sii_get_hs_frontporch_reg();
++	timming->hs_width	= sii_get_hs_width_reg();
++	timming->hs_bp		= sii_get_hs_backporch_reg();
++
++	timming->v_active	= sii_get_v_active_reg();
++	timming->v_total	= sii_get_v_total_reg();
++	timming->vs_fp		= sii_get_vs_frontporch_reg();
++	timming->vs_to_de	= sii_get_vs_to_de_reg();
++
++	timming->pixelfreq	= SiiDrvRxGetPixelFreq();
++	timming->interlaced = (vid_stat_reg & RX_M__VID_STAT__INTERLACE) ? INTL : PROG;
++	timming->hs_pol = (vid_stat_reg & RX_M__VID_STAT__HSYNC_POL) ? POS : NEG;
++	timming->vs_pol = (vid_stat_reg & RX_M__VID_STAT__VSYNC_POL) ? POS : NEG;
++
++	return 0;
++}
++
+ #endif
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
+index a06602433672..63ff413907b0 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/sii5293_interface.h
+@@ -36,5 +36,31 @@ int sii_get_interlaced(void);
+ int sii_get_pwr5v_status(void);
+ int sii_get_audio_sampling_freq(void);
+ 
++int sii_get_hs_polar(void);
++int sii_get_vs_polar(void);
++
++#if 0
++typedef struct
++{
++	unsigned int h_active;
++	unsigned int h_total;
++	unsigned int hs_fp; // hsync frontporch
++	unsigned int hs_width;
++	unsigned int hs_bp; // hsync backporch
++
++	unsigned int v_active;
++	unsigned int v_total;
++	unsigned int vs_fp; // vsync frontporch
++	unsigned int vs_to_de; // from vsync to the first active line
++
++	unsigned int pixelfreq;
++	unsigned int intelaced;
++	unsigned int hs_pol;
++	unsigned int vs_pol;
++}sii_video_timming_t;
++
++int sii_get_video_timming(sii_video_timming_t *timming);
++#endif
++
+ #endif
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
+old mode 100755
+new mode 100644
+index a92125cce0ad..7a03aea1d1b1
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.c
+@@ -7,6 +7,10 @@
+ #include "../../driver/cra_drv/si_cra.h"
+ #include "sii5293_interface.h"
+ 
++#define SII9293_VDIN_PORT TVIN_PORT_DVIN0;
++// 0 for vdin0, 1 for vdin1
++#define SII9293_VDIN_INDEX	0
++
+ #ifdef HDMIIN_FRAME_SKIP_MECHANISM
+ extern unsigned int flag_skip_status ;
+ extern unsigned int flag_skip_enable ;
+@@ -215,19 +219,20 @@ int sii5293_register_tvin_frontend(struct tvin_frontend_s *frontend)
+ 	return 0;
+ }
+ 
+-void sii5293_config_dvin (unsigned long hs_pol_inv,             // Invert HS polarity, for HW regards HS active high.
+-						unsigned long vs_pol_inv,             // Invert VS polarity, for HW regards VS active high.
+-						unsigned long de_pol_inv,             // Invert DE polarity, for HW regards DE active high.
+-						unsigned long field_pol_inv,          // Invert FIELD polarity, for HW regards odd field when high.
+-						unsigned long ext_field_sel,          // FIELD source select:
++extern int debug_level;
++void sii5293_config_dvin (unsigned int hs_pol_inv,             // Invert HS polarity, for HW regards HS active high.
++						unsigned int vs_pol_inv,             // Invert VS polarity, for HW regards VS active high.
++						unsigned int de_pol_inv,             // Invert DE polarity, for HW regards DE active high.
++						unsigned int field_pol_inv,          // Invert FIELD polarity, for HW regards odd field when high.
++						unsigned int ext_field_sel,          // FIELD source select:
+ 																		  // 1=Use external FIELD signal, ignore internal FIELD detection result;
+ 																		  // 0=Use internal FIELD detection result, ignore external input FIELD signal.
+-						unsigned long de_mode,                // DE mode control:
++						unsigned int de_mode,                // DE mode control:
+ 																		  // 0=Ignore input DE signal, use internal detection to to determine active pixel;
+ 																		  // 1=Rsrv;
+ 																		  // 2=During internal detected active region, if input DE goes low, replace input data with the last good data;
+ 																		  // 3=Active region is determined by input DE, no internal detection.
+-						unsigned long data_comp_map,          // Map input data to form YCbCr.
++						unsigned int data_comp_map,          // Map input data to form YCbCr.
+ 																		  // Use 0 if input is YCbCr;
+ 																		  // Use 1 if input is YCrCb;
+ 																		  // Use 2 if input is CbCrY;
+@@ -235,33 +240,71 @@ void sii5293_config_dvin (unsigned long hs_pol_inv,             // Invert HS pol
+ 																		  // Use 4 if input is CrYCb;
+ 																		  // Use 5 if input is CrCbY;
+ 																		  // 6,7=Rsrv.
+-						unsigned long mode_422to444,          // 422 to 444 conversion control:
++						unsigned int mode_422to444,          // 422 to 444 conversion control:
+ 																		  // 0=No convertion; 1=Rsrv;
+ 																		  // 2=Convert 422 to 444, use previous C value;
+ 																		  // 3=Convert 422 to 444, use average C value.
+-						unsigned long dvin_clk_inv,           // Invert dvin_clk_in for ease of data capture.
+-						unsigned long vs_hs_tim_ctrl,         // Controls which edge of HS/VS (post polarity control) the active pixel/line is related:
++						unsigned int dvin_clk_inv,           // Invert dvin_clk_in for ease of data capture.
++						unsigned int vs_hs_tim_ctrl,         // Controls which edge of HS/VS (post polarity control) the active pixel/line is related:
+ 																		  // Bit 0: HS and active pixel relation.
+ 																		  //  0=Start of active pixel is counted from the rising edge of HS;
+ 																		  //  1=Start of active pixel is counted from the falling edge of HS;
+ 																		  // Bit 1: VS and active line relation.
+ 																		  //  0=Start of active line is counted from the rising edge of VS;
+ 																		  //  1=Start of active line is counted from the falling edge of VS.
+-						unsigned long hs_lead_vs_odd_min,     // For internal FIELD detection:
++						unsigned int hs_lead_vs_odd_min,     // For internal FIELD detection:
+ 																		  // Minimum clock cycles allowed for HS active edge to lead before VS active edge in odd field. Failing it the field is even.
+-						unsigned long hs_lead_vs_odd_max,     // For internal FIELD detection:
++						unsigned int hs_lead_vs_odd_max,     // For internal FIELD detection:
+ 																		  // Maximum clock cycles allowed for HS active edge to lead before VS active edge in odd field. Failing it the field is even.
+-						unsigned long active_start_pix_fe,    // Number of clock cycles between HS active edge to first active pixel, in even field.
+-						unsigned long active_start_pix_fo,    // Number of clock cycles between HS active edge to first active pixel, in odd field.
+-						unsigned long active_start_line_fe,   // Number of clock cycles between VS active edge to first active line, in even field.
+-						unsigned long active_start_line_fo,   // Number of clock cycles between VS active edge to first active line, in odd field.
+-						unsigned long line_width,             // Number_of_pixels_per_line
+-						unsigned long field_height)           // Number_of_lines_per_field
++						unsigned int active_start_pix_fe,    // Number of clock cycles between HS active edge to first active pixel, in even field.
++						unsigned int active_start_pix_fo,    // Number of clock cycles between HS active edge to first active pixel, in odd field.
++						unsigned int active_start_line_fe,   // Number of clock cycles between VS active edge to first active line, in even field.
++						unsigned int active_start_line_fo,   // Number of clock cycles between VS active edge to first active line, in odd field.
++						unsigned int line_width,             // Number_of_pixels_per_line
++						unsigned int field_height)           // Number_of_lines_per_field
+ {
+-	unsigned long data32;
++	unsigned int data32;
++
++	if ( debug_level > 0 )
++		printk("[%s] config:\n\
++		hs_pol_inv = %d\n\
++		vs_pol_inv = %d\n\
++		de_pol_inv = %d\n\
++		field_pol_inv = %d\n\
++		ext_field_sel = %d\n\
++		de_mode = %d\n\
++		data_comp_map = %d\n\
++		mode_422to444 = %d\n\
++		dvin_clk_inv = %d\n\
++		vs_hs_tim_ctrl = %d\n\
++		hs_lead_vs_odd_min = %d\n\
++		hs_lead_vs_odd_max = %d\n\
++		active_start_pix_fe = %d\n\
++		active_start_pix_fo = %d\n\
++		active_start_line_fe = %d\n\
++		active_start_line_fo = %d\n\
++		line_width = %d\n\
++		field_height = %d\n",
++		__FUNCTION__,
++		hs_pol_inv,
++		vs_pol_inv,
++		de_pol_inv,
++		field_pol_inv,
++		ext_field_sel,
++		de_mode,
++		data_comp_map,
++		mode_422to444,
++		dvin_clk_inv,
++		vs_hs_tim_ctrl,
++		hs_lead_vs_odd_min,
++		hs_lead_vs_odd_max,
++		active_start_pix_fe,
++		active_start_pix_fo,
++		active_start_line_fe,
++		active_start_line_fo,
++		line_width,
++		field_height );
+ 
+-//	printk("[%s] config pol_inv: hs = %d, vs = %d, de = %d, field = %d, clk = %d\n",__FUNCTION__, hs_pol_inv,vs_pol_inv,de_pol_inv,field_pol_inv,dvin_clk_inv);
+-//	printk("[%s]: %lu %lu %lu %lu.\n",  __FUNCTION__, active_start_pix_fe, active_start_line_fe,  line_width, field_height);  
+ 	// Program reg DVIN_CTRL_STAT: disable DVIN
+ 	WRITE_MPEG_REG(DVIN_CTRL_STAT, 0);
+ 
+@@ -310,180 +353,83 @@ void sii5293_config_dvin (unsigned long hs_pol_inv,             // Invert HS pol
+ //    printk("[%s] end !\n", __FUNCTION__);
+ } /* config_dvin */
+ 
+-void sii5293_stop_vdin(sii5293_vdin *info)
++void sii9293_stop_tvin(sii9293_tvin_t *info)
+ {
+ 	if( info->vdin_started == 0 )
+ 	  return ;
+ 
+-	stop_tvin_service(0);
++	stop_tvin_service(SII9293_VDIN_INDEX);
+ 	set_invert_top_bot(false);
+ 	CLK_GATE_OFF(MISC_DVIN);
+ 	info->vdin_started = 0;
+-	printk("%s: stop vdin\n", __FUNCTION__);
++	printk("[%s]: stop vdin\n", __FUNCTION__);
+ 	return ;
+ }
+ 
+-void sii5293_start_vdin(sii5293_vdin *info, int width, int height, int frame_rate, int field_flag)
++
++int sii9293_start_tvin(sii9293_tvin_t *info, sii_video_timming_link *timming)
+ {
+ 	vdin_parm_t para;
++	sii_video_timming_link tmp;
++
++	memcpy(&tmp, timming, sizeof(sii_video_timming_link));
++
++	if ( (info == NULL) || (timming == NULL) )
++		return -1;
+ 
+-	printk("[%s]-%.3d, width = %d, height = %d, frame_rate = %d, field_flag = %d\n",
+-							__FUNCTION__, __LINE__, width,height,frame_rate,field_flag);
++	printk("[%s] start for hdmiin mode %d\n", __FUNCTION__, timming->vmode);
+ 
+-	//    printk("[%s]-%.3d, info = 0x%x\n",__FUNCTION__, __LINE__, info);
+ 	if(info->vdin_started)
+ 	{
+-		//printk("[%s]-%.3d, info->vdin_info = 0x%x\n",__FUNCTION__, __LINE__, &(info->vdin_info) );
+-		if( (info->vdin_info.cur_width != width) || (info->vdin_info.cur_height != height) ||
+-											(info->vdin_info.cur_frame_rate != frame_rate) )
++		if ( info->vmode != timming->vmode )
+ 		{
+-			stop_tvin_service(0);
+-			CLK_GATE_OFF(MISC_DVIN);
++			stop_tvin_service(SII9293_VDIN_INDEX);
+ 			info->vdin_started=0;
+-			printk("%s: stop vdin\n", __func__);
++			printk("[%s]: stop vdin\n", __FUNCTION__);
+ 		}
+ 	}
+ 
+ 	CLK_GATE_ON(MISC_DVIN);
+ 
+-	if( (info->vdin_started==0) && (width>0) && (height>0) && (frame_rate>0) )
++	if ( info->vdin_started == 0 )
+ 	{
+-		int start_pix=138, start_line_o=22, start_line_e=23, h_total=1728, v_total=625;
+-
+-		info->vdin_info.cur_width = width;
+-		info->vdin_info.cur_height = height;
+-		info->vdin_info.cur_frame_rate = frame_rate;
+-
+-		if(field_flag && height <= 576 )
++		sii5293_config_dvin(tmp.hs_pol_inv,
++							tmp.vs_pol_inv,
++							tmp.de_pol_inv,
++							tmp.field_pol_inv,
++							tmp.ext_field_sel,
++							tmp.de_mode,
++							tmp.data_comp_map,
++							tmp.mode_422to444,
++							tmp.dvin_clk_inv,
++							tmp.vs_hs_tim_ctrl,
++							tmp.hs_lead_vs_odd_min,
++							tmp.hs_lead_vs_odd_max,
++							tmp.active_start_pix_fe,
++							tmp.active_start_pix_fo,
++							tmp.active_start_line_fe,
++							tmp.active_start_line_fo,
++							tmp.h_total,
++							tmp.v_total );
++
++		memset( &para, 0, sizeof(vdin_parm_t));
++		para.port  = SII9293_VDIN_PORT;
++		para.frame_rate = tmp.frame_rate;
++		para.h_active = tmp.h_active;
++		para.v_active = tmp.v_active;
++		para.fmt = tmp.tvin_mode;
++
++		if ( tmp.interlaced == 1 )
+ 		{
+-			// for rgb 576i signal from 9233, it's 720/864, not 1440/1728
+-			if( (width==720)&&(height==288) )
+-			{
+-				start_pix = 138;
+-				start_line_o = 22;
+-				start_line_e = 23;
+-				h_total = 1728;
+-				v_total = 625;
+-			}
+-			// for rgb 480i signal from 9233, it's 720/858, not 1440/1716
+-			else if( (width==720)&&(height==240) )
+-			{
+-				start_pix = 114;
+-				start_line_o = 18;
+-				start_line_e = 19;
+-				h_total = 1716;
+-				v_total = 525;
+-			}
+-			sii5293_config_dvin(1, //hs_pol_inv,          
+-						1, //vs_pol_inv,          
+-						0, //de_pol_inv,          
+-						0, //field_pol_inv,       
+-						0, //ext_field_sel,       
+-						3, //de_mode,             
+-						0, //data_comp_map,       
+-						0, //mode_422to444,       
+-						0, //dvin_clk_inv,        
+-						0, //vs_hs_tim_ctrl,      
+-						400, //hs_lead_vs_odd_min,  
+-						1200, //hs_lead_vs_odd_max,  
+-						start_pix,//sii_get_hs_backporch()*2,//0xdc, //active_start_pix_fe, 
+-						start_pix,//sii_get_hs_backporch()*2,//0xdc, //active_start_pix_fo, 
+-						start_line_e,//sii_get_vs_backporch(), //0x19, //active_start_line_fe,
+-						start_line_o,//sii_get_vs_backporch(),//0x19, //active_start_line_fo,
+-						h_total,//sii_get_h_total(), //0x672, //line_width,          
+-						v_total//sii_get_v_total()*2 //0x2ee //field_height
+-						);
++			if ( (tmp.vmode != HDMIIN_CEA_1080I50) && (tmp.vmode != HDMIIN_CEA_1080I60) )
++				set_invert_top_bot(true);
++			para.scan_mode = TVIN_SCAN_MODE_INTERLACED;
+ 		}
+ 		else
+ 		{
+-			sii5293_config_dvin(height>576?0:1, //hs_pol_inv,          
+-						height>576?0:1, //vs_pol_inv,          
+-						0, //de_pol_inv,          
+-						(field_flag && height>=540)?1:0, //field_pol_inv, set to 1 for 1080i
+-						0, //ext_field_sel,       
+-						3, //de_mode,             
+-						0, //data_comp_map,       
+-						0, //mode_422to444,       
+-						0, //dvin_clk_inv,        
+-						0, //vs_hs_tim_ctrl,      
+-						0, //hs_lead_vs_odd_min,  
+-						0, //hs_lead_vs_odd_max,  
+-						sii_get_hs_backporch(),//0xdc, //active_start_pix_fe, 
+-						sii_get_hs_backporch(),//0xdc, //active_start_pix_fo, 
+-						sii_get_vs_backporch(), //0x19, //active_start_line_fe,
+-						sii_get_vs_backporch(),//0x19, //active_start_line_fo,
+-						sii_get_h_total(), //0x672, //line_width,          
+-						sii_get_v_total() //0x2ee //field_height
+-						);       
+-		}        
+-
+-		memset( &para, 0, sizeof(para));
+-		para.port  = TVIN_PORT_DVIN0;
+-		para.frame_rate = frame_rate;
+-		para.h_active = info->vdin_info.cur_width;
+-		para.v_active = info->vdin_info.cur_height;
+-		if(field_flag){
+-			if(info->vdin_info.cur_width == 1920 &&  
+-			  (info->vdin_info.cur_height == 1080 || info->vdin_info.cur_height == 540)){
+-				if( frame_rate == 60 )
+-					para.fmt = TVIN_SIG_FMT_HDMI_1920X1080I_60HZ;
+-				else if( frame_rate == 50 )
+-					para.fmt = TVIN_SIG_FMT_HDMI_1920X1080I_50HZ_A;
+-				para.v_active = 1080;
+-			}
+-		/*
+-			else if( info->vdin_info.cur_width == 720 &&  (info->vdin_info.cur_height == 576 || info->vdin_info.cur_height == 288)){
+-				 para.fmt = TVIN_SIG_FMT_HDMI_720X576I_50HZ;
+-				 para.v_active = 576;
+-				 set_invert_top_bot(true);
+-			}
+-		*/
+-			else if(info->vdin_info.cur_width == 720 &&  
+-			  (info->vdin_info.cur_height == 576 || info->vdin_info.cur_height == 288)){
+-				para.fmt = TVIN_SIG_FMT_MAX;//TVIN_SIG_FMT_HDMI_1440X576I_50HZ;
+-				para.v_active = 288;
+-				set_invert_top_bot(true);
+-			}
+-		/*
+-			else if( info->vdin_info.cur_width == 720 &&  (info->vdin_info.cur_height == 480 || info->vdin_info.cur_height == 240)){
+-				 para.fmt = TVIN_SIG_FMT_HDMI_720X480I_60HZ;
+-				 para.v_active = 480;
+-				 set_invert_top_bot(true);
+-			}
+-		*/
+-			else if(info->vdin_info.cur_width == 720  &&  
+-			  (info->vdin_info.cur_height == 480 || info->vdin_info.cur_height == 240)){
+-				para.fmt = TVIN_SIG_FMT_MAX;//TVIN_SIG_FMT_HDMI_1440X480I_60HZ;
+-				para.v_active = 240;
+-				set_invert_top_bot(true);
+-			}
+-			else{
+-				para.fmt = TVIN_SIG_FMT_MAX+1;
+-				set_invert_top_bot(true);
+-			}
+-			para.scan_mode = TVIN_SCAN_MODE_INTERLACED;	
+-		}
+-		else{
+-			if(info->vdin_info.cur_width == 1920 &&  info->vdin_info.cur_height == 1080){
+-				if( info->vdin_info.cur_frame_rate == 60 )
+-					para.fmt = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ;
+-				else if( info->vdin_info.cur_frame_rate == 30 )
+-					para.fmt = TVIN_SIG_FMT_MAX;//TVIN_SIG_FMT_HDMI_1920X1080P_30HZ;
+-			}
+-			else if(info->vdin_info.cur_width == 1280 &&  info->vdin_info.cur_height == 720){
+-				para.fmt = TVIN_SIG_FMT_HDMI_1280X720P_60HZ;
+-			}
+-			else if((info->vdin_info.cur_width == 1440 || info->vdin_info.cur_width == 720) &&  info->vdin_info.cur_height == 576){
+-				para.fmt = TVIN_SIG_FMT_HDMI_720X576P_50HZ;
+-			}
+-			else if((info->vdin_info.cur_width == 1440 || info->vdin_info.cur_width == 720) &&  info->vdin_info.cur_height == 480){
+-				para.fmt = TVIN_SIG_FMT_HDMI_720X480P_60HZ;
+-			}
+-			else{
+-				para.fmt = TVIN_SIG_FMT_MAX+1;
+-			}
+-			para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;	
++			para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+ 		}
++
+ 		para.hsync_phase = 1;
+ 		para.vsync_phase = 0;
+ 		//para.hs_bp = 0;
+@@ -500,12 +446,11 @@ void sii5293_start_vdin(sii5293_vdin *info, int width, int height, int frame_rat
+ 			(SKIP_STATUS_CABLE==flag_skip_status) )
+ 			flag_skip_enable = 1;
+ #endif
+-		start_tvin_service(0,&para);
++		start_tvin_service(SII9293_VDIN_INDEX,&para);
+ 		info->vdin_started = 1;
+ 
+-		//printk("%s: %dx%d %d %d/s\n", __func__, width, height, frame_rate, field_flag);
+ 	}
+ 
+-	return ;
++	return 0;
+ }
+ 
+diff --git a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.h b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.h
+index a3a3d97fbb64..5248a05fb3ff 100755
+--- a/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.h
++++ b/drivers/amlogic/ext_hdmiin/sii9293/linux_driver/application/vdin_interface.h
+@@ -3,7 +3,7 @@
+ 
+ int sii5293_register_tvin_frontend(struct tvin_frontend_s *frontend);
+ 
+-void sii5293_stop_vdin(sii5293_vdin *info);
+-void sii5293_start_vdin(sii5293_vdin *info, int width, int height, int frame_rate, int field_flag);
++void sii9293_stop_tvin(sii9293_tvin_t *info);
++int sii9293_start_tvin(sii9293_tvin_t *info, sii_video_timming_link *timming);
+ 
+ #endif
+-- 
+2.19.0
+

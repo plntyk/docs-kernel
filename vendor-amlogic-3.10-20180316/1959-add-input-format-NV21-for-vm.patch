@@ -1,0 +1,113 @@
+From 4d6507b02a005c9f0997b964e62939a5a3aa62d1 Mon Sep 17 00:00:00 2001
+From: "jiyu.yang" <jiyu.yang@amlogic.com>
+Date: Fri, 15 Nov 2013 21:40:11 +0800
+Subject: [PATCH 1959/5965] add input format NV21 for vm
+
+---
+ drivers/amlogic/camera/common/vm.c | 49 +++++++++++++++++++++++-------
+ drivers/amlogic/camera/ov5640.c    |  4 +--
+ drivers/amlogic/camera/ov5647.c    |  1 +
+ 3 files changed, 41 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/amlogic/camera/common/vm.c b/drivers/amlogic/camera/common/vm.c
+index 7fb546889bc2..009fe8525cf2 100755
+--- a/drivers/amlogic/camera/common/vm.c
++++ b/drivers/amlogic/camera/common/vm.c
+@@ -500,17 +500,44 @@ static inline void vm_vf_put_from_provider(vframe_t *vf)
+ *   main task functions.
+ *
+ *************************************************/
+-static int get_input_format(vframe_t* vf)
+-{
+-	int format= GE2D_FORMAT_M24_YUV420;
+-
+-	if(vf->type&VIDTYPE_VIU_422)
+-		format =  GE2D_FORMAT_S16_YUV422;
+-	else
+-		format =  GE2D_FORMAT_M24_YUV420;
+-
+-	return format;
+-}
++static unsigned int print_ifmt=0;
++module_param(print_ifmt, uint, 0644);
++MODULE_PARM_DESC(print_ifmt, "print input format\n");
++
++static int get_input_format(vframe_t* vf)
++{
++        int format= GE2D_FORMAT_M24_NV21;
++        if(vf->type&VIDTYPE_VIU_422){
++                if(vf->type &VIDTYPE_INTERLACE_BOTTOM){
++                        format =  GE2D_FORMAT_S16_YUV422|(GE2D_FORMAT_S16_YUV422B & (3<<3));
++                }else if(vf->type &VIDTYPE_INTERLACE_TOP){
++                        format =  GE2D_FORMAT_S16_YUV422|(GE2D_FORMAT_S16_YUV422T & (3<<3));
++                }else{
++                        format =  GE2D_FORMAT_S16_YUV422;
++                }
++        }else if(vf->type&VIDTYPE_VIU_NV21){
++                if(vf->type &VIDTYPE_INTERLACE_BOTTOM){
++                        format =  GE2D_FORMAT_M24_NV21|(GE2D_FORMAT_M24_NV21B & (3<<3));
++                }else if(vf->type &VIDTYPE_INTERLACE_TOP){
++                        format =  GE2D_FORMAT_M24_NV21|(GE2D_FORMAT_M24_NV21T & (3<<3));
++                }else{
++                        format =  GE2D_FORMAT_M24_NV21;
++                }
++        } else{
++                if(vf->type &VIDTYPE_INTERLACE_BOTTOM){
++                        format =  GE2D_FORMAT_M24_YUV420|(GE2D_FMT_M24_YUV420B & (3<<3));
++                }else if(vf->type &VIDTYPE_INTERLACE_TOP){
++                        format =  GE2D_FORMAT_M24_YUV420|(GE2D_FORMAT_M24_YUV420T & (3<<3));
++                }else{
++                        format =  GE2D_FORMAT_M24_YUV420;
++                }
++        }
++        if (1==print_ifmt) {
++                printk("VIDTYPE_VIU_NV21=%x, vf->type=%x, format=%x\n", VIDTYPE_VIU_NV21, vf->type, format);
++                print_ifmt = 0;
++        }
++        return format;
++}
+ 
+ #ifdef CONFIG_AMLOGIC_VM_DISABLE_VIDEOLAYER
+ static int calc_zoom(int* top ,int* left , int* bottom, int* right, int zoom)
+diff --git a/drivers/amlogic/camera/ov5640.c b/drivers/amlogic/camera/ov5640.c
+index 4c4411e827df..b5e5f51daa39 100755
+--- a/drivers/amlogic/camera/ov5640.c
++++ b/drivers/amlogic/camera/ov5640.c
+@@ -3645,7 +3645,6 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+                 para.v_active = fh->dev->cur_resolution_param->active_frmsize.height;
+                 para.hs_bp = 0;
+                 para.vs_bp = 2;
+-                para.cfmt = TVIN_NV21;
+                 para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;	
+         } else {
+                 para.frame_rate = ov5640_frmintervals_active.denominator;;
+@@ -3653,12 +3652,13 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+                 para.v_active = fh->dev->cur_resolution_param->active_frmsize.height;
+                 para.hs_bp = 0;
+                 para.vs_bp = 2;
+-                para.cfmt = TVIN_NV21;
+                 para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+         }
+ 
+         printk("ov5640: h_active = %d; v_active = %d, frame_rate=%d\n",
+                         para.h_active, para.v_active, para.frame_rate);
++        para.cfmt = TVIN_YUV422;
++        para.dfmt = TVIN_NV21;
+         para.hsync_phase = 1;
+         para.vsync_phase  = 1;    
+         para.skip_count =  2;
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 1278d5d620e1..ec21fc2c9877 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -3409,6 +3409,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     para.hs_bp = 0;
+     para.vs_bp = 2;
+     para.cfmt = TVIN_YUV422;
++    para.dfmt = TVIN_NV21;
+     para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+     para.bt_path = dev->cam_info.bt_path;
+     current_fmt = 0;
+-- 
+2.19.0
+

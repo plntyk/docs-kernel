@@ -1,0 +1,711 @@
+From 048b360f6fc0d63248ff2b1daab0d0a37a315c7c Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Wed, 6 Nov 2013 14:58:26 +0800
+Subject: [PATCH 1733/5965] modify for af.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c     |  80 ++++++++-
+ drivers/amlogic/tvin/isp/isp_drv.h     |  38 +++--
+ drivers/amlogic/tvin/isp/isp_hw.c      |  10 +-
+ drivers/amlogic/tvin/isp/isp_hw.h      |   2 +-
+ drivers/amlogic/tvin/isp/isp_sm.c      | 223 +++++++++++++------------
+ drivers/amlogic/tvin/isp/isp_sm.h      |   2 +
+ include/linux/amlogic/tvin/tvin_v4l2.h |  25 ++-
+ 7 files changed, 243 insertions(+), 137 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index cbc43aead62a..5d49edb73351 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -100,7 +100,7 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 	}else if(!strcmp(parm[0],"flag")){
+ 		data = simple_strtol(parm[1],NULL,16);
+ 		devp->flag = data;
+-		isp_sm_init(devp);
++		af_sm_init(devp);
+ 	}else if(!strcmp(parm[0],"lenc-mode")){
+ 		devp->debug.comb4_mode = simple_strtol(parm[1],NULL,10);
+ 		devp->flag |= ISP_FLAG_SET_COMB4;
+@@ -224,6 +224,55 @@ static ssize_t af_debug_store(struct device *dev,struct device_attribute *attr,
+ 		else
+ 			devp->vs_cnt = 4;
+ 		devp->flag |= ISP_FLAG_BLNR;
++	}else if(!strcmp(parm[0],"af_test")){
++		devp->af_test.max = simple_strtol(parm[1],NULL,10);
++		if(devp->af_test.af_win)
++			kfree(devp->af_test.af_win);
++		if(devp->af_test.af_bl)
++			kfree(devp->af_test.af_bl);
++		if(devp->af_test.ae_win)
++			kfree(devp->af_test.ae_win);
++		devp->af_test.af_win = kmalloc(sizeof(isp_af_stat_t)*devp->af_test.max,GFP_KERNEL);
++		devp->af_test.af_bl = kmalloc(sizeof(isp_blnr_stat_t)*devp->af_test.max,GFP_KERNEL);
++		devp->af_test.ae_win = kmalloc(sizeof(isp_ae_stat_t)*devp->af_test.max,GFP_KERNEL);
++		devp->af_test.cnt = 0;
++		devp->flag |= ISP_TEST_FOR_AF_WIN;
++	}else if(!strcmp(parm[0],"af_print")){
++		int i = 0;
++		/*unsigned long long sum_ac,sum_dc;
++		pr_info("sum_ac sum_dc win0_dc win1_dc win2_dc win3_dc win4_dc win5_dc\n");
++		for(i=0;i<devp->af_test.cnt;i++){
++			sum_ac  = (unsigned long long)devp->af_test.af_bl[i].ac[0];
++			sum_ac += (unsigned long long)devp->af_test.af_bl[i].ac[1];
++			sum_ac += (unsigned long long)devp->af_test.af_bl[i].ac[2];
++			sum_ac += (unsigned long long)devp->af_test.af_bl[i].ac[3];
++			sum_dc  = (unsigned long long)devp->af_test.af_bl[i].dc[0];
++			sum_dc  = (unsigned long long)devp->af_test.af_bl[i].dc[0];
++			sum_dc += (unsigned long long)devp->af_test.af_bl[i].dc[1];
++			sum_dc += (unsigned long long)devp->af_test.af_bl[i].dc[2];
++			sum_dc += (unsigned long long)devp->af_test.af_bl[i].dc[3];
++			pr_info("%llu %llu %u %u %u %u %u\n",sum_ac,sum_dc,devp->af_test.af_win[i].luma_win[0],
++					devp->af_test.af_win[i].luma_win[2],devp->af_test.af_win[i].luma_win[4],devp->af_test.af_win[i].luma_win[6],
++					devp->af_test.af_win[i].luma_win[8]);
++		}*/
++		pr_info("win0 win1 win2 win3 win4 win5 win6 win7 win8 win9 win10 win11 win12 win13 win14 win15\n");
++		for(i=0;i<devp->af_test.cnt;i++){
++			pr_info("%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",devp->af_test.ae_win[i].luma_win[0],
++				devp->af_test.ae_win[i].luma_win[1],devp->af_test.ae_win[i].luma_win[2],
++				devp->af_test.ae_win[i].luma_win[3],devp->af_test.ae_win[i].luma_win[4],
++				devp->af_test.ae_win[i].luma_win[5],devp->af_test.ae_win[i].luma_win[6],
++				devp->af_test.ae_win[i].luma_win[7],devp->af_test.ae_win[i].luma_win[8],
++				devp->af_test.ae_win[i].luma_win[9],devp->af_test.ae_win[i].luma_win[10],
++				devp->af_test.ae_win[i].luma_win[11],devp->af_test.ae_win[i].luma_win[12],
++				devp->af_test.ae_win[i].luma_win[13],devp->af_test.ae_win[i].luma_win[14],
++				devp->af_test.ae_win[i].luma_win[15]);
++		}
++		kfree(devp->af_test.af_bl);
++		kfree(devp->af_test.af_win);
++		kfree(devp->af_test.ae_win);
++		devp->af_test.af_bl = NULL;
++		devp->af_test.af_win = NULL;
++		devp->af_test.ae_win = NULL;
+ 	}
+ 	
+ 	kfree(buf_orig);
+@@ -646,6 +695,9 @@ static int isp_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
+         else
+                 return -1;
+ }
++static unsigned int ratio = 200;
++module_param(ratio,uint,0664);
++MODULE_PARM_DESC(ratio,"\n debug flag for ae.\n");
+ 
+ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ {        
+@@ -677,9 +729,12 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->capture_parm = devp->cam_param->xml_capture;
+ 		devp->wave = devp->cam_param->xml_wave;
+ 		isp_set_def_config(devp->cam_param->xml_regs_map,info->fe_port,info->h_active,info->v_active);
+-		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_t_af_t),GFP_KERNEL);
++		devp->isp_af_parm = kmalloc(sizeof(xml_algorithm_af_t),GFP_KERNEL);
+ 		memset(devp->isp_af_parm,0,sizeof(xml_algorithm_af_t));
+ 		devp->isp_af_parm->detect_step = 16;
++		devp->isp_af_parm->deta_ave_ratio = ratio;
++		devp->isp_af_parm->af_fail_ratio = 20;
++		devp->isp_af_parm->af_retry_max = 3;
+ 		devp->af_info.af_detect = kmalloc(sizeof(isp_blnr_stat_t)*devp->isp_af_parm->detect_step,GFP_KERNEL);
+ 		devp->isp_af_parm->step[0] = 100;
+ 		devp->isp_af_parm->step[1] = 150;
+@@ -696,7 +751,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+                 devp->isp_af_parm->step[12] = 520;
+                 devp->isp_af_parm->step[13] = 530;
+                 devp->isp_af_parm->step[14] = 540;
+-		devp->isp_af_parm->step[15] = 0;
++		devp->isp_af_parm->step[15] = 550;
+ 		devp->isp_af_parm->jump_offset = 100;
+ 		devp->isp_af_parm->field_delay = 1;
+ 	}
+@@ -752,6 +807,7 @@ static void isp_fe_stop(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ }
+ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ {
++	unsigned int x0,y0,x1,y1;
+ 	isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+ 	cam_parameter_t *param = (cam_parameter_t *)arg;
+ 	enum cam_command_e cmd;
+@@ -811,6 +867,14 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 			devp->capture_parm->af_mode = CAM_SCANMODE_FULL;
+ 		        break;
+                 case CAM_COMMAND_TOUCH_WINDOW:
++			devp->isp_af_parm = &param->xml_scenes->af;
++			x0 = devp->isp_af_parm->x - devp->isp_af_parm->radius>>1;
++			y0 = devp->isp_af_parm->y - devp->isp_af_parm->radius>>1;
++			x1 = x0 + devp->isp_af_parm->radius;
++			y1 = y0 + devp->isp_af_parm->radius;
++			isp_set_blenr_stat(x0,y0,x1,y1);
++			devp->flag |= (ISP_FLAG_AF|ISP_FLAG_TOUCH_AF);
++			af_sm_init(devp);
+ 		        break;
+                 case CAM_COMMAND_TOUCH_FOCUS_ON:
+ 		        break;
+@@ -859,7 +923,7 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 	if(af_enable){
+ 	if(devp->flag & ISP_FLAG_AF)
+ 	        isp_get_blnr_stat(&af_info->f[af_info->cur_index]);
+-			isp_get_af_stat(&af_info->af_wind[af_info->cur_index]);
++			//isp_get_af_stat(&af_info->af_wind[af_info->cur_index]);
+ 	}
+ 	if(devp->flag & ISP_FLAG_SET_EFFECT){
+ 		csc = &(devp->cam_param->xml_effect_manual->csc);
+@@ -882,10 +946,12 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 		}
+ 	}
+ 	if(devp->flag & ISP_TEST_FOR_AF_WIN){
+-		isp_get_af_stat(&devp->af_win[devp->cnt]);
+-		if(devp->cnt++ > devp->max){
++		isp_get_blnr_stat(&devp->af_test.af_bl[devp->af_test.cnt]);
++		isp_get_af_stat(&devp->af_test.af_win[devp->af_test.cnt]);
++		isp_get_ae_stat(&devp->af_test.ae_win[devp->af_test.cnt]);
++		if(devp->af_test.cnt++ > devp->af_test.max){
+ 			devp->flag &=(~ISP_TEST_FOR_AF_WIN);
+-			pr_info("get af win info end.\n");
++			pr_info("get af win,ae win&blnr info end.\n");
+ 		}
+ 	}
+ 	if(devp->flag&ISP_FLAG_MWB){
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 06eb4af14d8d..691ef8ccabaf 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -46,6 +46,7 @@
+ #define ISP_FLAG_BLNR				0x00000400
+ #define ISP_FLAG_SET_COMB4			0x00000800
+ #define ISP_TEST_FOR_AF_WIN			0x00001000	
++#define ISP_FLAG_TOUCH_AF			0x00002000
+ typedef struct isp_info_s {
+ 	tvin_port_t fe_port;
+ 	unsigned int h_active;
+@@ -81,13 +82,21 @@ typedef struct af_debug_s {
+ 	unsigned int	post_threshold;
+ 	isp_blnr_stat_t data[1024];	
+ } af_debug_t;
++/*for af test debug*/
++typedef struct af_debug_test_s {
++	unsigned int cnt;
++	unsigned int max;
++	struct isp_af_stat_s *af_win;
++	struct isp_blnr_stat_s *af_bl;
++	struct isp_ae_stat_s  *ae_win;
++} af_debug_test_t;
+ 
+ typedef struct isp_af_info_s {
+ 	unsigned int great_step;
+ 	unsigned int cur_step;
+ 	unsigned int cur_index;
+-	unsigned long long last_h_fv;
+-	unsigned long long last_v_fv;
++	unsigned long long fv_aft_af;
++	unsigned long long fv_bf_af;
+ 	unsigned int last_ave_ac;
+ 	unsigned int last_ave_dc;
+ 	isp_blnr_stat_t *f;
+@@ -97,27 +106,30 @@ typedef struct isp_af_info_s {
+ 	//unsigned char af_delay;
+ 	atomic_t writeable;
+ }isp_af_info_t;
+-
++#if 0
+ typedef struct xml_algorithm_t_af_s {
+     /*for climbing algorithm*/
+-	unsigned int step[FOCUS_GRIDS];
++	unsigned int               step[FOCUS_GRIDS];
++	unsigned int 		   af_retry_cnt;
++	unsigned int		   af_retry_max;
+ 	unsigned int		   step_min;
+ 	unsigned int		   step_max;
+-	unsigned int           f_thr_p;
++	unsigned int               f_thr_p;
+ 	unsigned int 		   f_thr_n;
+-	unsigned int 	       step_coarse;
+-	unsigned int	       step_fine;
++	unsigned int 	           step_coarse;
++	unsigned int	           step_fine;
+ 	unsigned int 		   jump_offset;
+ 	unsigned int		   field_delay;
+ 	unsigned int		   detect_step;
+-	unsigned int           deta_ave_ratio;//10bits/1024
++	unsigned int               deta_ave_ratio;//10bits/1024
+ 	unsigned int		   deta_last_ave;//10bits/1024
++	unsigned int               af_fail_ratio;//x/100
+ 	unsigned int		   window_l_ratio;//10bits/1024
+ 	unsigned int		   window_r_ratio;//10bits/1024
+ 	unsigned int		   window_t_ratio;//10bits/1024
+ 	unsigned int		   window_b_ratio;//10bits/1024
+ } xml_algorithm_t_af_t;
+-
++#endif
+ /*for debug cmd*/
+ typedef struct debug_s {
+ 	unsigned int comb4_mode;
+@@ -147,16 +159,14 @@ typedef struct isp_dev_s{
+ 	cam_parameter_t *cam_param;
+ 	xml_algorithm_ae_t *isp_ae_parm;
+ 	xml_algorithm_awb_t *isp_awb_parm;
+-	xml_algorithm_t_af_t *isp_af_parm;
++	xml_algorithm_af_t *isp_af_parm;
+ 	xml_capture_t *capture_parm;
+ 	wave_t        *wave;
+ 	flash_property_t flash;
+ 	af_debug_t      *af_dbg;
+ 	debug_t         debug;
+-	/*test for af win*/
+-	unsigned int cnt;
+-	unsigned int max;
+-	struct isp_af_stat_s *af_win;
++	/*test for af test win*/
++	af_debug_test_t af_test;
+ }isp_dev_t;
+ 
+ typedef enum data_type_e{
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 33912d97b7d4..bf1a6ea1aefb 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -259,7 +259,7 @@ void isp_set_af_stat(xml_af_t *afs,unsigned int w,unsigned int h)
+ /*
+ *reg 0xac~0xae
+ */
+-void isp_set_blenr_stat(unsigned int w,unsigned int h)
++void isp_set_blenr_stat(unsigned int x0,unsigned int y0,unsigned int x1,unsigned int y1)
+ {
+ 	#if 0
+ 	int i = 0;
+@@ -270,14 +270,14 @@ void isp_set_blenr_stat(unsigned int w,unsigned int h)
+ 	}
+ 	#endif
+ 	/*set lpf according to sd or hd*/
+-	if(h > 720)
++	if((y1-y0) > 720)
+ 		WR_BITS(ISP_BLNR_CTRL,3,BLNR_LPF_MODE_BIT,BLNR_LPF_MODE_WID);
+ 	else
+ 		WR_BITS(ISP_BLNR_CTRL,1,BLNR_LPF_MODE_BIT,BLNR_LPF_MODE_WID);
+ 	/*set ac adaptive*/
+ 	WR_BITS(ISP_BLNR_CTRL,1,BLNR_AC_ADAPTIVE_BIT,BLNR_AC_ADAPTIVE_WID);
+-	WR(ISP_BLNR_WIND_LR, w-1);
+-	WR(ISP_BLNR_WIND_TB, h-1);
++	WR(ISP_BLNR_WIND_LR, x1|x0<<16);
++	WR(ISP_BLNR_WIND_TB, y1|y0<<16);
+ 	WR_BITS(ISP_BLNR_CTRL,1,BLNR_STATISTICS_EN_BIT,BLNR_STATISTICS_EN_WID);
+ 	
+ }
+@@ -345,7 +345,7 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ 	isp_set_matrix(NULL,h);
+ 	isp_set_sharpness(&regs->sharp);
+ 	isp_set_nr(&regs->nr);
+-	isp_set_blenr_stat(w,h);
++	isp_set_blenr_stat(0,0,w-1,h-1);
+ 	isp_set_awb_stat(&regs->awb_reg,w,h);
+ 	isp_set_ae_stat(&regs->ae_reg,w,h);
+ 	isp_set_af_stat(&regs->af_reg,w,h);
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index d487fd8f2622..22e9635d8a72 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -90,7 +90,7 @@ extern void isp_set_nr(xml_nr_t *nr);
+ extern void isp_set_awb_stat(xml_awb_t *awb,unsigned int w,unsigned int h);
+ extern void isp_set_ae_stat(xml_ae_t *ae,unsigned int w,unsigned int h);
+ extern void isp_set_af_stat(xml_af_t *af,unsigned int w,unsigned int h);
+-extern void isp_set_blenr_stat(unsigned int w,unsigned int h);
++extern void isp_set_blenr_stat(unsigned int x0,unsigned int y0,unsigned int x1,unsigned int y1);
+ extern void isp_set_dbg(xml_dbg_t *dbg);
+ extern void isp_set_lnsd_mode(unsigned int mode);
+ extern void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned int w,unsigned int h);
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 73bd7fac11ec..6afb4c515355 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -129,15 +129,25 @@ void isp_sm_init(isp_dev_t *devp)
+ 	sm_state.isp_awb_parm.isp_awb_state = AWB_INIT;
+ 	sm_state.env = ENV_NULL;
+ 	/*init for af*/
+-        sm_state.af_state = AF_DETECT_INIT;
+-	devp->af_info.last_h_fv = 0;
+-	devp->af_info.last_v_fv = 0;
+-	devp->af_info.f = devp->af_info.af_detect;
+ 	/*init for wave*/
+ 	sm_state.cap_sm.fr_time = devp->wave->flash_rising_time;
+ 	sm_state.cap_sm.tr_time = devp->wave->torch_rising_time;
+ }
+ 
++void af_sm_init(isp_dev_t *devp)
++{
++	/*init for af*/
++	if(devp->flag & ISP_FLAG_TOUCH_AF){
++    	sm_state.af_state = AF_INIT;
++		devp->af_info.f = devp->af_info.af_data;
++	}else{
++		sm_state.af_state = AF_DETECT_INIT;
++		devp->af_info.f = devp->af_info.af_detect;
++	}
++	
++	devp->af_info.fv_aft_af = 0;
++	devp->af_info.fv_bf_af = 0;
++}
+ void isp_ae_low_gain()
+ {
+ 	sm_state.isp_ae_parm.isp_ae_state = AE_LOW_GAIN;
+@@ -819,7 +829,24 @@ unsigned long long div64(unsigned long long n, unsigned long long d) // n for nu
+     }
+     return q;
+ }
++static unsigned long long get_fv_base_blnr(isp_blnr_stat_t *blnr)
++{
++	unsigned long long sum_ac = 0, sum_dc = 0, mul_ac = 0;
++	sum_ac  = (unsigned long long)blnr->ac[0];
++	sum_ac += (unsigned long long)blnr->ac[1];
++	sum_ac += (unsigned long long)blnr->ac[2];
++	sum_ac += (unsigned long long)blnr->ac[3];
++	
++	sum_dc  = (unsigned long long)blnr->dc[0];
++	sum_dc += (unsigned long long)blnr->dc[1];
++	sum_dc += (unsigned long long)blnr->dc[2];
++	sum_dc += (unsigned long long)blnr->dc[3];
++	
++	mul_ac = (sum_ac > 0x00000000ffffffff) ? 0xffffffffffffffff : sum_ac*sum_ac;
+ 
++	return div64(mul_ac,sum_dc);
++	
++}
+ unsigned int get_best_step(isp_blnr_stat_t *blnr,unsigned int *step)
+ {
+         unsigned int i = 0, cur_grid = 0, max_grid = 0, best_step = 0;
+@@ -830,17 +857,8 @@ unsigned int get_best_step(isp_blnr_stat_t *blnr,unsigned int *step)
+                         break;
+                 }
+                 max_grid = i;
+-                sum_ac = (unsigned long long)blnr[i].ac[0]+
+-                        (unsigned long long)blnr[i].ac[1]+
+-                        (unsigned long long)blnr[i].ac[2]+
+-                        (unsigned long long)blnr[i].ac[3];
+-                sum_dc = (unsigned long long)blnr[i].dc[0]+
+-                        (unsigned long long)blnr[i].dc[1]+
+-                        (unsigned long long)blnr[i].dc[2]+
+-                        (unsigned long long)blnr[i].dc[3];
+-                mul_ac = (sum_ac > 0x00000000ffffffff) ? 0xffffffffffffffff : sum_ac*sum_ac;
+-                fv[i] = div64(mul_ac,sum_dc);
+-	        if(af_sm_dg)
++                fv[i] = get_fv_base_blnr(&blnr[i]);
++	        if(af_sm_dg&0x1)
+                         pr_info("%s ac:%u %u %u %u dc:%u %u %u %u\n", __func__, blnr[i].ac[0], blnr[i].ac[1], blnr[i].ac[2], blnr[i].ac[3], blnr[i].dc[0], blnr[i].dc[1], blnr[i].dc[2], blnr[i].dc[3]);
+                 if (max_fv < fv[i]){
+ 		        max_fv = fv[i];
+@@ -889,65 +907,41 @@ static unsigned int delta = 9;
+ module_param(delta,uint,0664);
+ MODULE_PARM_DESC(delta,"\n debug flag for ae.\n");
+ 
+-static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_t_af_t *af_alg)
++static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_af_t *af_alg)
+ {
+-	unsigned long long *fv,h_sum_fv=0,v_sum_fv=0,sum_wind1=0,sum_wind2=0,sum_wind3=0,h_ave_fv=0,v_ave_fv=0,
+-				new_stable_fv=0,tmp_ac=0,tmp_dc=0,curr_r=0;
++	unsigned long long *fv,sum_fv=0,ave_fv=0,delta_fv=0;
+ 	unsigned int i=0,step_cnt=0;
+ 	bool ret = false;
+-	fv = kmalloc(sizeof(unsigned long long)*(af_alg->detect_step<<1),GFP_KERNEL);
++	fv = kmalloc(sizeof(unsigned long long)*(af_alg->detect_step),GFP_KERNEL);
+ 
+-	memset(fv,0,sizeof(unsigned long long)*(af_alg->detect_step<<1));
++	memset(fv,0,sizeof(unsigned long long)*(af_alg->detect_step));
+ 	
+-	for(i=0;i< af_alg->detect_step;i++){
+-		sum_wind1  = (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[0];
+-		sum_wind1 += (unsigned long long)60*(unsigned long long)af_info->af_wind[i].luma_win[2];
+-		sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[4];
+-		sum_wind1 += (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[6];
+-		sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[8];
+-		
+-		sum_wind2  = af_info->af_wind[i].luma_win[0];
+-		sum_wind2 += af_info->af_wind[i].luma_win[2];
+-		sum_wind2 += af_info->af_wind[i].luma_win[4];
+-		sum_wind2 += af_info->af_wind[i].luma_win[6];
+-		sum_wind2 += af_info->af_wind[i].luma_win[8];
+-		/* center of gravity in horitial*/
+-		fv[i<<1] = div64(sum_wind1,sum_wind2);
+-		h_sum_fv += fv[i<<1];
+-		sum_wind3  = (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[0];
+-		sum_wind3 += (unsigned long long)60*(unsigned long long)af_info->af_wind[i].luma_win[2];
+-		sum_wind3 += (unsigned long long)40*(unsigned long long)af_info->af_wind[i].luma_win[4];
+-		sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[6];
+-		sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[i].luma_win[8];
+-		/* center of gravity in veritial*/
+-		fv[(i<<1) + 1] = div64(sum_wind3,sum_wind2);
+-		v_sum_fv += fv[(i<<1) + 1];
+-	}
+-	step_cnt = af_alg->detect_step;
+-	h_ave_fv = div64(h_sum_fv,step_cnt);
+-	v_ave_fv = div64(v_sum_fv,step_cnt);
+-
+-	for(i=0;i<step_cnt;i++){
+-		tmp_ac = fv[i<<1] > h_ave_fv ? (fv[i<<1]-h_ave_fv):(h_ave_fv-fv[i<<1]);
+-		tmp_dc = fv[(i<<1)+1] > v_ave_fv ? (fv[(i<<1)+1]-v_ave_fv):(v_ave_fv-fv[(i<<1)+1]);
+-		if(tmp_ac > jitter || tmp_dc > jitter)
+-		{
+-			if(af_sm_dg)
+-				pr_info("1 %5llu %5llu %5llu %5llu -----,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv);
+-			kfree(fv);
+-			return false;
++	for(i=0;i<af_alg->detect_step;i++){
++		fv[i] = get_fv_base_blnr(&af_info->af_detect[i]);
++		sum_fv += fv[i];
++		if(af_sm_dg&0x2){
++			pr_info("step[%u]:ac0=%u ac1=%u ac2=%u ac3=%u ",i,
++					af_info->af_detect[i].ac[0],af_info->af_detect[i].ac[1],af_info->af_detect[i].ac[2],
++					af_info->af_detect[i].ac[3]);
++			pr_info("dc0=%u dc1=%u dc2=%u dc3=%u  ",af_info->af_detect[i].dc[0],af_info->af_detect[i].dc[1],
++					af_info->af_detect[i].dc[2],af_info->af_detect[i].dc[3]);
++			pr_info("fv=%llu.\n",fv[i]);
+ 		}
+ 	}
+-	tmp_ac = h_ave_fv > af_info->last_h_fv ? (h_ave_fv-af_info->last_h_fv):(af_info->last_h_fv-h_ave_fv);
+-	tmp_dc = v_ave_fv > af_info->last_v_fv ? (v_ave_fv-af_info->last_v_fv):(af_info->last_v_fv-v_ave_fv);
+-	curr_r = tmp_ac*tmp_ac + tmp_dc*tmp_dc;
+-	if(curr_r > delta){
+-		pr_info("2 %5llu %5llu %5llu %5llu %5llu,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv,curr_r);
++	step_cnt = af_alg->detect_step;
++	ave_fv = div64(sum_fv,step_cnt);
++	if(af_sm_dg&0x1)
++		pr_info("ave_fv %llu.\n",ave_fv);
++	delta_fv = ave_fv>af_info->fv_aft_af?(ave_fv-af_info->fv_aft_af):(af_info->fv_aft_af-ave_fv);
++	delta_fv = delta_fv*(unsigned long long)1024;
++	delta_fv = div64(delta_fv,af_alg->deta_ave_ratio);
++	if(delta_fv > af_info->fv_aft_af){
++		pr_info("1 delta_fv*1024/ave_ratio=%llu,last_ave_fv=%llu.\n",delta_fv,af_info->fv_aft_af);
+ 		ret = true;
+ 	}else{
+ 		ret = false;
+-		if(af_sm_dg)
+-			pr_info("3 %5llu %5llu %5llu %5llu %5llu,\n",af_info->last_h_fv,af_info->last_v_fv,h_ave_fv,v_ave_fv,curr_r);
++		if(af_sm_dg&0x1)
++			pr_info("2 delta_fv*1024/ave_ratio=%llu,last_ave_fv=%llu.\n",delta_fv,af_info->fv_aft_af);
+ 	}
+ 
+ 	kfree(fv);
+@@ -958,9 +952,9 @@ static bool is_lost_focus(isp_af_info_t *af_info,xml_algorithm_t_af_t *af_alg)
+ void isp_af_detect(isp_dev_t *devp)
+ {
+ 	static unsigned int start_jf,af_delay=0;
+-	struct xml_algorithm_t_af_s *af_alg = devp->isp_af_parm;
++	struct xml_algorithm_af_s *af_alg = devp->isp_af_parm;
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+-
++	
+ 	switch(sm_state.af_state){
+ 		case AF_DETECT_INIT:
+ 			af_info->f = af_info->af_detect;
+@@ -968,17 +962,17 @@ void isp_af_detect(isp_dev_t *devp)
+ 			sm_state.af_state = AF_GET_STEPS_INFO;
+ 			break;
+ 		case AF_GET_STEPS_INFO:	
+-			if(sm_state.status!=ISP_AE_STATUS_STABLE){
++			if(sm_state.status == ISP_AE_STATUS_STABLE){
++				if(af_info->cur_index++ >= af_alg->detect_step){
++					af_info->cur_index = 0;
++					sm_state.af_state = AF_GET_STATUS;
++					pr_info("%s state get_status.\n",__func__);
++				}
++			}else{
+ 				sm_state.af_state = AF_DETECT_INIT;
+-				if(af_sm_dg)
++				if(af_sm_dg&0x1)
+ 					pr_info("%s ae unstable return to af init.\n",__func__);
+ 			}
+-			af_info->cur_index++;
+-			if(af_info->cur_index >= af_alg->detect_step){
+-				af_info->cur_index = 0;
+-				sm_state.af_state = AF_GET_STATUS;
+-				pr_info("%s state get_status.\n",__func__);
+-			}
+ 			break;
+ 		case AF_GET_STATUS:
+ 			if(is_lost_focus(af_info,af_alg)){
+@@ -999,11 +993,11 @@ void isp_af_detect(isp_dev_t *devp)
+ void isp_af_sm(isp_dev_t *devp)
+ {
+ 	static unsigned int start_jf,af_delay=0;
+-	struct xml_algorithm_t_af_s *af_alg = devp->isp_af_parm;
++	struct xml_algorithm_af_s *af_alg = devp->isp_af_parm;
+ 	struct isp_af_info_s *af_info = &devp->af_info;
+ 	struct isp_af_sm_s *sm = &sm_state.af_sm;
+ 	static unsigned int flag = 0;
+-	unsigned long long sum_wind1,sum_wind2,sum_wind3;
++	unsigned long long fv_delta;
+ 	af_delay++;
+ 	
+ 	switch(sm_state.af_state){
+@@ -1011,18 +1005,26 @@ void isp_af_sm(isp_dev_t *devp)
+ 			if((devp->flag&ISP_FLAG_AE)&&(sm_state.ae_down)){
+ 			/*awb brake,ae brake*/
+ 			flag = (devp->flag&ISP_FLAG_AWB)+(devp->flag&ISP_FLAG_AE);
+-			if(af_sm_dg)
++			if(af_sm_dg&0x1)
+ 				pr_info("%s:ae,awb flag status 0x%x.\n",__func__,flag);
+ 			devp->flag &=(~ISP_FLAG_AWB);
+ 			devp->flag &=(~ISP_FLAG_AE);
+ 			af_info->f = af_info->af_data;
+ 			af_info->cur_index = 0;
++			start_jf = jiffies;
++			sm_state.af_state = AF_GET_OLD_FV;
++		}else{
++			if(af_sm_dg&0x1)
++				pr_info("%s:ae isn't down.\n",__func__);
++		}
++			break;
++		case AF_GET_OLD_FV:
++			af_info->fv_bf_af = get_fv_base_blnr(&af_info->af_data[af_info->cur_index]);
++			af_info->cur_index = 0;
+ 			af_info->cur_step = af_alg->step[af_info->cur_index];
+ 			atomic_set(&af_info->writeable,1);
+-			start_jf = jiffies;
+ 			af_delay = 0;
+ 			sm_state.af_state = AF_GET_COARSE_INFO;
+-		}
+ 			break;
+ 		case AF_GET_COARSE_INFO:
+ 			if((af_info->cur_index >= FOCUS_GRIDS)||(af_alg->step[af_info->cur_index]==0)){
+@@ -1037,7 +1039,7 @@ void isp_af_sm(isp_dev_t *devp)
+ 		case AF_CALC_GREAT:
+ 			af_info->great_step = get_best_step(af_info->af_data,af_alg->step);
+ 			af_info->cur_step = af_info->great_step - af_alg->jump_offset;
+-			if(af_sm_dg)
++			if(af_sm_dg&0x1)
+ 				pr_info("%s:get best step %u.\n",__func__,af_info->great_step);
+ 			atomic_set(&af_info->writeable,1);
+ 			af_delay = 0;
+@@ -1052,29 +1054,42 @@ void isp_af_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AF_SUCCESS:
+-			/*enable awb,enable af*/
+-			devp->flag |=flag;
+-		        sum_wind1  = (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[0];
+-		        sum_wind1 += (unsigned long long)60*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[2];
+-		        sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[4];
+-		        sum_wind1 += (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[6];
+-		        sum_wind1 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[8];
+-		
+-		        sum_wind2  = af_info->af_wind[af_info->cur_index].luma_win[0];
+-		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[2];
+-		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[4];
+-		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[6];
+-		        sum_wind2 += af_info->af_wind[af_info->cur_index].luma_win[8];
+-		        /* center of gravity in horitial*/
+-		        af_info->last_h_fv = div64(sum_wind1,sum_wind2);		
+-		        sum_wind3  = (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[0];
+-		        sum_wind3 += (unsigned long long)60*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[2];
+-		        sum_wind3 += (unsigned long long)40*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[4];
+-		        sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[6];
+-		        sum_wind3 += (unsigned long long)80*(unsigned long long)af_info->af_wind[af_info->cur_index].luma_win[8];
+-		        /* center of gravity in veritial*/
+-		        af_info->last_v_fv = div64(sum_wind3,sum_wind2);
+-		        sm_state.af_state = AF_DETECT_INIT;
++			if(af_delay >= 2){
++				/*enable awb,enable af*/
++				devp->flag |=flag;
++		        /* get last fv */
++		        af_info->fv_aft_af = get_fv_base_blnr(&af_info->af_data[af_info->cur_index]);
++				if(af_sm_dg&0x2){
++					pr_info("%s:ac0=%u ac1=%u ac2=%u ac3=%u dc0=%u dc1=%u dc2=%u dc3=%u fv=%llu.\n",__func__,
++						af_info->af_data[af_info->cur_index].ac[0],af_info->af_data[af_info->cur_index].ac[1],
++						af_info->af_data[af_info->cur_index].ac[2],af_info->af_data[af_info->cur_index].ac[3],
++						af_info->af_data[af_info->cur_index].dc[0],af_info->af_data[af_info->cur_index].dc[1],
++						af_info->af_data[af_info->cur_index].dc[2],af_info->af_data[af_info->cur_index].dc[3],af_info->fv_aft_af);
++				}
++				fv_delta = af_info->fv_aft_af>af_info->fv_bf_af?(af_info->fv_aft_af-af_info->fv_bf_af):(af_info->fv_bf_af-af_info->fv_aft_af);
++				fv_delta = fv_delta*100;
++				fv_delta = div64(fv_delta,af_alg->af_fail_ratio);
++				/*af failed return to af init,retry*/
++				if(af_sm_dg&0x4){
++					pr_info("[af_sm..]:fv_delta %llu,fv_bf_af %llu.\n",fv_delta,af_info->fv_bf_af);
++				}
++				if((fv_delta > af_info->fv_bf_af)&&(af_alg->af_retry_cnt++ < af_alg->af_retry_max)){
++					sm_state.af_state = AF_INIT;
++					if(af_sm_dg&0x4)
++						pr_info("[af_sm..]:fail ratio %u,%u times,return to af init retry.\n",af_alg->af_fail_ratio,af_alg->af_retry_cnt);
++				} else if((fv_delta > af_info->fv_bf_af)&&(af_alg->af_retry_cnt > af_alg->af_retry_max)){
++		        	/*af failed over max times,force to step 0*/
++					af_info->cur_step = 0;
++					atomic_set(&af_info->writeable,1);
++					if(af_sm_dg&0x4)
++						pr_info("[af_sm..]:fail ratio %u over,force to step 0.\n",af_alg->af_fail_ratio);
++					af_alg->af_retry_cnt = 0;
++					sm_state.af_state = AF_NULL;
++				} else {/*af success*/
++					af_alg->af_retry_cnt = 0;
++					sm_state.af_state = AF_NULL;
++				}
++			}
+ 			break;
+ 		default:
+ 			break;
+@@ -1113,7 +1128,7 @@ int isp_capture_sm(isp_dev_t *devp)
+ 	
+ 	switch(cap_sm->capture_state){
+ 		case CAPTURE_INIT:
+-			isp_set_blenr_stat(devp->info.h_active,devp->info.v_active);
++			isp_set_blenr_stat(0,0,devp->info.h_active,devp->info.v_active);
+ 			if(parm->pretime){
+ 				cap_sm->capture_state = CAPTURE_PRE_WAIT;
+ 				start_jf = jiffies;
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.h b/drivers/amlogic/tvin/isp/isp_sm.h
+index 04d2c4b2c442..ee053cc0d7ab 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.h
++++ b/drivers/amlogic/tvin/isp/isp_sm.h
+@@ -84,6 +84,7 @@ typedef enum af_state_e {
+ 	AF_GET_STEPS_INFO,
+ 	AF_GET_STATUS,
+ 	AF_INIT,
++	AF_GET_OLD_FV,
+ 	AF_GET_COARSE_INFO,
+ 	AF_CALC_GREAT,
+ 	AF_GET_FINE_INFO,
+@@ -214,6 +215,7 @@ typedef struct isp_ae_to_sensor_s {
+ } isp_ae_to_sensor_t;
+ 
+ extern void isp_sm_init(isp_dev_t *devp);
++extern void af_sm_init(isp_dev_t *devp);
+ extern void isp_set_flash_mode(isp_dev_t *devp);
+ extern void isp_ae_sm(isp_dev_t *devp);
+ extern void isp_awb_sm(isp_dev_t *devp);
+diff --git a/include/linux/amlogic/tvin/tvin_v4l2.h b/include/linux/amlogic/tvin/tvin_v4l2.h
+index 4e306b4b014f..0fc15b5062a7 100755
+--- a/include/linux/amlogic/tvin/tvin_v4l2.h
++++ b/include/linux/amlogic/tvin/tvin_v4l2.h
+@@ -424,16 +424,29 @@ typedef struct xml_algorithm_awb_s {
+ #define FOCUS_GRIDS 16
+ 
+ typedef struct xml_algorithm_af_s {
+-    // normalization: f0_coef0+...+f0_coef7 = 256
+     /*for climbing algorithm*/
+-	unsigned int step[FOCUS_GRIDS];
+-	unsigned int		   step_min;
+-	unsigned int		   step_max;
++	unsigned int           step[FOCUS_GRIDS];
++	unsigned int 	       af_retry_cnt;
++	unsigned int	       af_retry_max;
++	unsigned int	       step_min;
++	unsigned int	       step_max;
+ 	unsigned int           f_thr_p;
+-	unsigned int 		   f_thr_n;
++	unsigned int 	       f_thr_n;
+ 	unsigned int 	       step_coarse;
+ 	unsigned int	       step_fine;
+-	unsigned int           stable_timeout;//ms
++	unsigned int 	       jump_offset;
++	unsigned int	       field_delay;
++	unsigned int	       detect_step;
++	unsigned int           deta_ave_ratio;//10bits/1024
++	unsigned int	       deta_last_ave;//10bits/1024
++	unsigned int           af_fail_ratio;//x/100
++	unsigned int	       window_l_ratio;//10bits/1024
++	unsigned int	       window_r_ratio;//10bits/1024
++	unsigned int	       window_t_ratio;//10bits/1024
++	unsigned int	       window_b_ratio;//10bits/1024
++	unsigned int	       x;//x coord of touch focus win
++	unsigned int	       y;//y coord of touch focus win
++	unsigned int           radius;//radius of touch focus win
+ } xml_algorithm_af_t;
+ 
+ #define XML_LUT_LS 1024 // 32*32 32-bit
+-- 
+2.19.0
+

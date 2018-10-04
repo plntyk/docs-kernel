@@ -1,0 +1,214 @@
+From fa6951b0871359da5ae53ec4c75c0e733969e7de Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Wed, 16 Sep 2015 19:58:25 +0800
+Subject: [PATCH 5835/5965] PD#112602: lcd: vbyone increase wait stable time
+
+Change-Id: Ifc369e5fadcd4cc1cd4d6ff7575a8786f817abfe
+---
+ drivers/amlogic/display/lcd/aml_lcd_tv.c      |  3 +
+ drivers/amlogic/display/lcd/aml_lcd_tv.h      |  3 +-
+ .../display/lcd/aml_tv_lcd_port/vbyone_drv.c  | 74 ++++++++++---------
+ 3 files changed, 46 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index 1ed2c38c0767..88ab10a2762a 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -863,6 +863,7 @@ static void lcd_function_probe(struct aml_lcd *pDev)
+ 	case LCD_DIGITAL_LVDS:
+ 		break;
+ 	case LCD_DIGITAL_VBYONE:
++		vbyone_aln_clk_disable();
+ 		init_timer(&pDev->timer);
+ 		pDev->timer.data = (ulong)pDev;
+ 		pDev->timer.function = vbyone_timer_handler;
+@@ -881,6 +882,8 @@ static int lcd_probe(struct platform_device *pdev)
+ 	//struct aml_lcd *pDev;
+ 	struct aml_lcd_platdata *pdata;
+ 
++	printk("lcd: driver version: %s\n", LCD_TV_DRIVER_VERSION);
++
+ 	pDev = (struct aml_lcd *)kmalloc(sizeof(struct aml_lcd), GFP_KERNEL);
+ 	if (!pDev) {
+ 		TV_LCD_ERR("lcd error: Not enough memory.\n");
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.h b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+index 62f192005da3..4ec5b8e2d1b8 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.h
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.h
+@@ -26,7 +26,7 @@
+ 
+ #include <linux/amlogic/vout/vinfo.h>
+ 
+-#define LCD_TV_DRIVER_VERSION        "20150909"
++#define LCD_TV_DRIVER_VERSION        "20150914"
+ 
+ typedef enum {
+     OFF = 0,
+@@ -212,5 +212,6 @@ extern unsigned int  lvds_init(struct aml_lcd *pDev);
+ extern unsigned int vbyone_init(struct aml_lcd *pDev);
+ extern void lcd_function_remove(void);
+ extern void vbyone_timer_handler(unsigned long arg);
++extern void vbyone_aln_clk_disable(void);
+ 
+ #endif
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+index 31993fbddf00..f34468022977 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/vbyone_drv.c
+@@ -299,23 +299,32 @@ static void set_control_vbyone(Lcd_Config_t *pConf)
+ 
+ 	//force vencl clk enable, otherwise, it might auto turn off by mipi DSI
+ 	//WRITE_VCBUS_REG_BITS(VPU_MISC_CTRL, 1, 0, 1);
++
++	//write REG_VBO_GCLK_LANE[3:2] == 0x0 to open the aln_clk
++	//for vbyone timer handler correction
++	aml_write_reg32(P_VBO_GCLK_LANE_L, 0);
++}
++
++void vbyone_aln_clk_disable(void)
++{
++	aml_write_reg32(P_VBO_GCLK_LANE_L, 4); //write REG_VBO_GCLK_LANE[3:2] == 0x1 to close the aln_clk);
++	vx1_cdr_status_check = true;
++	vx1_irq_check = false;
+ }
+ 
+ static void vbyone_wait_stable(void)
+ {
+-	int i = 1000;
++	int i = 2000;
+ 
+-	printk("lcd: %s ", __func__);
+ 	while ((aml_read_reg32(P_VBO_STATUS_L) & 0x3f) != 0x20) {
+-		udelay(5);
++		udelay(20);
+ 		if (i-- == 0)
+ 			break;
+ 	}
+-	//vx1_cdr_status_check = false;
+-	aml_write_reg32(P_VBO_GCLK_LANE_L, 4); //write REG_VBO_GCLK_LANE[3:2] == 0x1 to close the aln_clk);
+-	vx1_cdr_status_check = true;
+-	vx1_irq_check = false;
+-	printk("status: 0x%x\n", aml_read_reg32(P_VBO_STATUS_L));
++
++	vx1_cdr_status_check = false;
++
++	printk("lcd: %s status: 0x%x\n", __func__, aml_read_reg32(P_VBO_STATUS_L));
+ }
+ 
+ static void venc_set_vbyone(Lcd_Config_t *pConf)
+@@ -354,6 +363,7 @@ static void venc_change_vbyone(Lcd_Config_t *pConf)
+ {
+ 	aml_write_reg32(P_ENCL_VIDEO_MAX_PXCNT, pConf->lcd_basic.h_period - 1);
+ 	aml_write_reg32(P_ENCL_VIDEO_MAX_LNCNT, pConf->lcd_basic.v_period - 1);
++	printk("lcd: venc changed: %d,%d\n", pConf->lcd_basic.h_period, pConf->lcd_basic.v_period);
+ }
+ 
+ //clock seting for VX1
+@@ -627,9 +637,6 @@ unsigned int vbyone_init(struct aml_lcd *pDev)
+ 
+ 	mutex_lock(&pDev->init_lock);
+ 	vx1_init_flag = true; //flag to bypass vx1_cdr_status_check
+-	/* prepare ALN clk for vbyone init, because the vbyone timer handler close that */
+-	//write REG_VBO_GCLK_LANE[3:2] == 0x0 to open the aln_clk
+-	aml_write_reg32(P_VBO_GCLK_LANE_L, 0);
+ 
+ 	switch (pDev->pConf->lcd_timing.frame_rate_adj_type) {
+ 	case 0: /* clk adjust */
+@@ -641,6 +648,7 @@ unsigned int vbyone_init(struct aml_lcd *pDev)
+ 		set_tcon_vbyone(pDev->pConf);
+ 		set_vbyone_pinmux();
+ 		_enable_vsync_interrupt();
++		vbyone_wait_stable();
+ 		break;
+ 	case 1: /* htotal adjust */
+ 	case 2: /* vtotal adjust */
+@@ -649,36 +657,33 @@ unsigned int vbyone_init(struct aml_lcd *pDev)
+ 	default:
+ 		break;
+ 	}
+-	vbyone_wait_stable();
++
+ 	vx1_init_flag = false;
+ 	mutex_unlock(&pDev->init_lock);
+ 
+ 	return 0;
+ }
+ 
+-static void vbyone_handler(void)
++static void vbyone_handler(struct aml_lcd *pDev)
+ {
+-	int i = 200, n = 5;
+-	int done = 0;
+-#if 0
++	int i = 200;
++
++	mutex_lock(&pDev->init_lock);
+ 	if (vx1_cdr_status_check == false) { //In normal status
+ 		//if (vx1_debug_log)
+ 		//	printk("\nvx1_cdr_status_check->1\n");
+ 		if ((aml_read_reg32(P_VBO_STATUS_L) & 0x3f) == 0x20) {
+-			aml_write_reg32(P_VBO_GCLK_LANE_L, 4); //write REG_VBO_GCLK_LANE[3:2] == 0x1 to close the aln_clk);
+-			vx1_cdr_status_check = true;
+-			vx1_irq_check = false;
++			vbyone_aln_clk_disable();
+ 			if (vx1_debug_log)
+ 				printk("\nvx1_cdr_status_check->2\n");
+ 		}
+ 	}
+-#endif
++
+ 	//if(vx1_cdr_status_check == true) {
+-	while ((done == 0) && (n-- > 0)) {
+ 		if (((aml_read_reg32(P_VBO_STATUS_L) & 0x1c) != 0) ||
+ 			(vx1_irq_reset == true)) { //in ALN status
+ 			if (vx1_debug_log)
+-				printk("\nvx1 reset %d\n", n);
++				printk("\nvx1 reset\n");
+ 			//1) force phy output all 1, let tcon pull lockn high
+ 			vx1_irq_reset = false;
+ 			aml_write_reg32(P_HHI_LVDS_TX_PHY_CNTL0, aml_read_reg32(P_HHI_LVDS_TX_PHY_CNTL0)|0xc00);
+@@ -700,19 +705,22 @@ static void vbyone_handler(void)
+ 			aml_write_reg32(P_HHI_LVDS_TX_PHY_CNTL0, aml_read_reg32(P_HHI_LVDS_TX_PHY_CNTL0)&0xfffff3ff);
+ 			//if((aml_read_reg32(P_VBO_STATUS_L) & 0x3f) != 0x8){
+ 			vx1_irq_check = true;
+-			mdelay(5);
+-			if ((aml_read_reg32(P_VBO_STATUS_L) & 0x3f) == 0x20) {
+-				aml_write_reg32(P_VBO_GCLK_LANE_L, 4);   //write REG_VBO_GCLK_LANE[3:2] == 0x1 to close the aln_clk);
+-				vx1_cdr_status_check = true;
+-				done = 1;
+-				if (vx1_debug_log)
+-					printk("\nvx1_cdr_status_check-->3\n");
+-			} else {
+-				vx1_cdr_status_check = false;
++			for (i = 0; i < 40; i++) {
++				mdelay(5);
++				if ((aml_read_reg32(P_VBO_STATUS_L) & 0x3f) == 0x20) {
++					aml_write_reg32(P_VBO_GCLK_LANE_L, 4);   //write REG_VBO_GCLK_LANE[3:2] == 0x1 to close the aln_clk);
++					vx1_cdr_status_check = true;
++					if (vx1_debug_log)
++						printk("\nvx1_cdr_status_check-->3\n");
++					break;
++				} else {
++					vx1_cdr_status_check = false;
++				}
+ 			}
+ 		}
+-	}
+ 	//}
++
++	mutex_unlock(&pDev->init_lock);
+ }
+ 
+ void vbyone_timer_handler(unsigned long arg)
+@@ -720,7 +728,7 @@ void vbyone_timer_handler(unsigned long arg)
+ 	struct aml_lcd *pDev = (struct aml_lcd *)arg;
+ 
+ 	if (vx1_init_flag == false)
+-		vbyone_handler();
++		vbyone_handler(pDev);
+ 	pDev->timer.expires = jiffies + VX1_INTERVAL;
+ 	add_timer(&pDev->timer);
+ }
+-- 
+2.19.0
+

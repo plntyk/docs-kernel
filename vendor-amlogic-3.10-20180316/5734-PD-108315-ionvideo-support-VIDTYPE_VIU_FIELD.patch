@@ -1,0 +1,138 @@
+From 7313548a99f981b2292c0ccb801f027a49eb2f1a Mon Sep 17 00:00:00 2001
+From: Xu Jintao <jintao.xu@amlogic.com>
+Date: Mon, 20 Jul 2015 18:58:26 +0800
+Subject: [PATCH 5734/5965] PD#108315: ionvideo: support VIDTYPE_VIU_FIELD
+
+Change-Id: I028979aa25e089095e946ee8dcc409b3dd31dc2e
+Signed-off-by: Xu Jintao <jintao.xu@amlogic.com>
+---
+ drivers/amlogic/ionvideo/ionvideo.c | 27 +++++++++++++--------------
+ drivers/amlogic/ionvideo/ppmgr2.c   | 29 ++++++++++++++++-------------
+ 2 files changed, 29 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/amlogic/ionvideo/ionvideo.c b/drivers/amlogic/ionvideo/ionvideo.c
+index e4874ce8df13..9805e79dc7e4 100755
+--- a/drivers/amlogic/ionvideo/ionvideo.c
++++ b/drivers/amlogic/ionvideo/ionvideo.c
+@@ -200,11 +200,12 @@ static int ionvideo_fillbuff(struct ionvideo_dev *dev, struct ionvideo_buffer *b
+             dev->ppmgr2_dev.dst_width = vf->width;
+         if (vf->height <= dev->height)
+             dev->ppmgr2_dev.dst_height = vf->height;
+-            
+-        if((dev->ppmgr2_dev.dst_width >= 1920) &&(dev->ppmgr2_dev.dst_height >= 1080)&&(vf->type & VIDTYPE_INTERLACE)){
+-			dev->ppmgr2_dev.dst_width = dev->ppmgr2_dev.dst_width*scaling_rate/100;
+-			dev->ppmgr2_dev.dst_height = dev->ppmgr2_dev.dst_height*scaling_rate/100 ;
+-		}
++        if ((vf->type & VIDTYPE_INTERLACE) && (vf->type & VIDTYPE_VIU_FIELD)) {
++            dev->ppmgr2_dev.dst_height = vf->height << 1;
++            if (dev->ppmgr2_dev.dst_height > dev->height)
++                dev->ppmgr2_dev.dst_height = dev->height;
++        }
++
+         ret = ppmgr2_process(vf, &dev->ppmgr2_dev, vb->v4l2_buf.index);
+         if (ret) {
+             vf_put(vf, RECEIVER_NAME);
+@@ -252,15 +253,13 @@ static void ionvideo_thread_tick(struct ionvideo_dev *dev) {
+         msleep(5);
+         return;
+     }
+-    if ((vf->width >= 1920) && (vf->height >= 1080) && (vf->type & VIDTYPE_INTERLACE)) {
+-		dev->ppmgr2_dev.dst_width = vf->width*scaling_rate/100;
+-		dev->ppmgr2_dev.dst_height = vf->height*scaling_rate/100;
+-		w = dev->ppmgr2_dev.dst_width;
+-		h = dev->ppmgr2_dev.dst_height;
+-	}else{
+-		w = vf->width;
+-		h = vf->height;
+-	}
++
++    w = vf->width;
++    h = vf->height;
++    if ((vf->type & VIDTYPE_INTERLACE) && (vf->type & VIDTYPE_VIU_FIELD)) {
++        h = vf->height << 1;
++    }
++
+     if (freerun_mode == 0 && ionvideo_size_changed(dev, w , h)) {
+         msleep(10);
+         return;
+diff --git a/drivers/amlogic/ionvideo/ppmgr2.c b/drivers/amlogic/ionvideo/ppmgr2.c
+index 30a376ac3570..de2fc9f2a730 100755
+--- a/drivers/amlogic/ionvideo/ppmgr2.c
++++ b/drivers/amlogic/ionvideo/ppmgr2.c
+@@ -55,7 +55,9 @@ static int get_input_format(struct vframe_s* vf) {
+     int format = GE2D_FORMAT_M24_NV21;
+ 
+     if (vf->type & VIDTYPE_VIU_422) {
+-        if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
++        if (vf->type & VIDTYPE_VIU_FIELD) {
++            format = GE2D_FORMAT_S16_YUV422;
++        } else if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
+             format = GE2D_FORMAT_S16_YUV422 | (GE2D_FORMAT_S16_YUV422B & (3 << 3));
+         } else if ((vf->type & 3) == VIDTYPE_INTERLACE_TOP) {
+             format = GE2D_FORMAT_S16_YUV422 | (GE2D_FORMAT_S16_YUV422T & (3 << 3));
+@@ -63,7 +65,9 @@ static int get_input_format(struct vframe_s* vf) {
+             format = GE2D_FORMAT_S16_YUV422;
+         }
+     } else if (vf->type & VIDTYPE_VIU_NV21) {
+-        if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
++        if (vf->type & VIDTYPE_VIU_FIELD) {
++            format = GE2D_FORMAT_M24_NV21;
++        } else if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
+             format = GE2D_FORMAT_M24_NV21 | (GE2D_FORMAT_M24_NV21B & (3 << 3));
+         } else if ((vf->type & 3) == VIDTYPE_INTERLACE_TOP) {
+             format = GE2D_FORMAT_M24_NV21 | (GE2D_FORMAT_M24_NV21T & (3 << 3));
+@@ -71,7 +75,9 @@ static int get_input_format(struct vframe_s* vf) {
+             format = GE2D_FORMAT_M24_NV21;
+         }
+     } else {
+-        if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
++        if (vf->type & VIDTYPE_VIU_FIELD) {
++            format = GE2D_FORMAT_M24_YUV420;
++        } else if ((vf->type & 3) == VIDTYPE_INTERLACE_BOTTOM) {
+             format = GE2D_FORMAT_M24_YUV420 | (GE2D_FMT_M24_YUV420B & (3 << 3));
+         } else if ((vf->type & 3) == VIDTYPE_INTERLACE_TOP) {
+             format = GE2D_FORMAT_M24_YUV420 | (GE2D_FORMAT_M24_YUV420T & (3 << 3));
+@@ -118,7 +124,7 @@ static inline void ge2d_src_config(struct vframe_s* vf, config_para_ex_t* ge2d_c
+     ge2d_config->src_para.top = 0;
+     ge2d_config->src_para.left = 0;
+     ge2d_config->src_para.width = src_vf->width;
+-    if (vf->type & VIDTYPE_INTERLACE) {
++    if ((vf->type & VIDTYPE_INTERLACE) && !(vf->type & VIDTYPE_VIU_FIELD)) {
+         ge2d_config->src_para.height = src_vf->height >> 1;
+     } else {
+         ge2d_config->src_para.height = src_vf->height;
+@@ -322,6 +328,11 @@ int ppmgr2_process(struct vframe_s* vf, struct ppmgr2_device *ppd, int index) {
+     ge2d_context_t *context = ppd->context;
+     config_para_ex_t* ge2d_config = &(ppd->ge2d_config);
+     int angle = (ppd->angle + src_vf->orientation) % 4;
++    if (src_vf->type & VIDTYPE_INTERLACE) {
++        if ((ppd->bottom_first && src_vf->type & 0x2) || (ppd->bottom_first == 0 && (src_vf->type & 0x2) == 0)) {
++            return -EAGAIN;
++        }
++    }
+ 
+     src_position[0] = 0;
+     src_position[1] = 0;
+@@ -342,18 +353,10 @@ int ppmgr2_process(struct vframe_s* vf, struct ppmgr2_device *ppd, int index) {
+     ge2d_angle_config(angle, ge2d_config);
+     paint_mode_convert(ppd->paint_mode, src_position, dst_paint_position, dst_plane_position);
+ 
+-    if(src_vf->type & VIDTYPE_INTERLACE) {
++    if ((src_vf->type & VIDTYPE_INTERLACE) && !(src_vf->type & VIDTYPE_VIU_FIELD)) {
+         src_position[3] = src_vf->height >> 1;
+     }
+     ret = ge2d_paint_dst(context, ge2d_config, dst_canvas_id, dst_pixel_format, src_position, dst_paint_position, dst_plane_position);
+-
+-//#ifdef GE2D_DEINTERLACE
+-    if (src_vf->type & VIDTYPE_INTERLACE) {
+-        if ((ppd->bottom_first && src_vf->type & 0x2) || (ppd->bottom_first == 0 && (src_vf->type & 0x2) == 0)) {
+-        	return -EAGAIN;
+-        }
+-    }
+-//#endif
+     return ret;
+ }
+ 
+-- 
+2.19.0
+

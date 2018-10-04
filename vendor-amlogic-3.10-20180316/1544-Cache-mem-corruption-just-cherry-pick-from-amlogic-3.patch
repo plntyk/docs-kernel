@@ -1,0 +1,147 @@
+From 124ba444943207ba7f4e48c39e8045596cdabfc0 Mon Sep 17 00:00:00 2001
+From: "yun.cai" <yun.cai@amlogic.com>
+Date: Mon, 28 Oct 2013 18:57:00 +0800
+Subject: [PATCH 1544/5965] Cache/mem corruption:just cherry pick from
+ amlogic-3.8-bringup:
+ http://10.8.9.5/kernel/common/commit/?h=amlogic-3.8-bringup&id=dd9563e8675f05c24d0dd6b87fe2eb4a6550a9d3
+
+---
+ arch/arm/configs/meson8_defconfig |  1 +
+ arch/arm/kernel/head.S            | 15 ++++++++
+ arch/arm/mm/cache-v7.S            | 58 +++++++++++++++++++++++++++++++
+ arch/arm/mm/proc-v7.S             |  3 +-
+ 4 files changed, 76 insertions(+), 1 deletion(-)
+ mode change 100644 => 100755 arch/arm/kernel/head.S
+ mode change 100644 => 100755 arch/arm/mm/cache-v7.S
+ mode change 100644 => 100755 arch/arm/mm/proc-v7.S
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index e5d20111e769..61128ac42e3b 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -15,6 +15,7 @@ CONFIG_ARCH_MESON8=y
+ CONFIG_MESON_LEGACY_REGISTER_API=y
+ CONFIG_ARM_ERRATA_751472=y
+ CONFIG_ARM_ERRATA_754322=y
++CONFIG_ARM_ERRATA_764369=y
+ CONFIG_SMP=y
+ CONFIG_PREEMPT=y
+ CONFIG_AEABI=y
+diff --git a/arch/arm/kernel/head.S b/arch/arm/kernel/head.S
+old mode 100644
+new mode 100755
+index 8bac553fe213..e0c8cf258971
+--- a/arch/arm/kernel/head.S
++++ b/arch/arm/kernel/head.S
+@@ -437,6 +437,21 @@ __enable_mmu:
+ 		      domain_val(DOMAIN_IO, DOMAIN_CLIENT))
+ 	mcr	p15, 0, r5, c3, c0, 0		@ load domain access register
+ 	mcr	p15, 0, r4, c2, c0, 0		@ load page table pointer
++	
++	@ Invalidate BTAC/ICache/TLB
++	MOV r5,#0
++	MCR p15,0,r5,c7,c5,6		@ Invalidate BTAC
++	MCR p15,0,r5,c7,c5,0		@ Invalidate ICache
++	DSB
++	MCR p15,0,r5,c8,c7,0		@ Invalidate TLBs
++	DSB
++	
++	@ Enable Branch Prediction
++	MRC p15, 0, r5, c1, c0, 0	@ get control register
++	ORR r5, r5, #1 << 11		@ enable Branch Prediction
++	MCR p15, 0, r5, c1, c0, 0	@ write control register
++	DSB
++	ISB
+ #endif
+ 	b	__turn_mmu_on
+ ENDPROC(__enable_mmu)
+diff --git a/arch/arm/mm/cache-v7.S b/arch/arm/mm/cache-v7.S
+old mode 100644
+new mode 100755
+index 515b00064da8..0ebd7ebe7f99
+--- a/arch/arm/mm/cache-v7.S
++++ b/arch/arm/mm/cache-v7.S
+@@ -107,6 +107,64 @@ ENTRY(v7_flush_dcache_louis)
+ 	b	flush_levels			@ start flushing cache levels
+ ENDPROC(v7_flush_dcache_louis)
+ 
++/*
++ *	v7_invalidate_dcache_all()
++ *
++ *	Invalidate the whole D-cache.
++ *
++ *	Corrupted registers: r0-r7, r9-r11 (r6 only in Thumb mode)
++ *
++ *	- mm    - mm_struct describing address space
++ */
++ENTRY(v7_invalidate_dcache_all)
++	dmb					@ ensure ordering with previous memory accesses
++	mrc	p15, 1, r0, c0, c0, 1		@ read clidr
++	ands	r3, r0, #0x7000000		@ extract loc from clidr
++	mov	r3, r3, lsr #23			@ left align loc bit field
++	beq	invfinished			@ if loc is 0, then no need to clean
++	mov	r10, #0				@ start clean at cache level 0
++invloop1:
++	add	r2, r10, r10, lsr #1		@ work out 3x current cache level
++	mov	r1, r0, lsr r2			@ extract cache type bits from clidr
++	and	r1, r1, #7			@ mask of the bits for current cache only
++	cmp	r1, #2				@ see what cache we have at this level
++	blt	invskip				@ skip if no cache, or just i-cache
++	mcr	p15, 2, r10, c0, c0, 0		@ select current cache level in cssr
++	isb					@ isb to sych the new cssr&csidr
++	mrc	p15, 1, r1, c0, c0, 0		@ read the new csidr
++	and	r2, r1, #7			@ extract the length of the cache lines
++	add	r2, r2, #4			@ add 4 (line length offset)
++	ldr	r4, =0x3ff
++	ands	r4, r4, r1, lsr #3		@ find maximum number on the way size
++	clz	r5, r4				@ find bit position of way size increment
++	ldr	r7, =0x7fff
++	ands	r7, r7, r1, lsr #13		@ extract max number of the index size
++invloop2:
++	mov	r9, r4				@ create working copy of max way size
++invloop3:
++ ARM(	orr	r11, r10, r9, lsl r5	)	@ factor way and cache number into r11
++ THUMB(	lsl	r6, r9, r5		)
++ THUMB(	orr	r11, r10, r6		)	@ factor way and cache number into r11
++ ARM(	orr	r11, r11, r7, lsl r2	)	@ factor index number into r11
++ THUMB(	lsl	r6, r7, r2		)
++ THUMB(	orr	r11, r11, r6		)	@ factor index number into r11
++	mcr	p15, 0, r11, c7, c6, 2		@ invalidate by set/way
++	subs	r9, r9, #1			@ decrement the way
++	bge	invloop3
++	subs	r7, r7, #1			@ decrement the index
++	bge	invloop2
++invskip:
++	add	r10, r10, #2			@ increment cache number
++	cmp	r3, r10
++	bgt	invloop1
++invfinished:
++@	mov	r10, #0				@ swith back to cache level 0
++@	mcr	p15, 2, r10, c0, c0, 0		@ select current cache level in cssr
++	dsb
++	isb
++	mov	pc, lr
++ENDPROC(v7_invalidate_dcache_all)
++
+ /*
+  *	v7_flush_dcache_all()
+  *
+diff --git a/arch/arm/mm/proc-v7.S b/arch/arm/mm/proc-v7.S
+old mode 100644
+new mode 100755
+index 5fbccee5f644..d84a25d66116
+--- a/arch/arm/mm/proc-v7.S
++++ b/arch/arm/mm/proc-v7.S
+@@ -254,7 +254,8 @@ __v7_pj4b_setup:
+ __v7_setup:
+ 	adr	r12, __v7_setup_stack		@ the local stack
+ 	stmia	r12, {r0-r5, r7, r9, r11, lr}
+-	bl      v7_flush_dcache_louis
++	@bl      v7_flush_dcache_louis
++	bl	v7_invalidate_dcache_all
+ 	ldmia	r12, {r0-r5, r7, r9, r11, lr}
+ 
+ 	mrc	p15, 0, r0, c0, c0, 0		@ read main ID register
+-- 
+2.19.0
+

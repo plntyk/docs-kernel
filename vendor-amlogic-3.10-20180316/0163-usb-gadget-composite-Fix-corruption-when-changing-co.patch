@@ -1,0 +1,63 @@
+From 5c5f9b601a5e1926cd9adea28d309c08b659e852 Mon Sep 17 00:00:00 2001
+From: Benoit Goby <benoit@android.com>
+Date: Tue, 15 May 2012 20:44:33 -0700
+Subject: [PATCH 0163/5965] usb: gadget: composite: Fix corruption when
+ changing configuration
+
+Remove the config from the configs list before releasing the spinlock.
+Otherwise the other cpu might be processing a SET_CONFIGURATION that
+will switch to the configuration that is being released.
+
+Change-Id: Id4da0d0e18ead63e20cb236cd1d3e8e6d116acce
+Signed-off-by: Benoit Goby <benoit@android.com>
+---
+ drivers/usb/gadget/composite.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/usb/gadget/composite.c b/drivers/usb/gadget/composite.c
+index 55f4df60f327..f9e397556669 100644
+--- a/drivers/usb/gadget/composite.c
++++ b/drivers/usb/gadget/composite.c
+@@ -811,7 +811,7 @@ done:
+ }
+ EXPORT_SYMBOL_GPL(usb_add_config);
+ 
+-static void remove_config(struct usb_composite_dev *cdev,
++static void unbind_config(struct usb_composite_dev *cdev,
+ 			      struct usb_configuration *config)
+ {
+ 	while (!list_empty(&config->functions)) {
+@@ -826,7 +826,6 @@ static void remove_config(struct usb_composite_dev *cdev,
+ 			/* may free memory for "f" */
+ 		}
+ 	}
+-	list_del(&config->list);
+ 	if (config->unbind) {
+ 		DBG(cdev, "unbind config '%s'/%p\n", config->label, config);
+ 		config->unbind(config);
+@@ -853,9 +852,11 @@ void usb_remove_config(struct usb_composite_dev *cdev,
+ 	if (cdev->config == config)
+ 		reset_config(cdev);
+ 
++	list_del(&config->list);
++
+ 	spin_unlock_irqrestore(&cdev->lock, flags);
+ 
+-	remove_config(cdev, config);
++	unbind_config(cdev, config);
+ }
+ 
+ /*-------------------------------------------------------------------------*/
+@@ -1524,7 +1525,8 @@ static void __composite_unbind(struct usb_gadget *gadget, bool unbind_driver)
+ 		struct usb_configuration	*c;
+ 		c = list_first_entry(&cdev->configs,
+ 				struct usb_configuration, list);
+-		remove_config(cdev, c);
++		list_del(&c->list);
++		unbind_config(cdev, c);
+ 	}
+ 	if (cdev->driver->unbind && unbind_driver)
+ 		cdev->driver->unbind(cdev);
+-- 
+2.19.0
+

@@ -1,0 +1,391 @@
+From 62a9948430cf34003c29e3af6b4843b14f0a9a6e Mon Sep 17 00:00:00 2001
+From: "kele.bai" <kele.bai@amlogic.com>
+Date: Fri, 3 Jan 2014 19:55:29 +0800
+Subject: [PATCH 2704/5965] PD #85724: add dump isp rgb data interface.
+
+Conflicts:
+
+	drivers/amlogic/tvin/isp/isp_drv.h
+---
+ drivers/amlogic/camera/ar0543.c      |  2 +-
+ drivers/amlogic/camera/ar0833.c      |  2 +-
+ drivers/amlogic/tvin/isp/isp_drv.c   | 27 ++++++++++----
+ drivers/amlogic/tvin/isp/isp_drv.h   |  3 +-
+ drivers/amlogic/tvin/isp/isp_hw.c    | 26 ++++++-------
+ drivers/amlogic/tvin/isp/isp_hw.h    |  3 +-
+ drivers/amlogic/tvin/vdin/vdin_ctl.c | 10 +++--
+ drivers/amlogic/tvin/vdin/vdin_drv.c | 56 +++++++++++++++-------------
+ 8 files changed, 75 insertions(+), 54 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index 9a7728b06a96..bdbf6d9ec111 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -2452,7 +2452,7 @@ static void ar0543_fillbuff(struct ar0543_fh *fh, struct ar0543_buffer *buf)
+ 	para.vaddr = (unsigned)vbuf;
+ 	para.ext_canvas = buf->canvas_id;
+ 	para.width = buf->vb.width;
+-	para.height = buf->vb.height;
++	para.height = (buf->vb.height==1080)?1088:buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+diff --git a/drivers/amlogic/camera/ar0833.c b/drivers/amlogic/camera/ar0833.c
+index c95f07538755..8aedcdbe40b1 100755
+--- a/drivers/amlogic/camera/ar0833.c
++++ b/drivers/amlogic/camera/ar0833.c
+@@ -4541,7 +4541,7 @@ static void ar0833_fillbuff(struct ar0833_fh *fh, struct ar0833_buffer *buf)
+ 	para.vaddr = (unsigned)vbuf;
+ 	para.ext_canvas = buf->canvas_id;
+ 	para.width = buf->vb.width;
+-	para.height = buf->vb.height;
++	para.height = (buf->vb.height==1080)?1088:buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 143be0e7ebb6..f309bfaa58c8 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -54,7 +54,9 @@ static unsigned int af_enable = 1;
+ static unsigned int af_pr = 0;
+ static unsigned int ioctl_debug = 0;
+ static unsigned int isr_debug = 0;
+-static volatile unsigned int ae_flag = 0;
++static unsigned int ae_flag = 0;
++static bool rgb_mode = false;
++
+ extern struct isp_ae_to_sensor_s ae_sens;
+ static unsigned int def_config = 0;
+ static void parse_param(char *buf_orig,char **parm)
+@@ -109,7 +111,7 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 		unsigned int width,height;
+ 		width = simple_strtol(parm[1],NULL,10);
+ 		height = simple_strtol(parm[2],NULL,10);
+-		isp_test_pattern(width,height,width+26,height+16);
++		isp_test_pattern(width,height,width+26,height+16,0);
+ 	} else if(!strcmp(parm[0],"rgb")){
+         unsigned int b,r,g;
+         b = RD_BITS(ISP_GAIN_GRBG23, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);
+@@ -159,7 +161,7 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 		}
+ 	}else if(!strcmp(parm[0],"bypass_all")){
+ 		isp_bypass_all();
+-		pr_info("isp bypass all.\n");
++		pr_info("isp bypass all for raw data.\n");
+ 	}
+ 	return len;
+ }
+@@ -842,6 +844,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 
+ 	info->fe_port = parm->isp_fe_port;
+ 	info->bayer_fmt = parm->cfmt;
++	info->cfmt = TVIN_YUV422;
+ 	info->dfmt = parm->dfmt;
+ 	info->h_active = parm->h_active;
+ 	info->v_active = parm->v_active;
+@@ -861,7 +864,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 	if(IS_ERR_OR_NULL(devp->cam_param)){
+ 		pr_err("[%s..] camera parameter error use default config.\n",__func__);
+ 		isp_load_def_setting(info->h_active,info->v_active,0);
+-	} else {
++	}  else {
+ 		devp->isp_ae_parm = &devp->cam_param->xml_scenes->ae;
+ 		devp->isp_awb_parm = &devp->cam_param->xml_scenes->awb;
+ 		unsigned int i;
+@@ -875,6 +878,10 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		isp_hw_enable(false);
+ 		isp_set_def_config(devp->cam_param->xml_regs_map,info->fe_port,info->bayer_fmt,info->h_active,info->v_active);
+ 		isp_set_manual_wb(devp->cam_param->xml_wb_manual);
++		if (rgb_mode){
++			isp_bypass_for_rgb();
++			info->cfmt = TVIN_RGB444;
++		}
+ 		/*test for wb test disable gamma & lens*/
+ 		if(devp->flag & ISP_FLAG_TEST_WB)
+ 			disable_gc_lns_pk(false);
+@@ -966,8 +973,9 @@ static int isp_fe_ioctl(struct tvin_frontend_s *fe, void *arg)
+ 	cam_parameter_t *param = (cam_parameter_t *)arg;
+ 	enum cam_command_e cmd;
+ 	cam_cmd_state_t ret = CAM_STATE_SUCCESS;
+-	if(IS_ERR_OR_NULL(param)) {
+-                pr_err("[%s..]camera parameter can't be null.\n",DEVICE_NAME);
++	if(IS_ERR_OR_NULL(param)||rgb_mode) {
++		if(ioctl_debug)
++                        pr_err("[%s..]camera parameter can't be null.\n",DEVICE_NAME);
+                 return -1;
+         }
+ 	cmd = param->cam_command;
+@@ -1157,6 +1165,8 @@ static int isp_fe_isr(struct tvin_frontend_s *fe, unsigned int hcnt64)
+ 		ret = max(isp_capture_sm(devp),ret);
+ 	if(isr_debug&&ret)
+ 		pr_info("%s isp %d buf.\n",__func__,ret);
++	
++	
+ #ifndef USE_WORK_QUEUE
+ 	if(!(devp->flag & ISP_FLAG_TEST_WB))
+ 	    tasklet_schedule(&devp->isp_task);
+@@ -1242,7 +1252,7 @@ static struct tvin_decoder_ops_s isp_dec_ops ={
+ static void isp_sig_propery(struct tvin_frontend_s *fe, struct tvin_sig_property_s *prop)
+ {
+ 	isp_dev_t *devp = container_of(fe,isp_dev_t,frontend);
+-        prop->color_format = TVIN_YUV422;
++        prop->color_format = devp->info.cfmt;
+ 	prop->dest_cfmt = devp->info.dfmt;
+         prop->pixel_repeat = 0;
+ }
+@@ -1454,6 +1464,9 @@ MODULE_PARM_DESC(ioctl_debug,"\n debug ioctl function.\n");
+ module_param(isr_debug,uint,0664);
+ MODULE_PARM_DESC(isr_debug,"\n debug isr function.\n");
+ 
++module_param(rgb_mode,bool,0664);
++MODULE_PARM_DESC(rgb_mode,"\n debug for rgb output.\n");
++
+ MODULE_VERSION(ISP_VER);
+ module_init(isp_init_module);
+ module_exit(isp_exit_module);
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 7ad792a15538..2c1ee9badf93 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2014.01.02a"
++#define ISP_VER					"2014.01.03a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -64,6 +64,7 @@ typedef enum bayer_fmt_e {
+ typedef struct isp_info_s {
+ 	tvin_port_t fe_port;
+ 	tvin_color_fmt_t bayer_fmt;
++	tvin_color_fmt_t cfmt;
+ 	tvin_color_fmt_t dfmt;
+ 	unsigned int h_active;
+ 	unsigned int v_active;
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index c5eaa3d12056..d462c4e0e1ab 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -315,7 +315,7 @@ void isp_set_matrix(xml_csc_t *csc, unsigned int height)
+ 		//rgb->601
+ 		{0x0,0x10000,0x5e013a,0x2003cc,0x35300e1,0xe10334,0x3ec,0x400200,0x200},
+ 		//rgb->709
+-		{0x0,0x00000,0x1000100,0x1000100,0x1000100,0x1000100,0x100,0x0,0x0},
++		{0x0,0x0000,0x01000000,0x00000,0x01000000,0x00000,0x100,0x000000,0x000},
+ 	};
+ 	unsigned int i=0, *start;
+ 	if(csc){
+@@ -596,6 +596,12 @@ void disable_gc_lns_pk(bool flag)
+ }
+ 
+ void isp_bypass_all()
++{
++	isp_bypass_for_rgb();
++	WR_BITS(ISP_DMS_CTRL0,7,ISP_DMS_BYPASS_BIT,ISP_DMS_BYPASS_WID);
++}
++
++void isp_bypass_for_rgb()
+ {
+ 	WR_BITS(ISP_PAT_GEN_CTRL,0,ISP_PAT_ENABLE_BIT,ISP_PAT_ENABLE_WID);
+ 	WR_BITS(ISP_CLAMP_GRBG01,0,CLAMP_GRBG0_BIT,CLAMP_GRBG0_WID);
+@@ -609,10 +615,10 @@ void isp_bypass_all()
+ 	WR_BITS(ISP_LNS_CTRL,0,LNS_CMOP_ENABLE_BIT,LNS_CMOP_ENABLE_WID);
+ 	WR_BITS(ISP_GMR0_CTRL,0,GMR_CORRECT_ENABLE_BIT,GMR_CORRECT_ENABLE_WID);
+ 	WR_BITS(ISP_DFT_CTRL,0,ISP_DFT_ENABLE_BIT,ISP_DFT_ENABLE_WID);
+-	WR_BITS(ISP_DMS_CTRL0,7,ISP_DMS_BYPASS_BIT,ISP_DMS_BYPASS_WID);
+ 	isp_set_matrix(NULL,0);
+ 	WR_BITS(ISP_PKNR_ENABLE,0,ISP_NR_EN_BIT,ISP_NR_EN_WID);
+ 	WR_BITS(ISP_PKNR_ENABLE,0,ISP_PK_EN_BIT,ISP_PK_EN_WID);	
++	
+ }
+ static void isp_set_bayer_fmt(tvin_color_fmt_t bfmt)
+ {
+@@ -685,7 +691,7 @@ void isp_hw_enable(bool flag)
+ /*
+ *just enable test pattern
+ */
+-void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal)
++void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal,unsigned char bayer_fmt)
+ {
+         // pat gen
+         WRITE_VCBUS_REG(ISP_PAT_GEN_CTRL, 0x0);
+@@ -708,7 +714,7 @@ void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,
+ 
+         WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,  0 ,20,3); // xmode: raster/bar16/burst enable
+         WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,  2 ,16,3); // ymode: 1023
+-
++	WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,bayer_fmt,PAT_BAYER_FMT_BIT,PAT_BAYER_FMT_WID);
+         // pat dft
+         WRITE_VCBUS_REG(ISP_PAT_DFT_XYIDX,0x006400c8 ); //reg_isp_pat_dft_xidx='h64,reg_isp_pat_dft_yidx='hc8
+         WRITE_VCBUS_REG(ISP_PAT_DFT_XYWID,0x00010004 ); //default reg_isp_pat_dft_ywid=64,default is wrong?
+@@ -718,17 +724,9 @@ void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,
+         // demosaicing
+         WRITE_VCBUS_REG(ISP_DMS_CTRL0, 0x00030000);
+         WRITE_VCBUS_REG(ISP_DMS_CTRL1, 0x00120510);
+-
++	WRITE_VCBUS_REG_BITS(ISP_DMS_CTRL0,bayer_fmt,DMS_BAYER_FMT_BIT,DMS_BAYER_FMT_WID);
+         // color matrix
+-        WRITE_VCBUS_REG(ISP_MATRIX_PRE_OFST0_1,0x0);
+-        WRITE_VCBUS_REG(ISP_MATRIX_PRE_OFST2,  0x0);
+-        WRITE_VCBUS_REG(ISP_MATRIX_COEF00_01, 0x004d0096);
+-        WRITE_VCBUS_REG(ISP_MATRIX_COEF02_10, 0x001d03d5);
+-        WRITE_VCBUS_REG(ISP_MATRIX_COEF11_12, 0x03ab0080);
+-        WRITE_VCBUS_REG(ISP_MATRIX_COEF20_21, 0x00800395);
+-        WRITE_VCBUS_REG(ISP_MATRIX_COEF22,    0x000003eb);
+-        WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST0_1, 0x00000200);
+-        WRITE_VCBUS_REG(ISP_MATRIX_POS_OFST2,   0x00000200);
++        isp_set_matrix(NULL,0);
+ 
+         WRITE_VCBUS_REG(ISP_RST_DLY_NUM,htotal*6);
+         WRITE_VCBUS_REG_BITS(ISP_PAT_GEN_CTRL,1,28,1);
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index ba0dc3d4bb46..f8c471960a7d 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -95,7 +95,7 @@ extern void isp_set_dbg(xml_dbg_t *dbg);
+ extern void isp_set_lnsd_mode(unsigned int mode);
+ extern void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,tvin_color_fmt_t bfmt,unsigned int w,unsigned int h);
+ extern void isp_load_def_setting(unsigned int hsize,unsigned int vsize,unsigned char bayer_fmt);
+-extern void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal);
++extern void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal,unsigned char bayer_fmt);
+ extern void isp_set_manual_wb(xml_wb_manual_t *wb);
+ extern void isp_get_awb_stat(isp_awb_stat_t *awb_stat);
+ extern void isp_get_ae_stat(isp_ae_stat_t *ae_stat);
+@@ -112,6 +112,7 @@ extern void torch_level(bool mode_pol_inv,bool led1_pol_inv,bool pin_mux_inv,boo
+ extern void wave_power_manage(bool enable);
+ extern void isp_hw_reset(void);
+ extern void isp_bypass_all(void);
++extern void isp_bypass_for_rgb(void);
+ extern void isp_hw_enable(bool enable);
+ extern void isp_awb_set_gain(unsigned int r, unsigned int g, unsigned int b);
+ extern void isp_awb_get_gain(isp_awb_gain_t *awb_gain);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index 2c54af011e43..4cdb7e57d79f 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -337,18 +337,20 @@ inline void vdin_get_format_convert(struct vdin_dev_s *devp)
+ 		if ((devp->parm.port >= TVIN_PORT_VGA0) &&
+ 				(devp->parm.port <= TVIN_PORT_VGA7) &&
+ 				!vga_yuv422_enable
+-		   )
++		   ) {
+ 			devp->format_convert = VDIN_FORMAT_CONVERT_RGB_YUV444;
+-		else if(devp->parm.port == TVIN_PORT_VIU) {
++		} else if(devp->parm.port == TVIN_PORT_VIU) {
+ 			if(devp->prop.dest_cfmt == TVIN_NV12)
+ 				devp->format_convert = VDIN_FORMAT_CONVERT_RGB_NV12;
+ 			else if(devp->prop.dest_cfmt == TVIN_NV21)
+ 				devp->format_convert = VDIN_FORMAT_CONVERT_RGB_NV21;
+ 			else
+ 				devp->format_convert = VDIN_FORMAT_CONVERT_RGB_YUV422;
+-		}
+-		else
++		} else if(devp->prop.dest_cfmt == TVIN_RGB444) {
++			devp->format_convert = VDIN_FORMAT_CONVERT_RGB_RGB;
++		} else {
+ 			devp->format_convert = VDIN_FORMAT_CONVERT_RGB_YUV422;
++		}
+ 	}    
+ 	else if(devp->prop.color_format >= TVIN_YUV422 && devp->prop.color_format <= TVIN_VYUY422)
+ 	{
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 835239ae9c9a..641898b8e795 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -2024,7 +2024,7 @@ static void vdin_dump_state(vdin_dev_t *devp)
+ * echo output2nr >/sys/class/vdin/vdin0/attr
+ * echo output2mem >/sys/class/vdin/vdin0/attr
+ * 6.modify for vdin fmt & color fmt convertion
+-* echo w h cfmt >/sys/class/isp/isp0/attr
++* echo convertion w h cfmt >/sys/class/vdin/vdin0/attr
+ */
+ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,const char *buf, size_t len)
+ {
+@@ -2046,14 +2046,6 @@ static ssize_t vdin_attr_store(struct device *dev,struct device_attribute *attr,
+ 		if(devp->cycle)
+ 			fps = (VDIN_CRYSTAL + (devp->cycle>>3))/devp->cycle;
+                 pr_info("%u f/s\n",fps);
+-        }else if(!strcmp(parm[0], "bypass_isp")){
+-                vdin_bypass_isp(devp->addr_offset);
+-		if(devp->parm.port == TVIN_PORT_ISP){
+-			tmp_isp.cam_command = CMD_ISP_BYPASS;
+-			if(devp->frontend->dec_ops->ioctl)
+-				devp->frontend->dec_ops->ioctl(devp->frontend,(void *)&tmp_isp);
+-		}
+-                pr_info("vdin bypass isp.\n");
+         }
+         else if(!strcmp(parm[0],"capture")){
+ 		if(parm[3] != NULL){
+@@ -2266,28 +2258,42 @@ static ssize_t vdin_vf_log_store(struct device * dev,
+    echo print > /sys/class/vdin/vdin1/vf_log
+  */
+ static DEVICE_ATTR(vf_log, 0664, vdin_vf_log_show, vdin_vf_log_store);
+-/*
+-   static ssize_t vdin_isr_time_show(struct device * dev,
++#endif //VF_LOG_EN
++
++static ssize_t vdin_debug_for_isp_show(struct device * dev,
+    struct device_attribute *attr, char * buf)
+-   {
++{
+    int len = 0;
+-   struct vdin_dev_s *devp = dev_get_drvdata(dev);
+-
+-   len += sprintf(buf + len, "interval:%lu, min:%lu, max:%lu, average:%lu less5ms:%lu of %llu\n", devp->v.isr_interval,
+-   devp->v.min_isr_time, devp->v.max_isr_time, devp->v.avg_isr_time,
+-   devp->v.less_5ms_cnt, devp->v.isr_count);
++   
+    return len;
+    }
+ 
+-   static ssize_t vdin_isr_time_store(struct device * dev,
++static ssize_t vdin_debug_for_isp_store(struct device * dev,
+    struct device_attribute *attr, const char * buf, size_t count)
+-   {
+-   return count;
+-   }
++{
++        char ret=0,*buf_orig,*parm[6] = {NULL};
++        cam_parameter_t tmp_isp;
++        struct vdin_dev_s *devp;
++
++        if(!buf)
++		return count;
++        buf_orig = kstrdup(buf, GFP_KERNEL);
++        devp = dev_get_drvdata(dev);
++        parse_param(buf_orig,&parm);
++
++	if(!strcmp(parm[0], "bypass_isp")){
++                vdin_bypass_isp(devp->addr_offset);
++		tmp_isp.cam_command = CMD_ISP_BYPASS;
++		if(devp->frontend->dec_ops->ioctl)
++			devp->frontend->dec_ops->ioctl(devp->frontend,(void *)&tmp_isp);
++		pr_info("vdin bypass isp for raw data.\n");              
++        }
++        return count;
++}
++
++static DEVICE_ATTR(debug_for_isp, 0664, vdin_debug_for_isp_show, vdin_debug_for_isp_store);
++ 
+ 
+-   static DEVICE_ATTR(isr_time, 0664, vdin_isr_time_show, vdin_isr_time_store);
+- */
+-#endif //VF_LOG_EN
+ 
+ #ifdef ISR_LOG_EN
+ static ssize_t vdin_isr_log_show(struct device *dev,
+@@ -2728,7 +2734,7 @@ static int vdin_drv_probe(struct platform_device *pdev)
+         ret = device_create_file(vdevp->dev,&dev_attr_attr);
+         ret = device_create_file(vdevp->dev,&dev_attr_cm2);
+ 	ret = device_create_file(vdevp->dev,&dev_attr_crop);
+-
++	ret = device_create_file(vdevp->dev,&dev_attr_debug_for_isp);
+ 	if(ret < 0) {
+ 		pr_err("%s: fail to create vdin attribute files.\n", __func__);
+ 		goto fail_create_dev_file;
+-- 
+2.19.0
+

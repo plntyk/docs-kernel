@@ -1,0 +1,243 @@
+From c39bdbfead53f02ac2f644ae9aac4d8016ce3f5c Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Wed, 29 Jul 2015 20:58:26 +0800
+Subject: [PATCH 5736/5965] PD#110223: aml_logo: optimize vmode name parse, use
+ global vinfo API
+
+Change-Id: I673b5ce7b8f3846888ea66b7169c03fd8705d4d4
+---
+ .../aml_logo/loader/logo_setup_uboot.c        |  12 +-
+ drivers/amlogic/display/lcd/aml_lcd_tv.c      |   7 +-
+ drivers/amlogic/display/vout/Makefile         |   2 +-
+ drivers/amlogic/display/vout/vinfo.c          | 119 ++++++++++++++++++
+ include/linux/amlogic/vout/vinfo.h            |   2 +
+ 5 files changed, 135 insertions(+), 7 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
+ create mode 100644 drivers/amlogic/display/vout/vinfo.c
+
+diff --git a/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c b/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
+old mode 100755
+new mode 100644
+index 089e49fb4013..52ae69101292
+--- a/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
++++ b/drivers/amlogic/display/aml_logo/loader/logo_setup_uboot.c
+@@ -92,7 +92,14 @@ static inline int install_logo_info(logo_object_t *plogo,char *para)
+ 	static u32 tail=PARA_END+1;
+ 	u32 first=para_info_pair[0].next_idx ; 
+ 	u32 i,addr;
++	vmode_t vmode;
+ 	
++	vmode = vmode_name_to_mode(para);
++	if (vmode < VMODE_MAX) {
++		plogo->para.vout_mode = vmode;
++		printk("plogo vmode = %d\n", vmode);
++		return 0;
++	}
+ 	for(i=first;i<tail;i=para_info_pair[i].next_idx)
+ 	{
+ 		if(strcmp(para_info_pair[i].name,para)==0)
+@@ -107,10 +114,10 @@ static inline int install_logo_info(logo_object_t *plogo,char *para)
+ 				case PARA_FIRST_GROUP_START:
+ 				plogo->para.output_dev_type=(platform_dev_t)para_info_pair[i].info;
+ 				break;
+-				case PARA_SECOND_GROUP_START:
++/*				case PARA_SECOND_GROUP_START:
+ 				plogo->para.vout_mode=(vmode_t)para_info_pair[i].info;
+ 				break;
+-				case PARA_THIRD_GROUP_START:
++*/				case PARA_THIRD_GROUP_START:
+ 				plogo->para.dis_mode=(logo_display_mode_t)para_info_pair[i].info;
+ 				break;
+ 				case PARA_FOURTH_GROUP_START:
+@@ -190,6 +197,7 @@ int  __init  logo_setup(char *str)
+ 	memset(plogo,0,sizeof(logo_object_t));
+ 	sprintf(plogo->name,LOGO_NAME);
+ 	
++	plogo->para.vout_mode = VMODE_INIT_NULL;
+ 	do
+ 	{
+ 		if(!isalpha(*ptr)&&!isdigit(*ptr))
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index 3cb352eaf40e..dc1e00f55881 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -555,9 +555,10 @@ static unsigned int first_init = 0;
+ static int lcd_set_current_vmode(vmode_t mode)
+ {
+ 	unsigned int ret = 0;
+-	printk("initcall %s mode = %d\n", __func__, mode);
++	printk("initcall %s mode = %d\n", __func__, (mode & VMODE_MODE_BIT_MASK));
+ 
+ 	mutex_lock(&lcd_vout_mutex);
++	lcd_output_mode = get_lcd_vmode(mode & VMODE_MODE_BIT_MASK);
+ 	if (first_init == 0) {
+ 		first_init = 1;
+ 		printk("skip %s when first enter kernel\n", __func__);
+@@ -574,7 +575,6 @@ static int lcd_set_current_vmode(vmode_t mode)
+ 		case VMODE_4K2K_50HZ_Y420:
+ 		case VMODE_4K2K_60HZ:
+ 		case VMODE_4K2K_50HZ:
+-			lcd_output_mode = get_lcd_vmode(mode & VMODE_MODE_BIT_MASK);
+ 			_lcd_module_enable();
+ 			break;
+ 		default:
+@@ -602,9 +602,8 @@ static vmode_t lcd_validate_vmode(char *mode)
+ 
+ static int lcd_vmode_is_supported(vmode_t mode)
+ {
+-	printk("initcall %s mode = %d\n", __func__, mode);
+-
+ 	mode &= VMODE_MODE_BIT_MASK;
++	printk("initcall %s mode = %d\n", __func__, mode);
+ 
+ 	switch (mode) {
+ 	case VMODE_1080P:
+diff --git a/drivers/amlogic/display/vout/Makefile b/drivers/amlogic/display/vout/Makefile
+index 25e8dc58f3a3..e4ba43c61caf 100644
+--- a/drivers/amlogic/display/vout/Makefile
++++ b/drivers/amlogic/display/vout/Makefile
+@@ -1,4 +1,4 @@
+-obj-y += vout_notify.o  vout_serve.o
++obj-y += vout_notify.o  vout_serve.o vinfo.o
+ 
+ obj-$(CONFIG_AML_VDAC_HW_SWITCH)	+= vdac_switch.o
+ 
+diff --git a/drivers/amlogic/display/vout/vinfo.c b/drivers/amlogic/display/vout/vinfo.c
+new file mode 100644
+index 000000000000..f8e728d2256d
+--- /dev/null
++++ b/drivers/amlogic/display/vout/vinfo.c
+@@ -0,0 +1,119 @@
++/*************************************************************
++ * Amlogic
++ * vout  serve program
++ *
++ * Copyright (C) 2010 Amlogic, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the named License,
++ * or any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA
++ *
++ * Author:   evoke.zhang@amlogic
++ *
++ *
++ **************************************************************/
++#include <linux/version.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <linux/fs.h>
++#include <linux/slab.h>
++#include <linux/ctype.h>
++#include <linux/amlogic/vout/vinfo.h>
++
++static const char* vmode_name[]={
++	"480i",
++	"480irpt",
++	"480cvbs",
++	"480p",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"480p59hz",
++#endif
++	"480prpt",
++	"576i",
++	"576irpt",
++	"576cvbs",
++	"576p",
++	"576prpt",
++	"720p",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"720p59hz",
++#endif
++	"1080i",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"1080i59hz",
++#endif
++	"1080p",
++	"768p60hz",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"1080p59hz",
++#endif
++	"720p50hz",
++	"1080i50hz",
++	"1080p50hz",
++	"1080p24hz",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"1080p23hz",
++#endif
++	"4k2k30hz",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"4k2k29hz",
++#endif
++	"4k2k25hz",
++	"4k2k24hz",
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	"4k2k23hz",
++#endif
++	"4k2ksmpte",
++	"4k2kfake5g",
++	"4k2k60hz",
++	"4k2k60hz420",
++	"4k2k50hz",
++	"4k2k50hz420",
++	"4k2k5g",
++	"4k1k120hz",
++	"4k1k120hz420",
++	"4k1k100hz",
++	"4k1k100hz420",
++	"4k05k240hz",
++	"4k05k240hz420",
++	"4k05k200hz",
++	"4k05k200hz420",
++	"vga",
++	"svga",
++	"xga",
++	"sxga",
++	"wsxga",
++	"fhdvga",
++	"panel",
++	"lvds1080p",
++	"lvds1080p50hz",
++	"lvds768p",
++	"vx14k2k60hz",
++	"invalid",
++};
++
++vmode_t vmode_name_to_mode(char *str)
++{
++	int i;
++	vmode_t vmode;
++
++	for (i = 0; i < VMODE_MAX; i++) {
++		if (strcmp(vmode_name[i], str) == 0)
++			break;
++	}
++	vmode = VMODE_480I + i;
++	return vmode;
++}
++
+diff --git a/include/linux/amlogic/vout/vinfo.h b/include/linux/amlogic/vout/vinfo.h
+index ff1898ae84c1..12ebd2d6a2e9 100644
+--- a/include/linux/amlogic/vout/vinfo.h
++++ b/include/linux/amlogic/vout/vinfo.h
+@@ -211,4 +211,6 @@ typedef struct tvinfo_s {
+     const char *id;
+ } tvinfo_t;
+ 
++extern vmode_t vmode_name_to_mode(char *name);
++
+ #endif /* VINFO_H */
+-- 
+2.19.0
+

@@ -1,0 +1,104 @@
+From e176249f7f6990bc62263107346eb1bfbb543935 Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Fri, 1 Nov 2013 20:11:34 +0800
+Subject: [PATCH 1627/5965] 1. adjust the clock of mmc host according to the
+ change of clk81. 2. add mmc version.
+
+---
+ arch/arm/mach-meson8/include/mach/sd.h |  8 ++++++++
+ drivers/amlogic/mmc/aml_sdio.c         | 12 ++++++++----
+ drivers/amlogic/mmc/amlsd.c            |  8 +++++---
+ 3 files changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/include/mach/sd.h b/arch/arm/mach-meson8/include/mach/sd.h
+index 322c517cb4a7..381c2061531c 100755
+--- a/arch/arm/mach-meson8/include/mach/sd.h
++++ b/arch/arm/mach-meson8/include/mach/sd.h
+@@ -13,6 +13,10 @@
+ #include <linux/mmc/host.h>
+ #include <linux/earlysuspend.h>
+ 
++#define AML_MMC_MAJOR_VERSION   1
++#define AML_MMC_MINOR_VERSION   00
++#define AML_MMC_VERSION     ((AML_MMC_MAJOR_VERSION << 8) | AML_MMC_MINOR_VERSION)
++
+ enum aml_mmc_waitfor {
+ 	XFER_INIT,
+ 	XFER_START,				/* 1 */
+@@ -165,6 +169,8 @@ struct amlsd_host {
+ 
+     struct pinctrl *pinctrl;
+     int storage_flag; // used for judging if there is a tsd/emmc
++
++    int         version; // bit[7-0]--minor version, bit[31-8]--major version
+ };
+ 
+ /*-sdio-*/
+@@ -177,6 +183,8 @@ struct amlsd_host {
+ #define SDIO_MULT       (0x14)
+ #define SDIO_ADDR       (0x18)
+ #define SDIO_EXT        (0x1c)
++#define SDIO_CCTL       (0x40)
++#define SDIO_CDAT       (0x44)
+ 
+ #define CLK_DIV         (0x1f4)
+ 
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 180dcaa22b59..8ace964288a2 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -635,9 +635,9 @@ static void aml_sdio_set_clk_rate(struct amlsd_platform* pdata, u32 clk_ios)
+ 	struct amlsd_host* host = (void*)pdata->host;
+     u32 vconf = readl(host->base + SDIO_CONF);
+     struct sdio_config* conf = (void*)&vconf;
+-    //struct clk* clk_src = clk_get_sys("clk81", NULL);
+-    //u32 clk_rate = clk_get_rate(clk_src)/2;
+-    u32 clk_rate = 159000000/2; //tmp for 3.10
++    struct clk* clk_src = clk_get_sys("clk81", NULL);
++    u32 clk_rate = clk_get_rate(clk_src)/2;
++    // u32 clk_rate = 159000000/2; //tmp for 3.10
+ 	u32 clk_div;
+ 
+     // aml_sdio_init_param(pdata);
+@@ -904,7 +904,8 @@ static struct amlsd_host* aml_sdio_init_host(void)
+ 	host->xfer_step = XFER_INIT;
+ 
+ 	INIT_LIST_HEAD(&host->sibling);
+-
++    
++    host->version = AML_MMC_VERSION;
+     host->storage_flag = storage_flag;
+ 	return host;
+ }
+@@ -921,6 +922,9 @@ static int aml_sdio_probe(struct platform_device *pdev)
+ 	host = aml_sdio_init_host();
+ 	if(!host)
+ 		goto fail_init_host;
++    
++    printk("mmc driver version: %2d.%02d\n", host->version>>8, host->version&0xff);
++
+ 	if(amlsd_get_reg_base(pdev, host))
+ 		goto fail_init_host;
+ 
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index 110dbd0be282..292837f69737 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -823,9 +823,11 @@ void aml_cs_high (struct amlsd_platform * pdata) // chip select high
+ 
+         ret = amlogic_gpio_request_one(pdata->gpio_dat3, GPIOF_OUT_INIT_HIGH, MODULE_NAME);
+         CHECK_RET(ret);
+-        ret = amlogic_gpio_direction_output(pdata->gpio_dat3, 1, MODULE_NAME); // output high
+-        CHECK_RET(ret);
+-        // print_tmp("emmc gpio_dat3=%d\n", amlogic_get_value(pdata->gpio_dat3, MODULE_NAME));
++        if (ret == 0) {
++            ret = amlogic_gpio_direction_output(pdata->gpio_dat3, 1, MODULE_NAME); // output high
++            CHECK_RET(ret);
++            // print_tmp("emmc gpio_dat3=%d\n", amlogic_get_value(pdata->gpio_dat3, MODULE_NAME));
++        }
+     }
+ }
+ 
+-- 
+2.19.0
+

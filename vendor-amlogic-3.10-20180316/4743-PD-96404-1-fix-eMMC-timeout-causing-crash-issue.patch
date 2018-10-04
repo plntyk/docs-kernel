@@ -1,0 +1,97 @@
+From 1a7433c6b994ea810d04790958aa0bcad49dd525 Mon Sep 17 00:00:00 2001
+From: "benjamin.zhao" <benjamin.zhao@amlogic.com>
+Date: Thu, 21 Aug 2014 17:27:26 +0800
+Subject: [PATCH 4743/5965] PD#96404:1, fix eMMC timeout causing crash issue   
+       2, improve sdhc timeout function handle
+
+---
+ drivers/amlogic/mmc/aml_sdhc_m8.c | 17 ++++++++++++-----
+ drivers/amlogic/mmc/aml_sdio.c    |  2 +-
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/aml_sdhc_m8.c b/drivers/amlogic/mmc/aml_sdhc_m8.c
+index 63a16bc955c2..99683888cd59 100755
+--- a/drivers/amlogic/mmc/aml_sdhc_m8.c
++++ b/drivers/amlogic/mmc/aml_sdhc_m8.c
+@@ -1239,7 +1239,7 @@ timeout_handle:
+         //spin_lock_irqsave(&host->mrq_lock, flags);
+         aml_sdhc_send_stop(host);                
+         //spin_unlock_irqrestore(&host->mrq_lock, flags);
+-        schedule_delayed_work(&host->timeout, 1);
++        //schedule_delayed_work(&host->timeout, 50);
+     }
+     else{
+         spin_lock_irqsave(&host->mrq_lock, flags);        
+@@ -1551,7 +1551,8 @@ static irqreturn_t aml_sdhc_irq(int irq, void *dev_id)
+ 
+ static void aml_sdhc_com_err_handler (struct amlsd_host* host)
+ {
+-    cancel_delayed_work(&host->timeout);
++    if(delayed_work_pending(&host->timeout))
++        cancel_delayed_work(&host->timeout);
+     aml_sdhc_read_response(host->mmc, host->mrq->cmd);
+     aml_sdhc_print_err(host);
+     aml_sdhc_host_reset(host);
+@@ -1583,6 +1584,7 @@ void aml_sdhc_send_stop(struct amlsd_host* host)
+     // sdhc_err("before cmd12\n");
+    
+     /*Already in mrq_lock*/
++    schedule_delayed_work(&host->timeout, 50);
+     spin_lock_irqsave(&host->mrq_lock, flags);
+     sdhc_err_bak = host->mrq->cmd->error;
+     host->mrq->cmd->error = 0;
+@@ -1643,6 +1645,8 @@ irqreturn_t aml_sdhc_data_thread(int irq, void *data)
+         host->cmd_is_stop = 0;
+         mrq->cmd->error = sdhc_err_bak;
+         spin_unlock_irqrestore(&host->mrq_lock, flags);
++        if(delayed_work_pending(&host->timeout))
++            cancel_delayed_work(&host->timeout);
+         msleep(delay);
+         sdhc_err("delay %dms\n", delay);
+         aml_sdhc_request_done(host->mmc, host->mrq);
+@@ -1656,7 +1660,8 @@ irqreturn_t aml_sdhc_data_thread(int irq, void *data)
+         case HOST_TASKLET_DATA:
+             sdhc_error_flag = 0;
+             BUG_ON(!mrq->data);
+-            cancel_delayed_work(&host->timeout);
++            if(delayed_work_pending(&host->timeout))
++                cancel_delayed_work(&host->timeout);
+ 
+             xfer_bytes = mrq->data->blksz*mrq->data->blocks;
+             /* copy buffer from dma to data->sg in read cmd*/
+@@ -1740,7 +1745,8 @@ irqreturn_t aml_sdhc_data_thread(int irq, void *data)
+         case HOST_TASKLET_CMD:
+             sdhc_error_flag = 0;
+             if(!host->mrq->data){
+-                cancel_delayed_work(&host->timeout);
++                if(delayed_work_pending(&host->timeout))
++                    cancel_delayed_work(&host->timeout);
+                 spin_lock_irqsave(&host->mrq_lock, flags);
+                 host->mrq->cmd->error = 0;
+                 host->xfer_step = XFER_TASKLET_CMD;
+@@ -1759,7 +1765,8 @@ irqreturn_t aml_sdhc_data_thread(int irq, void *data)
+         case HOST_RX_FIFO_FULL:   
+         case HOST_RSP_TIMEOUT_ERR:
+         case HOST_DAT_TIMEOUT_ERR:                                 
+-            cancel_delayed_work(&host->timeout);
++            if(delayed_work_pending(&host->timeout))                            
++                cancel_delayed_work(&host->timeout);
+             //aml_sdhc_wait_ready(host, STAT_POLL_TIMEOUT);
+             if(aml_sdhc_wait_ready(host, (STAT_POLL_TIMEOUT<<2))){ /*Wait command busy*/
+             	sdhc_err("aml_sdhc_wait_ready error fifo or timeout thread\n");
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index c80be3bc0083..5b1c4ac210a7 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -557,7 +557,7 @@ timeout_handle:
+         aml_sdio_send_stop(host);                
+         spin_unlock_irqrestore(&host->mrq_lock, flags);
+ 		is_mmc_stop = 1;
+-        schedule_delayed_work(&host->timeout, 1);
++        schedule_delayed_work(&host->timeout, 50);
+     }
+     else{
+             /*request done*/
+-- 
+2.19.0
+

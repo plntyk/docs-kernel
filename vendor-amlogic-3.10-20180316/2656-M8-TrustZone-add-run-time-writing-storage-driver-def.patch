@@ -1,0 +1,415 @@
+From 7d2467ecbb8ecd17501aaf1c57b802095f92e070 Mon Sep 17 00:00:00 2001
+From: "yan.wang" <yan.wang@amlogic.com>
+Date: Wed, 25 Dec 2013 16:05:16 +0800
+Subject: [PATCH 2656/5965] [M8 TrustZone]: add run time writing storage
+ driver, default is disable
+
+---
+ drivers/amlogic/Makefile                      |   1 +
+ drivers/amlogic/secure_monitor/Makefile       |   4 +
+ drivers/amlogic/secure_monitor/flash_mutex.S  | 133 ++++++++++
+ drivers/amlogic/secure_monitor/flash_secure.c | 229 ++++++++++++++++++
+ 4 files changed, 367 insertions(+)
+ create mode 100755 drivers/amlogic/secure_monitor/Makefile
+ create mode 100755 drivers/amlogic/secure_monitor/flash_mutex.S
+ create mode 100755 drivers/amlogic/secure_monitor/flash_secure.c
+
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+index 4aff184866e3..47c76bb86cf8 100755
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -132,3 +132,4 @@ obj-$(CONFIG_AMLOGIC_ION) += ion_dev/
+ obj-y += crypto/
+ 
+ obj-$(CONFIG_MESON_TRUSTZONE) += trustzone/
++#obj-$(CONFIG_MESON_TRUSTZONE) += secure_monitor/
+\ No newline at end of file
+diff --git a/drivers/amlogic/secure_monitor/Makefile b/drivers/amlogic/secure_monitor/Makefile
+new file mode 100755
+index 000000000000..66ba9b50da50
+--- /dev/null
++++ b/drivers/amlogic/secure_monitor/Makefile
+@@ -0,0 +1,4 @@
++#                             
++# Makefile for secure_storage.         
++#  
++obj-$(CONFIG_MESON_TRUSTZONE)	+=flash_secure.o flash_mutex.o 
+\ No newline at end of file
+diff --git a/drivers/amlogic/secure_monitor/flash_mutex.S b/drivers/amlogic/secure_monitor/flash_mutex.S
+new file mode 100755
+index 000000000000..76ecb3a8a12a
+--- /dev/null
++++ b/drivers/amlogic/secure_monitor/flash_mutex.S
+@@ -0,0 +1,133 @@
++@ This file was created from a .asm file
++@  using the ads2gas.pl script.
++	.equ DO1STROUNDING, 0
++@ ------------------------------------------------------------
++@ Cortex-A MPCore - Mutex Code
++@
++@ Copyright@ ARM Ltd 2009. All rights reserved.
++@ ------------------------------------------------------------
++
++ @ PRESERVE8
++
++.text
++.p2align 2
++
++  @NOTES
++  @ struct mutex_t defined in A9MP_Mutexes.h
++  @ typedef struct mutex_t
++  @ {
++  @   unsigned int lock@          <-- offset 0
++  @ }
++  @
++  @ lock:   0xFF=unlocked  0x0 = Locked by CPU 0, 0x1 = Locked by CPU 1, 0x2 = Locked by CPU 2, 0x3 = Locked by CPU 3
++  @
++
++.equ UNLOCKED ,    0xFF
++
++@ ------------------------------------------------------------
++
++  .global init_mutex 
++	.type init_mutex, function
++  @ void init_mutex(mutex_t* pMutex)
++  @ Places mutex into a known state
++  @ r0 = address of mutex_t
++init_mutex: @ PROC
++
++  MOV     r1, #UNLOCKED           @ Mark as unlocked
++  STR     r1, [r0]
++
++  BX      lr
++	.size init_mutex, .-init_mutex  @ ENDP
++
++@ ------------------------------------------------------------
++
++  .global lock_mutex 
++	.type lock_mutex, function
++  @ void lock_mutex(mutex_t* pMutex)
++  @ Blocking call, returns once successfully locked a mutex
++  @ r0 = address of mutex_t
++lock_mutex: @ PROC
++
++  @ Is mutex locked?
++  @ -----------------
++  LDREX   r1, [r0]                @ Read lock field
++  CMP     r1, #UNLOCKED           @ Compare with "unlocked"
++
++  WFENE                           @ If mutex is locked, go into standby
++  BNE     lock_mutex              @ On waking re-check the mutex
++  
++  @ Attempt to lock mutex
++  @ -----------------------
++  MRC     p15, 0, r1, c0, c0, 5   @ Read CPU ID register
++  AND     r1, r1, #0x03           @ Mask off, leaving the CPU ID field.
++  STREX   r2, r1, [r0]            @ Attempt to lock mutex, by write CPU's ID to lock field
++  CMP     r2, #0x0                @ Check wether store completed successfully (0=succeeded)
++  BNE     lock_mutex              @ If store failed, go back to beginning and try again
++
++  DMB
++
++  BX      lr                      @ Return as mutex is now locked by this cpu
++	.size lock_mutex, .-lock_mutex  @ ENDP
++
++@ ------------------------------------------------------------
++
++  .global unlock_mutex 
++	.type unlock_mutex, function
++  @ unsigned int unlock_mutex(mutex_t* pMutex)
++  @ Releases mutex, returns 0x0 for success and 0x1 for failure
++  @ r0 = address of mutex_t
++unlock_mutex: @ PROC
++
++  @ Does this CPU own the mutex?
++  @ -----------------------------
++  MRC     p15, 0, r1, c0, c0, 5   @ Read CPU ID register
++  AND     r1, r1, #0x03           @ Mask off, leaving the CPU ID in r1
++  LDR     r2, [r0]                @ Read the lock field of the mutex
++  CMP     r1, r2                  @ Compare ID of this CPU with the lock owner
++  MOVNE   r0, #0x1                @ If ID doesn't match, return "fail"
++  BXNE    lr
++
++
++  @ Unlock mutex
++  @ -------------
++  DMB                             @ Ensure that accesses to shared resource have completed
++
++  MOV     r1, #UNLOCKED           @ Write "unlocked" into lock field
++  STR     r1, [r0]
++  
++  DMB                             @ To ensure update of the mutex occurs before other CPUs awake
++  DSB
++  ISB
++
++  SEV                             @ Send event to other CPUs, wakes anyone waiting on a mutex (using WFE)
++
++  MOV     r0, #0x0                @ Return "success"
++  BX      lr
++
++	.size unlock_mutex, .-unlock_mutex  @ ENDP
++
++@ ------------------------------------------------------------
++
++  .global is_mutex_locked 
++	.type is_mutex_locked, function
++  @ void is_mutex_locked(mutex_t* pMutex)
++  @ Returns 0x0 if mutex unlocked, 0x1 is locked
++  @ r0 = address of mutex_t
++is_mutex_locked: @ PROC
++  LDR     r0, [r0]                
++  CMP     r0, #UNLOCKED
++  MOVEQ   r0, #0x0
++  MOVNE   r0, #0x1
++  BX      lr
++	.size is_mutex_locked, .-is_mutex_locked  @ ENDP
++
++
++@ ------------------------------------------------------------
++@ End of code
++@ ------------------------------------------------------------
++
++
++@ ------------------------------------------------------------
++@ End of MP_Mutexes.s
++@ ------------------------------------------------------------
++	.section	.note.GNU-stack,"",%progbits
+diff --git a/drivers/amlogic/secure_monitor/flash_secure.c b/drivers/amlogic/secure_monitor/flash_secure.c
+new file mode 100755
+index 000000000000..4944fffa8845
+--- /dev/null
++++ b/drivers/amlogic/secure_monitor/flash_secure.c
+@@ -0,0 +1,229 @@
++#include <linux/cdev.h>
++#include <linux/module.h>
++#include <linux/device.h>
++#include <linux/types.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/ioport.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/slab.h>
++//#include <linux/io.h>
++#include <plat/io.h>
++#include <linux/bitops.h>
++#include <linux/crc32.h>
++#include <linux/fs.h>
++#include <asm/uaccess.h>
++#include <linux/kthread.h>
++#include <asm/irqflags.h>
++
++#define SECURE_MONITOR_MODULE_NAME "secure_monitor"
++#define SECURE_MONITOR_DRIVER_NAME  "secure_monitor"
++#define SECURE_MONITOR_DEVICE_NAME  "secure_monitor"
++#define SECURE_MONITOR_CLASS_NAME "secure_monitor"
++
++/* 
++  * SHARE MEM:
++  * Communicate Head: 1KB
++  * communicate Head lock mutex location: the last 4B of HEAD; inited by secureOS
++  * Data: 128KB
++*/
++#define SHARE_MEM_PHY_START   0x3c100000-0x20400
++#define SHARE_MEM_HEAD_OFFSET 0x0
++#define SHARE_MEM_DATA_OFFSET 0x400
++#define SHARE_MEM_PHY_SIZE 0x20400
++#define FLASH_BUF_SIZE 0x20000
++
++#define SHARE_MEM_CMD_FREE	0x00000000
++#define SHARE_MEM_CMD_WRITE	0x00000001
++
++struct __NS_SHARE_MEM_HEAD {
++	unsigned int cmdlock;
++	unsigned int cmd;	
++	unsigned int state;	
++	unsigned int input;   // can store input data position in NS_SHARE_MEM_CONTENT
++	unsigned int inlen;
++	unsigned int output; 
++	unsigned int outlen;
++};
++typedef struct __NS_SHARE_MEM_HEAD  NS_SHARE_MEM_HEAD;
++
++struct secure_monitor_arg{
++	unsigned char* pfbuf;
++	unsigned char*psbuf;
++};
++static struct secure_monitor_arg secure_monitor_buf;
++static struct task_struct *secure_task = NULL;
++
++static int secure_writer_monitor(void *arg);
++extern void lock_mutex(unsigned int* lock);
++extern void init_mutex(unsigned int* lock);
++extern unsigned int unlock_mutex(unsigned int* lock);
++extern void write_to_flash(unsigned char* psrc, unsigned size);
++
++static int secure_monitor_probe(struct platform_device *pdev)
++{	
++	int ret=0;
++	printk("%s:%d\n", __FUNCTION__, __LINE__);
++	secure_monitor_buf.pfbuf = kmalloc(FLASH_BUF_SIZE, GFP_KERNEL);
++	if(!secure_monitor_buf.pfbuf){
++		printk("nandbuf create fail!\n");
++		ret = -ENOMEM;
++		goto flash_monitor_probe_exit;		
++	}
++	secure_monitor_buf.psbuf = ioremap_cached(SHARE_MEM_PHY_START, SHARE_MEM_PHY_SIZE);
++	if(!secure_monitor_buf.psbuf){
++		printk("ioremap share memory fail \n");
++		ret = -ENOMEM;
++		goto flash_monitor_probe_exit1;				
++	}
++	
++	secure_task = kthread_run(secure_writer_monitor, (void*)(&secure_monitor_buf), "secure_flash");
++	if(!secure_task){
++		printk("create secure task failed \n");
++		ret = -ENODEV;
++		goto flash_monitor_probe_exit2;				
++	}	
++	goto flash_monitor_probe_exit;
++	
++flash_monitor_probe_exit2:
++	if(secure_monitor_buf.psbuf)
++		iounmap(secure_monitor_buf.psbuf);
++	secure_monitor_buf.psbuf = NULL;
++		
++flash_monitor_probe_exit1:
++	if(secure_monitor_buf.pfbuf)
++		kfree(secure_monitor_buf.pfbuf);
++	secure_monitor_buf.pfbuf = NULL;	
++
++flash_monitor_probe_exit:		
++	return ret;
++}
++
++static int secure_monitor_remove(struct platform_device *pdev)
++{
++	int ret=0;
++	printk("**************flash_secure_remove start!\n");
++	if(secure_task){
++		kthread_stop(secure_task);
++		secure_task = NULL;
++	}
++		
++	if(secure_monitor_buf.psbuf)
++		iounmap(secure_monitor_buf.psbuf);
++	secure_monitor_buf.psbuf = NULL;
++	
++	if(secure_monitor_buf.pfbuf)
++		kfree(secure_monitor_buf.pfbuf);
++	secure_monitor_buf.pfbuf = NULL;	
++	
++	printk("**************flash_secure_remove end!\n");
++	return ret;	
++}
++
++
++void write_to_flash(unsigned char* psrc, unsigned size)
++{	
++#ifdef CONFIG_SECURE_NAND
++extern int aml_nand_save_secure(struct mtd_info *mtd, u_char *buf, unsigned int size);
++extern struct mtd_info * nand_secure_mtd;
++
++	unsigned char * secure_ptr = psrc;
++	int error = 0;
++	printk("%s %d save secure here \n",__func__, __LINE__);
++	error = aml_nand_save_secure(nand_secure_mtd, secure_ptr, size);
++	if(error){
++		printk("save secure failed\n");
++	}	
++	printk("///////////////////////////////////////save secure success//////////////////////////////////\n");
++	return;
++	
++#elif CONFIG_SPI_NOR_SECURE_STORAGE
++extern 	int secure_storage_spi_write(u8 *buf,u32 len);
++	unsigned char * secure_ptr = psrc;
++	int error = 0;
++		
++	printk("%s %d save secure here \n",__func__, __LINE__);
++	error=secure_storage_spi_write(secure_ptr, size);
++	if(error){
++		printk("save secure failed\n");
++	}	
++	printk("///////////////////////////////////////save secure success//////////////////////////////////\n");
++	return;
++#endif	
++}
++
++
++static int secure_writer_monitor(void *arg)
++{
++	struct secure_monitor_arg *parg = (struct secure_monitor_arg*)arg;
++	unsigned char *pfbuf = parg->pfbuf;	
++	unsigned long flags;
++	
++	NS_SHARE_MEM_HEAD *pshead = (NS_SHARE_MEM_HEAD*)(parg->psbuf+SHARE_MEM_HEAD_OFFSET);
++	unsigned char *psdata = parg->psbuf + SHARE_MEM_DATA_OFFSET;
++	bool w_busy = false;	
++		
++	while(1){
++			if(w_busy){
++				write_to_flash(pfbuf, FLASH_BUF_SIZE);
++				w_busy=false;
++			}						
++			//arch_local_irq_save();
++			local_fiq_disable();
++			lock_mutex(&(pshead->cmdlock));						
++			if(pshead->cmd == SHARE_MEM_CMD_WRITE){				
++				memcpy(pfbuf, psdata, FLASH_BUF_SIZE);
++				pshead->cmd=SHARE_MEM_CMD_FREE;
++				w_busy = true;
++				printk("************kernel detect write flag*****\n");
++			}
++			unlock_mutex(&(pshead->cmdlock));		
++			//arch_local_irq_restore(flags);
++			local_fiq_enable();			
++			
++			if(!w_busy){				
++				if(kthread_should_stop())
++					break;
++				else
++					msleep(200);			
++			}
++	}	
++	return 0;
++}
++
++static struct platform_driver secure_monitor_driver = {
++	.probe = secure_monitor_probe,
++	.remove = secure_monitor_remove,
++	.driver = {
++		.name = SECURE_MONITOR_DEVICE_NAME,
++		.owner = THIS_MODULE,
++	},
++};
++
++static int __init secure_monitor_init(void)
++{
++	int ret=-1;
++	printk("%s:%d\n", __FUNCTION__, __LINE__);
++	ret = platform_driver_register(&secure_monitor_driver);
++	if(ret != 0){
++		printk(KERN_ERR "failed to register flash monitor driver, error %d\n", ret);
++		return -ENODEV;
++	}
++	return ret;		
++}
++
++static void __exit secure_monitor_exit(void)
++{
++	platform_driver_unregister(&secure_monitor_driver);
++}
++
++module_init(secure_monitor_init);
++module_exit(secure_monitor_exit);
++
++
++MODULE_DESCRIPTION("AMLOGIC secure monitor driver");
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Yan Wang <yan.wang@amlogic.com>");
+\ No newline at end of file
+-- 
+2.19.0
+

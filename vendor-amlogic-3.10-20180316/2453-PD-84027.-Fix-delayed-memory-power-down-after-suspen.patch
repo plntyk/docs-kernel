@@ -1,0 +1,156 @@
+From 1b476c2e28820548573c8e1304be9b16b377ce66 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Fri, 6 Dec 2013 19:04:46 -0800
+Subject: [PATCH 2453/5965] PD #84027. Fix delayed memory power down after
+ suspend/resume
+
+---
+ arch/arm/mach-meson8/include/mach/vpu.h |  1 +
+ arch/arm/mach-meson8/vpu.c              | 24 ++++++++++
+ drivers/amlogic/amports/video.c         | 61 +++++++++++++++++++++++--
+ 3 files changed, 82 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/include/mach/vpu.h b/arch/arm/mach-meson8/include/mach/vpu.h
+index bab52c1bd2b4..fdd19676ec75 100755
+--- a/arch/arm/mach-meson8/include/mach/vpu.h
++++ b/arch/arm/mach-meson8/include/mach/vpu.h
+@@ -44,4 +44,5 @@ extern int request_vpu_clk_vmod(unsigned int vclk, unsigned int vmod);
+ extern int release_vpu_clk_vmod(unsigned int vmod);
+ 
+ extern void switch_vpu_mem_pd_vmod(unsigned int vmod, int flag);
++extern int get_vpu_mem_pd_vmod(unsigned int vmod);
+ #endif
+diff --git a/arch/arm/mach-meson8/vpu.c b/arch/arm/mach-meson8/vpu.c
+index f0235cfb24cf..f177a75dc921 100755
+--- a/arch/arm/mach-meson8/vpu.c
++++ b/arch/arm/mach-meson8/vpu.c
+@@ -508,6 +508,30 @@ void switch_vpu_mem_pd_vmod(unsigned int vmod, int flag)
+ }
+ //***********************************************//
+ 
++int get_vpu_mem_pd_vmod(unsigned int vmod)
++{
++	unsigned vpu_mod;
++	unsigned vpu_mem_bit = 0;
++
++	vpu_mod = get_vpu_mod(vmod);
++
++	if ((vpu_mod >= VPU_MOD_START) && (vpu_mod <= VPU_DI_POST)) {
++		vpu_mem_bit = (vpu_mod - VPU_MOD_START) * 2;
++		return (aml_get_reg32_bits(P_HHI_VPU_MEM_PD_REG0, vpu_mem_bit, 2) == 0) ? VPU_MEM_POWER_ON : VPU_MEM_POWER_DOWN;
++	}
++	else if ((vpu_mod >= VPU_VIU2_OSD1) && (vpu_mod <= VPU_VIU2_OSD_SCALE)) {
++		vpu_mem_bit = (vpu_mod - VPU_VIU2_OSD1) * 2;
++		return (aml_get_reg32_bits(P_HHI_VPU_MEM_PD_REG1, vpu_mem_bit, 2) == 0) ? VPU_MEM_POWER_ON : VPU_MEM_POWER_DOWN;
++	}
++	else if ((vpu_mod >= VPU_VENCP) && (vpu_mod < VPU_MAX)) {
++		vpu_mem_bit = (vpu_mod - VPU_VENCP + 10) * 2;
++		return (aml_get_reg32_bits(P_HHI_VPU_MEM_PD_REG1, vpu_mem_bit, 2) == 0) ? VPU_MEM_POWER_ON : VPU_MEM_POWER_DOWN;
++	}
++	else {
++		return -1;
++	}
++}
++
+ //***********************************************//
+ //VPU sysfs function
+ //***********************************************//
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 03aec3a586c9..7c11a85a6874 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -231,6 +231,19 @@ static u32 next_peek_underflow;
+          } \
+     } while (0)
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#define DisableVideoLayer_NoDelay() \
++    do { \
++         VSYNC_WR_MPEG_REG(VPP_MISC + cur_dev->vpp_off, \
++           VSYNC_RD_MPEG_REG(VPP_MISC + cur_dev->vpp_off) & ~(VPP_VD1_PREBLEND|VPP_VD2_PREBLEND|VPP_VD2_POSTBLEND|VPP_VD1_POSTBLEND)); \
++         if(debug_flag& DEBUG_FLAG_BLACKOUT){  \
++            printk("DisableVideoLayer_NoDelay()\n"); \
++         } \
++    } while (0)
++#else
++#define DisableVideoLayer_NoDelay() DisableVideoLayer()
++#endif
++
+ #define DisableVideoLayer2() \
+     do { \
+          VSYNC_WR_MPEG_REG(VPP_MISC + cur_dev->vpp_off, \
+@@ -308,6 +321,15 @@ static int cur_dev_idx = 0;
+ typedef struct {
+     int event;
+     u32 vpp_misc;
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++    int mem_pd_vd1;
++    int mem_pd_vd2;
++    int mem_pd_di_post;
++#ifdef USE_PROT
++    int mem_pd_prot2;
++    int mem_pd_prot3;
++#endif
++#endif
+ } video_pm_state_t;
+ 
+ static video_pm_state_t pm_state;
+@@ -4030,8 +4052,30 @@ static int amvideo_class_suspend(struct device *dev, pm_message_t state)
+ 
+     if (state.event == PM_EVENT_SUSPEND) {
+         pm_state.vpp_misc = READ_VCBUS_REG(VPP_MISC + cur_dev->vpp_off);
+-        DisableVideoLayer();
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++        pm_state.mem_pd_vd1 = get_vpu_mem_pd_vmod(VPU_VIU_VD1);
++        pm_state.mem_pd_vd2 = get_vpu_mem_pd_vmod(VPU_VIU_VD2);
++        pm_state.mem_pd_di_post = get_vpu_mem_pd_vmod(VPU_DI_POST);
++#ifdef USE_PROT
++        pm_state.mem_pd_prot2 = get_vpu_mem_pd_vmod(VPU_PIC_ROT2);
++        pm_state.mem_pd_prot3 = get_vpu_mem_pd_vmod(VPU_PIC_ROT3);
++#endif
++#endif
++
++        DisableVideoLayer_NoDelay();
+         msleep(50);
++
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++        switch_vpu_mem_pd_vmod(VPU_VIU_VD1, VPU_MEM_POWER_DOWN);
++        switch_vpu_mem_pd_vmod(VPU_VIU_VD2, VPU_MEM_POWER_DOWN);
++        switch_vpu_mem_pd_vmod(VPU_DI_POST, VPU_MEM_POWER_DOWN);
++#ifdef USE_PROT
++        switch_vpu_mem_pd_vmod(VPU_PIC_ROT2, VPU_MEM_POWER_DOWN);
++        switch_vpu_mem_pd_vmod(VPU_PIC_ROT3, VPU_MEM_POWER_DOWN);
++#endif
++
++        vpu_delay_work_flag = 0;
++#endif
+     }
+ 
+     return 0;
+@@ -4047,11 +4091,20 @@ extern int power_key_pressed;
+ static int amvideo_class_resume(struct device *dev)
+ {
+     if (pm_state.event == PM_EVENT_SUSPEND) {
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++        switch_vpu_mem_pd_vmod(VPU_VIU_VD1, pm_state.mem_pd_vd1);
++        switch_vpu_mem_pd_vmod(VPU_VIU_VD2, pm_state.mem_pd_vd2);
++        switch_vpu_mem_pd_vmod(VPU_DI_POST, pm_state.mem_pd_di_post);
++#ifdef USE_PROT
++        switch_vpu_mem_pd_vmod(VPU_PIC_ROT2, pm_state.mem_pd_prot2);
++        switch_vpu_mem_pd_vmod(VPU_PIC_ROT3, pm_state.mem_pd_prot3);
++#endif
++#endif
+         WRITE_VCBUS_REG(VPP_MISC + cur_dev->vpp_off, pm_state.vpp_misc);
+         pm_state.event = -1;
+-         if(debug_flag& DEBUG_FLAG_BLACKOUT){  
+-            printk("%s write(VPP_MISC,%x)\n",__func__, pm_state.vpp_misc); 
+-         } 
++        if(debug_flag& DEBUG_FLAG_BLACKOUT){
++            printk("%s write(VPP_MISC,%x)\n",__func__, pm_state.vpp_misc);
++        }
+     }
+ 
+ #ifdef CONFIG_SCREEN_ON_EARLY
+-- 
+2.19.0
+

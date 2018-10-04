@@ -1,0 +1,1008 @@
+From c36a95170f456bd2c4b8232493621532aed65ba8 Mon Sep 17 00:00:00 2001
+From: "zhenfei.li" <zhenfei.li@amlogic>
+Date: Fri, 18 Jul 2014 16:10:45 +0800
+Subject: [PATCH 4540/5965] PD #92663: delete vm post process for increase
+ system effect.
+
+Squashed commit of the following:
+
+commit 1c812fa9472c8f85ce4c0cfa3c7e9ec771da3493
+Author: zhenfei.li <zhenfei.li@amlogic>
+Date:   Fri Jul 18 15:57:07 2014 +0800
+
+    camera: PD #92663: change some macro condition.
+
+    Change-Id: Id243990afa90c10bacc02434e5f8977d07d06b20
+
+commit cd57c28ba7190881d231783fc6d0716b5c09b60a
+Author: zhenfei.li <zhenfei.li@amlogic>
+Date:   Thu Jun 26 19:03:58 2014 +0800
+
+    camera: PD #92663: delete vm post process for increase system effect.
+---
+ drivers/amlogic/camera/ar0543.c |   2 +-
+ drivers/amlogic/camera/ar0833.c |   2 +-
+ drivers/amlogic/camera/bf3720.c |  12 +--
+ drivers/amlogic/camera/gc0308.c |  99 +++++++++++++++++++++----
+ drivers/amlogic/camera/gc2035.c |  35 +++++----
+ drivers/amlogic/camera/gc2155.c |   2 +-
+ drivers/amlogic/camera/hm5065.c |   2 +-
+ drivers/amlogic/camera/ov5640.c |   2 +-
+ drivers/amlogic/camera/ov5647.c |   2 +-
+ drivers/amlogic/camera/sp0838.c | 125 +++++++++++++++++++++++++-------
+ drivers/amlogic/camera/sp2518.c | 102 ++++++++++++++++++++++----
+ 11 files changed, 301 insertions(+), 84 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index 9c879d5cbb8b..f36db1bb674b 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -4171,7 +4171,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 	struct ar0543_fh  *fh = priv;
+ 
+ 	int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(ret == 0){
+ 		p->reserved  = convert_canvas_index(fh->fmt->fourcc, AR0543_RES0_CANVAS_INDEX+p->index*3);
+ 	}else{
+diff --git a/drivers/amlogic/camera/ar0833.c b/drivers/amlogic/camera/ar0833.c
+index 323db50a36a9..94565828eb6a 100755
+--- a/drivers/amlogic/camera/ar0833.c
++++ b/drivers/amlogic/camera/ar0833.c
+@@ -5040,7 +5040,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 	struct ar0833_fh  *fh = priv;
+ 
+ 	int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(ret == 0){
+ 		p->reserved  = convert_canvas_index(fh->fmt->fourcc, AR0833_RES0_CANVAS_INDEX+p->index*3);
+ 	}else{
+diff --git a/drivers/amlogic/camera/bf3720.c b/drivers/amlogic/camera/bf3720.c
+index 65fcd70454bb..f5a6ae40903e 100755
+--- a/drivers/amlogic/camera/bf3720.c
++++ b/drivers/amlogic/camera/bf3720.c
+@@ -2127,12 +2127,12 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 	struct bf3720_fh  *fh = priv;
+ 
+         int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+-                if(ret == 0){
+-                            p->reserved  = convert_canvas_index(fh->fmt->fourcc, BF3720_RES0_CANVAS_INDEX + p->index*3);
+-                        }else{
+-                                    p->reserved = 0;
+-                                }
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++		p->reserved  = convert_canvas_index(fh->fmt->fourcc, BF3720_RES0_CANVAS_INDEX + p->index*3);
++	}else{
++		p->reserved = 0;
++	}
+ #endif
+         return ret;
+ }
+diff --git a/drivers/amlogic/camera/gc0308.c b/drivers/amlogic/camera/gc0308.c
+index 2b082929ba59..966ef3e6e49e 100755
+--- a/drivers/amlogic/camera/gc0308.c
++++ b/drivers/amlogic/camera/gc0308.c
+@@ -29,7 +29,7 @@
+ #include <linux/kthread.h>
+ #include <linux/highmem.h>
+ #include <linux/freezer.h>
+-#include <media/videobuf-vmalloc.h>
++#include <media/videobuf-res.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <linux/wakelock.h>
+@@ -38,6 +38,7 @@
+ #include <media/v4l2-chip-ident.h>
+ #include <linux/amlogic/camera/aml_cam_info.h>
+ #include <linux/amlogic/vmapi.h>
++#include "common/vm.h"
+ 
+ #include <mach/am_regs.h>
+ #include <mach/pinmux.h>
+@@ -374,6 +375,8 @@ struct gc0308_buffer {
+ 	struct videobuf_buffer vb;
+ 
+ 	struct gc0308_fmt        *fmt;
++	
++	unsigned int canvas_id;
+ };
+ 
+ struct gc0308_dmaqueue {
+@@ -433,6 +436,7 @@ struct gc0308_fh {
+ 	unsigned int               width, height;
+ 	struct videobuf_queue      vb_vidq;
+ 
++	struct videobuf_res_privdata res;
+ 	enum v4l2_buf_type         type;
+ 	int			   input; 	/* Input Number on bars */
+ 	int  stream_on;
+@@ -1697,6 +1701,38 @@ unsigned char v4l_2_gc0308(int val)
+ 	else return 0;
+ }
+ 
++static int convert_canvas_index(unsigned int v4l2_format, unsigned int start_canvas)
++{
++	int canvas = start_canvas;
++
++	switch(v4l2_format){
++	case V4L2_PIX_FMT_RGB565X:
++	case V4L2_PIX_FMT_VYUY:
++		canvas = start_canvas;
++		break;
++	case V4L2_PIX_FMT_YUV444:
++	case V4L2_PIX_FMT_BGR24:
++	case V4L2_PIX_FMT_RGB24:
++		canvas = start_canvas;
++		break; 
++	case V4L2_PIX_FMT_NV12:
++	case V4L2_PIX_FMT_NV21: 
++		canvas = start_canvas | ((start_canvas+1)<<8);
++		break;
++	case V4L2_PIX_FMT_YVU420:
++	case V4L2_PIX_FMT_YUV420:
++		if(V4L2_PIX_FMT_YUV420 == v4l2_format){
++			canvas = start_canvas|((start_canvas+1)<<8)|((start_canvas+2)<<16);
++		}else{
++			canvas = start_canvas|((start_canvas+2)<<8)|((start_canvas+1)<<16);
++		}
++		break;
++	default:
++		break;
++	}
++	return canvas;
++}
++
+ static int gc0308_setting(struct gc0308_device *dev,int PROP_ID,int value )
+ {
+ 	int ret=0;
+@@ -1831,18 +1867,23 @@ static int gc0308_setting(struct gc0308_device *dev,int PROP_ID,int value )
+ static void gc0308_fillbuff(struct gc0308_fh *fh, struct gc0308_buffer *buf)
+ {
+ 	struct gc0308_device *dev = fh->dev;
+-	void *vbuf = videobuf_to_vmalloc(&buf->vb);
++	void *vbuf = (void *)videobuf_to_res(&buf->vb);
+ 	vm_output_para_t para = {0};
+ 	dprintk(dev,1,"%s\n", __func__);
+ 	if (!vbuf)
+ 		return;
+  /*  0x18221223 indicate the memory type is MAGIC_VMAL_MEM*/
++	if(buf->canvas_id == 0)
++		buf->canvas_id = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX+buf->vb.i*3);
+ 	para.mirror = gc0308_qctrl[5].default_value&3;// not set
+ 	para.v4l2_format = fh->fmt->fourcc;
+-	para.v4l2_memory = 0x18221223;
++	para.v4l2_memory = MAGIC_RE_MEM;
+ 	para.zoom = gc0308_qctrl[7].default_value;
+ 	para.vaddr = (unsigned)vbuf;
+ 	para.angle = gc0308_qctrl[8].default_value;
++	para.ext_canvas = buf->canvas_id;
++	para.width = buf->vb.width;
++	para.height = buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+@@ -1985,10 +2026,15 @@ static void gc0308_stop_thread(struct gc0308_dmaqueue  *dma_q)
+ static int
+ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ {
+-	struct gc0308_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc0308_fh *fh = container_of(res, struct gc0308_fh, res);
+ 	struct gc0308_device *dev  = fh->dev;
+     //int bytes = fh->fmt->depth >> 3 ;
+ 	*size = fh->width*fh->height*fh->fmt->depth >> 3;
++	int height = fh->height;
++	if(height==1080)
++		height = 1088;
++	*size = (fh->width*height*fh->fmt->depth)>>3;
+ 	if (0 == *count)
+ 		*count = 32;
+ 
+@@ -2003,7 +2049,8 @@ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ 
+ static void free_buffer(struct videobuf_queue *vq, struct gc0308_buffer *buf)
+ {
+-	struct gc0308_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc0308_fh *fh = container_of(res, struct gc0308_fh, res);
+ 	struct gc0308_device *dev  = fh->dev;
+ 
+ 	dprintk(dev, 1, "%s, state: %i\n", __func__, buf->vb.state);
+@@ -2012,7 +2059,7 @@ static void free_buffer(struct videobuf_queue *vq, struct gc0308_buffer *buf)
+ 	if (in_interrupt())
+ 		BUG();
+ 
+-	videobuf_vmalloc_free(&buf->vb);
++	videobuf_res_free(vq, &buf->vb);
+ 	dprintk(dev, 1, "free_buffer: freed\n");
+ 	buf->vb.state = VIDEOBUF_NEEDS_INIT;
+ }
+@@ -2023,7 +2070,8 @@ static int
+ buffer_prepare(struct videobuf_queue *vq, struct videobuf_buffer *vb,
+ 						enum v4l2_field field)
+ {
+-	struct gc0308_fh     *fh  = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc0308_fh *fh = container_of(res, struct gc0308_fh, res);
+ 	struct gc0308_device    *dev = fh->dev;
+ 	struct gc0308_buffer *buf = container_of(vb, struct gc0308_buffer, vb);
+ 	int rc;
+@@ -2067,7 +2115,8 @@ static void
+ buffer_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ {
+ 	struct gc0308_buffer    *buf  = container_of(vb, struct gc0308_buffer, vb);
+-	struct gc0308_fh        *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc0308_fh *fh = container_of(res, struct gc0308_fh, res);
+ 	struct gc0308_device       *dev  = fh->dev;
+ 	struct gc0308_dmaqueue *vidq = &dev->vidq;
+ 
+@@ -2080,7 +2129,8 @@ static void buffer_release(struct videobuf_queue *vq,
+ 			   struct videobuf_buffer *vb)
+ {
+ 	struct gc0308_buffer   *buf  = container_of(vb, struct gc0308_buffer, vb);
+-	struct gc0308_fh       *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc0308_fh *fh = container_of(res, struct gc0308_fh, res);
+ 	struct gc0308_device      *dev  = (struct gc0308_device *)fh->dev;
+ 
+ 	dprintk(dev, 1, "%s\n", __func__);
+@@ -2105,7 +2155,7 @@ static int vidioc_querycap(struct file *file, void  *priv,
+ 	struct gc0308_device *dev = fh->dev;
+ 
+ 	strcpy(cap->driver, "gc0308");
+-	strcpy(cap->card, "gc0308");
++	strcpy(cap->card, "gc0308.canvas");
+ 	strlcpy(cap->bus_info, dev->v4l2_dev.name, sizeof(cap->bus_info));
+ 	cap->version = GC0308_CAMERA_VERSION;
+ 	cap->capabilities =	V4L2_CAP_VIDEO_CAPTURE |
+@@ -2213,8 +2263,14 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ {
+ 	struct gc0308_fh *fh = priv;
+ 	struct videobuf_queue *q = &fh->vb_vidq;
++	int ret;
+ 
+-	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
++        f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
++            (f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
++                f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++        }
++	ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -2277,7 +2333,15 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct gc0308_fh  *fh = priv;
+ 
+-	return (videobuf_querybuf(&fh->vb_vidq, p));
++        int ret = videobuf_querybuf(&fh->vb_vidq, p);
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++		p->reserved  = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX + p->index*3);
++	}else{
++		p->reserved = 0;
++	}
++#endif
++	return ret;
+ }
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+@@ -2494,6 +2558,8 @@ static int gc0308_open(struct file *file)
+ 	struct gc0308_device *dev = video_drvdata(file);
+ 	struct gc0308_fh *fh = NULL;
+ 	int retval = 0;
++	resource_size_t mem_start = 0;
++        unsigned int mem_size = 0;
+ #if CONFIG_CMA
+     retval = vm_init_buf(16*SZ_1M);
+     if(retval <0)
+@@ -2552,9 +2618,14 @@ static int gc0308_open(struct file *file)
+ //    TVIN_SIG_FMT_CAMERA_1920X1080P_30Hz,
+ //    TVIN_SIG_FMT_CAMERA_1280X720P_30Hz,
+ 
+-	videobuf_queue_vmalloc_init(&fh->vb_vidq, &gc0308_video_qops,
++	get_vm_buf_info(&mem_start, &mem_size, NULL);
++	fh->res.start = mem_start;
++	fh->res.end = mem_start+mem_size-1;
++	fh->res.magic = MAGIC_RE_MEM;
++	fh->res.priv = NULL;
++	videobuf_queue_res_init(&fh->vb_vidq, &gc0308_video_qops,
+ 			NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
+-			sizeof(struct gc0308_buffer), fh,NULL);
++					sizeof(struct gc0308_buffer), (void*)&fh->res, NULL);
+ 
+ 	gc0308_start_thread(fh);
+ 
+diff --git a/drivers/amlogic/camera/gc2035.c b/drivers/amlogic/camera/gc2035.c
+index 810d64c7864f..08bc3a1cd327 100755
+--- a/drivers/amlogic/camera/gc2035.c
++++ b/drivers/amlogic/camera/gc2035.c
+@@ -2946,11 +2946,11 @@ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+         struct videobuf_res_privdata *res = vq->priv_data;
+         struct gc2035_fh *fh  = container_of(res, struct gc2035_fh, res);
+ 	struct gc2035_device *dev  = fh->dev;
+-    //int bytes = fh->fmt->depth >> 3 ;
+-       int height = fh->height;
+-       if(height==1080)
+-                   height = 1088;
+-       *size = (fh->width*height*fh->fmt->depth)>>3;
++	//int bytes = fh->fmt->depth >> 3 ;
++	int height = fh->height;
++	if(height==1080)
++		height = 1088;
++	*size = (fh->width*height*fh->fmt->depth)>>3;
+ 	if (0 == *count)
+ 		*count = 32;
+ 
+@@ -2972,11 +2972,11 @@ static void free_buffer(struct videobuf_queue *vq, struct gc2035_buffer *buf)
+ 	struct gc2035_device *dev  = fh->dev;
+ 
+ 	dprintk(dev, 1, "%s, state: %i\n", __func__, buf->vb.state);
+-    videobuf_waiton(vq, &buf->vb, 0, 0);
++	videobuf_waiton(vq, &buf->vb, 0, 0);
+ 	if (in_interrupt())
+ 		BUG();
+ 
+-       videobuf_res_free(vq, &buf->vb);
++	videobuf_res_free(vq, &buf->vb);
+ 
+ 	dprintk(dev, 1, "free_buffer: freed\n");
+ 	buf->vb.state = VIDEOBUF_NEEDS_INIT;
+@@ -3075,7 +3075,8 @@ static void buffer_release(struct videobuf_queue *vq,
+ 	//printk("----------- %s \n",__func__);
+ 
+ 	struct gc2035_buffer   *buf  = container_of(vb, struct gc2035_buffer, vb);
+-	struct gc2035_fh       *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct gc2035_fh *fh = container_of(res, struct gc2035_fh, res);
+ 	struct gc2035_device      *dev  = (struct gc2035_device *)fh->dev;
+ 
+ 	dprintk(dev, 1, "%s\n", __func__);
+@@ -3215,13 +3216,14 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ 	struct gc2035_fh *fh = priv;
+ 	struct videobuf_queue *q = &fh->vb_vidq;
+ 	struct gc2035_device *dev = fh->dev;
++	int ret;
+ 
+         f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
+ 	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
+             (f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
+                 f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
+         }
+-	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
++	ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -3270,12 +3272,12 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 	struct gc2035_fh  *fh = priv;
+ 
+         int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
+-                if(ret == 0){
+-                            p->reserved  = convert_canvas_index(fh->fmt->fourcc, GC2035_RES0_CANVAS_INDEX + p->index*3);
+-                        }else{
+-                                    p->reserved = 0;
+-                                }
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++		p->reserved  = convert_canvas_index(fh->fmt->fourcc, GC2035_RES0_CANVAS_INDEX + p->index*3);
++	}else{
++		p->reserved = 0;
++	}
+ #endif
+         return ret;
+ }
+@@ -3319,7 +3321,8 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 		return -EINVAL;
+ 	if (i != fh->type)
+ 		return -EINVAL;
+-
++	
++	memset( &para, 0, sizeof( para ));
+ 	para.port  = TVIN_PORT_CAMERA;
+ 	para.fmt = TVIN_SIG_FMT_MAX;
+ 	para.frame_rate = gc2035_frmintervals_active.denominator;
+diff --git a/drivers/amlogic/camera/gc2155.c b/drivers/amlogic/camera/gc2155.c
+index 6f5af9f21b99..30b83fa5073e 100755
+--- a/drivers/amlogic/camera/gc2155.c
++++ b/drivers/amlogic/camera/gc2155.c
+@@ -2987,7 +2987,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ 	struct gc2155_fh  *fh = priv;
+ 
+         int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(ret == 0) {
+ 		p->reserved  = convert_canvas_index(fh->fmt->fourcc, GC2155_RES0_CANVAS_INDEX + p->index*3);
+ 	} else {
+diff --git a/drivers/amlogic/camera/hm5065.c b/drivers/amlogic/camera/hm5065.c
+index 09b09dfa032d..1d80fb871650 100755
+--- a/drivers/amlogic/camera/hm5065.c
++++ b/drivers/amlogic/camera/hm5065.c
+@@ -1922,7 +1922,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct hm5065_fh  *fh = priv;
+ 	int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(ret == 0){
+ 	    p->reserved  = convert_canvas_index(fh->fmt->fourcc, HM5065_RES0_CANVAS_INDEX+p->index*3);
+ 	}else{
+diff --git a/drivers/amlogic/camera/ov5640.c b/drivers/amlogic/camera/ov5640.c
+index 84de61a55c25..374688da2171 100755
+--- a/drivers/amlogic/camera/ov5640.c
++++ b/drivers/amlogic/camera/ov5640.c
+@@ -4094,7 +4094,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct ov5640_fh  *fh = priv;
+ 	int ret = videobuf_querybuf(&fh->vb_vidq, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+ 	if(ret == 0){
+ 	    p->reserved  = convert_canvas_index(fh->fmt->fourcc, OV5640_RES0_CANVAS_INDEX+p->index*3);
+ 	}else{
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index 2d028e443305..93690f11b342 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -3886,7 +3886,7 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+         struct ov5647_device *dev = video_drvdata(file);
+ 
+         int ret = vb2_ioctl_querybuf(file, priv, p);
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+         if(ret == 0){
+                 p->reserved  = convert_canvas_index(dev->fmt->fourcc, OV5647_RES0_CANVAS_INDEX+p->index*3);
+         }else{
+diff --git a/drivers/amlogic/camera/sp0838.c b/drivers/amlogic/camera/sp0838.c
+index 9dceec947774..6a4b406e6740 100755
+--- a/drivers/amlogic/camera/sp0838.c
++++ b/drivers/amlogic/camera/sp0838.c
+@@ -29,7 +29,7 @@
+ #include <linux/kthread.h>
+ #include <linux/highmem.h>
+ #include <linux/freezer.h>
+-#include <media/videobuf-vmalloc.h>
++#include <media/videobuf-res.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <linux/wakelock.h>
+@@ -38,6 +38,7 @@
+ #include <media/v4l2-chip-ident.h>
+ #include <linux/amlogic/camera/aml_cam_info.h>
+ #include <linux/amlogic/vmapi.h>
++#include "common/vm.h"
+ 
+ #include <mach/am_regs.h>
+ #include <mach/pinmux.h>
+@@ -420,6 +421,8 @@ struct sp0838_buffer {
+ 	struct videobuf_buffer vb;
+ 
+ 	struct sp0838_fmt        *fmt;
++	
++	unsigned int canvas_id;
+ };
+ 
+ struct sp0838_dmaqueue {
+@@ -479,6 +482,7 @@ struct sp0838_fh {
+ 	unsigned int               width, height;
+ 	struct videobuf_queue      vb_vidq;
+ 
++	struct videobuf_res_privdata res;
+ 	enum v4l2_buf_type         type;
+ 	int			   input; 	/* Input Number on bars */
+ 	int  stream_on;
+@@ -1225,6 +1229,38 @@ unsigned char v4l_2_sp0838(int val)
+ 	else return 0;
+ }
+ 
++static int convert_canvas_index(unsigned int v4l2_format, unsigned int start_canvas)
++{
++	int canvas = start_canvas;
++
++	switch(v4l2_format){
++	case V4L2_PIX_FMT_RGB565X:
++	case V4L2_PIX_FMT_VYUY:
++		canvas = start_canvas;
++		break;
++	case V4L2_PIX_FMT_YUV444:
++	case V4L2_PIX_FMT_BGR24:
++	case V4L2_PIX_FMT_RGB24:
++		canvas = start_canvas;
++		break; 
++	case V4L2_PIX_FMT_NV12:
++	case V4L2_PIX_FMT_NV21: 
++		canvas = start_canvas | ((start_canvas+1)<<8);
++		break;
++	case V4L2_PIX_FMT_YVU420:
++	case V4L2_PIX_FMT_YUV420:
++		if(V4L2_PIX_FMT_YUV420 == v4l2_format){
++			canvas = start_canvas|((start_canvas+1)<<8)|((start_canvas+2)<<16);
++		}else{
++			canvas = start_canvas|((start_canvas+2)<<8)|((start_canvas+1)<<16);
++		}
++		break;
++	default:
++		break;
++	}
++	return canvas;
++}
++
+ static int sp0838_setting(struct sp0838_device *dev,int PROP_ID,int value )
+ {
+ 	int ret=0;
+@@ -1313,18 +1349,22 @@ static int sp0838_setting(struct sp0838_device *dev,int PROP_ID,int value )
+ static void sp0838_fillbuff(struct sp0838_fh *fh, struct sp0838_buffer *buf)
+ {
+ 	struct sp0838_device *dev = fh->dev;
+-	void *vbuf = videobuf_to_vmalloc(&buf->vb);
++	void *vbuf = (void *)videobuf_to_res(&buf->vb);
+ 	vm_output_para_t para = {0};
+ 	dprintk(dev,1,"%s\n", __func__);
+ 	if (!vbuf)
+ 		return;
+  /*  0x18221223 indicate the memory type is MAGIC_VMAL_MEM*/
+-	//para.mirror = sp0838_qctrl[5].default_value&3;;// not set
++	if(buf->canvas_id == 0)
++		buf->canvas_id = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX+buf->vb.i*3);
+ 	para.v4l2_format = fh->fmt->fourcc;
+-	para.v4l2_memory = 0x18221223;
++	para.v4l2_memory = MAGIC_RE_MEM;
+ 	para.zoom = sp0838_qctrl[7].default_value;
+ 	para.vaddr = (unsigned)vbuf;
+ 	para.angle =sp0838_qctrl[8].default_value;
++	para.ext_canvas = buf->canvas_id;
++        para.width = buf->vb.width;
++        para.height = buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+@@ -1467,10 +1507,14 @@ static void sp0838_stop_thread(struct sp0838_dmaqueue  *dma_q)
+ static int
+ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ {
+-	struct sp0838_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp0838_fh *fh = container_of(res, struct sp0838_fh, res);
+ 	struct sp0838_device *dev  = fh->dev;
+-    //int bytes = fh->fmt->depth >> 3 ;
+-	*size = fh->width*fh->height*fh->fmt->depth >> 3;
++	//int bytes = fh->fmt->depth >> 3 ;
++	int height = fh->height;
++	if(height==1080)
++                   height = 1088;
++	*size = (fh->width*height*fh->fmt->depth)>>3;
+ 	if (0 == *count)
+ 		*count = 32;
+ 
+@@ -1485,7 +1529,8 @@ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ 
+ static void free_buffer(struct videobuf_queue *vq, struct sp0838_buffer *buf)
+ {
+-	struct sp0838_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp0838_fh *fh = container_of(res, struct sp0838_fh, res);
+ 	struct sp0838_device *dev  = fh->dev;
+ 
+ 	dprintk(dev, 1, "%s, state: %i\n", __func__, buf->vb.state);
+@@ -1494,7 +1539,7 @@ static void free_buffer(struct videobuf_queue *vq, struct sp0838_buffer *buf)
+ 	if (in_interrupt())
+ 		BUG();
+ 
+-	videobuf_vmalloc_free(&buf->vb);
++	videobuf_res_free(vq, &buf->vb);
+ 	dprintk(dev, 1, "free_buffer: freed\n");
+ 	buf->vb.state = VIDEOBUF_NEEDS_INIT;
+ }
+@@ -1505,7 +1550,8 @@ static int
+ buffer_prepare(struct videobuf_queue *vq, struct videobuf_buffer *vb,
+ 						enum v4l2_field field)
+ {
+-	struct sp0838_fh     *fh  = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp0838_fh *fh = container_of(res, struct sp0838_fh, res);
+ 	struct sp0838_device    *dev = fh->dev;
+ 	struct sp0838_buffer *buf = container_of(vb, struct sp0838_buffer, vb);
+ 	int rc;
+@@ -1549,7 +1595,8 @@ static void
+ buffer_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ {
+ 	struct sp0838_buffer    *buf  = container_of(vb, struct sp0838_buffer, vb);
+-	struct sp0838_fh        *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp0838_fh *fh = container_of(res, struct sp0838_fh, res);
+ 	struct sp0838_device       *dev  = fh->dev;
+ 	struct sp0838_dmaqueue *vidq = &dev->vidq;
+ 
+@@ -1562,7 +1609,8 @@ static void buffer_release(struct videobuf_queue *vq,
+ 			   struct videobuf_buffer *vb)
+ {
+ 	struct sp0838_buffer   *buf  = container_of(vb, struct sp0838_buffer, vb);
+-	struct sp0838_fh       *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp0838_fh *fh = container_of(res, struct sp0838_fh, res);
+ 	struct sp0838_device      *dev  = (struct sp0838_device *)fh->dev;
+ 
+ 	dprintk(dev, 1, "%s\n", __func__);
+@@ -1587,7 +1635,7 @@ static int vidioc_querycap(struct file *file, void  *priv,
+ 	struct sp0838_device *dev = fh->dev;
+ 
+ 	strcpy(cap->driver, "sp0838");
+-	strcpy(cap->card, "sp0838");
++	strcpy(cap->card, "sp0838.canvas");
+ 	strlcpy(cap->bus_info, dev->v4l2_dev.name, sizeof(cap->bus_info));
+ 	cap->version = SP0838_CAMERA_VERSION;
+ 	cap->capabilities =	V4L2_CAP_VIDEO_CAPTURE |
+@@ -1694,8 +1742,15 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ {
+ 	struct sp0838_fh *fh = priv;
+ 	struct videobuf_queue *q = &fh->vb_vidq;
++	int ret;
++	
++	f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
++			(f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
++		f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++	}
+ 
+-	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
++	ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -1757,7 +1812,15 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct sp0838_fh  *fh = priv;
+ 
+-	return (videobuf_querybuf(&fh->vb_vidq, p));
++        int ret = videobuf_querybuf(&fh->vb_vidq, p);
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++		p->reserved  = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX + p->index*3);
++	}else{
++		p->reserved = 0;
++	}
++#endif
++	return ret;
+ }
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+@@ -1787,13 +1850,13 @@ static int vidiocgmbuf(struct file *file, void *priv, struct video_mbuf *mbuf)
+ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ {
+ 	struct sp0838_fh  *fh = priv;
+-    vdin_parm_t para;
+-    int ret = 0 ;
++	vdin_parm_t para;
++	int ret = 0 ;
+ 	if (fh->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+ 		return -EINVAL;
+ 	if (i != fh->type)
+ 		return -EINVAL;
+-    memset( &para, 0, sizeof( para ));
++	memset( &para, 0, sizeof( para ));
+ 	para.port  = TVIN_PORT_CAMERA;
+ 	para.fmt = TVIN_SIG_FMT_MAX;
+ 	para.frame_rate = sp0838_frmintervals_active.denominator;
+@@ -1804,6 +1867,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	para.hs_bp = 0;
+ 	para.vs_bp = 2;
+ 	para.cfmt = TVIN_YVYU422;
++        para.dfmt = TVIN_NV21;
+ 	para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;	
+ 	para.skip_count =  2; //skip_num
+ 	printk("0a19,h=%d, v=%d, frame_rate=%d\n", sp0838_h_active, sp0838_v_active, sp0838_frmintervals_active.denominator);
+@@ -1819,16 +1883,16 @@ static int vidioc_streamoff(struct file *file, void *priv, enum v4l2_buf_type i)
+ {
+ 	struct sp0838_fh  *fh = priv;
+ 
+-    int ret = 0 ;
++	int ret = 0 ;
+ 	if (fh->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+ 		return -EINVAL;
+ 	if (i != fh->type)
+ 		return -EINVAL;
+ 	ret = videobuf_streamoff(&fh->vb_vidq);
+-    if(ret == 0 ){
+-        vops->stop_tvin_service(0);
+-        fh->stream_on        = 0;
+-    }
++	if(ret == 0 ){
++		vops->stop_tvin_service(0);
++		fh->stream_on        = 0;
++	}
+ 	return ret;
+ }
+ 
+@@ -1972,6 +2036,8 @@ static int sp0838_open(struct file *file)
+ 	struct sp0838_device *dev = video_drvdata(file);
+ 	struct sp0838_fh *fh = NULL;
+ 	int retval = 0;
++	resource_size_t mem_start = 0;
++	unsigned int mem_size = 0;
+ #if CONFIG_CMA
+     retval = vm_init_buf(16*SZ_1M);
+     if(retval <0)
+@@ -2030,9 +2096,14 @@ static int sp0838_open(struct file *file)
+ //    TVIN_SIG_FMT_CAMERA_1920X1080P_30Hz,
+ //    TVIN_SIG_FMT_CAMERA_1280X720P_30Hz,
+ 
+-	videobuf_queue_vmalloc_init(&fh->vb_vidq, &sp0838_video_qops,
+-			NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
+-			sizeof(struct sp0838_buffer), fh,NULL);
++	get_vm_buf_info(&mem_start, &mem_size, NULL);
++	fh->res.start = mem_start;
++	fh->res.end = mem_start+mem_size-1;
++	fh->res.magic = MAGIC_RE_MEM;
++	fh->res.priv = NULL;
++	videobuf_queue_res_init(&fh->vb_vidq, &sp0838_video_qops,
++	NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
++	sizeof(struct sp0838_buffer), (void*)&fh->res, NULL);
+ 
+ 	sp0838_start_thread(fh);
+ 
+@@ -2201,7 +2272,7 @@ static int sp0838_probe(struct i2c_client *client,
+ 	int err;
+ 	struct sp0838_device *t;
+ 	struct v4l2_subdev *sd;
+-    vops = get_vdin_v4l2_ops();
++	vops = get_vdin_v4l2_ops();
+ 	v4l_info(client, "chip found @ 0x%x (%s)\n",
+ 			client->addr << 1, client->adapter->name);
+ 	t = kzalloc(sizeof(*t), GFP_KERNEL);
+diff --git a/drivers/amlogic/camera/sp2518.c b/drivers/amlogic/camera/sp2518.c
+index c96ea4d6733d..578a3057609b 100755
+--- a/drivers/amlogic/camera/sp2518.c
++++ b/drivers/amlogic/camera/sp2518.c
+@@ -29,7 +29,7 @@
+ #include <linux/kthread.h>
+ #include <linux/highmem.h>
+ #include <linux/freezer.h>
+-#include <media/videobuf-vmalloc.h>
++#include <media/videobuf-res.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <linux/wakelock.h>
+@@ -45,6 +45,7 @@
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ #include <mach/mod_gate.h>
+ #endif
++#include "common/vm.h"
+ 
+ #define SP2518_CAMERA_MODULE_NAME "sp2518"
+ 
+@@ -382,6 +383,8 @@ struct sp2518_buffer {
+ 	struct videobuf_buffer vb;
+ 
+ 	struct sp2518_fmt        *fmt;
++	
++	unsigned int canvas_id;
+ };
+ 
+ struct sp2518_dmaqueue {
+@@ -440,6 +443,7 @@ struct sp2518_fh {
+ 	unsigned int               width, height;
+ 	struct videobuf_queue      vb_vidq;
+ 
++	struct videobuf_res_privdata res;
+ 	enum v4l2_buf_type         type;
+ 	int			   input; 	/* Input Number on bars */
+ 	int  stream_on;
+@@ -1704,6 +1708,38 @@ unsigned char v4l_2_sp2518(int val)
+ 	else return 0;
+ }
+ 
++static int convert_canvas_index(unsigned int v4l2_format, unsigned int start_canvas)
++{
++	int canvas = start_canvas;
++
++	switch(v4l2_format){
++	case V4L2_PIX_FMT_RGB565X:
++	case V4L2_PIX_FMT_VYUY:
++		canvas = start_canvas;
++		break;
++	case V4L2_PIX_FMT_YUV444:
++	case V4L2_PIX_FMT_BGR24:
++	case V4L2_PIX_FMT_RGB24:
++		canvas = start_canvas;
++		break; 
++	case V4L2_PIX_FMT_NV12:
++	case V4L2_PIX_FMT_NV21: 
++		canvas = start_canvas | ((start_canvas+1)<<8);
++		break;
++	case V4L2_PIX_FMT_YVU420:
++	case V4L2_PIX_FMT_YUV420:
++		if(V4L2_PIX_FMT_YUV420 == v4l2_format){
++			canvas = start_canvas|((start_canvas+1)<<8)|((start_canvas+2)<<16);
++		}else{
++			canvas = start_canvas|((start_canvas+2)<<8)|((start_canvas+1)<<16);
++		}
++		break;
++	default:
++		break;
++	}
++	return canvas;
++}
++
+ static int sp2518_setting(struct sp2518_device *dev,int PROP_ID,int value )
+ {
+ #if 1 //zyy test
+@@ -1841,18 +1877,23 @@ static void power_down_sp2518(struct sp2518_device *dev)
+ static void sp2518_fillbuff(struct sp2518_fh *fh, struct sp2518_buffer *buf)
+ {
+ 	struct sp2518_device *dev = fh->dev;
+-	void *vbuf = videobuf_to_vmalloc(&buf->vb);
++	void *vbuf = (void *)videobuf_to_res(&buf->vb);
+ 	vm_output_para_t para = {0};
+ 	dprintk(dev,1,"%s\n", __func__);
+ 	if (!vbuf)
+ 		return;
+ 	/*  0x18221223 indicate the memory type is MAGIC_VMAL_MEM*/
++	if(buf->canvas_id == 0)
++           buf->canvas_id = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX+buf->vb.i*3);
+ 	para.mirror = sp2518_qctrl[5].default_value&3;// not set
+ 	para.v4l2_format = fh->fmt->fourcc;
+-	para.v4l2_memory = 0x18221223;
++	para.v4l2_memory = MAGIC_RE_MEM;
+ 	para.zoom = sp2518_qctrl[7].default_value;
+ 	para.angle = sp2518_qctrl[8].default_value;
+ 	para.vaddr = (unsigned)vbuf;
++	para.ext_canvas = buf->canvas_id;
++        para.width = buf->vb.width;
++        para.height = buf->vb.height;
+ 	vm_fill_buffer(&buf->vb,&para);
+ 	buf->vb.state = VIDEOBUF_DONE;
+ }
+@@ -1994,10 +2035,14 @@ static void sp2518_stop_thread(struct sp2518_dmaqueue  *dma_q)
+ static int
+ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ {
+-	struct sp2518_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp2518_fh *fh = container_of(res, struct sp2518_fh, res);
+ 	struct sp2518_device *dev  = fh->dev;
+     //int bytes = fh->fmt->depth >> 3 ;
+-	*size = (fh->width*fh->height*fh->fmt->depth)>>3;
++	int height = fh->height;
++	if(height==1080)
++		height = 1088;
++	*size = (fh->width*height*fh->fmt->depth)>>3;
+ 	if (0 == *count)
+ 		*count = 32;
+ 
+@@ -2012,7 +2057,8 @@ buffer_setup(struct videobuf_queue *vq, unsigned int *count, unsigned int *size)
+ 
+ static void free_buffer(struct videobuf_queue *vq, struct sp2518_buffer *buf)
+ {
+-	struct sp2518_fh  *fh = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp2518_fh *fh = container_of(res, struct sp2518_fh, res);
+ 	struct sp2518_device *dev  = fh->dev;
+ 
+ 	dprintk(dev, 1, "%s, state: %i\n", __func__, buf->vb.state);
+@@ -2020,7 +2066,7 @@ static void free_buffer(struct videobuf_queue *vq, struct sp2518_buffer *buf)
+ 	if (in_interrupt())
+ 		BUG();
+ 
+-	videobuf_vmalloc_free(&buf->vb);
++	videobuf_res_free(vq, &buf->vb);
+ 	dprintk(dev, 1, "free_buffer: freed\n");
+ 	buf->vb.state = VIDEOBUF_NEEDS_INIT;
+ }
+@@ -2031,7 +2077,8 @@ static int
+ buffer_prepare(struct videobuf_queue *vq, struct videobuf_buffer *vb,
+ 						enum v4l2_field field)
+ {
+-	struct sp2518_fh     *fh  = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp2518_fh *fh = container_of(res, struct sp2518_fh, res);
+ 	struct sp2518_device    *dev = fh->dev;
+ 	struct sp2518_buffer *buf = container_of(vb, struct sp2518_buffer, vb);
+ 	int rc;
+@@ -2075,7 +2122,8 @@ static void
+ buffer_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ {
+ 	struct sp2518_buffer    *buf  = container_of(vb, struct sp2518_buffer, vb);
+-	struct sp2518_fh        *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp2518_fh *fh = container_of(res, struct sp2518_fh, res);
+ 	struct sp2518_device       *dev  = fh->dev;
+ 	struct sp2518_dmaqueue *vidq = &dev->vidq;
+ 
+@@ -2088,7 +2136,8 @@ static void buffer_release(struct videobuf_queue *vq,
+ 			   struct videobuf_buffer *vb)
+ {
+ 	struct sp2518_buffer   *buf  = container_of(vb, struct sp2518_buffer, vb);
+-	struct sp2518_fh       *fh   = vq->priv_data;
++	struct videobuf_res_privdata *res = vq->priv_data;
++	struct sp2518_fh *fh = container_of(res, struct sp2518_fh, res);
+ 	struct sp2518_device      *dev  = (struct sp2518_device *)fh->dev;
+ 
+ 	dprintk(dev, 1, "%s\n", __func__);
+@@ -2113,7 +2162,7 @@ static int vidioc_querycap(struct file *file, void  *priv,
+ 	struct sp2518_device *dev = fh->dev;
+ 
+ 	strcpy(cap->driver, "sp2518");
+-	strcpy(cap->card, "sp2518");
++	strcpy(cap->card, "sp2518.canvas");
+ 	strlcpy(cap->bus_info, dev->v4l2_dev.name, sizeof(cap->bus_info));
+ 	cap->version = SP2518_CAMERA_VERSION;
+ 	cap->capabilities =	V4L2_CAP_VIDEO_CAPTURE |
+@@ -2222,8 +2271,15 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
+ 	struct sp2518_fh *fh = priv;
+ 	struct videobuf_queue *q = &fh->vb_vidq;
+ 	struct sp2518_device *dev = fh->dev;
++	int ret;
++
++	f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN-1) ) & (~(CANVAS_WIDTH_ALIGN-1));
++	if ((f->fmt.pix.pixelformat==V4L2_PIX_FMT_YVU420) ||
++			(f->fmt.pix.pixelformat==V4L2_PIX_FMT_YUV420)){
++		f->fmt.pix.width = (f->fmt.pix.width + (CANVAS_WIDTH_ALIGN*2-1) ) & (~(CANVAS_WIDTH_ALIGN*2-1));
++	}
+ 
+-	int ret = vidioc_try_fmt_vid_cap(file, fh, f);
++	ret = vidioc_try_fmt_vid_cap(file, fh, f);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -2291,7 +2347,15 @@ static int vidioc_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+ {
+ 	struct sp2518_fh  *fh = priv;
+ 
+-	return (videobuf_querybuf(&fh->vb_vidq, p));
++        int ret = videobuf_querybuf(&fh->vb_vidq, p);
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++	if(ret == 0){
++		p->reserved  = convert_canvas_index(fh->fmt->fourcc, CAMERA_USER_CANVAS_INDEX + p->index*3);
++	}else{
++		p->reserved = 0;
++	}
++#endif
++	return ret;
+ }
+ 
+ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+@@ -2340,6 +2404,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	para.hs_bp = 0;
+ 	para.vs_bp = 2;
+ 	para.cfmt = TVIN_YUV422;
++        para.dfmt = TVIN_NV21;
+ 	para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;	
+ 	para.skip_count =  2; //skip_num
+ 
+@@ -2509,6 +2574,8 @@ static int sp2518_open(struct file *file)
+ 	struct sp2518_device *dev = video_drvdata(file);
+ 	struct sp2518_fh *fh = NULL;
+ 	int retval = 0;
++	resource_size_t mem_start = 0;
++	unsigned int mem_size = 0;
+ #if CONFIG_CMA
+     retval = vm_init_buf(16*SZ_1M);
+     if(retval <0)
+@@ -2567,9 +2634,14 @@ static int sp2518_open(struct file *file)
+ //    TVIN_SIG_FMT_CAMERA_1920X1080P_30Hz,
+ //    TVIN_SIG_FMT_CAMERA_1280X720P_30Hz,
+ 
+-	videobuf_queue_vmalloc_init(&fh->vb_vidq, &sp2518_video_qops,
++	get_vm_buf_info(&mem_start, &mem_size, NULL);
++	fh->res.start = mem_start;
++	fh->res.end = mem_start+mem_size-1;
++	fh->res.magic = MAGIC_RE_MEM;
++	fh->res.priv = NULL;
++	videobuf_queue_res_init(&fh->vb_vidq, &sp2518_video_qops,
+ 			NULL, &dev->slock, fh->type, V4L2_FIELD_INTERLACED,
+-			sizeof(struct sp2518_buffer), fh,NULL);
++	sizeof(struct sp2518_buffer), (void*)&fh->res, NULL);
+ 
+ 	sp2518_start_thread(fh);
+ 	sp2518_have_open = 1;
+-- 
+2.19.0
+

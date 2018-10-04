@@ -1,0 +1,67 @@
+From fb531c9a730981b580955598bdaaa5e51c5ca915 Mon Sep 17 00:00:00 2001
+From: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Date: Mon, 18 Nov 2013 06:07:45 +0000
+Subject: [PATCH 3724/5965] ping: prevent NULL pointer dereference on write to
+ msg_name
+
+A plain read() on a socket does set msg->msg_name to NULL. So check for
+NULL pointer first.
+
+Signed-off-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ net/ipv4/ping.c | 30 +++++++++++++++++-------------
+ 1 file changed, 17 insertions(+), 13 deletions(-)
+
+diff --git a/net/ipv4/ping.c b/net/ipv4/ping.c
+index 71f6ad02fa67..231372ec50a0 100644
+--- a/net/ipv4/ping.c
++++ b/net/ipv4/ping.c
+@@ -875,10 +875,12 @@ int ping_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 	/* Copy the address and add cmsg data. */
+ 	if (family == AF_INET) {
+ 		sin = (struct sockaddr_in *) msg->msg_name;
+-		sin->sin_family = AF_INET;
+-		sin->sin_port = 0 /* skb->h.uh->source */;
+-		sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
+-		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
++		if (sin) {
++			sin->sin_family = AF_INET;
++			sin->sin_port = 0 /* skb->h.uh->source */;
++			sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
++			memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
++		}
+ 
+ 		if (isk->cmsg_flags)
+ 			ip_cmsg_recv(msg, skb);
+@@ -888,16 +890,18 @@ int ping_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 		struct ipv6_pinfo *np = inet6_sk(sk);
+ 		struct ipv6hdr *ip6 = ipv6_hdr(skb);
+ 		sin6 = (struct sockaddr_in6 *) msg->msg_name;
+-		sin6->sin6_family = AF_INET6;
+-		sin6->sin6_port = 0;
+-		sin6->sin6_addr = ip6->saddr;
+-
+-		if (np->sndflow)
+-			sin6->sin6_flowinfo = ip6_flowinfo(ip6);
++		if (sin6) {
++			sin6->sin6_family = AF_INET6;
++			sin6->sin6_port = 0;
++			sin6->sin6_addr = ip6->saddr;
++            if (np->sndflow)
++                sin6->sin6_flowinfo = ip6_flowinfo(ip6);
++
++            if (__ipv6_addr_needs_scope_id(
++                ipv6_addr_type(&sin6->sin6_addr)))
++                sin6->sin6_scope_id = IP6CB(skb)->iif;
++		}
+ 
+-		if (__ipv6_addr_needs_scope_id(
+-		    ipv6_addr_type(&sin6->sin6_addr)))
+-			sin6->sin6_scope_id = IP6CB(skb)->iif;
+ 
+ 		if (inet6_sk(sk)->rxopt.all)
+ 			pingv6_ops.ip6_datagram_recv_ctl(sk, msg, skb);
+-- 
+2.19.0
+

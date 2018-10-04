@@ -1,0 +1,1512 @@
+From 69e6d7b45ca9cbafe5e9149c671d6b244da4c7a8 Mon Sep 17 00:00:00 2001
+From: Tao Zeng <tao.zeng@amlogic.com>
+Date: Tue, 7 Jul 2015 15:44:10 +0800
+Subject: [PATCH 5710/5965] PD#108431: clock: add fixed pll mode for
+ M8/M8baby/G9TV/G9BB CPU
+
+Change-Id: Ie167b56f8969f34b0d64911ce2750ab865185704
+---
+ arch/arm/configs/meson8_defconfig             |   1 +
+ arch/arm/configs/mesong9bb_defconfig          |   1 +
+ arch/arm/configs/mesong9tv_defconfig          |   1 +
+ arch/arm/mach-meson8/clock.c                  | 216 +++++++++++++++++-
+ .../mach-meson8/include/mach/cpufreq_table.h  |  22 +-
+ arch/arm/mach-meson8b/clock.c                 | 173 +++++++++++++-
+ .../mach-meson8b/include/mach/cpufreq_table.h |  26 ++-
+ arch/arm/mach-mesong9bb/clock.c               | 185 ++++++++++++++-
+ .../include/mach/cpufreq_table.h              |  26 ++-
+ arch/arm/mach-mesong9tv/clock.c               | 210 ++++++++++++++++-
+ .../include/mach/cpufreq_table.h              |  20 ++
+ drivers/amlogic/cpufreq/Kconfig               |   1 -
+ drivers/amlogic/cpufreq/meson-cpufreq.c       |  61 ++++-
+ 13 files changed, 881 insertions(+), 62 deletions(-)
+ mode change 100755 => 100644 arch/arm/mach-meson8/clock.c
+ mode change 100755 => 100644 arch/arm/mach-meson8b/clock.c
+ mode change 100755 => 100644 arch/arm/mach-mesong9tv/clock.c
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 8445070e0a2b..a9f9693eeade 100644
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -493,3 +493,4 @@ CONFIG_CRYPTO_TWOFISH=y
+ CONFIG_CRYPTO_USER_API_SKCIPHER=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
++CONFIG_FIX_SYSPLL=y
+diff --git a/arch/arm/configs/mesong9bb_defconfig b/arch/arm/configs/mesong9bb_defconfig
+index 228da9f86905..06d8baa91b16 100644
+--- a/arch/arm/configs/mesong9bb_defconfig
++++ b/arch/arm/configs/mesong9bb_defconfig
+@@ -316,3 +316,4 @@ CONFIG_CRYPTO_ECB=y
+ CONFIG_CRYPTO_SHA256=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
++CONFIG_FIX_SYSPLL=y
+diff --git a/arch/arm/configs/mesong9tv_defconfig b/arch/arm/configs/mesong9tv_defconfig
+index 8b6c2d1c89ba..77d256721c53 100644
+--- a/arch/arm/configs/mesong9tv_defconfig
++++ b/arch/arm/configs/mesong9tv_defconfig
+@@ -331,3 +331,4 @@ CONFIG_CRYPTO_ECB=y
+ CONFIG_CRYPTO_SHA256=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
++CONFIG_FIX_SYSPLL=y
+diff --git a/arch/arm/mach-meson8/clock.c b/arch/arm/mach-meson8/clock.c
+old mode 100755
+new mode 100644
+index 475a09c631bf..cb5351924662
+--- a/arch/arm/mach-meson8/clock.c
++++ b/arch/arm/mach-meson8/clock.c
+@@ -52,9 +52,57 @@
+ #include <linux/delay.h>
+ extern struct arm_delay_ops arm_delay_ops;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++#include <linux/hrtimer.h>
++static int swing_inteval = 5000;
++extern unsigned int fixpll_target;
++extern int fix_syspll;
++extern int fixpll_freq_verify(unsigned long rate);
++struct virtual_clock {
++	unsigned long cur_rate;
++	struct hrtimer virtual_clock_timer;
++};
++static struct virtual_clock fixpll_clock;
++
++static atomic_t pll_changing;
++static int in_virtual_clock = 0;
++static enum hrtimer_restart virtual_clock_work(struct hrtimer *timer)
++{
++	static unsigned long cnt = 0;
++	static unsigned int bitmap[][4] = {
++		{1, 0, 1, 1},
++		{0, 1, 0, 1},
++		{0, 1, 0, 0}
++	};
++	struct virtual_clock *clk = container_of(timer, struct virtual_clock, virtual_clock_timer);
++	unsigned int tmp = (fixpll_target * 3 / 4);
++
++	if (tmp == clk->cur_rate) {
++		tmp = 1;
++	} else if (tmp < clk->cur_rate) {
++		tmp = 2;
++	} else {
++		tmp = 0;
++	}
++	if (atomic_read(&pll_changing) == 0) {
++		cnt++;
++		/* swing ext od */
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 7, 1);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, bitmap[tmp][cnt & 0x03], 2, 2);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 1, 7, 1);
++		udelay(5);
++		hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++	}
++	return HRTIMER_NORESTART;
++}
++#endif
++
+ 
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
++static int measure_cpu_clock = 0;
+ 
+ /**************** SYS PLL**************************/
+ #define SYS_PLL_TABLE_MIN	 24000000
+@@ -326,13 +374,16 @@ int    clk_measure(char  index )
+ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ {
+ 	int idx,dst;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div, rem;
++#endif
+ 	if (clk == NULL || IS_ERR(clk))
+ 		return -EINVAL;
+ 	
+ 	dst = rate;
+-	if (rate < SYS_PLL_TABLE_MIN) 
++	if (rate < SYS_PLL_TABLE_MIN)
+ 		dst = SYS_PLL_TABLE_MIN;
+-	else if (rate > SYS_PLL_TABLE_MAX) 
++	else if (rate > SYS_PLL_TABLE_MAX)
+ 		dst = SYS_PLL_TABLE_MAX;
+ 
+ 	if(dst < setup_a9_clk_min)
+@@ -340,8 +391,22 @@ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ 	else if(dst > setup_a9_clk_max)
+ 		dst = setup_a9_clk_max;
+  	 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (rate == 0) {
++			return 24000000;
++		}
++		div = (fixpll_target * 1000) / rate;
++		rem = (fixpll_target * 1000) - (div * rate);
++		if (!rem) {		// divider of fix pll
++			return rate;
++		} else if (fixpll_freq_verify(rate)) {
++			return rate;
++		}
++	}
++#endif
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
+-	//printk("sys round rate: %d -- %d\n",rate,sys_pll_settings[idx][0]);
++	//printk("sys round rate: %ld -- %d\n",rate,sys_pll_settings[idx][0]);
+ 	rate = sys_pll_settings[idx][0] * 1000000;
+ 	
+ 	return rate;
+@@ -707,6 +772,11 @@ static unsigned long clk_get_rate_xtal(struct clk * clkdev)
+ static unsigned long clk_get_rate_sys(struct clk * clkdev)
+ {
+ 	unsigned long clk;
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
+ 	if (clkdev && clkdev->rate)
+ 		clk = clkdev->rate;
+ 	else {
+@@ -730,6 +800,12 @@ static unsigned long clk_get_rate_a9(struct clk * clkdev)
+ 	unsigned long clk = 0;
+ 	unsigned int sysclk_cntl;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
++
+ 	if (clkdev && clkdev->rate)
+ 		return clkdev->rate;
+ 
+@@ -791,11 +867,19 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 	unsigned long parent = 0;
+ 	unsigned long oldcpu = clk_get_rate_a9(clk);
+ 	unsigned int cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
++	int test_n = 0;
+ 	
+ //	if ((cpu_clk_cntl & 3) == 1) {
+ 	{
++		unsigned long real_cpu;
+ 		parent = clk_get_rate_sys(clk->parent);
+ 		// CPU switch to xtal 
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			atomic_set(&pll_changing, 1);
++			in_virtual_clock = 0;
++		}
++	#endif
+ 		aml_write_reg32(P_HHI_SYS_CPU_CLK_CNTL, cpu_clk_cntl & ~(1 << 7));
+ 		if (oldcpu <= cpu) {
+ 			// when increasing frequency, lpj has already been adjusted
+@@ -817,6 +901,16 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 			udelay_scaled(100, oldcpu / 1000000, cpu / 1000000);
+ 		}
+ 
++		if (measure_cpu_clock) {
++			while (test_n < 5) {
++				real_cpu = clk_util_clk_msr(18) << 4;
++				if ((real_cpu < cpu && (cpu - real_cpu) > 48000000) ||
++					(real_cpu > cpu && (real_cpu - cpu) > 48000000)) {
++					pr_info("hope to set cpu clk as %ld, real value is %ld, time %d\n", cpu, real_cpu, test_n);
++				}
++				test_n++;
++			}
++		}
+ 		// CPU switch to sys pll
+ 		//cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
+ 		//aml_set_reg32_mask(P_HHI_SYS_CPU_CLK_CNTL, (1 << 7));
+@@ -1152,18 +1246,56 @@ static int set_sys_pll(struct clk *clk,  unsigned long dst)
+ 	unsigned int cpu_clk_cntl = 0;
+ 	unsigned int cntl;
+ 	latency_data_t latency;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div = 0, ext_div = 0, rem, virtual = 0;
++#endif
+ 
+ 	if (dst < SYS_PLL_TABLE_MIN) dst = SYS_PLL_TABLE_MIN;
+ 	if (dst > SYS_PLL_TABLE_MAX) dst = SYS_PLL_TABLE_MAX;
+  
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (fixpll_freq_verify(dst)) {
++			virtual = 1;
++		} else {
++			hrtimer_cancel(&fixpll_clock.virtual_clock_timer);
++		}
++		div = fixpll_target / (dst / 1000);
++		rem = (fixpll_target * 1000) - (div * dst);
++		if (!rem || virtual) {
++			idx = (((fixpll_target * 1000)- SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		} else {
++			idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		}
++	} else {
++		idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++	}
++#else
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++#endif
+ 	cpu_clk_cntl = sys_pll_settings[idx][1];
+ 	latency.d32 =  sys_pll_settings[idx][2];
+ 
+-	/*printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n",
+-									clk->rate / 1000000, dst / 1000000);*/
+-	pr_debug("CTS_CPU_CLK old_cntl=0x%x new_cntl=0x%x, latency: %x\n", 
+-									curr_cntl, cpu_clk_cntl, latency.d32);
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (div > 8) {
++			ext_div = div / 8;
++			div = 4;
++		}
++		if (div == 8) {
++			ext_div = 2;
++			div = 2;
++		}
++		cpu_clk_cntl &= ~(0x03 << 16);
++		cpu_clk_cntl |= ((div / 2) << 16);
++		if (ext_div) {
++			latency.b.ext_div_n = (ext_div - 1);
++		}
++		//printk("ext_div:%u, div:%u, rem:%d, idx:%d\n", ext_div, div, rem, idx);
++	}
++#endif
++
++	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n", clk->rate / 1000000, dst / 1000000);
+ 
+ 	if (cpu_clk_cntl != curr_cntl) {
+ SETPLL:
+@@ -1172,7 +1304,9 @@ SETPLL:
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 3, 2, 2);
+ 		else
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 2, 2);
+-		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
++		if ((cpu_clk_cntl & 0x3fff) != (curr_cntl & 0x3fff)) {
++			aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
++		}
+ 		if(only_once == 99){
+ 			only_once = 1;
+ 			aml_write_reg32(P_HHI_SYS_PLL_CNTL2, M8_SYS_PLL_CNTL_2);
+@@ -1185,7 +1319,7 @@ SETPLL:
+ 
+ 		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl);
+ 
+-		udelay_scaled(100, dst / 1000000, 24 /*clk_get_rate_xtal*/);
++		udelay_scaled(500, dst / 1000000, 24 /*clk_get_rate_xtal*/);
+ 
+ 		cntl = aml_read_reg32(P_HHI_SYS_PLL_CNTL);
+ 		if((cntl & (1<<31)) == 0){
+@@ -1216,12 +1350,31 @@ SETPLL:
+ 			goto SETPLL;
+ 		};
+ 
+-	}else {
++	} else {
+ 		//printk(KERN_INFO "(CTS_CPU_CLK) No Change (0x%x)\n", cpu_clk_cntl);
+ 	}
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (clk && !virtual)
++			clk->rate =	((idx * 24000000) + SYS_PLL_TABLE_MIN) / ((ext_div ? ext_div : 1) * (div ? div : 1));
++		else if (clk && virtual) {
++			clk->rate = dst;
++		}
++		if (virtual) {
++			atomic_set(&pll_changing, 0);
++			in_virtual_clock = 1;
++			fixpll_clock.cur_rate = dst / 1000;
++			hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++		}
++	} else {
++		if (clk)
++			clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++	}
++#else
+ 	if (clk)
+ 		clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++#endif
+ 
+ 	return idx;
+ }
+@@ -1683,9 +1836,46 @@ static ssize_t freq_limit_show(struct class *cla, struct class_attribute *attr,
+ 	return sprintf(buf, "%d\n", freq_limit);
+ }
+ 
++static ssize_t check_clock_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret != 1)
++		return -EINVAL;
++	measure_cpu_clock = input;
++	return count;
++}
++static ssize_t check_clock_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	printk("%u\n", measure_cpu_clock);
++	return sprintf(buf, "%d\n", measure_cpu_clock);
++}
++
++#ifdef CONFIG_FIX_SYSPLL
++static ssize_t swing_inteval_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret < 0 || ret > 100 * 1000)
++		return -EINVAL;
++	swing_inteval = input;
++	printk("set swing inteval to %d us\n", swing_inteval);
++	return count;
++}
++static ssize_t swing_inteval_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d us\n", swing_inteval);
++}
++#endif
+ 
+ static struct class_attribute freq_limit_class_attrs[] = {
+ 	__ATTR(limit, S_IRUGO|S_IWUSR|S_IWGRP, freq_limit_show, freq_limit_store),
++	__ATTR(check_clock, S_IRUGO|S_IWUSR|S_IWGRP, check_clock_show, check_clock_store),
++#ifdef CONFIG_FIX_SYSPLL
++	__ATTR(swing_inteval, S_IRUGO|S_IWUSR|S_IWGRP, swing_inteval_show, swing_inteval_store),
++#endif
+ 	__ATTR_NULL,
+ };
+ 
+@@ -1795,6 +1985,12 @@ static int __init meson_clock_init(void)
+ 	class_register(&meson_clktree_class);
+ #endif
+ 	class_register(&meson_freq_limit_class);
++#endif
++#ifdef CONFIG_FIX_SYSPLL
++	atomic_set(&pll_changing, 0);
++	hrtimer_init(&fixpll_clock.virtual_clock_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	fixpll_clock.virtual_clock_timer.function = virtual_clock_work;
++	printk("hrtimer for fix pll ok\n");
+ #endif
+ 	return 0;
+ }
+diff --git a/arch/arm/mach-meson8/include/mach/cpufreq_table.h b/arch/arm/mach-meson8/include/mach/cpufreq_table.h
+index 30c43ce7771e..2cc6bdb96a3d 100755
+--- a/arch/arm/mach-meson8/include/mach/cpufreq_table.h
++++ b/arch/arm/mach-meson8/include/mach/cpufreq_table.h
+@@ -23,4 +23,24 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+ 	{16	, 1800000  },
+ 	{17	, 1992000  },
+ 	{18	, CPUFREQ_TABLE_END},
+-};
+\ No newline at end of file
++};
++
++#ifdef CONFIG_FIX_SYSPLL
++static struct cpufreq_frequency_table meson_freq_table_fix_syspll[]=
++{
++    {0  ,  1},      //  1 / 32
++    {1  ,  2},      //  2 / 32
++    {2  ,  4},      //  4 / 32
++    {3  ,  8},      //  8 / 32
++    {4  , 16},      // 16 / 32
++    {5  , 20},      // 20 / 32
++    {6  , 24},      // 24 / 32
++    {7  , 28},      // 28 / 32
++    {8  , 32},      // 32 / 32
++    {9  , CPUFREQ_TABLE_END},
++};
++
++void adj_cpufreq_table(struct cpufreq_frequency_table *table, int target, int mpll);
++
++int fixpll_freq_verify(unsigned long rate);
++#endif
+diff --git a/arch/arm/mach-meson8b/clock.c b/arch/arm/mach-meson8b/clock.c
+old mode 100755
+new mode 100644
+index 86d04ff6cdf4..3e96faa23efb
+--- a/arch/arm/mach-meson8b/clock.c
++++ b/arch/arm/mach-meson8b/clock.c
+@@ -52,6 +52,52 @@
+ #include <linux/delay.h>
+ extern struct arm_delay_ops arm_delay_ops;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++#include <linux/hrtimer.h>
++static int swing_inteval = 5000;
++extern unsigned int fixpll_target;
++extern int fix_syspll;
++extern int fixpll_freq_verify(unsigned long rate);
++struct virtual_clock {
++	unsigned long cur_rate;
++	struct hrtimer virtual_clock_timer;
++};
++static struct virtual_clock fixpll_clock;
++
++static atomic_t pll_changing;
++static int in_virtual_clock = 0;
++static enum hrtimer_restart virtual_clock_work(struct hrtimer *timer)
++{
++	static unsigned long cnt = 0;
++	static unsigned int bitmap[][4] = {
++		{1, 0, 1, 1},
++		{0, 1, 0, 1},
++		{0, 1, 0, 0}
++	};
++	struct virtual_clock *clk = container_of(timer, struct virtual_clock, virtual_clock_timer);
++	unsigned int tmp = (fixpll_target * 3 / 4);
++
++	if (tmp == clk->cur_rate) {
++		tmp = 1;
++	} else if (tmp < clk->cur_rate) {
++		tmp = 2;
++	} else {
++		tmp = 0;
++	}
++	if (atomic_read(&pll_changing) == 0) {
++		cnt++;
++		/* swing ext od */
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 7, 1);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, bitmap[tmp][cnt & 0x03], 2, 2);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 1, 7, 1);
++		udelay(5);
++		hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++	}
++	return HRTIMER_NORESTART;
++}
++#endif
+ 
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
+@@ -327,6 +373,9 @@ int    clk_measure(char  index )
+ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ {
+ 	int idx,dst;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div, rem;
++#endif
+ 	if (clk == NULL || IS_ERR(clk))
+ 		return -EINVAL;
+ 	
+@@ -341,6 +390,20 @@ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ 	else if(dst > setup_a9_clk_max)
+ 		dst = setup_a9_clk_max;
+  	if ((rate != 1250000000)) {
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			if (rate == 0) {
++				return 24000000;
++			}
++			div = (fixpll_target * 1000) / rate;
++			rem = (fixpll_target * 1000) - (div * rate);
++			if (!rem) {		// divider of fix pll
++				return rate;
++			} else if (fixpll_freq_verify(rate)) {
++				return rate;
++			}
++		}
++	#endif
+ 	    idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
+         //printk("sys round rate: %ld -- %d\n",rate,sys_pll_settings[idx][0]);
+         rate = sys_pll_settings[idx][0] * 1000000;
+@@ -710,6 +773,11 @@ static unsigned long clk_get_rate_xtal(struct clk * clkdev)
+ static unsigned long clk_get_rate_sys(struct clk * clkdev)
+ {
+ 	unsigned long clk;
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
+ 	if (clkdev && clkdev->rate)
+ 		clk = clkdev->rate;
+ 	else {
+@@ -733,6 +801,12 @@ static unsigned long clk_get_rate_a9(struct clk * clkdev)
+ 	unsigned long clk = 0;
+ 	unsigned int sysclk_cntl;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
++
+ 	if (clkdev && clkdev->rate)
+ 		return clkdev->rate;
+ 
+@@ -804,7 +878,12 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 		unsigned long real_cpu;
+ 		parent = clk_get_rate_sys(clk->parent);
+ 		// CPU switch to xtal 
+-
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			atomic_set(&pll_changing, 1);
++			in_virtual_clock = 0;
++		}
++	#endif
+ 		aml_write_reg32(P_HHI_SYS_CPU_CLK_CNTL, cpu_clk_cntl & ~(1 << 7));
+ 		if (oldcpu <= cpu) {
+ 			// when increasing frequency, lpj has already been adjusted
+@@ -1190,18 +1269,56 @@ static int set_sys_pll(struct clk *clk,  unsigned long dst)
+ 	unsigned int cpu_clk_cntl = 0;
+ 	unsigned int cntl;
+ 	latency_data_t latency;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div = 0, ext_div = 0, rem, virtual = 0;
++#endif
+ 
+ 	if (dst < SYS_PLL_TABLE_MIN) dst = SYS_PLL_TABLE_MIN;
+ 	if (dst > SYS_PLL_TABLE_MAX) dst = SYS_PLL_TABLE_MAX;
+  
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (fixpll_freq_verify(dst)) {
++			virtual = 1;
++		} else {
++			hrtimer_cancel(&fixpll_clock.virtual_clock_timer);
++		}
++		div = fixpll_target / (dst / 1000);
++		rem = (fixpll_target * 1000) - (div * dst);
++		if (!rem || virtual) {
++			idx = (((fixpll_target * 1000)- SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		} else {
++			idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		}
++	} else {
++		idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++	}
++#else
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++#endif
+ 	cpu_clk_cntl = sys_pll_settings[idx][1];
+ 	latency.d32 =  sys_pll_settings[idx][2];
+ 
+-	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n",
+-									clk->rate / 1000000, dst / 1000000);
+-	pr_debug("CTS_CPU_CLK old_cntl=0x%x new_cntl=0x%x, latency: %x\n", 
+-									curr_cntl, cpu_clk_cntl, latency.d32);
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (div > 8) {
++			ext_div = div / 8;
++			div = 4;
++		}
++		if (div == 8) {
++			ext_div = 2;
++			div = 2;
++		}
++		cpu_clk_cntl &= ~(0x03 << 16);
++		cpu_clk_cntl |= ((div / 2) << 16);
++		if (ext_div) {
++			latency.b.ext_div_n = (ext_div - 1);
++		}
++		//printk("ext_div:%u, div:%u, rem:%d, idx:%d\n", ext_div, div, rem, idx);
++	}
++#endif
++
++	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n", clk->rate / 1000000, dst / 1000000);
+ 
+ 	if (cpu_clk_cntl != curr_cntl) {
+ SETPLL:
+@@ -1263,8 +1380,27 @@ SETPLL:
+ 		//printk(KERN_INFO "(CTS_CPU_CLK) No Change (0x%x)\n", cpu_clk_cntl);
+ 	}
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (clk && !virtual)
++			clk->rate =	((idx * 24000000) + SYS_PLL_TABLE_MIN) / ((ext_div ? ext_div : 1) * (div ? div : 1));
++		else if (clk && virtual) {
++			clk->rate = dst;
++		}
++		if (virtual) {
++			atomic_set(&pll_changing, 0);
++			in_virtual_clock = 1;
++			fixpll_clock.cur_rate = dst / 1000;
++			hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++		}
++	} else {
++		if (clk)
++			clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++	}
++#else
+ 	if (clk)
+ 		clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++#endif
+ 
+ 	return idx;
+ }
+@@ -1742,9 +1878,30 @@ static ssize_t check_clock_show(struct class *cla, struct class_attribute *attr,
+ 	return sprintf(buf, "%d\n", measure_cpu_clock);
+ }
+ 
++#ifdef CONFIG_FIX_SYSPLL
++static ssize_t swing_inteval_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret < 0 || ret > 100 * 1000)
++		return -EINVAL;
++	swing_inteval = input;
++	printk("set swing inteval to %d us\n", swing_inteval);
++	return count;
++}
++static ssize_t swing_inteval_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d us\n", swing_inteval);
++}
++#endif
++
+ static struct class_attribute freq_limit_class_attrs[] = {
+ 	__ATTR(limit, S_IRUGO|S_IWUSR|S_IWGRP, freq_limit_show, freq_limit_store),
+ 	__ATTR(check_clock, S_IRUGO|S_IWUSR|S_IWGRP, check_clock_show, check_clock_store),
++#ifdef CONFIG_FIX_SYSPLL
++	__ATTR(swing_inteval, S_IRUGO|S_IWUSR|S_IWGRP, swing_inteval_show, swing_inteval_store),
++#endif
+ 	__ATTR_NULL,
+ };
+ 
+@@ -1853,6 +2010,12 @@ static int __init meson_clock_init(void)
+ 	class_register(&meson_clktree_class);
+ #endif
+ 	class_register(&meson_freq_limit_class);
++#endif
++#ifdef CONFIG_FIX_SYSPLL
++	atomic_set(&pll_changing, 0);
++	hrtimer_init(&fixpll_clock.virtual_clock_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	fixpll_clock.virtual_clock_timer.function = virtual_clock_work;
++	printk("hrtimer for fix pll ok\n");
+ #endif
+ 	return 0;
+ }
+diff --git a/arch/arm/mach-meson8b/include/mach/cpufreq_table.h b/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
+index 37e1f6a77eae..8619dee2e613 100755
+--- a/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
++++ b/arch/arm/mach-meson8b/include/mach/cpufreq_table.h
+@@ -25,17 +25,19 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+ #ifdef CONFIG_FIX_SYSPLL
+ static struct cpufreq_frequency_table meson_freq_table_fix_syspll[]=
+ {
+-    {0	,   96000   },
+-    {1	,  192000   },
+-    {2  ,  384000   },
+-    {3  ,  768000   },
+-#if 1
+-    {4  , 1250000   },
+-    {5  , 1536000   },
+-    {6	, CPUFREQ_TABLE_END},
+-#else
+-    {4  , 1536000   },
+-    {5	, CPUFREQ_TABLE_END},
+-#endif
++    {0  ,  1},      //  1 / 32
++    {1  ,  2},      //  2 / 32
++    {2  ,  4},      //  4 / 32
++    {3  ,  8},      //  8 / 32
++    {4  , 16},      // 16 / 32
++    {5  , 20},      // 20 / 32
++    {6  , 24},      // 24 / 32
++    {7  , 28},      // 28 / 32
++    {8  , 32},      // 32 / 32
++    {9  , CPUFREQ_TABLE_END},
+ };
++
++void adj_cpufreq_table(struct cpufreq_frequency_table *table, int target, int mpll);
++
++int fixpll_freq_verify(unsigned long rate);
+ #endif
+diff --git a/arch/arm/mach-mesong9bb/clock.c b/arch/arm/mach-mesong9bb/clock.c
+index 65a7bc08c46d..552c4c2ebf45 100644
+--- a/arch/arm/mach-mesong9bb/clock.c
++++ b/arch/arm/mach-mesong9bb/clock.c
+@@ -47,6 +47,52 @@
+ #include <linux/delay.h>
+ extern struct arm_delay_ops arm_delay_ops;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++#include <linux/hrtimer.h>
++static int swing_inteval = 5000;
++extern unsigned int fixpll_target;
++extern int fix_syspll;
++extern int fixpll_freq_verify(unsigned long rate);
++struct virtual_clock {
++	unsigned long cur_rate;
++	struct hrtimer virtual_clock_timer;
++};
++static struct virtual_clock fixpll_clock;
++
++static atomic_t pll_changing;
++static int in_virtual_clock = 0;
++static enum hrtimer_restart virtual_clock_work(struct hrtimer *timer)
++{
++	static unsigned long cnt = 0;
++	static unsigned int bitmap[][4] = {
++		{1, 0, 1, 1},
++		{0, 1, 0, 1},
++		{0, 1, 0, 0}
++	};
++	struct virtual_clock *clk = container_of(timer, struct virtual_clock, virtual_clock_timer);
++	unsigned int tmp = (fixpll_target * 3 / 4);
++
++	if (tmp == clk->cur_rate) {
++		tmp = 1;
++	} else if (tmp < clk->cur_rate) {
++		tmp = 2;
++	} else {
++		tmp = 0;
++	}
++	if (atomic_read(&pll_changing) == 0) {
++		cnt++;
++		/* swing ext od */
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 7, 1);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, bitmap[tmp][cnt & 0x03], 2, 2);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 1, 7, 1);
++		udelay(5);
++		hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++	}
++	return HRTIMER_NORESTART;
++}
++#endif
+ 
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
+@@ -339,6 +385,9 @@ int clk_measure(char  index )
+ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ {
+ 	int idx,dst;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div, rem;
++#endif
+ 	if (clk == NULL || IS_ERR(clk))
+ 		return -EINVAL;
+ 
+@@ -352,11 +401,25 @@ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ 		dst = setup_a9_clk_min;
+ 	else if (dst > setup_a9_clk_max)
+ 		dst = setup_a9_clk_max;
+-
+-	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
+-	//printk("sys round rate: %d -- %d\n",rate,sys_pll_settings[idx][0]);
+-	rate = sys_pll_settings[idx][0] * 1000000;
+-
++	if ((rate != 1250000000)) {
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			if (rate == 0) {
++				return 24000000;
++			}
++			div = (fixpll_target * 1000) / rate;
++			rem = (fixpll_target * 1000) - (div * rate);
++			if (!rem) {		// divider of fix pll
++				return rate;
++			} else if (fixpll_freq_verify(rate)) {
++				return rate;
++			}
++		}
++	#endif
++		idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		//printk("sys round rate: %d -- %d\n",rate,sys_pll_settings[idx][0]);
++		rate = sys_pll_settings[idx][0] * 1000000;
++	}
+ 	return rate;
+ }
+ long clk_round_rate(struct clk *clk, unsigned long rate)
+@@ -721,6 +784,11 @@ static unsigned long clk_get_rate_xtal(struct clk * clkdev)
+ static unsigned long clk_get_rate_sys(struct clk * clkdev)
+ {
+ 	unsigned long clk;
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
+ 	if (clkdev && clkdev->rate)
+ 		clk = clkdev->rate;
+ 	else {
+@@ -744,6 +812,12 @@ static unsigned long clk_get_rate_a9(struct clk * clkdev)
+ 	unsigned long clk = 0;
+ 	unsigned int sysclk_cntl;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
++
+ 	if (clkdev && clkdev->rate)
+ 		return clkdev->rate;
+ 
+@@ -815,7 +889,12 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 		unsigned long real_cpu;
+ 		parent = clk_get_rate_sys(clk->parent);
+ 		// CPU switch to xtal
+-
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			atomic_set(&pll_changing, 1);
++			in_virtual_clock = 0;
++		}
++	#endif
+ 		aml_write_reg32(P_HHI_SYS_CPU_CLK_CNTL, cpu_clk_cntl & ~(1 << 7));
+ 		if (oldcpu <= cpu) {
+ 			// when increasing frequency, lpj has already been adjusted
+@@ -1201,18 +1280,56 @@ static int set_sys_pll(struct clk *clk,  unsigned long dst)
+ 	unsigned int cpu_clk_cntl = 0;
+ 	unsigned int cntl;
+ 	latency_data_t latency;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div = 0, ext_div = 0, rem, virtual = 0;
++#endif
+ 
+ 	if (dst < SYS_PLL_TABLE_MIN) dst = SYS_PLL_TABLE_MIN;
+ 	if (dst > SYS_PLL_TABLE_MAX) dst = SYS_PLL_TABLE_MAX;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (fixpll_freq_verify(dst)) {
++			virtual = 1;
++		} else {
++			hrtimer_cancel(&fixpll_clock.virtual_clock_timer);
++		}
++		div = fixpll_target / (dst / 1000);
++		rem = (fixpll_target * 1000) - (div * dst);
++		if (!rem || virtual) {
++			idx = (((fixpll_target * 1000)- SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		} else {
++			idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		}
++	} else {
++		idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++	}
++#else
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++#endif
+ 	cpu_clk_cntl = sys_pll_settings[idx][1];
+ 	latency.d32 =  sys_pll_settings[idx][2];
+ 
+-	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n",
+-									clk->rate / 1000000, dst / 1000000);
+-	pr_debug("CTS_CPU_CLK old_cntl=0x%x new_cntl=0x%x, latency: %x\n",
+-									curr_cntl, cpu_clk_cntl, latency.d32);
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (div > 8) {
++			ext_div = div / 8;
++			div = 4;
++		}
++		if (div == 8) {
++			ext_div = 2;
++			div = 2;
++		}
++		cpu_clk_cntl &= ~(0x03 << 16);
++		cpu_clk_cntl |= ((div / 2) << 16);
++		if (ext_div) {
++			latency.b.ext_div_n = (ext_div - 1);
++		}
++		//printk("ext_div:%u, div:%u, rem:%d, idx:%d\n", ext_div, div, rem, idx);
++	}
++#endif
++
++	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n", clk->rate / 1000000, dst / 1000000);
+ 
+ 	if (cpu_clk_cntl != curr_cntl) {
+ SETPLL:
+@@ -1238,7 +1355,7 @@ SETPLL:
+ 
+ 		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl);
+ 
+-		udelay_scaled(100, dst / 1000000, 24 /*clk_get_rate_xtal*/);
++		udelay_scaled(500, dst / 1000000, 24 /*clk_get_rate_xtal*/);
+ 
+ 		cntl = aml_read_reg32(P_HHI_SYS_PLL_CNTL);
+ 		if ((cntl & (1<<31)) == 0) {
+@@ -1273,8 +1390,27 @@ SETPLL:
+ 		//printk(KERN_INFO "(CTS_CPU_CLK) No Change (0x%x)\n", cpu_clk_cntl);
+ 	}
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (clk && !virtual)
++			clk->rate =	((idx * 24000000) + SYS_PLL_TABLE_MIN) / ((ext_div ? ext_div : 1) * (div ? div : 1));
++		else if (clk && virtual) {
++			clk->rate = dst;
++		}
++		if (virtual) {
++			atomic_set(&pll_changing, 0);
++			in_virtual_clock = 1;
++			fixpll_clock.cur_rate = dst / 1000;
++			hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++		}
++	} else {
++		if (clk)
++			clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++	}
++#else
+ 	if (clk)
+ 		clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++#endif
+ 
+ 	return idx;
+ }
+@@ -1752,9 +1888,30 @@ static ssize_t check_clock_show(struct class *cla, struct class_attribute *attr,
+ 	return sprintf(buf, "%d\n", measure_cpu_clock);
+ }
+ 
++#ifdef CONFIG_FIX_SYSPLL
++static ssize_t swing_inteval_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret < 0 || ret > 100 * 1000)
++		return -EINVAL;
++	swing_inteval = input;
++	printk("set swing inteval to %d us\n", swing_inteval);
++	return count;
++}
++static ssize_t swing_inteval_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d us\n", swing_inteval);
++}
++#endif
++
+ static struct class_attribute freq_limit_class_attrs[] = {
+ 	__ATTR(limit, S_IRUGO|S_IWUSR|S_IWGRP, freq_limit_show, freq_limit_store),
+ 	__ATTR(check_clock, S_IRUGO|S_IWUSR|S_IWGRP, check_clock_show, check_clock_store),
++#ifdef CONFIG_FIX_SYSPLL
++	__ATTR(swing_inteval, S_IRUGO|S_IWUSR|S_IWGRP, swing_inteval_show, swing_inteval_store),
++#endif
+ 	__ATTR_NULL,
+ };
+ 
+@@ -1870,6 +2027,12 @@ static int __init meson_clock_init(void)
+ 	class_register(&meson_clktree_class);
+ #endif
+ 	class_register(&meson_freq_limit_class);
++#endif
++#ifdef CONFIG_FIX_SYSPLL
++	atomic_set(&pll_changing, 0);
++	hrtimer_init(&fixpll_clock.virtual_clock_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	fixpll_clock.virtual_clock_timer.function = virtual_clock_work;
++	printk("hrtimer for fix pll ok\n");
+ #endif
+ 	return 0;
+ }
+diff --git a/arch/arm/mach-mesong9bb/include/mach/cpufreq_table.h b/arch/arm/mach-mesong9bb/include/mach/cpufreq_table.h
+index 219f47980cf9..8ae359f2d846 100644
+--- a/arch/arm/mach-mesong9bb/include/mach/cpufreq_table.h
++++ b/arch/arm/mach-mesong9bb/include/mach/cpufreq_table.h
+@@ -25,17 +25,19 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+ #ifdef CONFIG_FIX_SYSPLL
+ static struct cpufreq_frequency_table meson_freq_table_fix_syspll[]=
+ {
+-    {0	,   96000   },
+-    {1	,  192000   },
+-    {2  ,  384000   },
+-    {3  ,  768000   },
+-#if 1
+-    {4  , 1250000   },
+-    {5  , 1536000   },
+-    {6	, CPUFREQ_TABLE_END},
+-#else
+-    {4  , 1536000   },
+-    {5	, CPUFREQ_TABLE_END},
+-#endif
++    {0  ,  1},      //  1 / 32
++    {1  ,  2},      //  2 / 32
++    {2  ,  4},      //  4 / 32
++    {3  ,  8},      //  8 / 32
++    {4  , 16},      // 16 / 32
++    {5  , 20},      // 20 / 32
++    {6  , 24},      // 24 / 32
++    {7  , 28},      // 28 / 32
++    {8  , 32},      // 32 / 32
++    {9  , CPUFREQ_TABLE_END},
+ };
++
++void adj_cpufreq_table(struct cpufreq_frequency_table *table, int target, int mpll);
++
++int fixpll_freq_verify(unsigned long rate);
+ #endif
+diff --git a/arch/arm/mach-mesong9tv/clock.c b/arch/arm/mach-mesong9tv/clock.c
+old mode 100755
+new mode 100644
+index 1545806ef4bf..b9bb2f109181
+--- a/arch/arm/mach-mesong9tv/clock.c
++++ b/arch/arm/mach-mesong9tv/clock.c
+@@ -46,9 +46,56 @@
+ #include <linux/delay.h>
+ extern struct arm_delay_ops arm_delay_ops;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++#include <linux/hrtimer.h>
++static int swing_inteval = 5000;
++extern unsigned int fixpll_target;
++extern int fix_syspll;
++extern int fixpll_freq_verify(unsigned long rate);
++struct virtual_clock {
++	unsigned long cur_rate;
++	struct hrtimer virtual_clock_timer;
++};
++static struct virtual_clock fixpll_clock;
++
++static atomic_t pll_changing;
++static int in_virtual_clock = 0;
++static enum hrtimer_restart virtual_clock_work(struct hrtimer *timer)
++{
++	static unsigned long cnt = 0;
++	static unsigned int bitmap[][4] = {
++		{1, 0, 1, 1},
++		{0, 1, 0, 1},
++		{0, 1, 0, 0}
++	};
++	struct virtual_clock *clk = container_of(timer, struct virtual_clock, virtual_clock_timer);
++	unsigned int tmp = (fixpll_target * 3 / 4);
++
++	if (tmp == clk->cur_rate) {
++		tmp = 1;
++	} else if (tmp < clk->cur_rate) {
++		tmp = 2;
++	} else {
++		tmp = 0;
++	}
++	if (atomic_read(&pll_changing) == 0) {
++		cnt++;
++		/* swing ext od */
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 7, 1);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, bitmap[tmp][cnt & 0x03], 2, 2);
++		udelay(5);
++		aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 1, 7, 1);
++		udelay(5);
++		hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++	}
++	return HRTIMER_NORESTART;
++}
++#endif
+ 
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
++static int measure_cpu_clock = 0;
+ 
+ /**************** SYS PLL**************************/
+ #define SYS_PLL_TABLE_MIN		24000000
+@@ -338,6 +385,9 @@ int    clk_measure(char  index )
+ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ {
+ 	int idx,dst;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div, rem;
++#endif
+ 	if (clk == NULL || IS_ERR(clk))
+ 		return -EINVAL;
+ 
+@@ -352,6 +402,20 @@ long clk_round_rate_sys(struct clk *clk, unsigned long rate)
+ 	else if(dst > setup_a9_clk_max)
+ 		dst = setup_a9_clk_max;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (rate == 0) {
++			return 24000000;
++		}
++		div = (fixpll_target * 1000) / rate;
++		rem = (fixpll_target * 1000) - (div * rate);
++		if (!rem) {		// divider of fix pll
++			return rate;
++		} else if (fixpll_freq_verify(rate)) {
++			return rate;
++		}
++	}
++#endif
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
+ 	//printk("sys round rate: %d -- %d\n",rate,sys_pll_settings[idx][0]);
+ 	rate = sys_pll_settings[idx][0] * 1000000;
+@@ -719,6 +783,11 @@ static unsigned long clk_get_rate_xtal(struct clk * clkdev)
+ static unsigned long clk_get_rate_sys(struct clk * clkdev)
+ {
+ 	unsigned long clk;
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
+ 	if (clkdev && clkdev->rate)
+ 		clk = clkdev->rate;
+ 	else {
+@@ -742,6 +811,12 @@ static unsigned long clk_get_rate_a9(struct clk * clkdev)
+ 	unsigned long clk = 0;
+ 	unsigned int sysclk_cntl;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (in_virtual_clock && fix_syspll) {
++		return clkdev->rate;
++	}
++#endif
++
+ 	if (clkdev && clkdev->rate)
+ 		return clkdev->rate;
+ 
+@@ -803,11 +878,19 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 	unsigned long parent = 0;
+ 	unsigned long oldcpu = clk_get_rate_a9(clk);
+ 	unsigned int cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
++	int test_n = 0;
+ 
+ //	if ((cpu_clk_cntl & 3) == 1) {
+ 	{
++		unsigned long real_cpu;
+ 		parent = clk_get_rate_sys(clk->parent);
+ 		// CPU switch to xtal
++	#ifdef CONFIG_FIX_SYSPLL
++		if (fix_syspll) {
++			atomic_set(&pll_changing, 1);
++			in_virtual_clock = 0;
++		}
++	#endif
+ 		aml_write_reg32(P_HHI_SYS_CPU_CLK_CNTL, cpu_clk_cntl & ~(1 << 7));
+ 		if (oldcpu <= cpu) {
+ 			// when increasing frequency, lpj has already been adjusted
+@@ -831,10 +914,20 @@ static int _clk_set_rate_cpu(struct clk *clk, unsigned long cpu, unsigned long g
+ 			udelay_scaled(100, oldcpu / 1000000, cpu / 1000000);
+ 		}
+ 
++		if (measure_cpu_clock) {
++			while (test_n < 5) {
++				real_cpu = clk_util_clk_msr(18) << 4;
++				if ((real_cpu < cpu && (cpu - real_cpu) > 48000000) ||
++					(real_cpu > cpu && (real_cpu - cpu) > 48000000)) {
++					pr_info("hope to set cpu clk as %ld, real value is %ld, time %d\n", cpu, real_cpu, test_n);
++				}
++				test_n++;
++			}
++		}
+ 		// CPU switch to sys pll
+ 		//cpu_clk_cntl = aml_read_reg32(P_HHI_SYS_CPU_CLK_CNTL);
+ 		//aml_set_reg32_mask(P_HHI_SYS_CPU_CLK_CNTL, (1 << 7));
+- 	}
++	}
+ 
+ 	clk->rate = cpu;
+ 
+@@ -1157,18 +1250,56 @@ static int set_sys_pll(struct clk *clk,  unsigned long dst)
+ 	unsigned int cpu_clk_cntl = 0;
+ 	unsigned int cntl;
+ 	latency_data_t latency;
++#ifdef CONFIG_FIX_SYSPLL
++	unsigned int div = 0, ext_div = 0, rem, virtual = 0;
++#endif
+ 
+ 	if (dst < SYS_PLL_TABLE_MIN) dst = SYS_PLL_TABLE_MIN;
+ 	if (dst > SYS_PLL_TABLE_MAX) dst = SYS_PLL_TABLE_MAX;
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (fixpll_freq_verify(dst)) {
++			virtual = 1;
++		} else {
++			hrtimer_cancel(&fixpll_clock.virtual_clock_timer);
++		}
++		div = fixpll_target / (dst / 1000);
++		rem = (fixpll_target * 1000) - (div * dst);
++		if (!rem || virtual) {
++			idx = (((fixpll_target * 1000)- SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		} else {
++			idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++		}
++	} else {
++		idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++	}
++#else
+ 	idx = ((dst - SYS_PLL_TABLE_MIN) / 1000000) / 24;
++#endif
+ 	cpu_clk_cntl = sys_pll_settings[idx][1];
+ 	latency.d32 =  sys_pll_settings[idx][2];
+ 
+-	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n",
+-									clk->rate / 1000000, dst / 1000000);
+-	pr_debug("CTS_CPU_CLK old_cntl=0x%x new_cntl=0x%x, latency: %x\n",
+-									curr_cntl, cpu_clk_cntl, latency.d32);
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (div > 8) {
++			ext_div = div / 8;
++			div = 4;
++		}
++		if (div == 8) {
++			ext_div = 2;
++			div = 2;
++		}
++		cpu_clk_cntl &= ~(0x03 << 16);
++		cpu_clk_cntl |= ((div / 2) << 16);
++		if (ext_div) {
++			latency.b.ext_div_n = (ext_div - 1);
++		}
++		//printk("ext_div:%u, div:%u, rem:%d, idx:%d\n", ext_div, div, rem, idx);
++	}
++#endif
++
++	printk(KERN_DEBUG"CTS_CPU_CLK %4ld --> %4ld (MHz)\n", clk->rate / 1000000, dst / 1000000);
+ 
+ 	if (cpu_clk_cntl != curr_cntl) {
+ SETPLL:
+@@ -1177,7 +1308,9 @@ SETPLL:
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 3, 2, 2);
+ 		else
+ 			aml_set_reg32_bits(P_HHI_SYS_CPU_CLK_CNTL, 0, 2, 2);
+-		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
++		if ((cpu_clk_cntl & 0x3fff) != (curr_cntl & 0x3fff)) {
++			aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl | (1 << 29));
++		}
+ 		if(only_once == 99){
+ 			only_once = 1;
+ 			aml_write_reg32(P_HHI_SYS_PLL_CNTL2, G9TV_SYS_PLL_CNTL_2);
+@@ -1190,7 +1323,7 @@ SETPLL:
+ 
+ 		aml_write_reg32(P_HHI_SYS_PLL_CNTL,  cpu_clk_cntl);
+ 
+-		udelay_scaled(100, dst / 1000000, 24 /*clk_get_rate_xtal*/);
++		udelay_scaled(500, dst / 1000000, 24 /*clk_get_rate_xtal*/);
+ 
+ 		cntl = aml_read_reg32(P_HHI_SYS_PLL_CNTL);
+ 		if((cntl & (1<<31)) == 0){
+@@ -1225,8 +1358,27 @@ SETPLL:
+ 		//printk(KERN_INFO "(CTS_CPU_CLK) No Change (0x%x)\n", cpu_clk_cntl);
+ 	}
+ 
++#ifdef CONFIG_FIX_SYSPLL
++	if (fix_syspll) {
++		if (clk && !virtual)
++			clk->rate =	((idx * 24000000) + SYS_PLL_TABLE_MIN) / ((ext_div ? ext_div : 1) * (div ? div : 1));
++		else if (clk && virtual) {
++			clk->rate = dst;
++		}
++		if (virtual) {
++			atomic_set(&pll_changing, 0);
++			in_virtual_clock = 1;
++			fixpll_clock.cur_rate = dst / 1000;
++			hrtimer_start(&fixpll_clock.virtual_clock_timer, ktime_set(0, swing_inteval * 1000), HRTIMER_MODE_REL);
++		}
++	} else {
++		if (clk)
++			clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++	}
++#else
+ 	if (clk)
+ 		clk->rate = (idx * 24000000) + SYS_PLL_TABLE_MIN;
++#endif
+ 
+ 	return idx;
+ }
+@@ -1688,9 +1840,46 @@ static ssize_t freq_limit_show(struct class *cla, struct class_attribute *attr,
+ 	return sprintf(buf, "%d\n", freq_limit);
+ }
+ 
++static ssize_t check_clock_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret != 1)
++		return -EINVAL;
++	measure_cpu_clock = input;
++	return count;
++}
++static ssize_t check_clock_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	printk("%u\n", measure_cpu_clock);
++	return sprintf(buf, "%d\n", measure_cpu_clock);
++}
++
++#ifdef CONFIG_FIX_SYSPLL
++static ssize_t swing_inteval_store(struct class *cla, struct class_attribute *attr, const char *buf, size_t count)
++{
++	unsigned int input;
++	int ret;
++	ret = sscanf(buf, "%u", &input);
++	if (ret < 0 || ret > 100 * 1000)
++		return -EINVAL;
++	swing_inteval = input;
++	printk("set swing inteval to %d us\n", swing_inteval);
++	return count;
++}
++static ssize_t swing_inteval_show(struct class *cla, struct class_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d us\n", swing_inteval);
++}
++#endif
+ 
+ static struct class_attribute freq_limit_class_attrs[] = {
+ 	__ATTR(limit, S_IRUGO|S_IWUSR|S_IWGRP, freq_limit_show, freq_limit_store),
++	__ATTR(check_clock, S_IRUGO|S_IWUSR|S_IWGRP, check_clock_show, check_clock_store),
++#ifdef CONFIG_FIX_SYSPLL
++	__ATTR(swing_inteval, S_IRUGO|S_IWUSR|S_IWGRP, swing_inteval_show, swing_inteval_store),
++#endif
+ 	__ATTR_NULL,
+ };
+ 
+@@ -1811,7 +2000,12 @@ static int __init meson_clock_init(void)
+ 	aml_write_reg32(P_AO_RTI_PWR_CNTL_REG0,((aml_read_reg32(P_AO_RTI_PWR_CNTL_REG0)&~(0x1 << 8))|(0x2 << 10)));
+ 	aml_write_reg32(P_HHI_MPEG_CLK_CNTL, (aml_read_reg32(P_HHI_MPEG_CLK_CNTL) |(0x5<<12)|(0x1<<9)|(0x1<<8)|(0x1<<7)|(0x03)));
+ 	}
+-
++#ifdef CONFIG_FIX_SYSPLL
++	atomic_set(&pll_changing, 0);
++	hrtimer_init(&fixpll_clock.virtual_clock_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	fixpll_clock.virtual_clock_timer.function = virtual_clock_work;
++	printk("hrtimer for fix pll ok\n");
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/arch/arm/mach-mesong9tv/include/mach/cpufreq_table.h b/arch/arm/mach-mesong9tv/include/mach/cpufreq_table.h
+index b3ec0369f168..dc78afa6125f 100644
+--- a/arch/arm/mach-mesong9tv/include/mach/cpufreq_table.h
++++ b/arch/arm/mach-mesong9tv/include/mach/cpufreq_table.h
+@@ -23,3 +23,23 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+ 	{16	, 1800000  },
+ 	{17	, CPUFREQ_TABLE_END},
+ };
++
++#ifdef CONFIG_FIX_SYSPLL
++static struct cpufreq_frequency_table meson_freq_table_fix_syspll[]=
++{
++    {0  ,  1},      //  1 / 32
++    {1  ,  2},      //  2 / 32
++    {2  ,  4},      //  4 / 32
++    {3  ,  8},      //  8 / 32
++    {4  , 16},      // 16 / 32
++    {5  , 20},      // 20 / 32
++    {6  , 24},      // 24 / 32
++    {7  , 28},      // 28 / 32
++    {8  , 32},      // 32 / 32
++    {9  , CPUFREQ_TABLE_END},
++};
++
++void adj_cpufreq_table(struct cpufreq_frequency_table *table, int target, int mpll);
++
++int fixpll_freq_verify(unsigned long rate);
++#endif
+diff --git a/drivers/amlogic/cpufreq/Kconfig b/drivers/amlogic/cpufreq/Kconfig
+index f15df78b0540..761241b009cc 100644
+--- a/drivers/amlogic/cpufreq/Kconfig
++++ b/drivers/amlogic/cpufreq/Kconfig
+@@ -6,6 +6,5 @@ config AMLOGIC_MESON_CPUFREQ
+ 
+ config FIX_SYSPLL
+     bool "Meson CPU Fix syspll mode support"
+-    depends on ARCH_MESON8B 
+     help
+         This add fix sys pll mode support for M8baby
+diff --git a/drivers/amlogic/cpufreq/meson-cpufreq.c b/drivers/amlogic/cpufreq/meson-cpufreq.c
+index 5167043b571b..6989bd9e5c59 100755
+--- a/drivers/amlogic/cpufreq/meson-cpufreq.c
++++ b/drivers/amlogic/cpufreq/meson-cpufreq.c
+@@ -43,7 +43,45 @@ struct meson_cpufreq {
+ 
+ static struct meson_cpufreq cpufreq;
+ #ifdef CONFIG_FIX_SYSPLL
+-static int fix_syspll = 0;
++int fix_syspll = 0;
++EXPORT_SYMBOL(fix_syspll);
++unsigned int fixpll_target = 0;
++EXPORT_SYMBOL(fixpll_target);
++
++void adj_cpufreq_table(struct cpufreq_frequency_table *table, int target, int mpll)
++{
++    int i = 0;
++    while (1) {
++        if (table[i + 1].frequency == CPUFREQ_TABLE_END) {
++            break;
++        }
++        i++;
++    }
++    while (i >= 0) {
++        table[i].frequency = (target * table[i].frequency) / 32;
++        i--;
++    }
++}
++
++int fixpll_freq_verify(unsigned long rate)
++{
++    int i;
++    struct cpufreq_frequency_table *table;
++
++    table = meson_freq_table_fix_syspll;
++    rate = rate / 1000;
++
++    if (rate <= table[4].frequency ||
++        rate >= table[8].frequency) {
++        return 0;
++    }
++    for (i = 0; i < ARRAY_SIZE(meson_freq_table_fix_syspll); i++) {
++        if (rate == table[i].frequency) {
++            return 1;
++        }
++    }
++    return 0;
++}
+ #endif
+ 
+ static DEFINE_MUTEX(meson_cpufreq_mutex);
+@@ -95,6 +133,7 @@ static struct early_suspend early_suspend={
+ };
+ 
+ #endif
++
+ static int meson_cpufreq_target_locked(struct cpufreq_policy *policy,
+                                        unsigned int target_freq,
+                                        unsigned int relation)
+@@ -104,7 +143,7 @@ static int meson_cpufreq_target_locked(struct cpufreq_policy *policy,
+     int ret = -EINVAL;
+     unsigned int freqInt = 0;
+ #ifdef CONFIG_FIX_SYSPLL
+-	struct cpufreq_frequency_table *freq_table = NULL;
++    struct cpufreq_frequency_table *freq_table = NULL;
+     unsigned int freq_new, index;
+ #endif
+ 
+@@ -383,12 +422,30 @@ static int __init meson_cpufreq_probe(struct platform_device *pdev)
+ 		const void *prop;
+ #ifdef CONFIG_FIX_SYSPLL
+     int err = 0;
++    int using_mpll = 0;
+     if (pdev->dev.of_node) {
+         err = of_property_read_bool(pdev->dev.of_node, "syspll_fixed");
+         if (err) {
+             printk("%s:SYSPLL request to be fixed\n", __func__);
+             fix_syspll = 1;
+         }
++        err = of_property_read_bool(pdev->dev.of_node, "using_mpll");
++        if (err) {
++            printk("%s:using mpll\n", __func__);
++            using_mpll = 1;
++        }
++        err = of_property_read_u32(pdev->dev.of_node, "fixpll_target", &fixpll_target);
++        if (err) {
++            fixpll_target = 1536000;
++        } else {
++            printk("%s:SYSPLL fix to target:%u\n", __func__, fixpll_target);
++            /*
++             * update meson_freq_table_fix_syspll according fixpll_target
++             */
++            adj_cpufreq_table(meson_freq_table_fix_syspll, fixpll_target, using_mpll);
++            printk("%s, adj ok\n", __func__);
++
++        }
+     }
+ #endif
+ 		if (pdev->dev.of_node) {
+-- 
+2.19.0
+

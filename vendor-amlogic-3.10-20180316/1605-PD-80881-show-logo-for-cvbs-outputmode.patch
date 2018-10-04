@@ -1,0 +1,199 @@
+From d7ad86fc193b28f4640b48e1afe2b5c2f60e1866 Mon Sep 17 00:00:00 2001
+From: "wenbiao.zhang" <wenbiao.zhang@amlogic.com>
+Date: Sat, 19 Oct 2013 19:11:44 +0800
+Subject: [PATCH 1605/5965] PD #80881: show logo for cvbs outputmode
+
+Conflicts:
+
+	arch/arm/configs/meson8_defconfig
+	drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+---
+ arch/arm/configs/meson8_defconfig             |  1 +
+ drivers/amlogic/display/aml_logo/Kconfig      |  8 +-
+ .../aml_logo/logo_display/output_dev_osd.c    | 78 +++++++++++++++++++
+ include/linux/amlogic/logo/logo_dev_osd.h     | 10 +++
+ 4 files changed, 96 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index aa03be010361..f83604cfffd8 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -177,6 +177,7 @@ CONFIG_VSYNC_RDMA=y
+ CONFIG_AM_VIDEO=y
+ CONFIG_AM_ENCODER=y
+ CONFIG_AM_TV_OUTPUT2=y
++CONFIG_AM_HDMI_ONLY=y
+ CONFIG_FB_AM=y
+ CONFIG_FB_OSD2_CURSOR=y
+ CONFIG_FB_OSD2_DEFAULT_WIDTH=32
+diff --git a/drivers/amlogic/display/aml_logo/Kconfig b/drivers/amlogic/display/aml_logo/Kconfig
+index 192ab2b43e27..86d059e1b017 100755
+--- a/drivers/amlogic/display/aml_logo/Kconfig
++++ b/drivers/amlogic/display/aml_logo/Kconfig
+@@ -3,4 +3,10 @@ config  AM_LOGO
+ 	default n
+ 	depends on FB_AM && AM_GE2D
+ 	help 
+-		setup logo support osd parameter offered by Uboot 
+\ No newline at end of file
++		setup logo support osd parameter offered by Uboot 
++
++config AM_HDMI_ONLY
++	bool  "hdmi only"
++	default n
++	help
++		if enable hdmi only then only one display work
+diff --git a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+index f6b48ececf49..ce8a0a8d7e68 100755
+--- a/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
++++ b/drivers/amlogic/display/aml_logo/logo_display/output_dev_osd.c
+@@ -6,6 +6,7 @@
+ #include <linux/wait.h>
+ #include	"amlogo_log.h" 
+ #include <linux/amlogic/amlog.h>
++#include <linux/vout/vinfo.h>
+ 
+ #define DisableVideoLayer() \
+     do { aml_clr_reg32_mask(P_VPP_MISC, \
+@@ -32,6 +33,27 @@ static  logo_output_dev_t   output_osd1={
+ 		.deinit=osd_deinit,
+ 		},
+ };
++
++#ifdef CONFIG_AM_HDMI_ONLY
++static  hdmi_only_info_t hdmi_only_info[PARA_HDMI_ONLY]={
++	{"480i",VMODE_480I},
++	{"480p",VMODE_480P},
++	{"576i",VMODE_576I},
++	{"576p",VMODE_576P},
++	{"720p",VMODE_720P},
++	{"1080i",VMODE_1080I},
++	{"1080p",VMODE_1080P},
++	{"720p50hz",VMODE_720P_50HZ},
++	{"1080i50hz",VMODE_1080I_50HZ},
++	{"1080p50hz",VMODE_1080P_50HZ},
++	{"4k2k24hz",VMODE_4K2K_24HZ},
++};
++
++static vmode_t hdmimode_hdmionly = VMODE_1080P;
++static vmode_t cvbsmode_hdmionly = VMODE_480CVBS;
++#endif
++
++
+ static  inline void  setup_color_mode(const color_bit_define_t *color,u32  reg)
+ {
+ 	u32  data32;
+@@ -108,6 +130,8 @@ static int osd_hw_setup(logo_object_t *plogo)
+ }
+ static int osd0_init(logo_object_t *plogo)
+ {
++	int hpd_state = 0;
++
+ 	if(plogo->para.output_dev_type==output_osd0.idx)
+ 	{
+ 		if((plogo->platform_res[output_osd0.idx].mem_end - plogo->platform_res[output_osd0.idx].mem_start) ==0 ) 
+@@ -119,7 +143,17 @@ static int osd0_init(logo_object_t *plogo)
+ 			osd_init_hw(plogo->para.loaded);
+ 			plogo->para.vout_mode|=VMODE_LOGO_BIT_MASK;
+ 		}
++#ifdef CONFIG_AM_HDMI_ONLY
++		extern int read_hpd_gpio(void);
++		hpd_state = read_hpd_gpio();
++		
++		if (hpd_state == 0)
++			set_current_vmode(cvbsmode_hdmionly);
++		else
++			set_current_vmode(hdmimode_hdmionly);
++#else
+ 		set_current_vmode(plogo->para.vout_mode);
++#endif
+ 		output_osd0.vinfo=get_current_vinfo();
+ 		plogo->dev=&output_osd0;
+ 		plogo->dev->window.x=0;
+@@ -135,6 +169,8 @@ static int osd0_init(logo_object_t *plogo)
+ }
+ static int osd1_init(logo_object_t *plogo)
+ {
++	int hpd_state = 0;
++
+ 	if(plogo->para.output_dev_type==output_osd1.idx)
+ 	{
+ 		if((plogo->platform_res[output_osd1.idx].mem_end - plogo->platform_res[output_osd1.idx].mem_start) ==0)
+@@ -146,7 +182,17 @@ static int osd1_init(logo_object_t *plogo)
+ 			osd_init_hw(plogo->para.loaded);
+ 			plogo->para.vout_mode|=VMODE_LOGO_BIT_MASK;
+ 		}
++#ifdef CONFIG_AM_HDMI_ONLY		
++		extern int read_hpd_gpio(void);
++		hpd_state = read_hpd_gpio();
++		
++		if (hpd_state == 0)
++			set_current_vmode(cvbsmode_hdmionly);
++		else
++			set_current_vmode(hdmimode_hdmionly);
++#else
+ 		set_current_vmode(plogo->para.vout_mode);
++#endif
+ 		output_osd1.vinfo=get_current_vinfo();
+ 		plogo->dev=&output_osd1;
+ 		plogo->dev->window.x=0;
+@@ -343,3 +389,35 @@ int dev_osd_setup(void)
+ }
+ 
+ 
++#ifdef CONFIG_AM_HDMI_ONLY
++
++static int __init get_cvbs_mode(char *str)
++{
++    if(strncmp("480", str, 3) == 0){
++        cvbsmode_hdmionly = VMODE_480CVBS;
++    }else if(strncmp("576", str, 3) == 0){
++        cvbsmode_hdmionly = VMODE_576CVBS;
++    }else{
++	cvbsmode_hdmionly = VMODE_480CVBS;
++    }
++    printk("kernel get cvbsmode form uboot is %s\n", str);
++}
++__setup("cvbsmode=", get_cvbs_mode);
++
++static int __init get_hdmi_mode(char *str)
++{
++    u32 i;
++    for(i = 0; i<PARA_HDMI_ONLY; i++){
++	if (strcmp(hdmi_only_info[i].name, str) == 0){
++		hdmimode_hdmionly = hdmi_only_info[i].info;
++		break;
++	}
++   }
++
++   if(i == PARA_HDMI_ONLY){
++	hdmimode_hdmionly = VMODE_1080P;
++   }
++   printk("kernel get hdmimode form uboot is %s\n", str);
++}
++__setup("hdmimode=", get_hdmi_mode);
++#endif
+diff --git a/include/linux/amlogic/logo/logo_dev_osd.h b/include/linux/amlogic/logo/logo_dev_osd.h
+index 4c615ea731ef..38478535c79b 100755
+--- a/include/linux/amlogic/logo/logo_dev_osd.h
++++ b/include/linux/amlogic/logo/logo_dev_osd.h
+@@ -1,6 +1,16 @@
+ #ifndef  LOGO_DEV_OSD_H
+ #define LOGO_DEV_OSD_H
+ 
++
++#ifdef CONFIG_AM_HDMI_ONLY
++#define PARA_HDMI_ONLY    11
++
++typedef  struct {
++	char *name;
++	int   info;	
++}hdmi_only_info_t;
++#endif
++
+ static int osd0_init(logo_object_t *plogo);
+ static int osd1_init(logo_object_t *plogo);
+ static  int  osd_enable_set(int  enable);
+-- 
+2.19.0
+

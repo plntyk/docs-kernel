@@ -1,0 +1,343 @@
+From 82dfeaa87ea47401b93758afbbd9f7fca9b6db21 Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Fri, 14 Mar 2014 13:20:51 +0800
+Subject: [PATCH 3751/5965] PD:#88719: mm: optimize memory management for low
+ memory
+
+---
+ drivers/gpu/ion/ion_system_heap.c | 22 ++++++++++++++++++-
+ fs/dcache.c                       | 36 +++++++++++++++----------------
+ include/linux/mmzone.h            |  5 +++++
+ kernel/sysctl.c                   | 10 +++++++++
+ mm/page_alloc.c                   | 20 ++++++++++++++++-
+ mm/vmscan.c                       |  3 +--
+ 6 files changed, 74 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/gpu/ion/ion_system_heap.c b/drivers/gpu/ion/ion_system_heap.c
+index e101db5da5b4..af79bdf8f1a3 100644
+--- a/drivers/gpu/ion/ion_system_heap.c
++++ b/drivers/gpu/ion/ion_system_heap.c
+@@ -24,6 +24,9 @@
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
++#include <plat/io.h>
++#include <mach/io.h>
++#include <mach/register.h>
+ #include "ion_priv.h"
+ 
+ static unsigned int high_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO |
+@@ -31,7 +34,7 @@ static unsigned int high_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO |
+ 					   ~__GFP_WAIT;
+ static unsigned int low_order_gfp_flags  = (GFP_HIGHUSER | __GFP_ZERO |
+ 					 __GFP_NOWARN);
+-static const unsigned int orders[] = {8, 4, 0};
++static const unsigned int orders[] = {8, 4, 3, 2, 1, 0};
+ static const int num_orders = ARRAY_SIZE(orders);
+ static int order_to_index(unsigned int order)
+ {
+@@ -118,8 +121,25 @@ static struct page_info *alloc_largest_available(struct ion_system_heap *heap,
+ 	struct page *page;
+ 	struct page_info *info;
+ 	int i;
++	struct zone *zone = NULL;
++	struct zoneref *z;
++	struct zonelist *zonelist;
++	bool ret;
++
++	zonelist = NODE_DATA(numa_node_id())->node_zonelists;
+ 
+ 	for (i = 0; i < num_orders; i++) {
++
++		for_each_zone_zonelist(zone, z, zonelist,
++				gfp_zone(heap->pools[order_to_index(orders[i])]->gfp_mask)) {
++			ret = zone_watermark_ok_safe(zone, orders[i], low_wmark_pages(zone), 0, 0);
++			if(ret)
++				break;
++		}
++		if(!ret && i !=  num_orders - 1){
++			continue;
++		}
++
+ 		if (size < order_to_size(orders[i]))
+ 			continue;
+ 		if (max_order < orders[i])
+diff --git a/fs/dcache.c b/fs/dcache.c
+index 9a59653d3449..c453d8610db5 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -221,7 +221,7 @@ static void __d_free(struct rcu_head *head)
+ 	WARN_ON(!hlist_unhashed(&dentry->d_alias));
+ 	if (dname_external(dentry))
+ 		kfree(dentry->d_name.name);
+-	kmem_cache_free(dentry_cache, dentry); 
++	kmem_cache_free(dentry_cache, dentry);
+ }
+ 
+ /*
+@@ -481,7 +481,7 @@ relock:
+ 	return d_kill(dentry, parent);
+ }
+ 
+-/* 
++/*
+  * This is dput
+  *
+  * This is complicated by the fact that we do not want to put
+@@ -500,7 +500,7 @@ relock:
+ 
+ /*
+  * dput - release a dentry
+- * @dentry: dentry to release 
++ * @dentry: dentry to release
+  *
+  * Release a dentry. This will drop the usage count and if appropriate
+  * call the dentry unlink method as well as removing it from the queues and
+@@ -557,7 +557,7 @@ EXPORT_SYMBOL(dput);
+  *
+  * no dcache lock.
+  */
+- 
++
+ int d_invalidate(struct dentry * dentry)
+ {
+ 	/*
+@@ -1024,7 +1024,7 @@ static struct dentry *try_to_ascend(struct dentry *old, int locked, unsigned seq
+  * We descend to the next level whenever the d_subdirs
+  * list is non-empty and continue searching.
+  */
+- 
++
+ /**
+  * have_submounts - check for mounts over a dentry
+  * @parent: dentry to check.
+@@ -1233,7 +1233,7 @@ EXPORT_SYMBOL(shrink_dcache_parent);
+  * available. On a success the dentry is returned. The name passed in is
+  * copied and the copy passed in may be reused after this call.
+  */
+- 
++
+ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
+ {
+ 	struct dentry *dentry;
+@@ -1253,12 +1253,12 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
+ 	if (name->len > DNAME_INLINE_LEN-1) {
+ 		dname = kmalloc(name->len + 1, GFP_KERNEL);
+ 		if (!dname) {
+-			kmem_cache_free(dentry_cache, dentry); 
++			kmem_cache_free(dentry_cache, dentry);
+ 			return NULL;
+ 		}
+ 	} else  {
+ 		dname = dentry->d_iname;
+-	}	
++	}
+ 
+ 	dentry->d_name.len = name->len;
+ 	dentry->d_name.hash = name->hash;
+@@ -1394,7 +1394,7 @@ static void __d_instantiate(struct dentry *dentry, struct inode *inode)
+  * (or otherwise set) by the caller to indicate that it is now
+  * in use by the dcache.
+  */
+- 
++
+ void d_instantiate(struct dentry *entry, struct inode * inode)
+ {
+ 	BUG_ON(!hlist_unhashed(&entry->d_alias));
+@@ -1940,7 +1940,7 @@ struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
+ 	 * See Documentation/filesystems/path-lookup.txt for more details.
+ 	 */
+ 	rcu_read_lock();
+-	
++
+ 	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+ 
+ 		if (dentry->d_name.hash != hash)
+@@ -2049,7 +2049,7 @@ EXPORT_SYMBOL(d_validate);
+  * it from the hash queues and waiting for
+  * it to be deleted later when it has no users
+  */
+- 
++
+ /**
+  * d_delete - delete a dentry
+  * @dentry: The dentry to delete
+@@ -2057,7 +2057,7 @@ EXPORT_SYMBOL(d_validate);
+  * Turn the dentry into a negative dentry if possible, otherwise
+  * remove it from the hash queues so it can be deleted later
+  */
+- 
++
+ void d_delete(struct dentry * dentry)
+ {
+ 	struct inode *inode;
+@@ -2110,7 +2110,7 @@ static void _d_rehash(struct dentry * entry)
+  *
+  * Adds a dentry to the hash according to its name.
+  */
+- 
++
+ void d_rehash(struct dentry * entry)
+ {
+ 	spin_lock(&entry->d_lock);
+@@ -2715,7 +2715,7 @@ char *dynamic_dname(struct dentry *dentry, char *buffer, int buflen,
+ 			const char *fmt, ...)
+ {
+ 	va_list args;
+-	char temp[64];
++	char temp[256];
+ 	int sz;
+ 
+ 	va_start(args, fmt);
+@@ -2893,7 +2893,7 @@ out:
+  * Returns 0 otherwise.
+  * Caller must ensure that "new_dentry" is pinned before calling is_subdir()
+  */
+-  
++
+ int is_subdir(struct dentry *new_dentry, struct dentry *old_dentry)
+ {
+ 	int result;
+@@ -2997,7 +2997,7 @@ rename_retry:
+  * filesystems using synthetic inode numbers, and is necessary
+  * to keep getcwd() working.
+  */
+- 
++
+ ino_t find_inode_number(struct dentry *dir, struct qstr *name)
+ {
+ 	struct dentry * dentry;
+@@ -3052,10 +3052,10 @@ static void __init dcache_init(void)
+ {
+ 	unsigned int loop;
+ 
+-	/* 
++	/*
+ 	 * A constructor could be added for stable state like the lists,
+ 	 * but it is probably not worth it because of the cache nature
+-	 * of the dcache. 
++	 * of the dcache.
+ 	 */
+ 	dentry_cache = KMEM_CACHE(dentry,
+ 		SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_MEM_SPREAD);
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index d8867d762884..1431651e625e 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -18,6 +18,7 @@
+ #include <linux/page-flags-layout.h>
+ #include <linux/atomic.h>
+ #include <asm/page.h>
++#include <linux/sysctl.h>
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_FORCE_MAX_ZONEORDER
+@@ -787,6 +788,10 @@ extern int init_currently_empty_zone(struct zone *zone, unsigned long start_pfn,
+ 
+ extern void lruvec_init(struct lruvec *lruvec);
+ #define START_KSWAPD_FREE_PAGE_THRESH 16384
++extern int mem_management_thresh;
++extern int proc_mem_management_thresh_handler(struct ctl_table *table, int write,
++		void __user *buffer, size_t *lenp,
++		loff_t *ppos);
+ static inline struct zone *lruvec_zone(struct lruvec *lruvec)
+ {
+ #ifdef CONFIG_MEMCG
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 11cbf9044f16..cbd54b1ad9d5 100755
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -133,6 +133,7 @@ static int __maybe_unused two = 2;
+ static int __maybe_unused three = 3;
+ static unsigned long one_ul = 1;
+ static int one_hundred = 100;
++static int mem_thresh = 65536;
+ #ifdef CONFIG_PRINTK
+ static int ten_thousand = 10000;
+ #endif
+@@ -1470,6 +1471,15 @@ static struct ctl_table vm_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= proc_doulongvec_minmax,
+ 	},
++	{
++		.procname	= "mem_management_thresh",
++		.data		= &mem_management_thresh,
++		.maxlen		= sizeof(mem_management_thresh),
++		.mode		= 0666,
++		.proc_handler	= proc_mem_management_thresh_handler,
++		.extra1		= &zero,
++		.extra2		= &mem_thresh,
++	},
+ 	{ }
+ };
+ 
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 1c8766699177..2bcf9b237d11 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -60,6 +60,7 @@
+ #include <linux/page-debug-flags.h>
+ #include <linux/hugetlb.h>
+ #include <linux/sched/rt.h>
++#include <linux/sysctl.h>
+ 
+ #include <asm/tlbflush.h>
+ #include <asm/div64.h>
+@@ -235,7 +236,18 @@ void set_pageblock_migratetype(struct page *page, int migratetype)
+ }
+ 
+ bool oom_killer_disabled __read_mostly;
++int mem_management_thresh = START_KSWAPD_FREE_PAGE_THRESH;
++int proc_mem_management_thresh_handler(struct ctl_table *table, int write,
++		void __user *buffer, size_t *lenp,
++		loff_t *ppos)
++{
++	int ret;
+ 
++	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
++	if (ret && write)
++		mem_management_thresh = START_KSWAPD_FREE_PAGE_THRESH;
++	return ret;
++}
+ #ifdef CONFIG_DEBUG_VM
+ static int page_outside_zone_boundaries(struct zone *zone, struct page *page)
+ {
+@@ -1670,6 +1682,11 @@ bool zone_watermark_ok_safe(struct zone *z, int order, unsigned long mark,
+ {
+ 	long free_pages = zone_page_state(z, NR_FREE_PAGES);
+ 
++	if(global_page_state(NR_FREE_PAGES)  - global_page_state(NR_FREE_CMA_PAGES)
++	   < mem_management_thresh){
++		return false;
++	}
++
+ 	if (z->percpu_drift_mark && free_pages < z->percpu_drift_mark)
+ 		free_pages = zone_page_state_snapshot(z, NR_FREE_PAGES);
+ 
+@@ -2648,7 +2665,8 @@ retry_cpuset:
+ 	if (allocflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
+ 		alloc_flags |= ALLOC_CMA;
+ #endif
+-	if(global_page_state(NR_FREE_PAGES) < START_KSWAPD_FREE_PAGE_THRESH){
++	if(global_page_state(NR_FREE_PAGES)  - global_page_state(NR_FREE_CMA_PAGES)
++	   < mem_management_thresh){
+ 		if (!(gfp_mask & __GFP_NO_KSWAPD))
+ 			wake_all_kswapd(order, zonelist, high_zoneidx,
+ 							zone_idx(preferred_zone));
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 375d73264094..357025e0c244 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -2824,8 +2824,7 @@ loop_again:
+ 				testorder = 0;
+ 
+ 			if ((buffer_heads_over_limit && is_highmem_idx(i)) ||
+-			    !zone_balanced(zone, testorder, balance_gap, end_zone) ||
+-				(global_page_state(NR_FREE_PAGES) < START_KSWAPD_FREE_PAGE_THRESH)) {
++			    !zone_balanced(zone, testorder, balance_gap, end_zone)) {
+ 				shrink_zone(zone, &sc);
+ 
+ 				reclaim_state->reclaimed_slab = 0;
+-- 
+2.19.0
+

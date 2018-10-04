@@ -1,0 +1,177 @@
+From d2f01c58d0e4bd7a4814fd79c7d78aee27761a4a Mon Sep 17 00:00:00 2001
+From: Zongdong Jiao <zongdong.jiao@amlogic.com>
+Date: Tue, 5 Nov 2013 14:35:20 +0800
+Subject: [PATCH 1709/5965] PD #81780: hdmitx: clk: reconfig hpll divider
+ setting
+
+---
+ drivers/amlogic/display/vout/enc_clk_config.c | 83 ++++++++++++++++++-
+ drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c  |  5 +-
+ include/linux/amlogic/vout/enc_clk_config.h   |  3 +
+ 3 files changed, 86 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/display/vout/enc_clk_config.c b/drivers/amlogic/display/vout/enc_clk_config.c
+index cbdc1eaa3338..f51d9c0aabaf 100755
+--- a/drivers/amlogic/display/vout/enc_clk_config.c
++++ b/drivers/amlogic/display/vout/enc_clk_config.c
+@@ -110,6 +110,28 @@ static void set_hpll_hdmi_od(unsigned div)
+     }
+ }
+ 
++#ifdef CONFIG_ARCH_MESON8
++static void set_hpll_lvds_od(unsigned div)
++{
++    switch(div) {
++        case 1:
++            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 0, 16, 2);
++            break;
++        case 2:
++            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 1, 16, 2);
++            break;
++        case 4:
++            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 2, 16, 2);
++            break;
++        case 8:     // note: need test
++            aml_set_reg32_bits(P_HHI_VID_PLL_CNTL, 3, 16, 2);
++            break;
++        default:
++            break;
++    }
++}
++#endif
++
+ // viu_channel_sel: 1 or 2
+ // viu_type_sel: 0: 0=ENCL, 1=ENCI, 2=ENCP, 3=ENCT.
+ int set_viu_path(unsigned viu_channel_sel, viu_type_e viu_type_sel)
+@@ -147,6 +169,7 @@ int set_viu_path(unsigned viu_channel_sel, viu_type_e viu_type_sel)
+ 
+ static void set_vid_pll_div(unsigned div)
+ {
++#ifdef CONFIG_ARCH_MESON6
+     // Gate disable
+     WRITE_CBUS_REG_BITS(HHI_VID_DIVIDER_CNTL, 0, 16, 1);
+     switch(div){
+@@ -172,6 +195,34 @@ static void set_vid_pll_div(unsigned div)
+     WRITE_CBUS_REG_BITS(HHI_VID_DIVIDER_CNTL, 0, 7, 1);
+     // Gate enable
+     WRITE_CBUS_REG_BITS(HHI_VID_DIVIDER_CNTL, 1, 16, 1);
++#endif
++#ifdef CONFIG_ARCH_MESON8
++    // Gate disable
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 16, 1);
++    switch(div){
++        case 10:
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 4, 4, 3);
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 8, 2);
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 12, 3);
++            break;
++        case 5:
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 4, 4, 3);
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 8, 2);
++            aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 12, 3);
++            break;
++        default:
++            break;
++    }
++    // Soft Reset div_post/div_pre
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 0, 2);
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 3, 1);
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 7, 1);
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 3, 0, 2);
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 3, 1);
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 0, 7, 1);
++    // Gate enable
++    aml_set_reg32_bits(P_HHI_VID_DIVIDER_CNTL, 1, 16, 1);
++#endif
+ }
+ 
+ static void set_clk_final_div(unsigned div)
+@@ -228,6 +279,7 @@ static void set_vdac1_div(unsigned div)
+ // mode hpll_clk_out hpll_hdmi_od viu_path viu_type vid_pll_div clk_final_div
+ // hdmi_tx_pixel_div unsigned encp_div unsigned enci_div unsigned enct_div unsigned ecnl_div;
+ static enc_clk_val_t setting_enc_clk_val[] = {
++#ifdef CONFIG_ARCH_MESON6
+     {VMODE_480I,       1080, 4, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_480CVBS,    1080, 4, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
+     {VMODE_480P,       1080, 4, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
+@@ -242,13 +294,33 @@ static enc_clk_val_t setting_enc_clk_val[] = {
+     {VMODE_1080I_50HZ, 1488, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_50HZ, 1488, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_1080P_24HZ, 1488, 2, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
+-    {VMODE_4K2K_30HZ,  2970, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-    {VMODE_4K2K_25HZ,  2970, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-    {VMODE_4K2K_24HZ,  2970, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+-    {VMODE_4K2K_SMPTE, 2970, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
+     {VMODE_VGA,  1066, 3, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+     {VMODE_SVGA, 1058, 2, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
+     {VMODE_XGA, 1085, 1, 1, VIU_ENCP, 5, 1, 1, 1, -1, -1, -1,  1,  1},
++#endif
++#ifdef CONFIG_ARCH_MESON8       // add hpll_lvds_od
++    {VMODE_480I,       1080, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_480CVBS,    1080, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_480P,       1080, 4, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_576I,       1080, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_576CVBS,    1080, 4, 1, 1, VIU_ENCI,  5, 4, 2,-1,  2, -1, -1,  2,  -1},
++    {VMODE_576P,       1080, 4, 1, 1, VIU_ENCP,  5, 4, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_720P,       1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080I,      1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080P,      1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080P,      1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_720P_50HZ,  1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080I_50HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080P_50HZ, 1488, 1, 1, 1, VIU_ENCP, 10, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_1080P_24HZ, 1488, 2, 1, 1, VIU_ENCP, 10, 2, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_4K2K_30HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_4K2K_25HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_4K2K_24HZ,  2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_4K2K_SMPTE, 2970, 1, 2, 1, VIU_ENCP,  5, 1, 1, 1, -1, -1, -1,  1,  -1},
++    {VMODE_VGA,  1066, 3, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
++    {VMODE_SVGA, 1058, 2, 1, 1, VIU_ENCP, 10, 1, 2, 1, -1, -1, -1,  1,  1},
++    {VMODE_XGA, 1085, 1, 1, 1, VIU_ENCP, 5, 1, 1, 1, -1, -1, -1,  1,  1},
++#endif
+ };
+ 
+ void set_vmode_clk(vmode_t mode)
+@@ -264,6 +336,9 @@ void set_vmode_clk(vmode_t mode)
+     }
+     set_viu_path(p_enc[j].viu_path, p_enc[j].viu_type);
+     set_hpll_clk_out(p_enc[j].hpll_clk_out);
++#ifdef CONFIG_ARCH_MESON8
++    set_hpll_lvds_od(p_enc[j].hpll_lvds_od);
++#endif
+     set_hpll_hdmi_od(p_enc[j].hpll_hdmi_od);
+     set_vid_pll_div(p_enc[j].vid_pll_div);
+     set_clk_final_div(p_enc[j].clk_final_div);
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c b/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
+index 76749abb7473..8e20e3feff22 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hw/hdmi_tx_hw.c
+@@ -1696,7 +1696,10 @@ static void hdmi_hw_reset(hdmitx_dev_t* hdmitx_device, Hdmi_tx_video_para_t *par
+     //tmp_add_data[6] = 1'b0;      // Force Video Scan, only if [7]is set
+     //tmp_add_data[5] = 1'b0 ;     // Force Video field, only if [7]is set
+     //tmp_add_data[4:0] = 5'b00 ;  // Rsrv
+-    tmp_add_data = 0;
++    if(hdmitx_device->cur_VIC == 39)
++        tmp_add_data = 0;
++    else
++        tmp_add_data = (1<<4);
+     hdmi_wr_reg(TX_VIDEO_DTV_TIMING, tmp_add_data);
+     
+     tmp_add_data  = 0;
+diff --git a/include/linux/amlogic/vout/enc_clk_config.h b/include/linux/amlogic/vout/enc_clk_config.h
+index 4f21a79994a7..6199cd11083d 100755
+--- a/include/linux/amlogic/vout/enc_clk_config.h
++++ b/include/linux/amlogic/vout/enc_clk_config.h
+@@ -18,6 +18,9 @@ typedef struct enc_clk_val{
+     vmode_t mode;
+     unsigned hpll_clk_out;
+     unsigned hpll_hdmi_od;
++#ifdef CONFIG_ARCH_MESON8
++    unsigned hpll_lvds_od;
++#endif
+     unsigned viu_path;
+     viu_type_e viu_type;
+     unsigned vid_pll_div;
+-- 
+2.19.0
+

@@ -1,0 +1,87 @@
+From b7e43ee40402c717e40b450a25af781ad312d9fc Mon Sep 17 00:00:00 2001
+From: "zhe.wang" <zhe.wang@amlogic.com>
+Date: Mon, 5 May 2014 18:02:46 +0800
+Subject: [PATCH 3999/5965] PD[90997]: In Audio_In side ,when alsa rdptr is too
+ close to HW wrptr,reset alsa
+
+---
+ sound/soc/aml/m6/aml_pcm.c | 12 +++++++++++-
+ sound/soc/aml/m8/aml_i2s.c | 11 +++++++++++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/aml/m6/aml_pcm.c b/sound/soc/aml/m6/aml_pcm.c
+index f35ecd127ca8..c32dad50b042 100755
+--- a/sound/soc/aml/m6/aml_pcm.c
++++ b/sound/soc/aml/m6/aml_pcm.c
+@@ -1138,6 +1138,9 @@ static int aml_pcm_copy_playback(struct snd_pcm_runtime *runtime, int channel,
+ 	return res;
+ }
+ 
++static unsigned int aml_get_in_wr_ptr(){
++	return (audio_in_i2s_wr_ptr() - aml_i2s_capture_phy_start_addr);
++}
+ 
+ static int aml_pcm_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+ 		    snd_pcm_uframes_t pos,
+@@ -1150,6 +1153,10 @@ static int aml_pcm_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+     int i = 0, j = 0;
+     unsigned int t1, t2;
+     char *hwbuf = runtime->dma_area + frames_to_bytes(runtime, pos)*2;
++    unsigned int buffersize = (unsigned int)runtime->buffer_size*8;  //512*4*4*2
++    unsigned int hw_ptr = aml_get_in_wr_ptr();
++    unsigned int alsa_read_ptr = frames_to_bytes(runtime, pos)*2;
++    int size = (buffersize + hw_ptr - alsa_read_ptr)%buffersize;
+     unsigned char r_shift = 8;
+     if(audioin_mode&SPDIFIN_MODE) //spdif in
+     {
+@@ -1162,7 +1169,10 @@ static int aml_pcm_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+       printk("Too many datas to read\n");
+       return -EINVAL;
+     }
+-
++	if(size < 2*n){
++		printk(KERN_DEBUG "~~~Reset ALSA!~~~\n");
++		return -EPIPE;
++	}
+ 		if(access_ok(VERIFY_WRITE, buf, frames_to_bytes(runtime, count))){
+ 				left = tfrom;
+ 		    right = tfrom + 8;
+diff --git a/sound/soc/aml/m8/aml_i2s.c b/sound/soc/aml/m8/aml_i2s.c
+index 8adcf5ccb8be..3bcf8c835d2d 100755
+--- a/sound/soc/aml/m8/aml_i2s.c
++++ b/sound/soc/aml/m8/aml_i2s.c
+@@ -666,6 +666,9 @@ static int aml_i2s_copy_playback(struct snd_pcm_runtime *runtime, int channel,
+     return res;
+ }
+ 
++static unsigned int aml_get_in_wr_ptr(){
++	return (audio_in_i2s_wr_ptr() - aml_i2s_capture_phy_start_addr);
++}
+ 
+ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+ 		    snd_pcm_uframes_t pos,
+@@ -680,6 +683,10 @@ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+ 	struct aml_runtime_data *prtd = runtime->private_data;
+ 	audio_stream_t *s = &prtd->s;
+     char *hwbuf = runtime->dma_area + frames_to_bytes(runtime, pos)*2;
++	unsigned int buffersize = (unsigned int)runtime->buffer_size*8;  //512*4*4*2
++	unsigned int hw_ptr = aml_get_in_wr_ptr();
++	unsigned int alsa_read_ptr = frames_to_bytes(runtime, pos)*2;
++	int size = (buffersize + hw_ptr - alsa_read_ptr)%buffersize;
+     unsigned char r_shift = 8;
+ 	if(s->device_type == AML_AUDIO_SPDIFIN) //spdif in
+     {
+@@ -692,6 +699,10 @@ static int aml_i2s_copy_capture(struct snd_pcm_runtime *runtime, int channel,
+ 		printk("Too many datas to read,please enlarge the snd_i2s_tmp buffer size\n");
+       return -EINVAL;
+     }
++	if(size < 2*n){
++		printk(KERN_DEBUG "~~~Reset ALSA!~~~\n");
++		return -EPIPE;
++	}
+ 	if(access_ok(VERIFY_WRITE, buf, frames_to_bytes(runtime, count)))
+ 	{
+ 		if(runtime->channels == 2){
+-- 
+2.19.0
+

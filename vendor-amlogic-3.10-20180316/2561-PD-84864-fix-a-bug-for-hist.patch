@@ -1,0 +1,122 @@
+From 2717abe36827648bf4cb62d87b1d2957ba037f63 Mon Sep 17 00:00:00 2001
+From: jiwei chen <jiwei.chen@amlogic.com>
+Date: Thu, 19 Dec 2013 23:01:47 +0800
+Subject: [PATCH 2561/5965] PD #84864: fix a bug for hist.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.h     |  2 +-
+ drivers/amlogic/tvin/isp/isp_sm.c      | 15 ++++++++-------
+ drivers/amlogic/tvin/vdin/vdin_ctl.c   |  1 +
+ drivers/amlogic/tvin/vdin/vdin_drv.c   |  2 +-
+ include/linux/amlogic/amports/vframe.h |  1 +
+ include/linux/amlogic/tvin/tvin.h      |  1 +
+ 6 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 6a98f144ee36..67651fbb84ba 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.12.19a"
++#define ISP_VER					"2013.12.19b"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index c0e3d03075ec..889b11d4627c 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -30,6 +30,7 @@ static unsigned int capture_debug = 0;
+ #define AE_LUMA_AVG_CHECK_DG		0x00000020
+ #define AE_EXPOSURE_ADJUST_DG		0x00000040
+ #define AE_STATUS_DG			0x00000080
++#define AE_DYNAMIC_ADJUST_DG    0x00000100
+ 
+ static unsigned int ae_sm_dg = 0;
+ module_param(ae_sm_dg,uint,0664);
+@@ -300,10 +301,10 @@ void isp_ae_sm(isp_dev_t *devp)
+ 			isp_set_ae_thrlpf(aep->thr_r_mid, aep->thr_g_mid, aep->thr_b_mid, aep->lpftype_mid);
+ 			aepa->pixel_sum = parm->h_active * parm->v_active;
+ 			aepa->sub_pixel_sum = aepa->pixel_sum >> 4;
+-			aepa->max_lumasum1 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low) >> 10;
+-			aepa->max_lumasum2 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low2mid) >> 10;
+-			aepa->max_lumasum3 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_mid2high) >> 10;
+-			aepa->max_lumasum4 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_high) >> 10;
++			aepa->max_lumasum1 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low) >> 7;
++			aepa->max_lumasum2 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_low2mid) >> 7;
++			aepa->max_lumasum3 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_mid2high) >> 7;
++			aepa->max_lumasum4 = ((aepa->pixel_sum >> 4) * aep->ae_ratio_high) >> 7;
+ 			aepa->pre_gain = 400;
+ 			if(devp->ae_info.manul_level==0)
+ 			aepa->targ = aep->targetmid;
+@@ -424,12 +425,12 @@ void isp_ae_sm(isp_dev_t *devp)
+ 						if(aepa->cur_gain == 0)
+ 							printk("[AE_CALCULATE_LUMA_TARG]:error,aepa->cur_gain = 0\n");
+ 						avg_envo = (avg_env << 10)/aepa->cur_gain;
+-						sum = ph->hist.gamma[58]+ph->hist.gamma[57];
++						sum = (ph->hist.gamma[58]+ph->hist.gamma[57]) << ph->hist.hist_pow;
+ 						if(ae_sm_dg&AE_CALCULATE_LUMA_TARG_DG){
+ 							pr_info("avg=%d,avg_envo=%d,aepa->cur_gain=%d,avg_env=%d,avg_env_sum=%d,avg_sum=%d,luma_win[9]=%d,sub[9]=%d\n",avg,avg_envo,aepa->cur_gain,avg_env,avg_env_sum,avg_sum,ae->luma_win[9],sub_avg[9]);
+-							pr_info("ph->hist.gamma[58]=%d,%d\n",ph->hist.gamma[58],sum);
++							pr_info("ph->hist.gamma[58]=%d,%d,%d\n",ph->hist.gamma[58],sum,ph->hist.hist_pow);
+ 						}
+-						if(devp->ae_info.manul_level==0){//(avg_envo <= aep->env_low)||((avg_envo <= aep->env_low2mid)&&targ == (aep->targetlow)))
++						if((devp->ae_info.manul_level==0)&&((ae_sm_dg&AE_DYNAMIC_ADJUST_DG)==0)){//(avg_envo <= aep->env_low)||((avg_envo <= aep->env_low2mid)&&targ == (aep->targetlow)))
+ 							//targ = aep->targetlow;
+ 							if((sum > aepa->max_lumasum4)||((sum > aepa->max_lumasum3)&&(temp==2))){
+ 								temp = 2;
+diff --git a/drivers/amlogic/tvin/vdin/vdin_ctl.c b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+index 1e2bdf002f14..bbbaeec1155a 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_ctl.c
++++ b/drivers/amlogic/tvin/vdin/vdin_ctl.c
+@@ -1167,6 +1167,7 @@ inline void vdin_set_vframe_prop_info(struct vframe_s *vf, struct vdin_dev_s *de
+ #endif
+ 	// fetch hist info
+ 	//vf->prop.hist.luma_sum   = READ_CBUS_REG_BITS(VDIN_HIST_SPL_VAL,     HIST_LUMA_SUM_BIT,    HIST_LUMA_SUM_WID   );
++	vf->prop.hist.hist_pow   = RD_BITS(VDIN_HIST_CTRL, HIST_POW_BIT, HIST_POW_WID);
+ 	vf->prop.hist.luma_sum   = RD(VDIN_HIST_SPL_VAL);
+ 	//vf->prop.hist.chroma_sum = READ_CBUS_REG_BITS(VDIN_HIST_CHROMA_SUM,  HIST_CHROMA_SUM_BIT,  HIST_CHROMA_SUM_WID );
+ 	vf->prop.hist.chroma_sum = RD(VDIN_HIST_CHROMA_SUM);
+diff --git a/drivers/amlogic/tvin/vdin/vdin_drv.c b/drivers/amlogic/tvin/vdin/vdin_drv.c
+index 71ef41901404..53ee48a99551 100755
+--- a/drivers/amlogic/tvin/vdin/vdin_drv.c
++++ b/drivers/amlogic/tvin/vdin/vdin_drv.c
+@@ -1006,7 +1006,7 @@ static irqreturn_t vdin_isr_simple(int irq, void *dev_id)
+ static void vdin_backup_histgram(struct vframe_s *vf, struct vdin_dev_s *devp)
+ {
+ 	unsigned int i = 0;
+-
++    devp->parm.hist_pow = vf->prop.hist.hist_pow;
+ 	for (i = 0; i < 64; i++)
+ 		devp->parm.histgram[i] = vf->prop.hist.gamma[i];
+ }
+diff --git a/include/linux/amlogic/amports/vframe.h b/include/linux/amlogic/amports/vframe.h
+index 032fd5d2b76e..1b9b483fb39c 100755
+--- a/include/linux/amlogic/amports/vframe.h
++++ b/include/linux/amlogic/amports/vframe.h
+@@ -68,6 +68,7 @@ typedef enum pixel_aspect_ratio_e {
+  */
+ typedef struct vframe_hist_s
+ {
++	    unsigned int   hist_pow;
+         unsigned int   luma_sum;
+         unsigned int   chroma_sum;
+         unsigned int   pixel_sum;  // [31:30] POW [21:0] PIXEL_SUM
+diff --git a/include/linux/amlogic/tvin/tvin.h b/include/linux/amlogic/tvin/tvin.h
+index ce09683ab467..018cbc1ab0a6 100755
+--- a/include/linux/amlogic/tvin/tvin.h
++++ b/include/linux/amlogic/tvin/tvin.h
+@@ -458,6 +458,7 @@ typedef struct tvin_parm_s {
+         enum tvin_port_e            port;     // must set port in IOCTL
+         struct tvin_info_s          info;
+         struct tvin_cutwin_s        cutwin;
++		unsigned int                hist_pow;
+         unsigned short              histgram[64];
+         unsigned int                flag;
+         unsigned int                reserved;
+-- 
+2.19.0
+

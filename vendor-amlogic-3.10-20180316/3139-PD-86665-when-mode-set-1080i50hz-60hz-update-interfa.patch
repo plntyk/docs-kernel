@@ -1,0 +1,640 @@
+From 92f531c975972b7f49ebe6cc16e62c46da2dbc19 Mon Sep 17 00:00:00 2001
+From: "wei.nie" <wei.nie@amlogic.com>
+Date: Fri, 24 Jan 2014 16:53:07 +0800
+Subject: [PATCH 3139/5965] PD #86665:when mode set 1080i50hz/60hz,update
+ interface shaking
+
+---
+ drivers/amlogic/display/osd/Makefile          |   2 +-
+ drivers/amlogic/display/osd/osd_antiflicker.c | 314 ++++++++++++++++++
+ drivers/amlogic/display/osd/osd_antiflicker.h |  51 +++
+ drivers/amlogic/display/osd/osd_dev.c         |  10 +
+ drivers/amlogic/display/osd/osd_hw.c          |  43 ++-
+ drivers/amlogic/display/osd/osd_hw_def.h      |   1 +
+ drivers/amlogic/display/osd/osd_main.c        |  33 +-
+ include/linux/amlogic/osd/osd_dev.h           |   2 +
+ include/linux/amlogic/osd/osd_hw.h            |   3 +-
+ 9 files changed, 455 insertions(+), 4 deletions(-)
+ create mode 100755 drivers/amlogic/display/osd/osd_antiflicker.c
+ create mode 100755 drivers/amlogic/display/osd/osd_antiflicker.h
+
+diff --git a/drivers/amlogic/display/osd/Makefile b/drivers/amlogic/display/osd/Makefile
+index 138309fff86b..ed133e721b1d 100755
+--- a/drivers/amlogic/display/osd/Makefile
++++ b/drivers/amlogic/display/osd/Makefile
+@@ -5,7 +5,7 @@
+ 
+ obj-$(CONFIG_FB_AM) += fb.o 
+ 
+-fb-objs =  osd_hw.o osd_main.o osd_dev.o  
++fb-objs =  osd_hw.o osd_main.o osd_dev.o  osd_antiflicker.o
+ 
+ ifeq ($(CONFIG_ARCH_MESON8),y)
+ fb-objs += osd_prot.o
+diff --git a/drivers/amlogic/display/osd/osd_antiflicker.c b/drivers/amlogic/display/osd/osd_antiflicker.c
+new file mode 100755
+index 000000000000..380209996131
+--- /dev/null
++++ b/drivers/amlogic/display/osd/osd_antiflicker.c
+@@ -0,0 +1,314 @@
++/*
++ * Amlogic Ethernet Driver
++ *
++ * Copyright (C) 2012 Amlogic, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the named License,
++ * or any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA
++ *
++ * Author: Platform-BJ@amlogic.com
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/interrupt.h>
++#include <linux/timer.h>
++#include <linux/amlogic/amports/canvas.h>
++#include <linux/amlogic/ge2d/ge2d_main.h>
++#include <linux/amlogic/ge2d/ge2d.h>
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/semaphore.h>
++#include <linux/sched.h>
++#include <linux/amlogic/amlog.h>
++#include <linux/amlogic/vout/vout_notify.h>
++#include <linux/amlogic/vout/vinfo.h>
++
++#include <mach/am_regs.h>
++#include <mach/mod_gate.h>
++
++#include "osd_antiflicker.h"
++
++typedef struct {
++	bool inited;
++	u32 yoffset;
++	u32 yres;
++	config_para_ex_t ge2d_config;
++	ge2d_context_t *ge2d_context;
++} osd_antiflicker_t;
++
++static DEFINE_MUTEX(osd_antiflicker_mutex);
++static osd_antiflicker_t ge2d_osd_antiflicker;
++
++void osd_antiflicker_enable(u32 enable)
++{
++	ge2d_antiflicker_enable(ge2d_osd_antiflicker.ge2d_context, enable);
++}
++
++#if 0
++static void osd_antiflicker_process(void)
++{
++	canvas_t cs, cd;
++	u32 x0 = 0;
++	u32 y0 = 0;
++	u32 y1 = 0;
++
++	config_para_ex_t *ge2d_config = &ge2d_osd_antiflicker.ge2d_config;
++	ge2d_context_t *context = ge2d_osd_antiflicker.ge2d_context;
++
++	canvas_read(OSD1_CANVAS_INDEX, &cs);
++	canvas_read(OSD2_CANVAS_INDEX, &cd);
++
++	if (ge2d_osd_antiflicker.pan == 1) {
++		y0 = cs.height/2;
++		//y1 = cd.height/2;
++	}
++
++	memset(ge2d_config, 0, sizeof(config_para_ex_t));
++	ge2d_config->alu_const_color = 0;
++	ge2d_config->bitmask_en = 0;
++	ge2d_config->src1_gb_alpha = 0;
++
++	ge2d_config->src_planes[0].addr = cs.addr;
++	ge2d_config->src_planes[0].w = cs.width/4;
++	ge2d_config->src_planes[0].h = cs.height;
++
++	ge2d_config->dst_planes[0].addr = cd.addr;
++	ge2d_config->dst_planes[0].w = cd.width/4;
++	ge2d_config->dst_planes[0].h = cd.height;
++
++	ge2d_config->src_para.canvas_index = OSD1_CANVAS_INDEX;
++	ge2d_config->src_para.mem_type = CANVAS_OSD0;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->src_para.fill_color_en = 0;
++	ge2d_config->src_para.fill_mode = 0;
++	ge2d_config->src_para.x_rev = 0;
++	ge2d_config->src_para.y_rev = 0;
++	ge2d_config->src_para.color = 0xffffffff;
++	ge2d_config->src_para.top = 0;
++	ge2d_config->src_para.left = 0;
++	ge2d_config->src_para.width = cs.width/4;
++	ge2d_config->src_para.height = cs.height;
++
++	ge2d_config->dst_para.canvas_index = OSD2_CANVAS_INDEX;
++	ge2d_config->dst_para.mem_type = CANVAS_OSD1;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->dst_para.top = 0;
++	ge2d_config->dst_para.left = 0;
++	ge2d_config->dst_para.width = cd.width/4;
++	ge2d_config->dst_para.height = cd.height;
++	ge2d_config->dst_para.fill_color_en = 0;
++	ge2d_config->dst_para.fill_mode = 0;
++	ge2d_config->dst_para.color = 0;
++	ge2d_config->dst_para.x_rev = 0;
++	ge2d_config->dst_para.y_rev = 0;
++	ge2d_config->dst_xy_swap = 0;
++
++	if (ge2d_context_config_ex(context, ge2d_config) < 0) {
++		printk("++ osd antiflicker ge2d config error.\n");
++		return;
++	}
++	stretchblt(context, x0, y0, cs.width/4, cs.height/2, x0, y1, cd.width/4, cd.height);
++}
++
++static void osd_antiflicker_process_2(void)
++{
++	canvas_t cs, cd;
++	u32 x0 = 0;
++	u32 y0 = 0;
++	u32 y1 = 0;
++
++	config_para_ex_t *ge2d_config = &ge2d_osd_antiflicker.ge2d_config;
++	ge2d_context_t *context = ge2d_osd_antiflicker.ge2d_context;
++
++	canvas_read(OSD2_CANVAS_INDEX, &cs);
++	canvas_read(OSD1_CANVAS_INDEX, &cd);
++
++	if (ge2d_osd_antiflicker.pan == 1) {
++		//y0 = cs.height/2;
++		y1 = cd.height/2;
++	}
++
++	memset(ge2d_config, 0, sizeof(config_para_ex_t));
++	ge2d_config->alu_const_color = 0;
++	ge2d_config->bitmask_en = 0;
++	ge2d_config->src1_gb_alpha = 0;
++
++	ge2d_config->src_planes[0].addr = cs.addr;
++	ge2d_config->src_planes[0].w = cs.width/4;
++	ge2d_config->src_planes[0].h = cs.height;
++
++	ge2d_config->dst_planes[0].addr = cd.addr;
++	ge2d_config->dst_planes[0].w = cd.width/4;
++	ge2d_config->dst_planes[0].h = cd.height;
++
++	ge2d_config->src_para.canvas_index = OSD2_CANVAS_INDEX;
++	ge2d_config->src_para.mem_type = CANVAS_OSD1;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->src_para.fill_color_en = 0;
++	ge2d_config->src_para.fill_mode = 0;
++	ge2d_config->src_para.x_rev = 0;
++	ge2d_config->src_para.y_rev = 0;
++	ge2d_config->src_para.color = 0xffffffff;
++	ge2d_config->src_para.top = 0;
++	ge2d_config->src_para.left = 0;
++	ge2d_config->src_para.width = cs.width/4;
++	ge2d_config->src_para.height = cs.height;
++
++	ge2d_config->dst_para.canvas_index = OSD1_CANVAS_INDEX;
++	ge2d_config->dst_para.mem_type = CANVAS_OSD0;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->dst_para.top = 0;
++	ge2d_config->dst_para.left = 0;
++	ge2d_config->dst_para.width = cd.width/4;
++	ge2d_config->dst_para.height = cd.height;
++	ge2d_config->dst_para.fill_color_en = 0;
++	ge2d_config->dst_para.fill_mode = 0;
++	ge2d_config->dst_para.color = 0;
++	ge2d_config->dst_para.x_rev = 0;
++	ge2d_config->dst_para.y_rev = 0;
++	ge2d_config->dst_xy_swap = 0;
++
++	if (ge2d_context_config_ex(context, ge2d_config) < 0) {
++		printk("++ osd antiflicker ge2d config error.\n");
++		return;
++	}
++	stretchblt(context, x0, y0, cs.width/4, cs.height, x0, y1, cd.width/4, cd.height/2);
++}
++#endif
++
++static void osd_antiflicker_process(void)
++{
++	canvas_t cs, cd;
++	u32 x0 = 0;
++	u32 y0 = 0;
++	u32 y1 = 0;
++	u32 yres = 0;
++
++	config_para_ex_t *ge2d_config = &ge2d_osd_antiflicker.ge2d_config;
++	ge2d_context_t *context = ge2d_osd_antiflicker.ge2d_context;
++
++	canvas_read(OSD1_CANVAS_INDEX, &cs);
++	canvas_read(OSD1_CANVAS_INDEX, &cd);
++
++	if (ge2d_osd_antiflicker.yoffset > 0) {
++		y0 = ge2d_osd_antiflicker.yoffset;
++		y1 = ge2d_osd_antiflicker.yoffset;
++	}
++
++	yres = cs.height/ge2d_osd_antiflicker.yres;
++	memset(ge2d_config, 0, sizeof(config_para_ex_t));
++	ge2d_config->alu_const_color = 0;
++	ge2d_config->bitmask_en = 0;
++	ge2d_config->src1_gb_alpha = 0;
++
++	ge2d_config->src_planes[0].addr = cs.addr;
++	ge2d_config->src_planes[0].w = cs.width/4;
++	ge2d_config->src_planes[0].h = cs.height;
++
++	ge2d_config->dst_planes[0].addr = cd.addr;
++	ge2d_config->dst_planes[0].w = cd.width/4;
++	ge2d_config->dst_planes[0].h = cd.height;
++
++	ge2d_config->src_para.canvas_index = OSD1_CANVAS_INDEX;
++	ge2d_config->src_para.mem_type = CANVAS_OSD0;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->src_para.fill_color_en = 0;
++	ge2d_config->src_para.fill_mode = 0;
++	ge2d_config->src_para.x_rev = 0;
++	ge2d_config->src_para.y_rev = 0;
++	ge2d_config->src_para.color = 0xffffffff;
++	ge2d_config->src_para.top = 0;
++	ge2d_config->src_para.left = 0;
++	ge2d_config->src_para.width = cs.width/4;
++	ge2d_config->src_para.height = cs.height;
++
++	ge2d_config->dst_para.canvas_index = OSD1_CANVAS_INDEX;
++	ge2d_config->dst_para.mem_type = CANVAS_OSD0;
++	ge2d_config->dst_para.format = GE2D_FORMAT_S32_ARGB;
++	ge2d_config->dst_para.top = 0;
++	ge2d_config->dst_para.left = 0;
++	ge2d_config->dst_para.width = cd.width/4;
++	ge2d_config->dst_para.height = cd.height;
++	ge2d_config->dst_para.fill_color_en = 0;
++	ge2d_config->dst_para.fill_mode = 0;
++	ge2d_config->dst_para.color = 0;
++	ge2d_config->dst_para.x_rev = 0;
++	ge2d_config->dst_para.y_rev = 0;
++	ge2d_config->dst_xy_swap = 0;
++
++	if (ge2d_context_config_ex(context, ge2d_config) < 0) {
++		printk("++ osd antiflicker ge2d config ex error.\n");
++		return;
++	}
++	stretchblt(context, x0, y0, cs.width/4, (cs.height/yres), x0, y1, cd.width/4, (cd.height/yres));
++}
++
++void osd_antiflicker_update_pan(u32 yoffset, u32 yres)
++{
++	if (!ge2d_osd_antiflicker.inited)
++		return;
++
++	mutex_lock(&osd_antiflicker_mutex);
++	ge2d_osd_antiflicker.yoffset= yoffset;
++	ge2d_osd_antiflicker.yres = yres;
++	mutex_unlock(&osd_antiflicker_mutex);
++#if 0
++	osd_antiflicker_process();
++	osd_antiflicker_process_2();
++#endif
++	osd_antiflicker_process();
++}
++
++int osd_antiflicker_task_start(void)
++{
++	if (ge2d_osd_antiflicker.inited) {
++		printk("osd_antiflicker_task already started.\n");
++		return 0;
++	}
++
++	printk("osd_antiflicker_task start.\n");
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name("ge2d", 1);
++#endif
++	if (ge2d_osd_antiflicker.ge2d_context == NULL){
++		ge2d_osd_antiflicker.ge2d_context = create_ge2d_work_queue();
++	}
++
++	memset(&ge2d_osd_antiflicker.ge2d_config, 0, sizeof(config_para_ex_t));
++	ge2d_osd_antiflicker.inited = true;
++
++	return 0;
++}
++
++void osd_antiflicker_task_stop(void)
++{
++	if (!ge2d_osd_antiflicker.inited) {
++		printk("osd_antiflicker_task already stopped.\n");
++		return;
++	}
++
++	printk("osd_antiflicker_task stop.\n");
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
++	switch_mod_gate_by_name("ge2d", 0);
++#endif
++	if (ge2d_osd_antiflicker.ge2d_context) {
++		destroy_ge2d_work_queue(ge2d_osd_antiflicker.ge2d_context);
++		ge2d_osd_antiflicker.ge2d_context = NULL;
++	}
++	ge2d_osd_antiflicker.inited = false;
++}
++
+diff --git a/drivers/amlogic/display/osd/osd_antiflicker.h b/drivers/amlogic/display/osd/osd_antiflicker.h
+new file mode 100755
+index 000000000000..6c6c63854c26
+--- /dev/null
++++ b/drivers/amlogic/display/osd/osd_antiflicker.h
+@@ -0,0 +1,51 @@
++/*
++ * Amlogic OSD Driver
++ *
++ * Copyright (C) 2012 Amlogic, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the named License,
++ * or any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA
++ *
++ * Author: Platform-BJ@amlogic.com
++ *
++ */
++
++#ifndef _OSD_ANTIFLICKER_H_
++#define _OSD_ANTIFLICKER_H_
++
++#ifdef CONFIG_AM_GE2D
++#define OSD_GE2D_ANTIFLICKER_SUPPORT 1
++#endif
++
++#ifdef OSD_GE2D_ANTIFLICKER_SUPPORT
++extern void osd_antiflicker_update_pan(u32 yoffset, u32 yres);
++extern int osd_antiflicker_task_start(void);
++extern void osd_antiflicker_task_stop(void);
++extern void osd_antiflicker_enable(u32 enable);
++#else
++static inline void  osd_antiflicker_enable(u32 enable){}
++static inline void osd_antiflicker_update_pan(u32 yoffset, u32 yres){}
++static inline int osd_antiflicker_task_start(void)
++{
++	printk("++ osd_antiflicker depends on GE2D module!\n");
++	return 0;
++}
++static inline void osd_antiflicker_task_stop(void)
++{
++	printk("-- osd_antiflicker depends on GE2D module!\n");
++}
++#endif
++
++#endif
++
+diff --git a/drivers/amlogic/display/osd/osd_dev.c b/drivers/amlogic/display/osd/osd_dev.c
+index e27a85bf2b32..77d9b226209f 100755
+--- a/drivers/amlogic/display/osd/osd_dev.c
++++ b/drivers/amlogic/display/osd/osd_dev.c
+@@ -244,6 +244,16 @@ void osddev_set_osd_rotate_on(u32 index, u32 on_off)
+         osd_set_osd_rotate_on_hw(index, on_off);
+ }
+ 
++void osddev_get_osd_antiflicker(u32 index, u32 *on_off)
++{
++        osd_get_osd_antiflicker_hw(index, on_off);
++}
++
++void osddev_set_osd_antiflicker(u32 index, u32 vmode, u32 yres)
++{
++        osd_set_osd_antiflicker_hw(index, vmode, yres);
++}
++
+ void osddev_get_osd_rotate_angle(u32 index, u32 *angle)
+ {
+         osd_get_osd_rotate_angle_hw(index, angle);
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index 840c49893dee..80313c49d2e7 100755
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -40,6 +40,7 @@
+ #include "osd_hw_def.h"
+ #include "osd_prot.h"
+ //#include <mach/utils.h>
++#include "osd_antiflicker.h"
+ 
+ #ifdef CONFIG_AML_VSYNC_FIQ_ENABLE
+ #define  FIQ_VSYNC
+@@ -711,6 +712,9 @@ void osd_setup(struct osd_ctl_s *osd_ctl,
+ 	}
+ #endif
+ 
++	if(osd_hw.antiflicker_mode){
++		osd_antiflicker_update_pan(yoffset, yres);
++	}
+ #ifdef CONFIG_AM_FB_EXT
+ 	osd_ext_clone_pan(index);
+ #endif
+@@ -1205,6 +1209,41 @@ void osd_get_osd_rotate_on_hw(u32 index,u32 *on_off)
+ 	*on_off = osd_hw.rotate[index].on_off;
+ }
+ 
++void osd_set_osd_antiflicker_hw(u32 index, u32 vmode, u32 yres)
++{
++	bool osd_need_antiflicker = false;
++
++	switch (vmode) {
++		case VMODE_480I:
++		case VMODE_480CVBS:
++		case VMODE_576I:
++		case VMODE_576CVBS:
++		case VMODE_1080I:
++		case VMODE_1080I_50HZ:
++			osd_need_antiflicker = true;
++		break;
++		default:
++		break;
++	}
++
++	if (osd_need_antiflicker){
++		osd_hw.antiflicker_mode = 1;
++		osd_antiflicker_task_start();
++		osd_antiflicker_enable(1);
++		osd_antiflicker_update_pan(osd_hw.pandata[index].y_start, yres);
++	}else{
++		if(osd_hw.antiflicker_mode){
++			osd_antiflicker_task_stop();
++		}
++		osd_hw.antiflicker_mode = 0;
++	}
++}
++
++void osd_get_osd_antiflicker_hw(u32 index, u32 *on_off)
++{
++	*on_off = osd_hw.antiflicker_mode;
++}
++
+ void osd_set_osd_reverse_hw(u32 index, u32 reverse)
+ {
+ 	osd_hw.osd_reverse[index] = reverse;
+@@ -1263,13 +1302,14 @@ void osd_pan_display_hw(unsigned int xoffset, unsigned int yoffset,int index )
+ 		osd_hw.pandata[index].x_end   += diff_x;
+ 		osd_hw.pandata[index].y_start += diff_y;
+ 		osd_hw.pandata[index].y_end   += diff_y;
++#if 0
+ 		add_to_update_list(index,DISP_GEOMETRY);
+ 
+ #ifdef CONFIG_AM_FB_EXT
+ 		osd_ext_clone_pan(index);
+ #endif
+ 		osd_wait_vsync_hw();
+-
++#endif
+ 		amlog_mask_level(LOG_MASK_HARDWARE,LOG_LEVEL_LOW,"offset[%d-%d]x[%d-%d]y[%d-%d]\n", \
+ 				xoffset,yoffset,osd_hw.pandata[index].x_start ,osd_hw.pandata[index].x_end , \
+ 				osd_hw.pandata[index].y_start ,osd_hw.pandata[index].y_end );
+@@ -2331,6 +2371,7 @@ void osd_init_hw(u32  logo_loaded)
+ 	osd_hw.osd_reverse[OSD1] = osd_hw.osd_reverse[OSD2] = 0;
+ 	osd_hw.rotation_pandata[OSD1].x_start = osd_hw.rotation_pandata[OSD1].y_start = 0;
+ 	osd_hw.rotation_pandata[OSD2].x_start = osd_hw.rotation_pandata[OSD2].y_start = 0;
++	osd_hw.antiflicker_mode = 0;
+ 	memset(osd_hw.rotate,0,sizeof(osd_rotate_t));
+ 
+ #ifdef FIQ_VSYNC
+diff --git a/drivers/amlogic/display/osd/osd_hw_def.h b/drivers/amlogic/display/osd/osd_hw_def.h
+index ef9bbdfb903b..d19e9a17e4a5 100755
+--- a/drivers/amlogic/display/osd/osd_hw_def.h
++++ b/drivers/amlogic/display/osd/osd_hw_def.h
+@@ -144,6 +144,7 @@ typedef  struct {
+ 	pandata_t	rotation_pandata[HW_OSD_COUNT];
+ 	hw_list_t	 	reg[HW_OSD_COUNT][HW_REG_INDEX_MAX];
+ 	u32			field_out_en;
++	u32         antiflicker_mode;
+ }hw_para_t;
+ 
+ /************************************************************************
+diff --git a/drivers/amlogic/display/osd/osd_main.c b/drivers/amlogic/display/osd/osd_main.c
+index 499f96e9d111..b14b137b83b3 100755
+--- a/drivers/amlogic/display/osd/osd_main.c
++++ b/drivers/amlogic/display/osd/osd_main.c
+@@ -565,7 +565,6 @@ int osd_notify_callback(struct notifier_block *block, unsigned long cmd , void *
+ 	myfb_dev_t *fb_dev;
+ 	int  i,blank;
+ 	disp_rect_t  *disp_rect;
+-
+ 	
+ 	vinfo = get_current_vinfo();
+ 	amlog_mask_level(LOG_MASK_PARA,LOG_LEVEL_LOW,"tv_server:vmode=%s\r\n", vinfo->name);
+@@ -580,6 +579,7 @@ int osd_notify_callback(struct notifier_block *block, unsigned long cmd , void *
+ 			set_default_display_axis(&fb_dev->fb_info->var,&fb_dev->osd_ctl,vinfo);
+ 			console_lock();
+ 			osddev_update_disp_axis(fb_dev,1);
++			osddev_set_osd_antiflicker(OSD1, vinfo->mode, gp_fbdev_list[OSD1]->fb_info->var.yres);
+ 			console_unlock();
+ 		}
+ 		break;
+@@ -1285,6 +1285,35 @@ static ssize_t store_prot_canvas(struct device *device, struct device_attribute
+ 	return count;
+ }
+ 
++static ssize_t show_antiflicker(struct device *device, struct device_attribute *attr,
++                        char *buf)
++{
++	unsigned int osd_antiflicker = 0;
++	struct fb_info *fb_info = dev_get_drvdata(device);
++
++	osddev_get_osd_antiflicker(fb_info->node, &osd_antiflicker);
++	return snprintf(buf, PAGE_SIZE, "osd_antifliter:[%s]\n", osd_antiflicker?"ON":"OFF");
++}
++
++static ssize_t store_antiflicker(struct device *device, struct device_attribute *attr,
++                         const char *buf, size_t count)
++{
++	const vinfo_t *vinfo;
++	unsigned int osd_antiflicker = 0;
++	struct fb_info *fb_info = dev_get_drvdata(device);
++
++	osd_antiflicker = simple_strtoul(buf, NULL, 0);
++	vinfo = get_current_vinfo();
++
++	if(osd_antiflicker == 2){
++		osddev_set_osd_antiflicker(fb_info->node, osd_antiflicker, fb_info->var.yres);
++	}else{
++		osddev_set_osd_antiflicker(fb_info->node, vinfo->mode, fb_info->var.yres);
++	}
++
++	return count;
++}
++
+ static inline  int str2lower(char *str)
+ {
+ 	while(*str != '\0')
+@@ -1417,6 +1446,7 @@ static struct device_attribute osd_attrs[] = {
+ 	__ATTR(prot_canvas, S_IRUGO|S_IWUSR, show_prot_canvas, store_prot_canvas),
+ 	__ATTR(osd_reverse, S_IRUGO|S_IWUSR, show_osd_reverse, store_osd_reverse),
+ 	__ATTR(prot_state, S_IRUGO|S_IWUSR, show_prot_state, NULL),
++	__ATTR(osd_antiflicker, S_IRUGO|S_IWUSR, show_antiflicker, store_antiflicker),
+ };		
+ 
+ #ifdef  CONFIG_PM
+@@ -1589,6 +1619,7 @@ osd_probe(struct platform_device *pdev)
+ 			r = -EFAULT;
+ 			goto failed2;
+ 		}
++
+ 		mem->start = (phys_addr_t)get_reserve_block_addr(ret);
+ 		mem->end = mem->start+ (phys_addr_t)get_reserve_block_size(ret)-1;
+ #endif
+diff --git a/include/linux/amlogic/osd/osd_dev.h b/include/linux/amlogic/osd/osd_dev.h
+index 4531a2d739cf..4d9dc1436273 100755
+--- a/include/linux/amlogic/osd/osd_dev.h
++++ b/include/linux/amlogic/osd/osd_dev.h
+@@ -101,6 +101,8 @@ extern void osddev_get_osd_reverse(u32 index, u32 *reverse);
+ extern void osddev_set_osd_reverse(u32 index, u32 reverse);
+ extern void osddev_get_osd_rotate_on(u32 index, u32 *on_off);
+ extern void osddev_set_osd_rotate_on(u32 index, u32 on_off);
++extern void osddev_get_osd_antiflicker(u32 index, u32 *on_off);
++extern void osddev_set_osd_antiflicker(u32 index, u32 vmode, u32 yres);
+ extern void osddev_get_osd_rotate_angle(u32 index, u32 *angle);
+ extern void osddev_set_osd_rotate_angle(u32 index, u32 angle);
+ extern void osddev_get_prot_canvas(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end);
+diff --git a/include/linux/amlogic/osd/osd_hw.h b/include/linux/amlogic/osd/osd_hw.h
+index 80a9d264f66f..5eef05691de2 100755
+--- a/include/linux/amlogic/osd/osd_hw.h
++++ b/include/linux/amlogic/osd/osd_hw.h
+@@ -32,7 +32,6 @@ typedef  enum{
+ 	HW_REG_INDEX_MAX
+ }hw_reg_index;
+ 
+-
+ typedef struct {
+ 	s32 x_start;
+ 	s32 x_end;
+@@ -103,6 +102,8 @@ extern void osd_set_osd_reverse_hw(u32 index, u32 reverse);
+ extern void osd_get_osd_reverse_hw(u32 index, u32 *reverse);
+ extern void osd_set_osd_rotate_on_hw(u32 index, u32 on_off);
+ extern void osd_get_osd_rotate_on_hw(u32 index, u32 *on_off);
++extern void osd_set_osd_antiflicker_hw(u32 index, u32 vmode, u32 yres);
++extern void osd_get_osd_antiflicker_hw(u32 index, u32 *on_off);
+ extern void osd_set_osd_rotate_angle_hw(u32 index, u32 angle);
+ extern void osd_get_osd_rotate_angle_hw(u32 index, u32 *angle);
+ extern void osd_get_prot_canvas_hw(u32 index, s32 *x_start, s32 *y_start, s32 *x_end, s32 *y_end);
+-- 
+2.19.0
+

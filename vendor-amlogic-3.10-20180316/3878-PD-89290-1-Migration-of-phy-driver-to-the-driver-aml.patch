@@ -1,0 +1,275 @@
+From 68816b39c38a013a9520bc9d0242c36b027353e1 Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Fri, 4 Apr 2014 11:02:15 +0800
+Subject: [PATCH 3878/5965] PD#89290 1)Migration of phy driver to the
+ driver/amlogic/ethernet directory for m6/m6tvd          2)add eee ethtool for
+ ethernet driver
+
+---
+ arch/arm/configs/meson6_defconfig          |  6 +-
+ arch/arm/configs/meson6tvd_defconfig       |  7 ++-
+ drivers/amlogic/ethernet/am_mdio.c         |  1 +
+ drivers/amlogic/ethernet/am_net8218.c      | 33 ++++++++--
+ drivers/amlogic/ethernet/phy/am_internal.c | 70 +++++++++++++---------
+ 5 files changed, 82 insertions(+), 35 deletions(-)
+
+diff --git a/arch/arm/configs/meson6_defconfig b/arch/arm/configs/meson6_defconfig
+index e9346998d083..ea67a1603c3c 100755
+--- a/arch/arm/configs/meson6_defconfig
++++ b/arch/arm/configs/meson6_defconfig
+@@ -178,6 +178,10 @@ CONFIG_AML_NEXT_GEN_NAND=y
+ CONFIG_AM_NAND=n
+ CONFIG_AML_NFTL_NEW=m
+ CONFIG_AM_ETHERNET=y
++CONFIG_AML_IP101_PHY=y
++#CONFIG_AML_PHY=y
++CONFIG_AML_KSZ8091=y
++CONFIG_AML_LAN8720=y
+ CONFIG_AM_WIFI=y
+ CONFIG_AM_WIFI_SD_MMC=y
+ CONFIG_AM_WIFI_USB=y
+@@ -208,7 +212,7 @@ CONFIG_NETDEVICES=y
+ CONFIG_MII=y
+ CONFIG_TUN=y
+ CONFIG_PHYLIB=y
+-CONFIG_SMSC_PHY=y
++#CONFIG_SMSC_PHY=y
+ CONFIG_PPP=y
+ CONFIG_PPP_BSDCOMP=y
+ CONFIG_PPP_DEFLATE=y
+diff --git a/arch/arm/configs/meson6tvd_defconfig b/arch/arm/configs/meson6tvd_defconfig
+index c9b3339df09b..642bb22812d2 100755
+--- a/arch/arm/configs/meson6tvd_defconfig
++++ b/arch/arm/configs/meson6tvd_defconfig
+@@ -154,6 +154,10 @@ CONFIG_MMC_AML=y
+ # CONFIG_AM_NAND is not set
+ # CONFIG_AML_NEXT_NAND is not set
+ CONFIG_AM_ETHERNET=y
++#CONFIG_AML_IP101_PHY=y
++CONFIG_AML_PHY=y
++#CONFIG_AML_KSZ8091=y
++#CONFIG_AML_LAN8720=y
+ CONFIG_AM_WIFI=y
+ CONFIG_AM_WIFI_SD_MMC=y
+ CONFIG_AM_WIFI_USB=y
+@@ -211,9 +215,6 @@ CONFIG_BLK_DEV_SR=y
+ CONFIG_SCSI_MULTI_LUN=y
+ CONFIG_NETDEVICES=y
+ CONFIG_PHYLIB=y
+-CONFIG_MARVELL_PHY=y
+-CONFIG_AMLOGIC_PHY=y
+-CONFIG_SMSC_PHY=y
+ CONFIG_INPUT_POLLDEV=y
+ CONFIG_INPUT_EVDEV=y
+ CONFIG_INPUT_MISC=y
+diff --git a/drivers/amlogic/ethernet/am_mdio.c b/drivers/amlogic/ethernet/am_mdio.c
+index ef149221d1f7..73ec66df5d1c 100755
+--- a/drivers/amlogic/ethernet/am_mdio.c
++++ b/drivers/amlogic/ethernet/am_mdio.c
+@@ -108,6 +108,7 @@ int aml_mdio_register(struct net_device *ndev)
+ 			if (phydev->phy_id  != 0) {
+ 				//priv->phydev->addr = addr;
+ 				priv->phy_addr = addr;
++				phydev->irq = PHY_POLL;
+ 				irqlist[addr] = PHY_POLL;
+ 			}
+ 			pr_info("%s: PHY ID %08x at %d IRQ %d (%s)%s\n",
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index 08cca0697030..514fc38999b4 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -1653,10 +1653,17 @@ static void set_multicast_list(struct net_device *dev)
+ 		writel(tmp, (void*)(np->base_addr + ETH_MAC_1_Frame_Filter));//hash muticast
+ 	}
+ }
+-static void set_mac_addr_n(struct net_device *dev, void *p){
+-	eth_mac_addr(dev,p);
+-	write_mac_addr(dev, dev->dev_addr);
++static int set_mac_addr_n(struct net_device *dev, void *addr){
++	printk("mac addr come in\n");
++	struct sockaddr *sa = addr;
++
++	if (!is_valid_ether_addr(sa->sa_data))
++		return -EADDRNOTAVAIL;
++
++	memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
+ 
++	write_mac_addr(dev, dev->dev_addr);
++	return 0;
+ }
+ 
+ static const struct net_device_ops am_netdev_ops = {
+@@ -1730,6 +1737,23 @@ static int aml_eth_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+ 		printk( "The PHY does not support set_wol, was CONFIG_MICREL_PHY enabled?\n");
+ 	return err;
+ }
++static int aml_ethtool_op_get_eee(struct net_device *dev,
++				     struct ethtool_eee *edata)
++{
++	struct am_net_private *np = netdev_priv(dev);
++	if (np->phydev == NULL)
++		return -EOPNOTSUPP;
++	return phy_ethtool_get_eee(np->phydev, edata);
++}
++
++static int aml_ethtool_op_set_eee(struct net_device *dev,
++				     struct ethtool_eee *edata)
++{
++	struct am_net_private *np = netdev_priv(dev);
++	if (np->phydev == NULL)
++		return -EOPNOTSUPP;
++	return phy_ethtool_set_eee(np->phydev, edata);
++}
+ 
+ static const struct ethtool_ops aml_ethtool_ops = {
+ 	.get_settings = aml_ethtool_get_settings,
+@@ -1738,7 +1762,8 @@ static const struct ethtool_ops aml_ethtool_ops = {
+ 	.get_link = ethtool_op_get_link,
+ 	.get_wol  = aml_eth_get_wol,
+ 	.set_wol  = aml_eth_set_wol,
+-
++	.get_eee = aml_ethtool_op_get_eee,
++	.set_eee = aml_ethtool_op_set_eee,
+ };
+ /* --------------------------------------------------------------------------*/
+ /**
+diff --git a/drivers/amlogic/ethernet/phy/am_internal.c b/drivers/amlogic/ethernet/phy/am_internal.c
+index 06b5ac9f393c..8b5f3382d73c 100755
+--- a/drivers/amlogic/ethernet/phy/am_internal.c
++++ b/drivers/amlogic/ethernet/phy/am_internal.c
+@@ -27,6 +27,7 @@
+ #define  SMI_ADDR_TSTREAD2    22
+ #define  SMI_ADDR_TSTWRITE    23
+ 
++#define  WR_ADDR_A0CFG        0x11
+ #define  WR_ADDR_A1CFG        0x12
+ #define  WR_ADDR_A2CFG        0x13
+ #define  WR_ADDR_A3CFG        0x14
+@@ -89,20 +90,24 @@ static void closeTSTMODE(struct phy_device *phydev)
+ 
+ static void init_internal_phy(struct phy_device *phydev)
+ {
+-	initTSTMODE(phydev);
+-	// write tstcntl addr val
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x1354);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR);//write addr 0
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3e01);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x8900);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3412);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x2636);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A5CFG);//write addr 0x16
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,3);//write val
+-	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
++        initTSTMODE(phydev);
++        // write tstcntl addr val
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x1354);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR);//write addr 0
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x3e00);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0xf902);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x3412);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
++        phy_write(phydev,SMI_ADDR_TSTWRITE,0x2636);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A5CFG);//write addr 0x16
++        phy_write(phydev,SMI_ADDR_TSTWRITE,3);//write val
++        phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x108);
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0xda00);//write val
+@@ -118,9 +123,13 @@ void init_internal_phy_10B(struct phy_device *phydev)
+ 	// write tstcntl addr val
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0000);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR);//write addr 0
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3e01);//write val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3e00);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x8900);//write val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0xf902);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3412);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
+@@ -130,7 +139,7 @@ void init_internal_phy_10B(struct phy_device *phydev)
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x108);//write val by chandle (2)
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0xda06);//write val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0xda00);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A11CFG);//write addr 0x1d
+ 	closeTSTMODE(phydev);
+ }
+@@ -142,9 +151,13 @@ void init_internal_phy_100B(struct phy_device *phydev)
+ 	// write tstcntl addr val
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x9354);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|0x00);//write addr 0x00
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x38);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A0CFG);//write addr 0x11
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0x0c00);//write val
++	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A1CFG);//write addr 0x12
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3e00);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A2CFG);//write addr 0x13
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0x8900);//write val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0xf902);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A3CFG);//write addr 0x14
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x3412);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A4CFG);//write addr 0x15
+@@ -154,7 +167,7 @@ void init_internal_phy_100B(struct phy_device *phydev)
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A7CFG);//write addr 0x18
+ 	phy_write(phydev,SMI_ADDR_TSTWRITE,0x00a6);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A9CFG);//write addr 0x1b
+-	phy_write(phydev,SMI_ADDR_TSTWRITE,0xda06);//write val
++	phy_write(phydev,SMI_ADDR_TSTWRITE,0xda00);//write val
+ 	phy_write(phydev,SMI_ADDR_TSTCNTL,TSTCNTL_WR|WR_ADDR_A11CFG);//write addr 0x1d
+ 	closeTSTMODE(phydev);
+ }
+@@ -201,17 +214,17 @@ static int amlogic_phy_config_init(struct phy_device *phydev)
+ 			rc = phy_read(phydev, MII_BMCR);
+ 		} while (rc & BMCR_RESET);
+ 	}
+-	/*
+-	   rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
+-	   if (rc < 0)
+-	   return rc;
++
++	rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
++	if (rc < 0)
++		return rc;
+ 
+ 	// Enable energy detect mode for this AML Transceivers 
+ 	rc = phy_write(phydev, MII_INTERNAL_CTRL_STATUS,
+-	rc | MII_INTERNAL_EDPWRDOWN);
++		       rc & ~MII_INTERNAL_EDPWRDOWN);
+ 	if (rc < 0)
+-	return rc;
+-	 */
++		return rc;
++
+ 	return amlogic_phy_ack_interrupt (phydev);
+ }
+ 
+@@ -230,7 +243,10 @@ static int internal_read_status(struct phy_device *phydev)
+ 	if(phydev->speed == SPEED_100){
+ 		init_internal_phy_100B(phydev);
+ 	}
+-	if (!phydev->link) {
++	if (AUTONEG_ENABLE == phydev->autoneg){
++		NULL;
++	}
++	else if (!phydev->link) {
+ 		/* Disable EDPD to wake up PHY */
+ 		int rc = phy_read(phydev, MII_INTERNAL_CTRL_STATUS);
+ 		if (rc < 0)
+-- 
+2.19.0
+

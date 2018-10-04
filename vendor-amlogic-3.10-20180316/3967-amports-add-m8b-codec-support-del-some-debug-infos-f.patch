@@ -1,0 +1,773 @@
+From 09093041ba146e4f5fdb8faad735e9ae9ccacffb Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Tue, 29 Apr 2014 15:34:01 +0800
+Subject: [PATCH 3967/5965] amports: add m8b codec support & del some debug
+ infos from old commit.
+
+---
+ arch/arm/configs/meson8b_vlsi_defconfig  |  5 ++
+ drivers/amlogic/amports/Makefile         |  9 ++++
+ drivers/amlogic/amports/amports_config.h | 36 ++++++++++++++
+ drivers/amlogic/amports/amvdec.c         | 21 ++++----
+ drivers/amlogic/amports/amvdec.h         |  5 +-
+ drivers/amlogic/amports/vdec.c           | 11 +++--
+ drivers/amlogic/amports/vdec.h           |  1 +
+ drivers/amlogic/amports/vh264.c          | 38 ++++++++-------
+ drivers/amlogic/amports/video.c          | 62 ++++++++++++------------
+ drivers/amlogic/amports/vmpeg4.c         |  2 +-
+ drivers/amlogic/amports/vpp.c            | 12 +++--
+ drivers/amlogic/ppmgr/ppmgr_drv.c        |  8 ++-
+ 12 files changed, 140 insertions(+), 70 deletions(-)
+ create mode 100755 drivers/amlogic/amports/amports_config.h
+
+diff --git a/arch/arm/configs/meson8b_vlsi_defconfig b/arch/arm/configs/meson8b_vlsi_defconfig
+index f86a5a22bcf6..9e5555de5d5a 100644
+--- a/arch/arm/configs/meson8b_vlsi_defconfig
++++ b/arch/arm/configs/meson8b_vlsi_defconfig
+@@ -157,6 +157,7 @@ CONFIG_GPIO_AMLOGIC=y
+ CONFIG_AML_NEXT_GEN_NAND=y
+ CONFIG_AML_NAND_KEY=y 
+ # CONFIG_AM_NAND is not set
++CONFIG_AM_VIDEO=y
+ CONFIG_MMC_AML=y
+ # CONFIG_AMAUDIO is not set
+ # CONFIG_AM_LCD_OUTPUT is not set
+@@ -164,6 +165,10 @@ CONFIG_FB_AM=y
+ # CONFIG_AMLOGIC_BACKLIGHT is not set
+ CONFIG_AM_GE2D=y
+ CONFIG_AM_LOGO=y
++#CONFIG_AM_HDMI_ONLY=y
++CONFIG_POST_PROCESS_MANAGER=y
++CONFIG_POST_PROCESS_MANAGER_PPSCALER=y
++#CONFIG_UMP=m
+ # CONFIG_CRYPTO_AML_HW_CRYPRO is not set
+ # CONFIG_CRYPTO_DEVICE_DRIVER is not set
+ CONFIG_UEVENT_HELPER_PATH="/sbin/hotplug"
+diff --git a/drivers/amlogic/amports/Makefile b/drivers/amlogic/amports/Makefile
+index 092627afd693..f831978b8685 100755
+--- a/drivers/amlogic/amports/Makefile
++++ b/drivers/amlogic/amports/Makefile
+@@ -26,9 +26,17 @@ ifeq ($(CONFIG_ARCH_MESON8),y)
+ obj-y = m8/
+ endif
+ 
++ifeq ($(CONFIG_ARCH_MESON8B),y)
++obj-y = m8/
++endif
++
+ obj-$(CONFIG_AM_STREAMING) += amports.o
+ 
+ AMPROT_OBJS = amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o
++
++ifeq ($(CONFIG_ARCH_MESON8B),y)
++amports-y    := amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o
++else
+ ifeq ($(CONFIG_ARCH_MESON8),y)
+ amports-objs := $(AMPROT_OBJS)
+ amports-y    := $(AMPROT_OBJS)
+@@ -51,6 +59,7 @@ endif
+ endif
+ endif
+ endif
++endif
+ 
+ obj-$(CONFIG_AM_VDEC_MPEG12) += amvdec_mpeg12.o
+ amvdec_mpeg12-objs := vmpeg12.o
+diff --git a/drivers/amlogic/amports/amports_config.h b/drivers/amlogic/amports/amports_config.h
+new file mode 100755
+index 000000000000..de18e6d21504
+--- /dev/null
++++ b/drivers/amlogic/amports/amports_config.h
+@@ -0,0 +1,36 @@
++#ifndef AMPORTS_CONFIG_HHH
++#define AMPORTS_CONFIG_HHH
++#include <mach/cpu.h>
++/*
++value seem:
++arch\arm\plat-meson\include\plat\cpu.h
++*/
++
++
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++
++#define HAS_VPU_PROT 0
++#define HAS_VDEC2 0
++#define HAS_HEVC_VDEC 1
++#define HAS_HDEC 1
++
++
++#elif MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++
++#define HAS_VPU_PROT 1
++#define HAS_VDEC2 1
++#define HAS_HDEC 1
++#define HAS_HEVC_VDEC 0
++
++#else
++#define HAS_VPU_PROT 0
++#define HAS_VDEC2 0
++#define HAS_HEVC_VDEC 0
++#define HAS_HDEC 0
++
++#endif
++
++
++
++#endif //AMPORTS_CONFIG_HHH
++
+diff --git a/drivers/amlogic/amports/amvdec.c b/drivers/amlogic/amports/amvdec.c
+index c4906b1a0ce8..be4e7a3c8471 100755
+--- a/drivers/amlogic/amports/amvdec.c
++++ b/drivers/amlogic/amports/amvdec.c
+@@ -43,6 +43,7 @@
+ #include <mach/power_gate.h>
+ #include "vdec_reg.h"
+ #include "amvdec.h"
++#include "amports_config.h"
+ 
+ #define MC_SIZE (4096 * 4)
+ 
+@@ -134,7 +135,7 @@ static void amvdec_pg_enable(bool enable)
+     }
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ static void amvdec2_pg_enable(bool enable)
+ {
+     ulong timeout;
+@@ -250,7 +251,7 @@ s32 amvdec_loadmc(const u32 *p)
+     return ret;
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ s32 amvdec2_loadmc(const u32 *p)
+ {
+     ulong timeout;
+@@ -305,7 +306,7 @@ s32 amvdec2_loadmc(const u32 *p)
+ }
+ #endif
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_HDEC
+ void amhcodec_loadmc(const u32 *p)
+ {
+ #ifdef AMVDEC_USE_STATIC_MEMORY
+@@ -373,7 +374,7 @@ void amvdec_start(void)
+     WRITE_VREG(MPSR, 0x0001);
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ void amvdec2_start(void)
+ {
+ #ifdef CONFIG_WAKELOCK
+@@ -395,7 +396,7 @@ void amvdec2_start(void)
+ }
+ #endif
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_HDEC
+ void amhcodec_start(void)
+ {
+     WRITE_VREG(HCODEC_MPSR, 0x0001);
+@@ -441,7 +442,7 @@ void amvdec_stop(void)
+ #endif
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ void amvdec2_stop(void)
+ {
+     ulong timeout = jiffies + HZ;
+@@ -465,7 +466,7 @@ void amvdec2_stop(void)
+ }
+ #endif
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_HDEC
+ void amhcodec_stop(void)
+ {
+     WRITE_VREG(HCODEC_MPSR, 0);
+@@ -482,7 +483,7 @@ void amvdec_disable(void)
+     amvdec_pg_enable(false);
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ void amvdec2_enable(void)
+ {
+     amvdec2_pg_enable(true);
+@@ -499,7 +500,7 @@ int amvdec_suspend(struct platform_device *dev, pm_message_t event)
+ {
+     amvdec_pg_enable(false);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+     amvdec2_pg_enable(false);
+ #endif
+ 
+@@ -510,7 +511,7 @@ int amvdec_resume(struct platform_device *dev)
+ {
+     amvdec_pg_enable(true);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD 
++#if HAS_VDEC2
+     amvdec2_pg_enable(true);
+ #endif
+ 
+diff --git a/drivers/amlogic/amports/amvdec.h b/drivers/amlogic/amports/amvdec.h
+index b56d3b7ec2fe..33eca3898ac5 100755
+--- a/drivers/amlogic/amports/amvdec.h
++++ b/drivers/amlogic/amports/amvdec.h
+@@ -21,6 +21,7 @@
+ 
+ #ifndef AMVDEC_H
+ #define AMVDEC_H
++#include "amports_config.h"
+ 
+ #include <mach/cpu.h>
+ 
+@@ -33,7 +34,7 @@ extern void amvdec_stop(void);
+ extern void amvdec_enable(void);
+ extern void amvdec_disable(void);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ extern  s32 amvdec2_loadmc(const u32 *p);
+ extern void amvdec2_start(void);
+ extern void amvdec2_stop(void);
+@@ -41,7 +42,7 @@ extern void amvdec2_enable(void);
+ extern void amvdec2_disable(void);
+ #endif
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_HDEC
+ extern void amhcodec_loadmc(const u32 *p);
+ extern void amhcodec_start(void);
+ extern void amhcodec_stop(void);
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index 36b288e3f183..437e3394df57 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -38,9 +38,8 @@
+ #include <linux/module.h>
+ #include <linux/slab.h>
+ 
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TVD
++#include "amports_config.h"
+ #include "amvdec.h"
+-#endif
+ 
+ static DEFINE_SPINLOCK(lock);
+ 
+@@ -420,6 +419,7 @@ void vdec_poweron(vdec_type_t core)
+         // reset DOS top registers
+         WRITE_VREG(DOS_VDEC_MCRCC_STALL_CTRL, 0);
+     } else if (core == VDEC_2) {
++#if HAS_VDEC2
+         // vdec2 power on
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & ~0x30);
+         // wait 10uS
+@@ -435,7 +435,9 @@ void vdec_poweron(vdec_type_t core)
+         WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) & ~0x300);
+         // reset DOS top registers
+         WRITE_VREG(DOS_VDEC2_MCRCC_STALL_CTRL, 0);
++#endif
+     } else if (core == VDEC_HCODEC) {
++#if HAS_HDEC
+         // hcodec poer on
+         WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) & ~0x3);
+         // wait 10uS
+@@ -449,7 +451,8 @@ void vdec_poweron(vdec_type_t core)
+         WRITE_VREG(DOS_MEM_PD_HCODEC, 0);
+         // remove hcodec isolation
+         WRITE_AOREG(AO_RTI_GEN_PWR_ISO0, READ_AOREG(AO_RTI_GEN_PWR_ISO0) & ~0x30);
+-    }
++#endif  
++  }
+ 
+     spin_unlock_irqrestore(&lock, flags);
+ }
+@@ -618,7 +621,7 @@ void vdec_power_mode(int level)
+     spin_unlock_irqrestore(&lock, flags);
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD
++#if HAS_VDEC2
+ void vdec2_power_mode(int level)
+ {
+     /* todo: add level routines for clock adjustment per chips */
+diff --git a/drivers/amlogic/amports/vdec.h b/drivers/amlogic/amports/vdec.h
+index 9dc440338370..e0a802e89be8 100755
+--- a/drivers/amlogic/amports/vdec.h
++++ b/drivers/amlogic/amports/vdec.h
+@@ -21,6 +21,7 @@
+ 
+ #ifndef VDEC_H
+ #define VDEC_H
++#include <mach/cpu.h>
+ 
+ #include <linux/platform_device.h>
+ 
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index bc727ae0ddb8..78cf2365602a 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -38,6 +38,9 @@
+ #include <asm/atomic.h>
+ #include <plat/io.h>
+ #include <linux/module.h>
++#include <linux/slab.h>
++#include "amports_priv.h"
++
+ 
+ #include "vdec.h"
+ #include "vdec_reg.h"
+@@ -73,15 +76,15 @@ static DEFINE_MUTEX(vh264_mutex);
+ #define DEFAULT_MEM_SIZE        (32*1024*1024)
+ #define AVIL_DPB_BUFF_SIZE      0x01ec2000
+ 
+-#define DEF_BUF_START_ADDR            0x81000000
+-#define DEF_BUF_START_BASE            (0x81000000 + buf_offset)
+-#define MEM_HEADER_CPU_BASE           (0x81110000 + buf_offset)
+-#define MEM_DATA_CPU_BASE             (0x81111000 + buf_offset)
+-#define MEM_MMCO_CPU_BASE             (0x81112000 + buf_offset)
+-#define MEM_LIST_CPU_BASE             (0x81113000 + buf_offset)
+-#define MEM_SLICE_CPU_BASE            (0x81114000 + buf_offset)
++
++#define DEF_BUF_START_ADDR            0x1000000
++#define MEM_HEADER_CPU_OFFSET         (0x110000)
++#define MEM_DATA_CPU_OFFSET           (0x111000)
++#define MEM_MMCO_CPU_OFFSET           (0x112000)
++#define MEM_LIST_CPU_OFFSET           (0x113000)
++#define MEM_SLICE_CPU_OFFSET          (0x114000)
+ #define MEM_SWAP_SIZE                 (0x5000*4)
+-#define V_BUF_ADDR_START              0x8113e000
++#define V_BUF_ADDR_OFFSET             (0x13e000)
+ 
+ #define PIC_SINGLE_FRAME        0
+ #define PIC_TOP_BOT_TOP         1
+@@ -168,6 +171,7 @@ static struct timer_list recycle_timer;
+ static u32 stat;
+ static u32 buf_start, buf_size;
+ static s32 buf_offset;
++static u32 ucode_map_start;
+ static u32 pts_outside = 0;
+ static u32 sync_outside = 0;
+ static u32 dec_control = 0;
+@@ -1470,12 +1474,12 @@ static void vh264_local_init(void)
+     return;
+ }
+ 
++
+ static s32 vh264_init(void)
+ {
+     int trickmode_fffb = 0;
+-    void __iomem *p = ioremap_nocache(DEF_BUF_START_BASE, V_BUF_ADDR_START - DEF_BUF_START_ADDR);
+-    void __iomem *p1 = (void __iomem *)((ulong)(p) + MEM_HEADER_CPU_BASE - DEF_BUF_START_BASE);
+-
++    void __iomem *p = ioremap_nocache(ucode_map_start, V_BUF_ADDR_OFFSET);
++    void __iomem *p1 = (void __iomem *)((ulong)(p) + MEM_HEADER_CPU_OFFSET);
+     if (!p) {
+         printk("\nvh264_init: Cannot remap ucode swapping memory\n");
+         return -ENOMEM;
+@@ -1494,12 +1498,12 @@ static s32 vh264_init(void)
+     query_video_status(0, &trickmode_fffb);
+ 
+     if (!trickmode_fffb) {
+-        memset(p, 0, V_BUF_ADDR_START - DEF_BUF_START_ADDR);
++        memset(p, 0, V_BUF_ADDR_OFFSET);
+     }
+ 
+     amvdec_enable();
+-
+-    if (amvdec_loadmc(vh264_mc) < 0) {
++	
++    if (amvdec_loadmc(vh264_mc) < 0) { 
+         amvdec_disable();
+         return -EBUSY;
+     }
+@@ -1769,7 +1773,7 @@ static int amvdec_h264_probe(struct platform_device *pdev)
+         mutex_unlock(&vh264_mutex);
+         return -EFAULT;
+     }
+-
++    ucode_map_start=mem->start;
+     buf_size = mem->end - mem->start + 1;
+     if (buf_size < DEFAULT_MEM_SIZE) {
+         printk("\namvdec_h264 memory size not enough.\n");
+@@ -1777,8 +1781,8 @@ static int amvdec_h264_probe(struct platform_device *pdev)
+     }
+ 
+     buf_offset = mem->start - DEF_BUF_START_ADDR;
+-    buf_start = V_BUF_ADDR_START + buf_offset;
+-
++    buf_start = V_BUF_ADDR_OFFSET + mem->start;
++    printk("mem-addr=%x,buff_offset=%x,buf_start=%x\n",mem->start,buf_offset,buf_start);
+     memcpy(&vh264_amstream_dec_info, (void *)mem[1].start, sizeof(vh264_amstream_dec_info));
+ 
+     if (vh264_init() < 0) {
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 9c4d5499e49b..ca7e0d762535 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -63,7 +63,9 @@
+ #include <asm/fiq.h>
+ #include <asm/uaccess.h>
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#include "amports_config.h"
++
++#if HAS_VPU_PROT
+ #include <mach/vpu.h>
+ #endif
+ 
+@@ -151,7 +153,7 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+ 
+ #define RESERVE_CLR_FRAME
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ #define VD1_MEM_POWER_ON() \
+     do { \
+         unsigned long flags; \
+@@ -227,7 +229,7 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+         video_onoff_state = VIDEO_ENABLE_STATE_OFF_REQ; \
+         spin_unlock_irqrestore(&video_onoff_lock, flags); \
+     } while (0)
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ #define EnableVideoLayer()  \
+     do { \
+         if(get_vpu_mem_pd_vmod(VPU_VIU_VD1) == VPU_MEM_POWER_DOWN || \
+@@ -275,7 +277,7 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+          } \
+     } while (0)
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ #define DisableVideoLayer_NoDelay() \
+     do { \
+          CLEAR_VCBUS_REG_MASK(VPP_MISC + cur_dev->vpp_off, \
+@@ -321,7 +323,7 @@ static int video_onoff_state = VIDEO_ENABLE_STATE_IDLE;
+ 
+ #define MAX_ZOOM_RATIO 300
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ #define VPP_PREBLEND_VD_V_END_LIMIT 2304
+ #else
+ #define VPP_PREBLEND_VD_V_END_LIMIT 1080
+@@ -389,7 +391,7 @@ static int cur_dev_idx = 0;
+ typedef struct {
+     int event;
+     u32 vpp_misc;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     int mem_pd_vd1;
+     int mem_pd_vd2;
+     int mem_pd_di_post;
+@@ -417,7 +419,7 @@ static int scaler_pos_changed = 0;
+ static struct amvideocap_req *capture_frame_req=NULL;
+ static video_prot_t video_prot;
+ static u32 video_angle = 0;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ static u32 use_prot = 0;
+ u32 get_prot_status(void) { return video_prot.status; }
+ EXPORT_SYMBOL(get_prot_status);
+@@ -635,7 +637,7 @@ static const u8 skip_tab[6] = { 0x24, 0x04, 0x68, 0x48, 0x28, 0x08 };
+ /* wait queue for poll */
+ static wait_queue_head_t amvideo_trick_wait;
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ #define VPU_DELAYWORK_VPU_CLK            1
+ #define VPU_DELAYWORK_MEM_POWER_OFF_VD1  2
+ #define VPU_DELAYWORK_MEM_POWER_OFF_VD2  4
+@@ -1234,13 +1236,13 @@ static void vsync_toggle_frame(vframe_t *vf)
+ #endif
+ 	VSYNC_WR_MPEG_REG(VD2_IF0_CANVAS1, disp_canvas[rdma_canvas_id][1]);
+         next_rdma_canvas_id = rdma_canvas_id?0:1;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         if (use_prot) {
+             video_prot.prot2_canvas = disp_canvas[rdma_canvas_id][0] & 0xff;
+             video_prot.prot3_canvas = (disp_canvas[rdma_canvas_id][0] >> 8) & 0xff;
+              VSYNC_WR_MPEG_REG_BITS(VPU_PROT2_DDR, video_prot.prot2_canvas, 0, 8);
+              VSYNC_WR_MPEG_REG_BITS(VPU_PROT3_DDR, video_prot.prot3_canvas, 0, 8);
+-        }
++        }	 
+ #endif
+ #else
+         canvas_copy(vf->canvas0Addr & 0xff, disp_canvas_index[0]);
+@@ -1263,7 +1265,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+ 	VSYNC_WR_MPEG_REG(VD2_IF0_CANVAS0, disp_canvas[0]);
+ 	VSYNC_WR_MPEG_REG(VD2_IF0_CANVAS1, disp_canvas[1]);
+ #endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         if (use_prot) {
+             video_prot.prot2_canvas = disp_canvas_index[0];
+             video_prot.prot3_canvas = disp_canvas_index[1];
+@@ -1319,7 +1321,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+         ((cur_dispbuf->type_backup & VIDTYPE_INTERLACE) !=
+          (vf->type_backup & VIDTYPE_INTERLACE)) ||
+          (cur_dispbuf->type != vf->type)
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+          || video_prot.angle_changed
+ #endif
+          ) {
+@@ -1342,7 +1344,7 @@ amlog_mask(LOG_MASK_FRAMEINFO,
+ #endif
+         next_frame_par = (&frame_parms[0] == next_frame_par) ?
+                          &frame_parms[1] : &frame_parms[0];
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         if (use_prot) {
+             vframe_t tmp_vf = *vf;
+             if (video_prot.angle_changed || cur_dispbuf->width != vf->width || cur_dispbuf->height != vf->height) {
+@@ -1386,7 +1388,7 @@ amlog_mask(LOG_MASK_FRAMEINFO,
+         /* apply new vpp settings */
+         frame_par_ready_to_set = 1;
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         if ((vf->width > 1920) && (vf->height > 1088)) {
+             if (vpu_clk_level == 0) {
+                 vpu_clk_level = 1;
+@@ -1453,7 +1455,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+             r |= VDIF_FORMAT_RGB888_YUV444 | VDIF_DEMUX_MODE_RGB_444;
+         }
+     }
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if (video_prot.status && use_prot) {
+         r |= VDIF_DEMUX_MODE | VDIF_LAST_LINE | 3 << VDIF_BURSTSIZE_Y_BIT | 1 << VDIF_BURSTSIZE_CB_BIT | 1 << VDIF_BURSTSIZE_CR_BIT;
+         r &= 0xffffffbf;
+@@ -1472,7 +1474,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+     } else {
+         VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0,0,1);
+     }
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if (use_prot) {
+         if (video_prot.angle == 2) {
+             VSYNC_WR_MPEG_REG_BITS(VD1_IF0_GEN_REG2 + cur_dev->viu_off, 0xf, 2, 4);
+@@ -1547,7 +1549,7 @@ static void viu_set_dcu(vpp_frame_par_t *frame_par, vframe_t *vf)
+                        (((vf->type & VIDTYPE_VIU_422) ? 0x10 : 0x08) << VFORMATTER_PHASE_BIT) |
+                        VFORMATTER_EN);
+     }
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if (video_prot.status && use_prot) {
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, VFORMATTER_INIPHASE_BIT, 4);
+         VSYNC_WR_MPEG_REG_BITS(VIU_VD1_FMT_CTRL + cur_dev->viu_off, 0, 16, 1);
+@@ -2164,7 +2166,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+ 	/* amvecm video latch function */
+ 	amvecm_video_latch();
+ #endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     vdin_ops=get_vdin_v4l2_ops();
+     if(vdin_ops){
+ 	arg.cmd = VDIN_CMD_ISR;
+@@ -2239,7 +2241,7 @@ static irqreturn_t vsync_isr(int irq, void *dev_id)
+         dispbuf_to_put_num = 0;
+     }
+ #endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     use_prot = get_use_prot();
+     if (video_prot.video_started) {
+         video_prot.video_started = 0;
+@@ -2536,7 +2538,7 @@ SET_FILTER:
+                             VPP_SC_HBANK_LENGTH_BIT,
+                             VPP_SC_BANK_LENGTH_WID);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         VSYNC_WR_MPEG_REG_BITS(VPP_VSC_PHASE_CTRL + cur_dev->vpp_off,
+                             (vpp_filter->vpp_vert_coeff[0] == 2) ? 1 : 0,
+                             VPP_PHASECTL_DOUBLELINE_BIT,
+@@ -2699,7 +2701,7 @@ exit:
+     if (video_notify_flag)
+         vsync_notify();
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if (vpu_delay_work_flag) {
+         schedule_work(&vpu_delay_work);
+     }
+@@ -2961,7 +2963,7 @@ static void video_vf_light_unreg_provider(void)
+         vf_local = *cur_dispbuf;
+         cur_dispbuf = &vf_local;
+     }
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if(get_vpu_mem_pd_vmod(VPU_VIU_VD1) == VPU_MEM_POWER_DOWN ||
+             get_vpu_mem_pd_vmod(VPU_PIC_ROT2) == VPU_MEM_POWER_DOWN ||
+             aml_read_reg32(P_VPU_PROT3_CLK_GATE) == 0) {
+@@ -4685,7 +4687,7 @@ static int amvideo_class_suspend(struct device *dev, pm_message_t state)
+     if (state.event == PM_EVENT_SUSPEND) {
+         pm_state.vpp_misc = READ_VCBUS_REG(VPP_MISC + cur_dev->vpp_off);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         pm_state.mem_pd_vd1 = get_vpu_mem_pd_vmod(VPU_VIU_VD1);
+         pm_state.mem_pd_vd2 = get_vpu_mem_pd_vmod(VPU_VIU_VD2);
+         pm_state.mem_pd_di_post = get_vpu_mem_pd_vmod(VPU_DI_POST);
+@@ -4697,7 +4699,7 @@ static int amvideo_class_suspend(struct device *dev, pm_message_t state)
+ 
+         msleep(50);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         switch_vpu_mem_pd_vmod(VPU_VIU_VD1, VPU_MEM_POWER_DOWN);
+         switch_vpu_mem_pd_vmod(VPU_VIU_VD2, VPU_MEM_POWER_DOWN);
+         switch_vpu_mem_pd_vmod(VPU_DI_POST, VPU_MEM_POWER_DOWN);
+@@ -4724,7 +4726,7 @@ static int amvideo_class_resume(struct device *dev)
+   ((VPP_VD2_ALPHA_MASK << VPP_VD2_ALPHA_BIT) | VPP_VD2_PREBLEND | VPP_VD1_PREBLEND | VPP_VD2_POSTBLEND | VPP_VD1_POSTBLEND | VPP_POSTBLEND_EN)
+ 
+     if (pm_state.event == PM_EVENT_SUSPEND) {
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+         switch_vpu_mem_pd_vmod(VPU_VIU_VD1, pm_state.mem_pd_vd1);
+         switch_vpu_mem_pd_vmod(VPU_VIU_VD2, pm_state.mem_pd_vd2);
+         switch_vpu_mem_pd_vmod(VPU_DI_POST, pm_state.mem_pd_di_post);
+@@ -4874,7 +4876,7 @@ static void vout_hook(void)
+ #endif
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ static void do_vpu_delay_work(struct work_struct *work)
+ {
+     unsigned long flags;
+@@ -4936,7 +4938,7 @@ static int __init video_early_init(void)
+ {
+     logo_object_t  *init_logo_obj=NULL;
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     /* todo: move this to clock tree, enable VPU clock */
+     //WRITE_CBUS_REG(HHI_VPU_CLK_CNTL, (1<<9) | (1<<8) | (3)); // fclk_div3/4 = ~200M
+     //WRITE_CBUS_REG(HHI_VPU_CLK_CNTL, (3<<9) | (1<<8) | (0)); // fclk_div7/1 = 364M	//moved to vpu.c, default config by dts
+@@ -4952,7 +4954,7 @@ static int __init video_early_init(void)
+ #endif // MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+     }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     WRITE_VCBUS_REG(VPP_PREBLEND_VD1_H_START_END, 4096);
+ #endif
+ 
+@@ -4974,7 +4976,7 @@ static int __init video_early_init(void)
+     	WRITE_VCBUS_REG(VPP2_HOLD_LINES, 0x08080808);
+     }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+    	WRITE_VCBUS_REG_BITS(VPP2_OFIFO_SIZE, 0x800,
+                         VPP_OFIFO_SIZE_BIT, VPP_OFIFO_SIZE_WID);
+ #else
+@@ -5078,7 +5080,7 @@ static int __init video_init(void)
+ 
+     init_waitqueue_head(&amvideo_trick_wait);
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     INIT_WORK(&vpu_delay_work, do_vpu_delay_work);
+ #endif
+ 
+diff --git a/drivers/amlogic/amports/vmpeg4.c b/drivers/amlogic/amports/vmpeg4.c
+index 70b5a558b196..6b70d089fb45 100755
+--- a/drivers/amlogic/amports/vmpeg4.c
++++ b/drivers/amlogic/amports/vmpeg4.c
+@@ -723,7 +723,7 @@ static void vmpeg4_prot_init(void)
+     SET_VREG_MASK(MDEC_PIC_DC_CTRL, 1<<17);
+ #endif
+ 
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+     printk("mpeg4 meson8 prot init\n");
+     WRITE_VREG(MDEC_PIC_DC_THRESH, 0x404038aa);
+ #endif
+diff --git a/drivers/amlogic/amports/vpp.c b/drivers/amlogic/amports/vpp.c
+index 46319699f2a8..6f1c0108c588 100755
+--- a/drivers/amlogic/amports/vpp.c
++++ b/drivers/amlogic/amports/vpp.c
+@@ -23,9 +23,13 @@
+ #include <linux/err.h>
+ #include <linux/amlogic/vout/vinfo.h>
+ #include <mach/am_regs.h>
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#include "amports_config.h"
++
++
++#if HAS_VPU_PROT
+ #include <mach/vpu.h>
+ #endif
++
+ #include <linux/amlogic/amports/vframe.h>
+ #include "video.h"
+ #include "vpp.h"
+@@ -289,7 +293,7 @@ vpp_process_speed_check(s32 width_in,
+                         vpp_frame_par_t *next_frame_par,
+                         const vinfo_t *vinfo)
+ {
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if ((width_in <= 0) || (height_in <= 0) || (height_out <= 0) || (height_screen <= 0)) {
+         return SPEED_CHECK_DONE;
+     }
+@@ -686,7 +690,7 @@ RESTART:
+     }
+ 
+     next_frame_par->VPP_hf_ini_phase_ = vpp_zoom_center_x & 0xff;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     if (get_prot_status()){
+         s32 tmp_height = (((s32)next_frame_par->VPP_vd_end_lines_ + 1) << 18) / tmp_ratio_y;
+         s32 tmp_top = 0;
+@@ -942,7 +946,7 @@ vpp_set_filters(u32 process_3d_type,u32 wide_mode,
+     vpp_set_filters2(src_width, src_height, vinfo, vpp_flags, next_frame_par);
+ }
+ 
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+ void
+ prot_get_parameter(u32 wide_mode,
+                 vframe_t *vf,
+diff --git a/drivers/amlogic/ppmgr/ppmgr_drv.c b/drivers/amlogic/ppmgr/ppmgr_drv.c
+index 4b9900d3fb39..c523587a99d0 100755
+--- a/drivers/amlogic/ppmgr/ppmgr_drv.c
++++ b/drivers/amlogic/ppmgr/ppmgr_drv.c
+@@ -47,7 +47,11 @@ extern void Set3DProcessPara(unsigned mode);
+ #endif
+ #ifdef CONFIG_POST_PROCESS_MANAGER_PPSCALER
+ static bool scaler_pos_reset = false;
+-#endif
++#endif
++
++#include "../amports/amports_config.h"
++
++
+ platform_type_t get_platform_type()
+ {
+ 	return	platform_type;
+@@ -1139,7 +1143,7 @@ int  init_ppmgr_device(void)
+     if(ppmgr_buffer_init(0) < 0) goto unregister_dev;
+     //if(start_vpp_task()<0) return -1;
+     ppmgr_device.use_prot = 1;
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if HAS_VPU_PROT
+     ppmgr_device.disable_prot = 0;
+ #else
+     ppmgr_device.disable_prot = 1;
+-- 
+2.19.0
+

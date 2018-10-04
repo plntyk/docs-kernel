@@ -1,0 +1,126 @@
+From a7bd3a2024f91f08f356378014ec304249e08146 Mon Sep 17 00:00:00 2001
+From: "qi.duan" <qi.duan@amlogic.com>
+Date: Fri, 27 Dec 2013 10:36:02 +0800
+Subject: [PATCH 2671/5965] PD #83999 new reserve memory way for M6
+
+---
+ drivers/amlogic/ion_dev/dev_ion.c | 50 +++++++++++++++++++++++++++----
+ drivers/of/fdt.c                  | 13 ++++++++
+ include/linux/of_fdt.h            |  1 +
+ 3 files changed, 59 insertions(+), 5 deletions(-)
+ mode change 100644 => 100755 drivers/amlogic/ion_dev/dev_ion.c
+ mode change 100644 => 100755 include/linux/of_fdt.h
+
+diff --git a/drivers/amlogic/ion_dev/dev_ion.c b/drivers/amlogic/ion_dev/dev_ion.c
+old mode 100644
+new mode 100755
+index 1e95b3215ebc..695557196a68
+--- a/drivers/amlogic/ion_dev/dev_ion.c
++++ b/drivers/amlogic/ion_dev/dev_ion.c
+@@ -49,6 +49,9 @@ int dev_ion_probe(struct platform_device *pdev) {
+     num_heaps = 1;
+     
+     struct resource *res;
++    struct device_node	*of_node = pdev->dev.of_node;
++    const void *name;
++    int offset,size;
+ 
+     my_ion_heap[0].type = ION_HEAP_TYPE_SYSTEM;
+     my_ion_heap[0].id = ION_HEAP_TYPE_SYSTEM;
+@@ -57,13 +60,50 @@ int dev_ion_probe(struct platform_device *pdev) {
+     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ #else
+     res = &memobj;
+-    i = find_reserve_block(pdev->dev.of_node->name,0);
++    i = find_reserve_block(of_node->name,0);
+     if(i < 0){
+-        printk("\ndev_ion memory resource undefined.\n");
+-        return -EFAULT;
++	 name = of_get_property(of_node, "share-memory-name", NULL);
++	 if(!name)
++	 {
++        	printk("\ndev_ion memory resource undefined1.\n");
++        	return -EFAULT;
++	 }
++	 else
++	 {
++		i= find_reserve_block_by_name(name);
++		if(i<0)
++		{
++			printk("\ndev_ion memory resource undefined2.\n");
++        		return -EFAULT;
++		}
++		name = of_get_property(of_node, "share-memory-offset", NULL);
++		if(name)
++			offset = of_read_ulong(name,1);
++		else
++		{
++			printk("\ndev_ion memory resource undefined3.\n");
++        		return -EFAULT;
++		}
++		name = of_get_property(of_node, "share-memory-size", NULL);
++		if(name)
++			size = of_read_ulong(name,1);
++		else
++		{
++			printk("\ndev_ion memory resource undefined4.\n");
++        		return -EFAULT;
++		}
++		
++		
++		res->start = (phys_addr_t)get_reserve_block_addr(i)+offset;
++    		res->end = res->start+ size-1;
++		
++	 }
++    }
++    else
++    {
++    	res->start = (phys_addr_t)get_reserve_block_addr(i);
++    	res->end = res->start+ (phys_addr_t)get_reserve_block_size(i)-1;
+     }
+-    res->start = (phys_addr_t)get_reserve_block_addr(i);
+-    res->end = res->start+ (phys_addr_t)get_reserve_block_size(i)-1;
+ #endif
+     if (res) {
+         num_heaps = 2;
+diff --git a/drivers/of/fdt.c b/drivers/of/fdt.c
+index 83e992f74dfe..4488e34389d9 100755
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
+@@ -667,6 +667,19 @@ int find_reserve_block(char * name,int idx)
+ 	return -1;
+ }
+ 
++int find_reserve_block_by_name(char * name)
++{
++	int i;
++
++	for(i=0;i<pReserve_Manager->count;i++)
++	{
++		if(strcmp(pReserve_Manager->reserve[i].name,name)==0)
++			return i;
++	}
++
++	return -1;
++}
++
+ unsigned long long get_reserve_block_addr(int blockid)
+ {
+ 	if(blockid >= MAX_RESERVE_BLOCK)
+diff --git a/include/linux/of_fdt.h b/include/linux/of_fdt.h
+old mode 100644
+new mode 100755
+index d0d231ae246f..4cd6328bb9a1
+--- a/include/linux/of_fdt.h
++++ b/include/linux/of_fdt.h
+@@ -101,6 +101,7 @@ extern int early_init_dt_scan_reserve_memory(unsigned long node, const char *una
+ 				     int depth, void *data);
+ extern int init_reserve_mgr(void);
+ extern int find_reserve_block(char * name,int idx);
++extern int find_reserve_block_by_name(char * name);
+ extern unsigned long long get_reserve_block_addr(int blockid);
+ extern unsigned long long get_reserve_block_size(int blockid);
+ #endif
+-- 
+2.19.0
+

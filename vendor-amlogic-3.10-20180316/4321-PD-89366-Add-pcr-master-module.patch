@@ -1,0 +1,1215 @@
+From 51a2f4b165413221bbea4073a2168d417f21a6fd Mon Sep 17 00:00:00 2001
+From: "le.yang" <le.yang@amlogic.com>
+Date: Tue, 10 Jun 2014 16:00:16 +0800
+Subject: [PATCH 4321/5965] PD #89366:Add pcr master module.
+
+---
+ drivers/amlogic/amports/Makefile          |   4 +-
+ drivers/amlogic/amports/amstream.c        |  23 +-
+ drivers/amlogic/amports/ptsserv.c         |  23 ++
+ drivers/amlogic/amports/streambuf.h       |   1 +
+ drivers/amlogic/amports/timestamp.c       |  28 ++
+ drivers/amlogic/amports/tsdemux.c         |  73 +++-
+ drivers/amlogic/amports/tsdemux.h         |  12 +-
+ drivers/amlogic/amports/tsync.c           |  56 ++-
+ drivers/amlogic/amports/tsync_pcr.c       | 460 ++++++++++++++++++++++
+ drivers/amlogic/amports/tsync_pcr.h       |   8 +
+ drivers/amlogic/amports/vh264.c           |  14 +-
+ drivers/amlogic/amports/video.c           |  20 +-
+ drivers/amlogic/dvb_tv/aml_dvb.c          |  40 ++
+ drivers/amlogic/dvb_tv/aml_dvb.h          |   1 +
+ include/linux/amlogic/amports/amstream.h  |   2 +
+ include/linux/amlogic/amports/ptsserv.h   |   1 +
+ include/linux/amlogic/amports/timestamp.h |  10 +
+ include/linux/amlogic/amports/tsync.h     |   1 +
+ 18 files changed, 750 insertions(+), 27 deletions(-)
+ create mode 100644 drivers/amlogic/amports/tsync_pcr.c
+ create mode 100644 drivers/amlogic/amports/tsync_pcr.h
+
+diff --git a/drivers/amlogic/amports/Makefile b/drivers/amlogic/amports/Makefile
+index 7f92c8733f24..db9b96079360 100755
+--- a/drivers/amlogic/amports/Makefile
++++ b/drivers/amlogic/amports/Makefile
+@@ -32,10 +32,10 @@ endif
+ 
+ obj-$(CONFIG_AM_STREAMING) += amports.o
+ 
+-AMPROT_OBJS = amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o
++AMPROT_OBJS = amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o tsync_pcr.o
+ 
+ ifeq ($(CONFIG_ARCH_MESON8B),y)
+-amports-y    := amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o
++amports-y    := amstream.o streambuf.o vdec.o adec.o tsdemux.o psparser.o esparser.o rmparser.o amvdec.o amstream_profile.o  tsync_pcr.o
+ else
+ ifeq ($(CONFIG_ARCH_MESON8),y)
+ amports-objs := $(AMPROT_OBJS)
+diff --git a/drivers/amlogic/amports/amstream.c b/drivers/amlogic/amports/amstream.c
+index e9b766ab32ba..774a8f568083 100755
+--- a/drivers/amlogic/amports/amstream.c
++++ b/drivers/amlogic/amports/amstream.c
+@@ -653,11 +653,13 @@ static  int amstream_port_init(stream_port_t *port)
+         r = tsdemux_init((port->flag & PORT_FLAG_VID) ? port->vid : 0xffff,
+                          (port->flag & PORT_FLAG_AID) ? port->aid : 0xffff,
+                          (port->flag & PORT_FLAG_SID) ? port->sid : 0xffff,
++                         port->pcrid,
+                          (port->vformat == VFORMAT_HEVC));
+ #else
+         r = tsdemux_init((port->flag & PORT_FLAG_VID) ? port->vid : 0xffff,
+                          (port->flag & PORT_FLAG_AID) ? port->aid : 0xffff,
+-                         (port->flag & PORT_FLAG_SID) ? port->sid : 0xffff);
++                         (port->flag & PORT_FLAG_SID) ? port->sid : 0xffff,
++                         port->pcrid);
+ #endif
+         if (r < 0) {
+             printk("tsdemux_init  failed\n");
+@@ -1107,6 +1109,7 @@ static int amstream_open(struct inode *inode, struct file *file)
+     this->vid = 0;
+     this->aid = 0;
+     this->sid = 0;
++    this->pcrid = 0;
+     file->f_op = this->fops;
+     file->private_data = this;
+ 
+@@ -1132,6 +1135,18 @@ static int amstream_release(struct inode *inode, struct file *file)
+     if (this->flag & PORT_FLAG_INITED) {
+         amstream_port_release(this);
+     }
++    if ((this->type & (PORT_TYPE_AUDIO | PORT_TYPE_VIDEO)) == PORT_TYPE_AUDIO) {
++        s32 i;
++        stream_port_t *s;
++        for (s = &ports[0], i = 0; i < MAX_AMSTREAM_PORT_NUM; i++, s++) {
++            if ((s->flag & PORT_FLAG_IN_USE) && (s->type & PORT_TYPE_VIDEO)) {
++                break;
++            }
++        }
++        if (i == MAX_AMSTREAM_PORT_NUM) {
++            timestamp_firstvpts_set(0);
++        }
++    }    
+     this->flag = 0;
+ 
+     ///timestamp_pcrscr_set(0);
+@@ -1287,6 +1302,12 @@ static long amstream_ioctl(struct file *file,
+         }
+ 
+         break;
++
++    case AMSTREAM_IOC_PCRID:
++	this->pcrid= (u32)arg;
++       printk("set pcrid = 0x%x \n", this->pcrid);
++    	break;
++    	
+     case AMSTREAM_IOC_VB_STATUS:
+         if (this->type & PORT_TYPE_VIDEO) {
+             struct am_io_param *p = (void*)arg;
+diff --git a/drivers/amlogic/amports/ptsserv.c b/drivers/amlogic/amports/ptsserv.c
+index bb53b9dd491b..8756bf679f03 100755
+--- a/drivers/amlogic/amports/ptsserv.c
++++ b/drivers/amlogic/amports/ptsserv.c
+@@ -236,6 +236,29 @@ int calculation_stream_delayed_ms(u8 type,u32 *latestbitrate,u32*avg_bitare)
+ }
+ EXPORT_SYMBOL(calculation_stream_delayed_ms);
+ 
++// return the 1/90000 unit time
++int calculation_vcached_delayed(){
++	pts_table_t *pTable;
++	u32 delay=0;
++
++	pTable = &pts_table[PTS_TYPE_VIDEO];
++
++	delay = pTable->last_checkin_pts-timestamp_vpts_get();
++
++	if (0<delay && delay<5*90000) 
++		return delay;
++
++	if(pTable->last_avg_bitrate>0){
++		int diff = pTable->last_checkin_offset-pTable->last_checkout_offset;
++      		delay=diff*90000/(1+pTable->last_avg_bitrate/8);
++
++		return delay;
++	}
++
++	return -1;
++}
++EXPORT_SYMBOL(calculation_vcached_delayed);
++
+ int calculation_stream_ext_delayed_ms(u8 type)
+ {
+     pts_table_t *pTable;
+diff --git a/drivers/amlogic/amports/streambuf.h b/drivers/amlogic/amports/streambuf.h
+index 9fec38fed6f5..332e905b531b 100755
+--- a/drivers/amlogic/amports/streambuf.h
++++ b/drivers/amlogic/amports/streambuf.h
+@@ -82,6 +82,7 @@ typedef struct stream_port_s {
+     u32 vid;
+     u32 aid;
+     u32 sid;
++    u32 pcrid;
+ } stream_port_t;
+ 
+ extern ulong fetchbuf, *fetchbuf_remap;
+diff --git a/drivers/amlogic/amports/timestamp.c b/drivers/amlogic/amports/timestamp.c
+index 8044d2312032..1b9e871d8798 100755
+--- a/drivers/amlogic/amports/timestamp.c
++++ b/drivers/amlogic/amports/timestamp.c
+@@ -18,6 +18,8 @@ static u32 system_time = 0;
+ static u32 system_time_up = 0;
+ static u32 audio_pts_up = 0;
+ static u32 audio_pts_started = 0;
++static u32 first_vpts = 0;
++static u32 first_apts = 0;
+ 
+ #ifdef MODIFY_TIMESTAMP_INC_WITH_PLL
+ #define PLL_FACTOR 10000
+@@ -130,6 +132,32 @@ void timestamp_pcrscr_set(u32 pts)
+ 
+ EXPORT_SYMBOL(timestamp_pcrscr_set);
+ 
++void timestamp_firstvpts_set(u32 pts)
++{
++    first_vpts = pts;
++}
++
++EXPORT_SYMBOL(timestamp_firstvpts_set);
++
++u32 timestamp_firstvpts_get(void)
++{
++    return first_vpts;
++}
++EXPORT_SYMBOL(timestamp_firstvpts_get);
++
++void timestamp_firstapts_set(u32 pts)
++{
++    first_apts = pts;
++}
++
++EXPORT_SYMBOL(timestamp_firstapts_set);
++
++u32 timestamp_firstapts_get(void)
++{
++    return first_apts;
++}
++EXPORT_SYMBOL(timestamp_firstapts_get);
++
+ void timestamp_pcrscr_inc(s32 inc)
+ {
+     if (system_time_up) {
+diff --git a/drivers/amlogic/amports/tsdemux.c b/drivers/amlogic/amports/tsdemux.c
+index d22f75198679..754cf614cc98 100755
+--- a/drivers/amlogic/amports/tsdemux.c
++++ b/drivers/amlogic/amports/tsdemux.c
+@@ -51,6 +51,7 @@ const static char tsdemux_irq_id[] = "tsdemux-irq-id";
+ static DECLARE_WAIT_QUEUE_HEAD(wq);
+ static u32 fetch_done;
+ static u32 discontinued_counter;
++static int pcrscr_valid=0;
+ 
+ static int demux_skipbyte;
+ 
+@@ -244,6 +245,20 @@ static int tsdemux_set_sid(int spid)
+     return r;
+ }
+ 
++static int tsdemux_set_pcrid(int pcrpid)
++{
++    unsigned long flags;
++    int r = 0;
++
++    spin_lock_irqsave(&demux_ops_lock, flags);
++    if (demux_ops && demux_ops->set_pcrid) {
++        r = demux_ops->set_pcrid(pcrpid);
++    }
++    spin_unlock_irqrestore(&demux_ops_lock, flags);
++
++    return r;
++}
++
+ static int tsdemux_set_skip_byte(int skipbyte)
+ {
+     unsigned long flags;
+@@ -416,9 +431,9 @@ static ssize_t _tsdemux_write(const char __user *buf, size_t count)
+ }
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
+-s32 tsdemux_init(u32 vid, u32 aid, u32 sid, bool is_hevc)
++s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid, bool is_hevc)
+ #else
+-s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
++s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid)
+ #endif
+ {
+     s32 r;
+@@ -446,8 +461,8 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
+ #endif
+ 
+     /* set PID filter */
+-    printk("tsdemux video_pid = 0x%x, audio_pid = 0x%x, sub_pid = 0x%x\n",
+-           vid, aid, sid);
++    printk("tsdemux video_pid = 0x%x, audio_pid = 0x%x, sub_pid = 0x%x, pcrid = 0x%x\n",
++           vid, aid, sid, pcrid);
+ 
+ #ifndef ENABLE_DEMUX_DRIVER
+     WRITE_MPEG_REG(FM_WR_DATA,
+@@ -598,9 +613,37 @@ s32 tsdemux_init(u32 vid, u32 aid, u32 sid)
+     if (sid < 0x1FFF) {
+         tsdemux_set_sid(sid);
+     }
+-
++    if ((pcrid < 0x1FFF) && (pcrid != vid) && (pcrid != aid) && (pcrid != sid)) {
++    	tsdemux_set_pcrid(pcrid);
++	}
+ #endif
+ 
++    /* set paramater to fetch pcr */  
++    u32 pcr_num=0;
++    if(pcrid == vid)
++    	pcr_num=0;
++    else if(pcrid == aid)
++    	pcr_num=1;
++    else
++    	pcr_num=3;
++
++    if(READ_MPEG_REG(TS_HIU_CTL_2) & 0x40){
++    	WRITE_MPEG_REG(PCR90K_CTL_2, 12 << 1);    
++    	WRITE_MPEG_REG(ASSIGN_PID_NUMBER_2, pcr_num);    
++    	printk("[tsdemux_init] To use device 2,pcr_num=%d \n",pcr_num);
++    }
++    else if(READ_MPEG_REG(TS_HIU_CTL_3) & 0x40){
++    	WRITE_MPEG_REG(PCR90K_CTL_3, 12 << 1); 
++    	WRITE_MPEG_REG(ASSIGN_PID_NUMBER_3, pcr_num);    
++    	printk("[tsdemux_init] To use device 3,pcr_num=%d \n",pcr_num);
++    }
++    else{
++    	WRITE_MPEG_REG(PCR90K_CTL, 12 << 1); 
++    	WRITE_MPEG_REG(ASSIGN_PID_NUMBER, pcr_num);    
++    	printk("[tsdemux_init] To use device 1,pcr_num=%d \n",pcr_num);
++    }
++    pcrscr_valid=1;
++
+     return 0;
+ 
+ #ifndef ENABLE_DEMUX_DRIVER
+@@ -622,7 +665,7 @@ err1:
+ 
+ void tsdemux_release(void)
+ {
+-
++    pcrscr_valid=0;
+ 
+     WRITE_MPEG_REG(PARSER_INT_ENABLE, 0);
+     WRITE_MPEG_REG(PARSER_VIDEO_HOLE, 0);
+@@ -637,6 +680,7 @@ void tsdemux_release(void)
+     tsdemux_set_aid(0xffff);
+     tsdemux_set_vid(0xffff);
+     tsdemux_set_sid(0xffff);
++    tsdemux_set_pcrid(0xffff);
+     tsdemux_free_irq();
+ 
+ #endif
+@@ -862,3 +906,20 @@ void tsdemux_set_demux(int dev)
+ #endif
+ }
+ 
++u32 tsdemux_pcrscr_get(void)
++{
++    if(READ_MPEG_REG(TS_HIU_CTL_2) & 0x40){
++    	return READ_MPEG_REG(PCR_DEMUX_2);
++    }
++    else if(READ_MPEG_REG(TS_HIU_CTL_3) & 0x40){
++    	return READ_MPEG_REG(PCR_DEMUX_3);
++    }
++    else{
++    	return READ_MPEG_REG(PCR_DEMUX);    
++   }
++}
++
++int tsdemux_pcrscr_valid(void)
++{
++    return pcrscr_valid;
++}
+diff --git a/drivers/amlogic/amports/tsdemux.h b/drivers/amlogic/amports/tsdemux.h
+index 0a7cb7b5b80f..85628c3a8537 100755
+--- a/drivers/amlogic/amports/tsdemux.h
++++ b/drivers/amlogic/amports/tsdemux.h
+@@ -68,11 +68,10 @@
+ #define PARSER_INT_HOST_EN_BIT      8
+ #endif
+ 
+-
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
+-extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid, bool is_hevc);
++extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid, bool is_hevc);
+ #else
+-extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid);
++extern s32 tsdemux_init(u32 vid, u32 aid, u32 sid, u32 pcrid);
+ #endif
+ 
+ extern void tsdemux_release(void);
+@@ -82,8 +81,11 @@ extern ssize_t tsdemux_write(struct file *file,
+                              struct stream_buf_s *abuf,
+                              const char __user *buf, size_t count);
+ 
+-int  tsdemux_class_register(void);
+-void tsdemux_class_unregister(void);
++extern u32 tsdemux_pcrscr_get(void);
++extern int tsdemux_pcrscr_valid(void);
++
++int     tsdemux_class_register(void);
++void  tsdemux_class_unregister(void);
+ void tsdemux_change_avid(unsigned int vid, unsigned int aid);
+ void tsdemux_change_sid(unsigned int sid);
+ void tsdemux_audio_reset(void);
+diff --git a/drivers/amlogic/amports/tsync.c b/drivers/amlogic/amports/tsync.c
+index c83d8a8e8bb7..c1db354c5212 100755
+--- a/drivers/amlogic/amports/tsync.c
++++ b/drivers/amlogic/amports/tsync.c
+@@ -12,6 +12,8 @@
+ #endif
+ #include "vdec_reg.h"
+ #include "amvdec.h"
++#include "tsync_pcr.h"
++
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6
+ //TODO: for stream buffer register bit define only
+ #include "streambuf_reg.h"
+@@ -91,7 +93,7 @@ const static struct {
+ };
+ 
+ const static char *tsync_mode_str[] = {
+-    "vmaster", "amaster"
++    "vmaster", "amaster", "pcrmaster"
+ };
+ 
+ static DEFINE_SPINLOCK(lock);
+@@ -372,6 +374,11 @@ mode='T': diff_pts=|vpts-apts|,timeout mode switch,
+ 
+ static int tsync_mode_switch(int mode,unsigned long diff_pts,int jump_pts)
+ {
++	if(tsync_mode == TSYNC_MODE_PCRMASTER){
++		printk("[tsync_mode_switch]tsync_mode is pcr master, do nothing \n");
++		return 0;
++	}
++
+ 	int debugcnt=0;
+ 	int old_tsync_mode=tsync_mode;
+ 	int old_tsync_av_mode=tsync_av_mode;
+@@ -487,6 +494,12 @@ void tsync_mode_reinit(void)
+ EXPORT_SYMBOL(tsync_mode_reinit);
+ void tsync_avevent_locked(avevent_t event, u32 param)
+ {
++    if(tsync_mode == TSYNC_MODE_PCRMASTER){
++    	amlog_level(LOG_LEVEL_INFO,"[tsync_avevent_locked]PCR MASTER to use tsync pcr cmd deal ");
++	tsync_pcr_avevent_locked(event,param);
++	return 0;
++    }
++
+     u32 t;
+ 
+     switch (event) {
+@@ -539,12 +552,17 @@ void tsync_avevent_locked(avevent_t event, u32 param)
+         if (/*tsync_mode == TSYNC_MODE_VMASTER && */!vpause_flag) {
+             timestamp_pcrscr_enable(1);
+         }
++
++        if (!timestamp_firstvpts_get() && param) {
++            timestamp_firstvpts_set(param);
++        }    
+         break;
+ 
+     case VIDEO_STOP:
+         tsync_stat = TSYNC_STAT_PCRSCR_SETUP_NONE;
+         timestamp_vpts_set(0);
+         timestamp_pcrscr_enable(0);
++        timestamp_firstvpts_set(0);
+         tsync_video_started = 0;
+         break;
+ 
+@@ -1153,13 +1171,37 @@ static ssize_t show_mode(struct class *class,
+                          struct class_attribute *attr,
+                          char *buf)
+ {
+-    if (tsync_mode <= TSYNC_MODE_AMASTER) {
++    if (tsync_mode <= TSYNC_MODE_PCRMASTER) {
+         return sprintf(buf, "%d: %s\n", tsync_mode, tsync_mode_str[tsync_mode]);
+     }
+ 
+     return sprintf(buf, "invalid mode");
+ }
+ 
++static ssize_t store_mode(struct class *class,
++                            struct class_attribute *attr,
++                            const char *buf,
++                            size_t size)
++{
++    unsigned mode;
++    ssize_t r;
++
++    r = sscanf(buf, "%d", &mode);
++    if ((r != 1)) {
++        return -EINVAL;
++    }
++
++    if(mode == TSYNC_MODE_PCRMASTER)
++    	tsync_mode = TSYNC_MODE_PCRMASTER;
++    else if(mode == TSYNC_MODE_VMASTER)
++    	tsync_mode=TSYNC_MODE_VMASTER;
++    else
++    	tsync_mode=TSYNC_MODE_AMASTER;
++    
++    printk("[%s]tsync_mode=%d, buf=%s\n",__func__,tsync_mode,buf);
++    return size;
++}
++
+ static ssize_t show_enable(struct class *class,
+                            struct class_attribute *attr,
+                            char *buf)
+@@ -1398,12 +1440,19 @@ static ssize_t show_last_checkin_apts(struct class *class,
+   return sprintf(buf, "0x%x\n",last_apts);
+ }
+ 
++static ssize_t show_firstvpts(struct class *class,
++                         struct class_attribute *attr,
++                         char *buf)
++{
++    return sprintf(buf, "0x%x\n", timestamp_firstvpts_get());
++}
++
+ static struct class_attribute tsync_class_attrs[] = {
+     __ATTR(pts_video,  S_IRUGO | S_IWUSR | S_IWGRP, show_vpts,    store_vpts),
+     __ATTR(pts_audio,  S_IRUGO | S_IWUSR | S_IWGRP, show_apts,    store_apts),
+     __ATTR(pts_pcrscr, S_IRUGO | S_IWUSR | S_IWGRP, show_pcrscr,  store_pcrscr),
+     __ATTR(event,      S_IRUGO | S_IWUSR | S_IWGRP, NULL,         store_event),
+-    __ATTR(mode,       S_IRUGO | S_IWUSR | S_IWGRP, show_mode,    NULL),
++    __ATTR(mode,       S_IRUGO | S_IWUSR | S_IWGRP, show_mode,    store_mode),
+     __ATTR(enable,     S_IRUGO | S_IWUSR | S_IWGRP, show_enable,  store_enable),
+     __ATTR(pcr_recover, S_IRUGO | S_IWUSR | S_IWGRP, show_pcr_recover,  store_pcr_recover),
+     __ATTR(discontinue, S_IRUGO | S_IWUSR, show_discontinue,  store_discontinue),
+@@ -1414,6 +1463,7 @@ static struct class_attribute tsync_class_attrs[] = {
+     __ATTR(av_threshold_min, S_IRUGO | S_IWUSR | S_IWGRP, show_av_threshold_min,  store_av_threshold_min),
+     __ATTR(av_threshold_max, S_IRUGO | S_IWUSR | S_IWGRP, show_av_threshold_max,  store_av_threshold_max),
+     __ATTR(last_checkin_apts, S_IRUGO | S_IWUSR, show_last_checkin_apts, NULL),
++    __ATTR(firstvpts, S_IRUGO | S_IWUSR, show_firstvpts, NULL),
+     __ATTR_NULL
+ };
+ 
+diff --git a/drivers/amlogic/amports/tsync_pcr.c b/drivers/amlogic/amports/tsync_pcr.c
+new file mode 100644
+index 000000000000..1ac0377a432e
+--- /dev/null
++++ b/drivers/amlogic/amports/tsync_pcr.c
+@@ -0,0 +1,460 @@
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/amlogic/amports/tsync.h>
++#include <linux/platform_device.h>
++#include <linux/amlogic/amports/timestamp.h>
++#include <linux/amlogic/amports/ptsserv.h>
++#include "tsync_pcr.h"
++#include "amvdec.h"
++#include "tsdemux.h"
++#include "streambuf.h"
++#include "amports_priv.h"
++
++//#define CONFIG_AM_PCRSYNC_LOG
++
++#ifdef CONFIG_AM_PCRSYNC_LOG
++#define AMLOG
++#define LOG_LEVEL_ERROR     0
++#define LOG_LEVEL_ATTENTION 1
++#define LOG_LEVEL_INFO      2
++#define LOG_LEVEL_VAR       amlog_level_tsync_pcr
++#define LOG_MASK_VAR        amlog_mask_tsync_pcr
++#endif
++#include <linux/amlogic/amlog.h>
++MODULE_AMLOG(AMLOG_DEFAULT_LEVEL, 0, LOG_DEFAULT_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
++
++typedef enum {
++    PLAY_MODE_NORMAL=0,
++    PLAY_MODE_SLOW,
++    PLAY_MODE_SPEED,
++    PLAY_MODE_FORCE_SLOW,
++    PLAY_MODE_FORCE_SPEED,
++} play_mode_t;
++
++#define CHECK_INTERVAL  (HZ * 5)
++
++#define START_AUDIO_LEVEL       256
++#define START_VIDEO_LEVEL       2048
++#define PAUSE_AUDIO_LEVEL         16
++#define PAUSE_VIDEO_LEVEL         512
++#define UP_RESAMPLE_AUDIO_LEVEL      128
++#define UP_RESAMPLE_VIDEO_LEVEL      1024
++#define DOWN_RESAMPLE_CACHE_TIME     90000*2
++#define NO_DATA_CHECK_TIME           4000
++
++/* the diff of system time and referrence lock, which use the threshold to adjust the system time  */
++#define OPEN_RECOVERY_THRESHOLD 18000
++#define CLOSE_RECOVERY_THRESHOLD 300
++#define RECOVERY_SPAN 10
++#define FORCE_RECOVERY_SPAN 20
++
++/* the delay from ts demuxer to the amvideo  */
++#define DEFAULT_VSTREAM_DELAY 18000
++
++static struct timer_list tsync_pcr_check_timer;
++
++static u32 tsync_pcr_discontinue_threshold = (TIME_UNIT90K * 1.5);
++
++static u32 tsync_pcr_ref_cache_time = TIME_UNIT90K;
++
++static u32 tsync_pcr_system_startpcr=0;
++static u32 tsync_pcr_tsdemux_startpcr=0;
++
++static int tsync_pcr_vpause_flag = 0;
++static int tsync_pcr_apause_flag = 0;
++static int tsync_pcr_vstart_flag = 0;
++static int tsync_pcr_inited_flag = 0;
++
++// the really ts demuxer pcr, haven't delay
++static u32 tsync_pcr_last_tsdemuxpcr = 0;
++static u32 tsync_pcr_discontinue_point = 0;
++static u32 tsync_pcr_discontinue_waited = 0;							// the time waited the v-discontinue to happen
++static int tsync_pcr_tsdemuxpcr_discontinue = 0;						// the boolean value		
++
++static int abuf_level=0;
++static int abuf_size=0;
++static int vbuf_level=0;
++static int vbuf_size=0;
++static int play_mode=PLAY_MODE_NORMAL;
++//static int tsync_pcr_debug_pcrscr = 100;
++
++extern int get_vsync_pts_inc_mode(void);
++
++u32 tsync_pcr_vstream_delayed(){
++    int cur_delay = calculation_vcached_delayed();	
++    if(cur_delay == -1)
++    	return DEFAULT_VSTREAM_DELAY;
++
++    return cur_delay;
++}
++
++void tsync_pcr_avevent_locked(avevent_t event, u32 param)
++{
++    u32 t;
++
++    switch (event) {
++    case VIDEO_START:        
++        if (tsync_pcr_vstart_flag == 0) {
++            timestamp_firstvpts_set(param);
++        }
++
++        if(tsync_pcr_vstart_flag == 0 && tsync_pcr_inited_flag == 0){		
++		u32 ref_pcr=param - VIDEO_HOLD_THRESHOLD;		// to wait 3 second
++		u32 tsdemux_pcr = tsdemux_pcrscr_get();
++		timestamp_pcrscr_set(ref_pcr);						
++
++		tsync_pcr_tsdemux_startpcr = tsdemux_pcr;
++		tsync_pcr_system_startpcr = ref_pcr;
++		printk("video start! init system time param=%x ref_pcr= %x  \n",param,ref_pcr);
++
++        	if (!tsync_pcr_vpause_flag) {
++            		timestamp_pcrscr_enable(1);
++        	}
++        }
++        tsync_pcr_vstart_flag=1;
++	 break;
++
++    case VIDEO_STOP:
++	 timestamp_pcrscr_enable(0);
++	 timestamp_vpts_set(0);
++	 timestamp_firstvpts_set(0);
++	 //tsync_pcr_debug_pcrscr=100;
++
++	 tsync_pcr_vpause_flag=0;
++	 tsync_pcr_vstart_flag=0;
++	 tsync_pcr_inited_flag=0;
++	 
++	 tsync_pcr_tsdemuxpcr_discontinue=0;
++	 tsync_pcr_discontinue_point=0;
++	 tsync_pcr_discontinue_waited=0;
++
++	 tsync_pcr_tsdemux_startpcr = 0;
++	 tsync_pcr_system_startpcr = 0;
++	 printk("video stop! \n");
++        break;
++        
++    case VIDEO_TSTAMP_DISCONTINUITY:  	 
++    	{		    	
++		unsigned oldpts=timestamp_vpts_get();
++		if((abs(param-oldpts)>AV_DISCONTINUE_THREDHOLD_MIN) && (!get_vsync_pts_inc_mode())){
++			printk("[tsync_pcr_avevent_locked] video discontinue happen.param=%x,discontinue=%d\n",param,tsync_pcr_tsdemuxpcr_discontinue);
++		    	u32 tsdemux_pcr = tsdemux_pcrscr_get();
++		    	u32 ref_pcr = param;
++		    	//if(ref_pcr == 0)
++		    	//	ref_pcr=tsdemux_pcr-tsync_pcr_vstream_delayed();
++			timestamp_pcrscr_set(ref_pcr);
++
++			tsync_pcr_tsdemux_startpcr = tsdemux_pcr;
++			tsync_pcr_system_startpcr = ref_pcr;
++			printk("reset ref pcr=%x , ts demuxer pcr=%x \n",tsync_pcr_system_startpcr, tsync_pcr_tsdemux_startpcr);
++
++		    	/* to resume the pcr check*/
++			tsync_pcr_tsdemuxpcr_discontinue=0;	 
++		    	tsync_pcr_discontinue_point=0;
++		    	tsync_pcr_discontinue_waited=0;
++		}
++		timestamp_vpts_set(param);
++
++		break;
++    	} 
++    case AUDIO_PRE_START:
++        timestamp_apts_start(0);
++        printk("audio prestart!   \n");
++        break;
++
++    case AUDIO_START:	
++        if(timestamp_apts_started()==0)
++        	timestamp_firstapts_set(param);
++    	
++	 timestamp_apts_set(param);
++        timestamp_apts_enable(1);
++        timestamp_apts_start(1);
++        
++        tsync_pcr_apause_flag=0;
++        printk("audio start!timestamp_apts_set =%x.   \n",param);
++        break;
++
++    case AUDIO_RESUME:
++	 timestamp_apts_enable(1);
++        tsync_pcr_apause_flag=0;
++        printk("audio resume!   \n");
++        break;
++
++    case AUDIO_STOP:
++	 timestamp_apts_enable(0);
++	 timestamp_apts_set(-1);
++        timestamp_apts_start(0);
++        timestamp_firstapts_set(0);
++        tsync_pcr_apause_flag=0;
++        printk("audio stop!   \n");
++        break;
++
++    case AUDIO_PAUSE:
++  	 timestamp_apts_enable(0);
++        tsync_pcr_apause_flag=1;
++        printk("audio pause!   \n");
++        break;
++
++    case VIDEO_PAUSE:
++       if(param == 1){
++      	 	timestamp_pcrscr_enable(0);
++      	 	tsync_pcr_vpause_flag = 1;
++		printk("video pause!\n");
++	 }else{
++		timestamp_pcrscr_enable(1);
++		tsync_pcr_vpause_flag = 0;
++		printk("video resume\n");
++	 }
++        break;	
++
++    default:
++        break;
++    }
++    switch (event) {
++    case VIDEO_START:
++    case AUDIO_START:
++    case AUDIO_RESUME:
++        amvdev_resume();
++        break;
++    case VIDEO_STOP:
++    case AUDIO_STOP:
++    case AUDIO_PAUSE:
++        amvdev_pause();
++        break;
++    case VIDEO_PAUSE:
++        if (tsync_pcr_vpause_flag)
++            amvdev_pause();
++        else
++            amvdev_resume();
++        break;
++    default:
++        break;
++    }
++
++}
++
++// timer to check the system with the referrence time in ts stream.
++static unsigned long tsync_pcr_check()
++{
++    u32 tsdemux_pcr=tsdemux_pcrscr_get();
++    u32 tsdemux_pcr_diff=0;
++    int need_recovery=1;
++    unsigned long res=jiffies;
++
++   /* check the value valid */
++   if(tsync_pcr_last_tsdemuxpcr ==0 && tsdemux_pcr ==0)
++   	return res;
++
++    // To monitor the pcr discontinue 
++    tsdemux_pcr_diff=abs(tsdemux_pcr - tsync_pcr_last_tsdemuxpcr);
++    if(tsdemux_pcr_diff > tsync_pcr_discontinue_threshold && tsync_pcr_tsdemuxpcr_discontinue==0 && tsync_pcr_inited_flag==1){
++    	tsync_pcr_tsdemuxpcr_discontinue=1;  
++    	tsync_pcr_discontinue_waited=tsync_pcr_vstream_delayed()+TIME_UNIT90K;
++    	printk("[tsync_pcr_check] refpcr_discontinue. tsdemux_pcr_diff=%x, last refpcr=%x, repcr=%x\n",tsdemux_pcr_diff,tsync_pcr_last_tsdemuxpcr,tsdemux_pcr);
++	tsync_pcr_discontinue_point=timestamp_pcrscr_get();
++	need_recovery=0;
++    }
++    else if(tsync_pcr_tsdemuxpcr_discontinue == 1){
++    	// to pause the pcr check
++	if(abs(timestamp_pcrscr_get()-tsync_pcr_discontinue_point)>tsync_pcr_discontinue_waited){			
++		// the v-discontinue did'n happen
++	 	tsync_pcr_tsdemuxpcr_discontinue=0;	 
++    	 	tsync_pcr_discontinue_point=0;
++    	 	tsync_pcr_discontinue_waited=0;	
++    	 	printk("[tsync_pcr_check] video discontinue didn't happen, waited=%x\n",abs(tsdemux_pcr-tsync_pcr_discontinue_point));
++	}
++	need_recovery=0;
++    }
++    tsync_pcr_last_tsdemuxpcr=tsdemux_pcr;
++
++    abuf_level= stbuf_level(get_buf_by_type(BUF_TYPE_AUDIO));
++    abuf_size= stbuf_size(get_buf_by_type(BUF_TYPE_AUDIO));
++    vbuf_level= stbuf_level(get_buf_by_type(BUF_TYPE_VIDEO));
++    vbuf_size= stbuf_size(get_buf_by_type(BUF_TYPE_VIDEO));
++    if(tsync_pcr_inited_flag == 0){
++	// check the video and audio stream buffer, to check to start
++	if((timestamp_apts_started() == 1 && tsync_pcr_vstart_flag)){
++	    	u32 ref_pcr =0;	
++		//if(timestamp_firstvpts_get() <= timestamp_firstapts_get() || timestamp_firstapts_get() == 0){
++			ref_pcr=timestamp_firstvpts_get();
++			printk("[tsync_pcr_check]Inited use video pts. ref_pcr=%x tsdemux time=%x  \n",ref_pcr,tsdemux_pcr);			
++		//}
++		//else{
++		//	ref_pcr=timestamp_firstapts_get();
++		//	printk("[tsync_pcr_check]Inited use audio pts. ref_pcr=%x tsdemux time=%x  \n",ref_pcr,tsdemux_pcr);	
++		//}
++		
++		timestamp_pcrscr_set(ref_pcr);
++		tsync_pcr_tsdemux_startpcr = tsdemux_pcr;
++		tsync_pcr_system_startpcr = ref_pcr;
++		tsync_pcr_inited_flag = 1;
++		play_mode=PLAY_MODE_FORCE_SLOW;
++		printk("[tsync_pcr_check] init and slow play.abuf_level=%x vbuf_level=%x \n", abuf_level,vbuf_level);	
++		
++        	if (!tsync_pcr_vpause_flag) {
++            		timestamp_pcrscr_enable(1);
++        	}	
++	}
++
++	return res;
++    }
++
++    if(!tsync_pcr_vpause_flag){
++	if(vbuf_level < PAUSE_VIDEO_LEVEL||abuf_level<PAUSE_AUDIO_LEVEL){
++		tsync_pcr_avevent_locked(VIDEO_PAUSE,1);						// to pause
++		printk("[tsync_pcr_check] to pause abuf_level=%x vbuf_level=%x play_mode=%d \n",abuf_level,vbuf_level,play_mode);
++		return res;
++	}	
++    }else{ 	
++    	if(vbuf_level < START_VIDEO_LEVEL||abuf_level < START_AUDIO_LEVEL)
++    		return res;
++
++	printk("[tsync_pcr_check] resume and show play. abuf_level=%x vbuf_level=%x play_mode=%d\n",abuf_level,vbuf_level,play_mode);
++    	// to resume
++	tsync_pcr_avevent_locked(VIDEO_PAUSE,0);
++    	play_mode=PLAY_MODE_FORCE_SLOW;
++    }
++
++    if((vbuf_level * 5 > vbuf_size * 4 || abuf_level * 5 > abuf_size * 4) && play_mode != PLAY_MODE_FORCE_SPEED){
++    	printk("[tsync_pcr_check]Buffer will overflow and speed play. vlevel=%x vsize=%x alevel=%x asize=%x play_mode=%d\n",
++    		vbuf_level,vbuf_size,abuf_level,abuf_size, play_mode);
++	// the video stream buffer will happen overflow
++    	play_mode=PLAY_MODE_FORCE_SPEED;
++    }
++
++    if(play_mode == PLAY_MODE_FORCE_SLOW){
++    	if((vbuf_level * 50 > vbuf_size && abuf_level * 50 > abuf_size)||			
++    	    vbuf_level * 10 > vbuf_size ||
++	    abuf_level * 10 > abuf_size){
++	    	play_mode=PLAY_MODE_NORMAL;
++		printk("[tsync_pcr_check]Buffer to vlevel=%x vsize=%x alevel=%x asize=%x. slow to normal play\n",
++			vbuf_level,vbuf_size,abuf_level,abuf_size);	  
++    	}
++    }
++    else if(play_mode == PLAY_MODE_FORCE_SPEED){
++	if((vbuf_level * 3 < vbuf_size && abuf_level * 3 < abuf_size) ||
++	    vbuf_level * 10 < vbuf_size ||
++	    abuf_level * 10 < abuf_size){
++		play_mode=PLAY_MODE_NORMAL;
++		tsync_pcr_tsdemux_startpcr = tsdemux_pcr;
++		tsync_pcr_system_startpcr = timestamp_pcrscr_get();
++		printk("[tsync_pcr_check]Buffer to vlevel=%x vsize=%x alevel=%x asize=%x. speed to normal play\n",
++			vbuf_level,vbuf_size,abuf_level,abuf_size);
++	}
++    }
++/*
++    tsync_pcr_debug_pcrscr++;
++    if(tsync_pcr_debug_pcrscr>=100){    	
++    	printk("[tsync_pcr_check]debug pcr=%x,refer lock=%x, vpts =%x, apts=%x\n",pcr,tsdemux_pcr,timestamp_vpts_get(),timestamp_apts_get());
++    	tsync_pcr_debug_pcrscr=0;
++    }
++*/
++
++    //if(need_recovery==1 || play_mode == PLAY_MODE_FORCE_SLOW || play_mode == PLAY_MODE_FORCE_SPEED){
++    /* To check the system time with ts demuxer pcr */
++    if(play_mode != PLAY_MODE_FORCE_SLOW && play_mode != PLAY_MODE_FORCE_SPEED){
++	    u32 ref_pcr=tsdemux_pcr-tsync_pcr_ref_cache_time;
++	    u32 cur_pcr=timestamp_pcrscr_get();
++	    u32 diff=abs(ref_pcr - cur_pcr);
++	    if(diff > OPEN_RECOVERY_THRESHOLD && cur_pcr<ref_pcr && play_mode!=PLAY_MODE_SPEED && need_recovery){
++		play_mode=	PLAY_MODE_SPEED;
++		amlog_level(LOG_LEVEL_INFO, "[tsync_pcr_check] diff=%x to speed play  \n",diff);	
++	    }
++	    else if(diff > OPEN_RECOVERY_THRESHOLD && cur_pcr>ref_pcr && play_mode!=PLAY_MODE_SLOW && need_recovery){
++		play_mode=PLAY_MODE_SLOW;
++		amlog_level(LOG_LEVEL_INFO, "[tsync_pcr_check] diff=%x to show play  \n",diff);	
++	    }	
++	    else if(diff < CLOSE_RECOVERY_THRESHOLD && play_mode!=PLAY_MODE_NORMAL){
++	    	play_mode=PLAY_MODE_NORMAL;
++		amlog_level(LOG_LEVEL_INFO, "[tsync_pcr_check] diff=%x to nomal play  \n",diff);	
++	    }
++    }
++    
++    if(play_mode == PLAY_MODE_SLOW)
++    	timestamp_pcrscr_set(timestamp_pcrscr_get()-RECOVERY_SPAN);
++    else if( play_mode == PLAY_MODE_FORCE_SLOW)
++    	timestamp_pcrscr_set(timestamp_pcrscr_get()-FORCE_RECOVERY_SPAN);
++    else if(play_mode == PLAY_MODE_SPEED)
++    	timestamp_pcrscr_set(timestamp_pcrscr_get()+RECOVERY_SPAN);
++    else if( play_mode == PLAY_MODE_FORCE_SPEED)
++    	timestamp_pcrscr_set(timestamp_pcrscr_get()+FORCE_RECOVERY_SPAN);
++    //}
++
++    return res;
++}
++
++static void tsync_pcr_check_timer_func(unsigned long arg)
++{
++    if(tsdemux_pcrscr_valid() == 1){
++	tsync_pcr_check_timer.expires = tsync_pcr_check();
++    }
++    else{
++    	    tsync_pcr_last_tsdemuxpcr=0;
++    	    tsync_pcr_check_timer.expires = jiffies;
++    }
++    
++    add_timer(&tsync_pcr_check_timer);
++}
++
++static ssize_t show_play_mode(struct class *class,
++                         struct class_attribute *attr,
++                         char *buf)
++{
++    return sprintf(buf, "%d\n", play_mode);
++}
++
++
++// --------------------------------------------------------------------------------
++// define of tsync pcr module
++
++static struct class_attribute tsync_pcr_class_attrs[] = {
++    __ATTR(play_mode,  S_IRUGO | S_IWUSR | S_IWGRP, show_play_mode, NULL),
++    __ATTR_NULL
++};
++static struct class tsync_pcr_class = {
++        .name = "tsync_pcr",
++        .class_attrs = tsync_pcr_class_attrs,
++    };
++
++static int __init tsync_pcr_init(void)
++{
++    int r;
++
++    r = class_register(&tsync_pcr_class);
++
++    if (r) {
++        printk("[tsync_pcr_init]tsync_pcr_class create fail.  \n");
++        return r;
++    }
++
++    /* init audio pts to -1, others to 0 */
++    timestamp_apts_set(-1);
++    timestamp_vpts_set(0);
++    timestamp_pcrscr_set(0);
++
++    init_timer(&tsync_pcr_check_timer);
++
++    tsync_pcr_check_timer.function = tsync_pcr_check_timer_func;
++    tsync_pcr_check_timer.expires = jiffies;
++
++    add_timer(&tsync_pcr_check_timer);
++
++    printk("[tsync_pcr_init]init success. \n");
++    return (0);
++}
++
++static void __exit tsync_pcr_exit(void)
++{
++    del_timer_sync(&tsync_pcr_check_timer);
++
++    class_unregister(&tsync_pcr_class);
++    printk("[tsync_pcr_exit]exit success.   \n");
++}
++
++
++module_init(tsync_pcr_init);
++module_exit(tsync_pcr_exit);
++
++MODULE_DESCRIPTION("AMLOGIC time sync management driver of referrence by pcrscr");
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("le yang <le.yang@amlogic.com>");
+diff --git a/drivers/amlogic/amports/tsync_pcr.h b/drivers/amlogic/amports/tsync_pcr.h
+new file mode 100644
+index 000000000000..1ee3015614b5
+--- /dev/null
++++ b/drivers/amlogic/amports/tsync_pcr.h
+@@ -0,0 +1,8 @@
++#ifndef TSYNC_PCR_H
++#define TSYNC_PCR_H
++
++extern void tsync_pcr_avevent_locked(avevent_t event, u32 param);
++
++
++#endif
++
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 4f06e73fcbf7..9f04b1d9f6b6 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -185,6 +185,7 @@ static u32 last_interlaced;
+ #endif
+ static u8 neg_poc_counter;
+ static unsigned char h264_first_pts_ready;
++static unsigned char h264_first_valid_pts_ready;
+ static u32 h264pts1, h264pts2;
+ static u32 h264_pts_count, duration_from_pts_done,duration_on_correcting;
+ static u32 vh264_error_count;
+@@ -474,6 +475,7 @@ static void vh264_set_params(void)
+     unsigned int crop_infor, crop_bottom;
+ 
+     h264_first_pts_ready = 0;
++    h264_first_valid_pts_ready=0;
+     buffer_for_recycle_rd = 0;
+     buffer_for_recycle_wr = 0;
+ 
+@@ -1012,8 +1014,13 @@ static void vh264_isr(void)
+             }
+ 
+             if (timing_info_present_flag && frame_dur && use_idr_framerate) {
+-                pts_valid = pts_valid && idr_flag;  // if fixed frame rate, then use duration
++            	  if(h264_first_valid_pts_ready == 0 && pts_valid)
++            	  	h264_first_valid_pts_ready=1;
++		  else
++            	  	pts_valid = pts_valid && idr_flag;  // if fixed frame rate, then use duration
++		 
+             }
++	     
+             if ((dec_control & DEC_CONTROL_FLAG_FORCE_2997_1080P_INTERLACE) &&
+                 (frame_width == 1920) &&
+                 (frame_height >= 1080) &&
+@@ -1226,8 +1233,8 @@ static void vh264_put_timer_func(unsigned long arg)
+             } else {
+                 wait_buffer_counter = 0;
+             }
+-        } else if (wait_i_pass_frames > 100) {
+-            printk("i passed frames > 10\n");
++        } else if (wait_i_pass_frames > 1000) {
++            printk("i passed frames > 1000\n");
+             amvdec_stop();
+ #ifdef CONFIG_POST_PROCESS_MANAGER
+             vh264_ppmgr_reset();
+@@ -1457,6 +1464,7 @@ static void vh264_local_init(void)
+ #endif
+     neg_poc_counter = 0;
+     h264_first_pts_ready = 0;
++    h264_first_valid_pts_ready=0;
+     h264pts1 = 0;
+     h264pts2 = 0;
+     h264_pts_count = 0;
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 930797065870..033c9bbe0c44 100755
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -1218,7 +1218,7 @@ static void vsync_toggle_frame(vframe_t *vf)
+ 
+     if(debug_flag& DEBUG_FLAG_BLACKOUT){
+         if(first_picture){
+-            printk("[video4osd] first %s picture {%d,%d}\n", (vf->source_type==VFRAME_SOURCE_TYPE_OSD)?"OSD":"", vf->width, vf->height);
++            printk("[video4osd] first %s picture {%d,%d} pts:%x, \n", (vf->source_type==VFRAME_SOURCE_TYPE_OSD)?"OSD":"", vf->width, vf->height, vf->pts);
+         }
+     }
+     /* switch buffer */
+@@ -1861,12 +1861,18 @@ static inline bool vpts_expire(vframe_t *cur_vf, vframe_t *next_vf)
+         pts = timestamp_vpts_get() + (cur_vf ? DUR2PTS(cur_vf->duration) : 0);
+ 			//printk("system=0x%x vpts=0x%x\n", systime, timestamp_vpts_get());
+         if ((int)(systime - pts) >= 0){
+-            tsync_avevent_locked(VIDEO_TSTAMP_DISCONTINUITY, next_vf->pts);
+-	    		printk(" discontinue, system=0x%x vpts=0x%x\n", systime, pts);
+-		    if(systime>next_vf->pts || next_vf->pts==0){// pts==0 is a keep frame maybe.
+-            	return true;
+-            }
+-            return false;
++		if(next_vf->pts != 0)
++      			tsync_avevent_locked(VIDEO_TSTAMP_DISCONTINUITY, next_vf->pts);
++		else
++			tsync_avevent_locked(VIDEO_TSTAMP_DISCONTINUITY, pts);
++		
++    		printk(" discontinue, system=0x%x vpts=0x%x\n", systime, pts);
++
++		if(systime>next_vf->pts || next_vf->pts==0){// pts==0 is a keep frame maybe.
++            		return true;
++	 	}
++		
++            	return false;
+         }
+     }
+ 
+diff --git a/drivers/amlogic/dvb_tv/aml_dvb.c b/drivers/amlogic/dvb_tv/aml_dvb.c
+index cd7e2cf3d753..41a51046d153 100755
+--- a/drivers/amlogic/dvb_tv/aml_dvb.c
++++ b/drivers/amlogic/dvb_tv/aml_dvb.c
+@@ -75,6 +75,7 @@ static int aml_tsdemux_free_irq(void);
+ static int aml_tsdemux_set_vid(int vpid);
+ static int aml_tsdemux_set_aid(int apid);
+ static int aml_tsdemux_set_sid(int spid);
++static int aml_tsdemux_set_pcrid(int pcrpid);
+ static int aml_tsdemux_set_skipbyte(int skipbyte);
+ static int aml_tsdemux_set_demux(int id);
+ 
+@@ -86,6 +87,7 @@ static struct tsdemux_ops aml_tsdemux_ops = {
+ .set_vid        = aml_tsdemux_set_vid,
+ .set_aid        = aml_tsdemux_set_aid,
+ .set_sid        = aml_tsdemux_set_sid,
++.set_pcrid      = aml_tsdemux_set_pcrid,
+ .set_skipbyte   = aml_tsdemux_set_skipbyte,
+ .set_demux      = aml_tsdemux_set_demux
+ };
+@@ -1534,6 +1536,44 @@ static int aml_tsdemux_set_sid(int spid)
+ 	return ret;
+ }
+ 
++static int aml_tsdemux_set_pcrid(int pcrpid)
++{
++	struct aml_dvb *dvb = &aml_dvb_device;
++	struct aml_dmx *dmx;
++	unsigned long flags;
++	int ret = 0;
++
++	spin_lock_irqsave(&dvb->slock, flags);
++
++	dmx = get_stb_dmx();
++
++	spin_unlock_irqrestore(&dvb->slock, flags);
++
++	if(dmx) {
++		mutex_lock(&dmx->dmxdev.mutex);
++
++		spin_lock_irqsave(&dvb->slock, flags);
++
++		if(dmx->pcr_chan!=-1) {
++			dmx_free_chan(dmx, dmx->pcr_chan);
++			dmx->pcr_chan = -1;
++		}
++
++		if((pcrpid>=0) && (pcrpid<0x1FFF)) {
++			dmx->pcr_chan = dmx_alloc_chan(dmx, DMX_TYPE_TS, DMX_PES_PCR, pcrpid);
++			if(dmx->pcr_chan==-1) {
++				ret = -1;
++			}
++		}
++
++		spin_unlock_irqrestore(&dvb->slock, flags);
++
++		mutex_unlock(&dmx->dmxdev.mutex);
++	}
++
++	return ret;
++}
++
+ static int aml_tsdemux_set_skipbyte(int skipbyte)
+ {
+ 	struct aml_dvb *dvb = &aml_dvb_device;
+diff --git a/drivers/amlogic/dvb_tv/aml_dvb.h b/drivers/amlogic/dvb_tv/aml_dvb.h
+index 9c2212addeab..b043dd9bbc7e 100755
+--- a/drivers/amlogic/dvb_tv/aml_dvb.h
++++ b/drivers/amlogic/dvb_tv/aml_dvb.h
+@@ -139,6 +139,7 @@ struct aml_dmx {
+ 	int                  aud_chan;
+ 	int                  vid_chan;
+ 	int                  sub_chan;
++	int                  pcr_chan;
+ 	u32                  section_busy[SEC_BUF_BUSY_SIZE];
+ 	struct dvb_frontend *fe;
+ 	int                  int_check_count;
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 25d81b69a087..d87004d00730 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -102,6 +102,7 @@
+ #define AMSTREAM_IOC_SET_VIDEO_AXIS   _IOW(AMSTREAM_IOC_MAGIC, 0x4c, unsigned long)
+ #define AMSTREAM_IOC_GET_VIDEO_CROP   _IOR(AMSTREAM_IOC_MAGIC, 0x4d, unsigned long)
+ #define AMSTREAM_IOC_SET_VIDEO_CROP   _IOW(AMSTREAM_IOC_MAGIC, 0x4e, unsigned long)
++#define AMSTREAM_IOC_PCRID        _IOW(AMSTREAM_IOC_MAGIC, 0x4f, int)
+ 
+ // VPP.VE IOCTL command list
+ #define AMSTREAM_IOC_VE_BEXT   _IOW(AMSTREAM_IOC_MAGIC, 0x20, struct ve_bext_s  )
+@@ -307,6 +308,7 @@ struct tsdemux_ops {
+     int (*set_vid)(int vpid);
+     int (*set_aid)(int apid);
+     int (*set_sid)(int spid);
++	int (*set_pcrid)(int pcrpid);
+     int (*set_skipbyte)(int skipbyte);
+     int (*set_demux)(int dev);
+ };
+diff --git a/include/linux/amlogic/amports/ptsserv.h b/include/linux/amlogic/amports/ptsserv.h
+index 7dca98fee800..2f4cc7cb51ab 100755
+--- a/include/linux/amlogic/amports/ptsserv.h
++++ b/include/linux/amlogic/amports/ptsserv.h
+@@ -72,5 +72,6 @@ extern int first_lookup_pts_failed(u8 type);
+ extern int first_pts_checkin_complete(u8 type);
+ extern int calculation_stream_delayed_ms(u8 type,u32 *latestbirate,u32*avg_bitare);
+ 
++extern int calculation_vcached_delayed();
+ 
+ #endif /* PTSSERV_H */
+diff --git a/include/linux/amlogic/amports/timestamp.h b/include/linux/amlogic/amports/timestamp.h
+index 7d79faa4652c..8ff24a4b1aa1 100755
+--- a/include/linux/amlogic/amports/timestamp.h
++++ b/include/linux/amlogic/amports/timestamp.h
+@@ -42,6 +42,8 @@ extern void timestamp_pcrscr_inc(s32 val);
+ 
+ extern void timestamp_pcrscr_enable(u32 enable);
+ 
++extern u32 timestamp_pcrscr_enable_state(void);
++
+ extern void timestamp_pcrscr_set_adj(s32 inc);
+ 
+ extern void timestamp_apts_enable(u32 enable);
+@@ -50,4 +52,12 @@ extern void  timestamp_apts_start(u32 enable);
+ 
+ extern u32 timestamp_apts_started(void);
+ 
++extern void timestamp_firstvpts_set(u32 pts);
++
++extern u32 timestamp_firstvpts_get(void);
++
++extern void timestamp_firstapts_set(u32 pts);
++
++extern u32 timestamp_firstapts_get(void);
++
+ #endif /* TIMESTAMP_H */
+diff --git a/include/linux/amlogic/amports/tsync.h b/include/linux/amlogic/amports/tsync.h
+index dc56c3ff67be..2e3376f5e2e1 100755
+--- a/include/linux/amlogic/amports/tsync.h
++++ b/include/linux/amlogic/amports/tsync.h
+@@ -44,6 +44,7 @@ typedef enum {
+ typedef enum {
+     TSYNC_MODE_VMASTER,
+     TSYNC_MODE_AMASTER,
++    TSYNC_MODE_PCRMASTER,
+ } tsync_mode_t;
+ 
+ extern void tsync_avevent_locked(avevent_t event, u32 param);
+-- 
+2.19.0
+

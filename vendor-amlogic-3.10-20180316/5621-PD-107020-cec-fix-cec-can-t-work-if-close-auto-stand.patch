@@ -1,0 +1,529 @@
+From c74d4cf1d166a6c951ff228745bd03cbf4a2703e Mon Sep 17 00:00:00 2001
+From: Tao Zeng <tao.zeng@amlogic.com>
+Date: Mon, 25 May 2015 16:09:47 +0800
+Subject: [PATCH 5621/5965] PD#107020: cec: fix cec can't work if close auto
+ standby
+
+1. do not report power key event if auto-standby is disabled(for LG TV);
+2. do not report key event if kernel is under suspend-resume progress(
+   for Panasonic TV);
+3. report active source/menu status when resume and other cases. This
+   can help for tv pass remote control event to devices because TV assume
+   that there is no menu for devices unless devices report their menu
+   stauts;
+4. fix wrong power status after cec node re-init(for LG TV);
+5. use platform devices for CEC probe. So we can add more operations when
+   kernel suspend/resumes.
+
+Change-Id: Iaf534adac0a9b669cd197b9bf48ecb485702ada5
+---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c |   8 +
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c  | 375 ++++++++++++--------
+ 2 files changed, 232 insertions(+), 151 deletions(-)
+
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
+index 79d4a1ae18cf..a74e2b4e5a69 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_cec_key.c
+@@ -100,6 +100,7 @@ void cec_send_event_irq(void)
+     int i;
+     unsigned char   operand_num_irq;
+     unsigned char operands_irq[14];
++    unsigned int mask;
+     static unsigned int last_key = -1;
+     static s64 last_key_report = 0;
+     s64 cur_time;
+@@ -124,6 +125,13 @@ void cec_send_event_irq(void)
+             break;
+     }
+ 
++    mask = (1 << CEC_FUNC_MSAK) | (1 << ONE_TOUCH_STANDBY_MASK);
++    if (((hdmitx_device->cec_func_config & mask) != mask) &&
++        (cec_key_map[operands_irq[0]] == KEY_POWER)) {
++        hdmi_print(INF, CEC "ignore power key when standby disabled\n");
++        return ;
++    }
++
+     cur_time = ktime_to_us(now);
+     if (last_key == -1) {
+         last_key = operands_irq[0];
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index dd1ecb20c02f..cc7e6a0a37b4 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -14,7 +14,7 @@
+  * GNU General Public License for more details.
+  *
+  */
+-
++
+ #include <linux/version.h>
+ #include <linux/module.h>
+ #include <linux/irq.h>
+@@ -61,6 +61,7 @@ static struct workqueue_struct *cec_workqueue = NULL;
+ static struct hrtimer cec_late_timer;
+ static unsigned char rx_msg[MAX_MSG];
+ static unsigned char rx_len;
++static int cec_suspend = 0;
+ 
+ DEFINE_SPINLOCK(cec_input_key);
+ 
+@@ -118,14 +119,21 @@ static void hdmitx_cec_early_suspend(struct early_suspend *h)
+     }
+     cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_STANDBY;
+     printk("CEC return, power status:%d\n", cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status);
+-    cec_report_power_status(NULL);
+-    if (rc_long_press_pwr_key == 1)
+-    {
+-        cec_set_standby();
+-        msleep(100);
+-        hdmi_print(INF, CEC "get power-off command from Romote Control\n");
+-        rc_long_press_pwr_key = 0;
+-    }
++    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))
++    {
++        cec_report_power_status(NULL);
++        msleep(50);
++        cec_menu_status_smp(DEVICE_MENU_INACTIVE);
++        msleep(50);
++        cec_inactive_source();
++        if (rc_long_press_pwr_key == 1)
++        {
++            cec_set_standby();
++            msleep(100);
++            hdmi_print(INF, CEC "get power-off command from Romote Control\n");
++            rc_long_press_pwr_key = 0;
++        }
++    }
+     return ;
+ }
+ 
+@@ -149,10 +157,8 @@ static void hdmitx_cec_late_resume(struct early_suspend *h)
+         cec_imageview_on_smp();
+         msleep(30);
+         cec_active_source_smp();
+-        //msleep(100);
+-        //cec_active_source_smp();
+-        //msleep(100);
+-        //cec_menu_status_smp(DEVICE_MENU_ACTIVE);
++        msleep(100);
++        cec_menu_status_smp(DEVICE_MENU_ACTIVE);
+     }
+ 
+     hdmi_print(INF, CEC "late resume\n");
+@@ -340,6 +346,7 @@ void cec_node_init(hdmitx_dev_t* hdmitx_device)
+ #endif
+              hdmi_print(INF, CEC "Set logical address: %d\n", player_dev[i]);
+ 
++            cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_ON;
+             if (cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status == DEVICE_MENU_INACTIVE)
+                 break;
+             msleep(100);
+@@ -367,7 +374,6 @@ void cec_node_init(hdmitx_dev_t* hdmitx_device)
+             msleep(100);
+ 
+             cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status = DEVICE_MENU_ACTIVE;
+-            cec_global_info.cec_node_info[cec_global_info.my_node_index].power_status = POWER_ON;
+             break;
+         }
+     }
+@@ -486,8 +492,9 @@ void cec_input_handle_message(void)
+         hdmi_print(INF, CEC "Error:hdmitx_device NULL!\n");
+         return;
+     }
+-    /* process key event messages from tv */
+-    if (hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))
++    /* process key event messages from tv if not suspend */
++    if ((hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)) &&
++        (!cec_suspend))
+     {
+         switch (opcode)
+         {
+@@ -505,7 +512,14 @@ void cec_input_handle_message(void)
+             default:
+                 break;
+         }
+-    }
++    } else if (!cec_suspend){
++        /*
++         * Panasonic tv will send key power and power on for resume devices
++         * we should avoid send key again when device is resuming from uboot
++         * to prevent devicese suspend again
++         */
++        hdmi_print(INF, CEC "under suspend state, ignore key\n");
++    }
+ }
+ 
+ void unregister_cec_tx_msg(cec_usr_message_list_t* cec_tx_message_list)
+@@ -995,6 +1009,13 @@ void cec_set_stream_path(cec_rx_message_t* pcec_message)
+     if (phy_addr_active == (aml_read_reg32(P_AO_DEBUG_REG1) & 0xffff))
+     {
+         cec_active_source_smp();
++        msleep(100);
++        /*
++         * some types of TV such as panasonic need to send menu status,
++         * otherwise it will not send remote key event to control device's
++         * menu
++         */
++        cec_menu_status_smp(DEVICE_MENU_ACTIVE);
+         cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status = DEVICE_MENU_ACTIVE;
+     }
+     else
+@@ -1086,13 +1107,22 @@ void cec_inactive_source(void)
+ 
+     cec_ll_tx(msg, 4);
+     cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status = DEVICE_MENU_INACTIVE;
+-}
+-
++}
++
+ void cec_inactive_source_rx(cec_rx_message_t* pcec_message)
+-{
++{
++    /*
++     * if device is not set one-touch-standby, but tv goto standby, we should
++     * also tell tv that device is inactive.
++     */
++    if (!(hdmitx_device->cec_func_config & (1 << ONE_TOUCH_STANDBY_MASK))) {
++        cec_menu_status_smp(DEVICE_MENU_INACTIVE);
++        msleep(100);
++        cec_inactive_source();
++    }
+     cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status = DEVICE_MENU_INACTIVE;
+-}
+-
++}
++
+ void cec_get_version(cec_rx_message_t* pcec_message)
+ {
+     unsigned char dest_log_addr = pcec_message->content.msg.header&0xf;
+@@ -1684,125 +1714,174 @@ void cec_routing_information(cec_rx_message_t* pcec_message)
+     {
+         cec_global_info.cec_node_info[cec_global_info.my_node_index].menu_status = DEVICE_MENU_INACTIVE;
+     }
+-}
+-/***************************** cec middle level code end *****************************/
+-
+-
+-/***************************** cec high level code *****************************/
+-
+-static int __init cec_init(void)
+-{
+-    int i;
+-    extern __u16 cec_key_map[128];
+-    extern hdmitx_dev_t * get_hdmitx_device(void);
+-    hdmitx_device = get_hdmitx_device();
+-    cec_key_init();
+-    hdmi_print(INF, CEC "CEC init\n");
+-
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
+-    hdmi_wr_reg(CEC0_BASE_ADDR+CEC_CLOCK_DIV_H, 0x00 );
+-    hdmi_wr_reg(CEC0_BASE_ADDR+CEC_CLOCK_DIV_L, 0xf0 );
+-#endif
+-
+-    memset(&cec_global_info, 0, sizeof(cec_global_info_t));
+-    cec_global_info.cec_rx_msg_buf.rx_buf_size = sizeof(cec_global_info.cec_rx_msg_buf.cec_rx_message)/sizeof(cec_global_info.cec_rx_msg_buf.cec_rx_message[0]);
+-
+-    cec_global_info.hdmitx_device = hdmitx_device;
+-
+-    cec_workqueue = create_workqueue("cec_work");
+-    if (cec_workqueue == NULL) {
+-        printk("create work queue failed\n");
+-        return -EFAULT;
+-    }
+-    INIT_WORK(&hdmitx_device->cec_work, cec_task);
+-    hrtimer_init(&cec_late_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-    cec_late_timer.function = cec_late_check_rx_buffer;
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
+-    if (request_irq(INT_HDMI_CEC, &cec_isr_handler,
+-    IRQF_SHARED, "amhdmitx-cec",(void *)hdmitx_device))
+-    {
+-        hdmi_print(INF, CEC "Can't register IRQ %d\n",INT_HDMI_CEC);
+-        return -EFAULT;
+-    }
+-#endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-    if (request_irq(INT_AO_CEC, &cec_isr_handler,
+-    IRQF_SHARED, "amhdmitx-aocec",(void *)hdmitx_device))
+-    {
+-        hdmi_print(INF, CEC "Can't register IRQ %d\n",INT_HDMI_CEC);
+-        return -EFAULT;
+-    }
+-#endif
+-
+-    cec_global_info.remote_cec_dev = input_allocate_device();
+-    if (!cec_global_info.remote_cec_dev)
+-    {
+-        hdmi_print(INF, CEC "remote_cec.c: Not enough memory\n");
+-    }
+-    cec_global_info.remote_cec_dev->name = "cec_input";
+-
+-    cec_global_info.remote_cec_dev->evbit[0] = BIT_MASK(EV_KEY);
+-    cec_global_info.remote_cec_dev->keybit[BIT_WORD(BTN_0)] = BIT_MASK(BTN_0);
+-    cec_global_info.remote_cec_dev->id.bustype = BUS_ISA;
+-    cec_global_info.remote_cec_dev->id.vendor = 0x1b8e;
+-    cec_global_info.remote_cec_dev->id.product = 0x0cec;
+-    cec_global_info.remote_cec_dev->id.version = 0x0001;
+-
+-    for (i = 0; i < 128; i++)
+-    {
+-          set_bit( cec_key_map[i], cec_global_info.remote_cec_dev->keybit);
+-    }
+-
+-    if (input_register_device(cec_global_info.remote_cec_dev))
+-    {
+-        hdmi_print(INF, CEC "remote_cec.c: Failed to register device\n");
+-        input_free_device(cec_global_info.remote_cec_dev);
+-    }
+-#ifdef CONFIG_HAS_EARLYSUSPEND
+-    hdmitx_cec_early_suspend_handler.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN - 20;
+-    hdmitx_cec_early_suspend_handler.suspend = hdmitx_cec_early_suspend;
+-    hdmitx_cec_early_suspend_handler.resume = hdmitx_cec_late_resume;
+-    hdmitx_cec_early_suspend_handler.param = hdmitx_device;
+-
+-    register_early_suspend(&hdmitx_cec_early_suspend_handler);
+-#endif
+-
+-    hdmitx_device->cec_init_ready = 1;
+-    cec_global_info.cec_flag.cec_init_flag = 0;
+-    hdmi_print(INF, CEC "hdmitx_device->cec_init_ready:0x%x", hdmitx_device->cec_init_ready);
+-    queue_work(cec_workqueue, &hdmitx_device->cec_work);    // for init
+-    return 0;
+-}
+-
+-static void __exit cec_uninit(void)
+-{
+-    if (!(hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)))
+-    {
+-        return ;
+-    }
+-    hdmi_print(INF, CEC "cec uninit!\n");
+-    if (cec_global_info.cec_flag.cec_init_flag == 1)
+-    {
+-
+-#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
+-        aml_write_reg32(P_SYS_CPU_0_IRQ_IN1_INTR_MASK, aml_read_reg32(P_SYS_CPU_0_IRQ_IN1_INTR_MASK) & ~(1 << 23));            // Disable the hdmi cec interrupt
+-        free_irq(INT_HDMI_CEC, (void *)hdmitx_device);
+-#endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-        free_irq(INT_AO_CEC, (void *)hdmitx_device);
+-#endif
+-        cec_global_info.cec_flag.cec_init_flag = 0;
+-    }
+-
+-    if (cec_workqueue) {
+-        cancel_work_sync(&hdmitx_device->cec_work);
+-        destroy_workqueue(cec_workqueue);
+-    }
+-    hdmitx_device->cec_init_ready = 0;
+-    input_unregister_device(cec_global_info.remote_cec_dev);
+-    cec_global_info.cec_flag.cec_fiq_flag = 0;
+-}
+-
++}
++/***************************** cec middle level code end *****************************/
++/***************************** cec high level code *****************************/
++static int aml_cec_probe(struct platform_device *pdev)
++{
++    int i;
++    extern __u16 cec_key_map[128];
++    extern hdmitx_dev_t * get_hdmitx_device(void);
++    hdmitx_device = get_hdmitx_device();
++    cec_key_init();
++    hdmi_print(INF, CEC "CEC init\n");
++
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
++    hdmi_wr_reg(CEC0_BASE_ADDR+CEC_CLOCK_DIV_H, 0x00 );
++    hdmi_wr_reg(CEC0_BASE_ADDR+CEC_CLOCK_DIV_L, 0xf0 );
++#endif
++
++    memset(&cec_global_info, 0, sizeof(cec_global_info_t));
++    cec_global_info.cec_rx_msg_buf.rx_buf_size = sizeof(cec_global_info.cec_rx_msg_buf.cec_rx_message)/sizeof(cec_global_info.cec_rx_msg_buf.cec_rx_message[0]);
++
++    cec_global_info.hdmitx_device = hdmitx_device;
++
++    cec_workqueue = create_workqueue("cec_work");
++    if (cec_workqueue == NULL) {
++        printk("create work queue failed\n");
++        return -EFAULT;
++    }
++    INIT_WORK(&hdmitx_device->cec_work, cec_task);
++    hrtimer_init(&cec_late_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++    cec_late_timer.function = cec_late_check_rx_buffer;
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
++    if (request_irq(INT_HDMI_CEC, &cec_isr_handler,
++    IRQF_SHARED, "amhdmitx-cec",(void *)hdmitx_device))
++    {
++        hdmi_print(INF, CEC "Can't register IRQ %d\n",INT_HDMI_CEC);
++        return -EFAULT;
++    }
++#endif
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++    if (request_irq(INT_AO_CEC, &cec_isr_handler,
++    IRQF_SHARED, "amhdmitx-aocec",(void *)hdmitx_device))
++    {
++        hdmi_print(INF, CEC "Can't register IRQ %d\n",INT_HDMI_CEC);
++        return -EFAULT;
++    }
++#endif
++
++    cec_global_info.remote_cec_dev = input_allocate_device();
++    if (!cec_global_info.remote_cec_dev)
++    {
++        hdmi_print(INF, CEC "remote_cec.c: Not enough memory\n");
++    }
++    cec_global_info.remote_cec_dev->name = "cec_input";
++
++    cec_global_info.remote_cec_dev->evbit[0] = BIT_MASK(EV_KEY);
++    cec_global_info.remote_cec_dev->keybit[BIT_WORD(BTN_0)] = BIT_MASK(BTN_0);
++    cec_global_info.remote_cec_dev->id.bustype = BUS_ISA;
++    cec_global_info.remote_cec_dev->id.vendor = 0x1b8e;
++    cec_global_info.remote_cec_dev->id.product = 0x0cec;
++    cec_global_info.remote_cec_dev->id.version = 0x0001;
++
++    for (i = 0; i < 128; i++)
++    {
++          set_bit( cec_key_map[i], cec_global_info.remote_cec_dev->keybit);
++    }
++
++    if (input_register_device(cec_global_info.remote_cec_dev))
++    {
++        hdmi_print(INF, CEC "remote_cec.c: Failed to register device\n");
++        input_free_device(cec_global_info.remote_cec_dev);
++    }
++#ifdef CONFIG_HAS_EARLYSUSPEND
++    hdmitx_cec_early_suspend_handler.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN - 20;
++    hdmitx_cec_early_suspend_handler.suspend = hdmitx_cec_early_suspend;
++    hdmitx_cec_early_suspend_handler.resume = hdmitx_cec_late_resume;
++    hdmitx_cec_early_suspend_handler.param = hdmitx_device;
++
++    register_early_suspend(&hdmitx_cec_early_suspend_handler);
++#endif
++
++    hdmitx_device->cec_init_ready = 1;
++    cec_global_info.cec_flag.cec_init_flag = 0;
++    hdmi_print(INF, CEC "hdmitx_device->cec_init_ready:0x%x", hdmitx_device->cec_init_ready);
++    queue_work(cec_workqueue, &hdmitx_device->cec_work);    // for init
++    return 0;
++}
++
++static int aml_cec_remove(struct platform_device *dev)
++{
++    if (!(hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK)))
++    {
++        return 0;
++    }
++    hdmi_print(INF, CEC "cec uninit!\n");
++    if (cec_global_info.cec_flag.cec_init_flag == 1)
++    {
++
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6
++        aml_write_reg32(P_SYS_CPU_0_IRQ_IN1_INTR_MASK, aml_read_reg32(P_SYS_CPU_0_IRQ_IN1_INTR_MASK) & ~(1 << 23));            // Disable the hdmi cec interrupt
++        free_irq(INT_HDMI_CEC, (void *)hdmitx_device);
++#endif
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++        free_irq(INT_AO_CEC, (void *)hdmitx_device);
++#endif
++        cec_global_info.cec_flag.cec_init_flag = 0;
++    }
++
++    if (cec_workqueue) {
++        cancel_work_sync(&hdmitx_device->cec_work);
++        destroy_workqueue(cec_workqueue);
++    }
++    hdmitx_device->cec_init_ready = 0;
++    input_unregister_device(cec_global_info.remote_cec_dev);
++    cec_global_info.cec_flag.cec_fiq_flag = 0;
++    return 0;
++}
++
++static int aml_cec_pm_prepare(struct device *dev)
++{
++    if ((hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))) {
++        cec_suspend = 1;
++        hdmi_print(INF, CEC "cec prepare suspend!\n");
++    }
++    return 0;
++}
++
++static void aml_cec_pm_complete(struct device *dev)
++{
++    if ((hdmitx_device->cec_func_config & (1 << CEC_FUNC_MSAK))) {
++        cec_suspend = 0;
++        hdmi_print(INF, CEC "cec complete suspend!\n");
++    }
++}
++
++static struct dev_pm_ops aml_cec_pm = {
++    .prepare  = aml_cec_pm_prepare,
++    .complete = aml_cec_pm_complete,
++};
++
++static struct platform_driver aml_cec_driver = {
++    .driver = {
++        .name  = "amlogic_cec",
++        .owner = THIS_MODULE,
++        .pm     = &aml_cec_pm,
++    },
++    .probe  = aml_cec_probe,
++    .remove = aml_cec_remove,
++};
++
++static struct platform_device *cec_dev = NULL;
++static int __init cec_init(void)
++{
++    struct platform_device *pdev;
++    pdev = platform_device_alloc("amlogic_cec", 0);
++    if (pdev == NULL) {
++        hdmi_print(INF, CEC "allocate device failed\n");
++    }
++    cec_dev = pdev;
++    platform_driver_register(&aml_cec_driver);
++    return platform_device_add(pdev);
++}
++
++static void __exit cec_uninit(void)
++{
++    platform_device_del(cec_dev);
++    platform_driver_unregister(&aml_cec_driver);
++}
++
+ size_t cec_usrcmd_get_global_info(char * buf)
+ {
+     int i = 0;
+@@ -1907,8 +1986,7 @@ void cec_usrcmd_set_config(const char * buf, size_t count)
+     }
+     hdmi_print(INF, CEC "cec_func_config:0x%x : 0x%x\n",hdmitx_device->cec_func_config, aml_read_reg32(P_AO_DEBUG_REG0));
+ }
+-
+-
++
+ void cec_usrcmd_set_dispatch(const char * buf, size_t count)
+ {
+     int i = 0;
+@@ -2069,10 +2147,10 @@ void cec_usrcmd_set_dispatch(const char * buf, size_t count)
+             break;
+     }
+     hdmi_print(INF, CEC "cec usrcmd set dispatch end!\n\n");
+-}
+-
++}
++
+ /***************************** cec high level code end *****************************/
+-
++
+ late_initcall(cec_init);
+ module_exit(cec_uninit);
+ MODULE_DESCRIPTION("AMLOGIC HDMI TX CEC driver");
+@@ -2082,8 +2160,3 @@ MODULE_LICENSE("GPL");
+ 
+ MODULE_PARM_DESC(cec_msg_dbg_en, "\n cec_msg_dbg_en\n");
+ module_param(cec_msg_dbg_en, bool, 0664);
+-
+-
+-
+-
+-
+-- 
+2.19.0
+

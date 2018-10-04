@@ -1,0 +1,170 @@
+From f568f9def2e9a9dad9661c7d8f5b63367873bc72 Mon Sep 17 00:00:00 2001
+From: Zhe Wang <zhe.wang@amlogic.com>
+Date: Fri, 18 Sep 2015 16:03:16 +0800
+Subject: [PATCH 5840/5965] PD#112906: audio: add audio buffer threshold and
+ control interface
+
+Change-Id: Ifbdee20e11b8c1bf085690a44722c24d74ee0f12
+---
+ drivers/amlogic/amaudio2/amaudio2.c | 91 +++++++++++++++++++++++++----
+ 1 file changed, 81 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/amlogic/amaudio2/amaudio2.c b/drivers/amlogic/amaudio2/amaudio2.c
+index 208b6ba60800..0580659d92c4 100755
+--- a/drivers/amlogic/amaudio2/amaudio2.c
++++ b/drivers/amlogic/amaudio2/amaudio2.c
+@@ -106,6 +106,10 @@ int amaudio2_enable = 0;
+ int android_left_gain = 256;
+ int android_right_gain = 256;
+ int set_android_gain_enable = 0;
++int softbuffer_level = 0;
++int soft_buffer_reset = 0;
++int soft_buffer_threshold = 10240;
++int soft_latency = 1024;
+ 
+ static irqreturn_t i2s_out_callback(int irq, void* data);
+ static unsigned get_i2s_out_size(void);
+@@ -158,7 +162,8 @@ static int amaudio_open(struct inode *inode, struct file *file)
+   	amaudio->hw.paddr = aml_i2s_playback_phy_start_addr;
+   	amaudio->hw.size = get_i2s_out_size();
+   	amaudio->hw.rd = get_i2s_out_ptr();
+-		
++	soft_latency = 1024;
++
+ 	printk(KERN_DEBUG "sw.addr=%08x,sw.paddr=%08x \n hw.addr=%08x,hw.paddr=%08x\n hw.size=%08x,hw.rd=%08x\n",
+ 						(unsigned int)amaudio->sw.addr,amaudio->sw.paddr,
+ 						(unsigned int)amaudio->hw.addr,amaudio->hw.paddr,
+@@ -386,13 +391,13 @@ static void i2s_copy(amaudio_t* amaudio)
+ 			hw->wr,hw->rd,alsa_delay,amaudio_delay,hw->level,sw->level);
+ 		goto EXIT;
+ 	}
+-	
+-	if(sw->level < INT_BLOCK) {
++
++	if (sw->level < soft_latency) {
+ 		printk(KERN_DEBUG "i2s copy: sw->wr = %x, sw->rd = %x, sw->level = %x\n",
+ 			sw->wr,sw->rd,sw->level);
+ 		goto EXIT;
+ 	}
+-	
++
+ 	if((alsa_delay - amaudio_delay) < INT_BLOCK){
+ 		printk(KERN_DEBUG "alsa_delay:%x, amaudio_delay:%x, sw->level = %x\n",
+ 			alsa_delay,amaudio_delay,sw->level);
+@@ -412,13 +417,11 @@ static void i2s_copy(amaudio_t* amaudio)
+ 
+ 	if(audio_out_read_enable == 1){
+ 		spin_lock_irqsave(&sw_read->lock,sw_readirqflags);
+-		if(sw_read->level < INT_BLOCK) {
+-			goto EXIT_COPY;
++		if (sw_read->level > INT_BLOCK) {
++			interleave_memcpy(sw_read,sw_read->wr,hw,hw->wr,INT_BLOCK);
++			sw_read->wr = (sw_read->wr + INT_BLOCK)%sw_read->size;
++			sw_read->level = sw_read->size - (sw_read->size + sw_read->wr - sw_read->rd)%sw_read->size;
+ 		}
+-		interleave_memcpy(sw_read,sw_read->wr,hw,hw->wr,INT_BLOCK);
+-		sw_read->wr = (sw_read->wr + INT_BLOCK)%sw_read->size;
+-		sw_read->level = sw_read->size - (sw_read->size + sw_read->wr - sw_read->rd)%sw_read->size;
+-EXIT_COPY:
+ 		spin_unlock_irqrestore(&sw_read->lock,sw_readirqflags);
+ 	}
+ 	
+@@ -428,6 +431,12 @@ EXIT_COPY:
+ 	spin_lock_irqsave(&sw->lock,swirqflags);
+ 	sw->rd = (sw->rd + INT_BLOCK)%sw->size;
+ 	sw->level = (sw->size + sw->wr - sw->rd)%sw->size;
++	if (soft_buffer_reset == 1 || sw->level > soft_buffer_threshold) {
++		sw->rd = (sw->size + sw->wr - soft_latency)%sw->size;
++		sw->level = soft_latency;
++		soft_buffer_reset = 0;
++	}
++	softbuffer_level = sw->level;
+ 	spin_unlock_irqrestore(&sw->lock,swirqflags);
+ 	
+ EXIT:
+@@ -476,6 +485,7 @@ static long amaudio_ioctl(struct file *file,unsigned int cmd, unsigned long arg)
+ 				spin_lock_irqsave(&amaudio->sw.lock, swirqflags);
+ 				amaudio->sw.wr = arg;
+ 				amaudio->sw.level = (amaudio->sw.size + amaudio->sw.wr - amaudio->sw.rd)%amaudio->sw.size;
++				softbuffer_level = amaudio->sw.level;
+ 				spin_unlock_irqrestore(&amaudio->sw.lock, swirqflags);
+ 				if(amaudio->sw.wr % 64){
+ 					printk(KERN_WARNING "wr:%x, not 64 Bytes align\n", amaudio->sw.wr);
+@@ -845,6 +855,64 @@ static ssize_t store_set_android_gain_enable(struct class* class, struct class_a
+   	return count;
+ }
+ 
++static ssize_t show_softbuffer_level(struct class* class, struct class_attribute* attr,
++	char* buf)
++{
++	return sprintf(buf, "%d\n", softbuffer_level);
++}
++
++static ssize_t store_softbuffer_level(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	if (strncmp(buf, "reset", 5) == 0) {
++		printk(KERN_INFO "reset soft buffer!\n");
++		soft_buffer_reset = 1;
++	}
++	return count;
++}
++
++static ssize_t show_softbuffer_threshold(struct class* class, struct class_attribute* attr,
++	char* buf)
++{
++	return sprintf(buf, "%d\n", soft_buffer_threshold);
++}
++
++static ssize_t store_softbuffer_threshold(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	int val = 0;
++	if (buf[0])
++		val=simple_strtol(buf, NULL, 10);
++	if ( val < 4096) {
++		printk(KERN_INFO "soft buffer threshold level (%d) is too low\n", val);
++		return count;
++	}
++	soft_buffer_threshold = val;
++	printk(KERN_INFO "soft buffer threshold = %d\n", soft_buffer_threshold);
++	return count;
++}
++
++static ssize_t show_soft_latency(struct class* class, struct class_attribute* attr,
++	char* buf)
++{
++	return sprintf(buf, "%d\n", soft_latency);
++}
++
++static ssize_t store_soft_latency(struct class* class, struct class_attribute* attr,
++   const char* buf, size_t count )
++{
++	int val = 0;
++	if (buf[0])
++		val=simple_strtol(buf, NULL, 10);
++	if ( !(val%1024) || val < 1024) {
++		printk(KERN_INFO "soft buffer latency must 1024*N and at leaset 1024, soft_latency = %d\n", val);
++		return count;
++	}
++	soft_latency = val;
++	printk(KERN_INFO "soft buffer latency = %d\n", soft_latency);
++	return count;
++}
++
+ static struct class_attribute amaudio_attrs[]={
+ 	__ATTR(aml_audio_out_mode,  S_IRUGO | S_IWUSR, show_audio_out_mode, store_audio_out_mode),
+ 	__ATTR(aml_direct_left_gain,  S_IRUGO | S_IWUSR, show_direct_left_gain, store_direct_left_gain),
+@@ -855,6 +923,9 @@ static struct class_attribute amaudio_attrs[]={
+ 	__ATTR(aml_set_android_gain_enable,  S_IRUGO | S_IWUSR, show_set_android_gain_enable, store_set_android_gain_enable),
+ 	__ATTR(aml_audio_read_enable,  S_IRUGO | S_IWUSR, show_audio_read_enable, store_audio_read_enable),
+ 	__ATTR(aml_amaudio2_enable,  S_IRUGO | S_IWUSR | S_IWGRP, show_aml_amaudio2_enable, store_aml_amaudio2_enable),
++	__ATTR(aml_soft_buffer_level, S_IRUGO | S_IWUSR | S_IWGRP, show_softbuffer_level, store_softbuffer_level),
++	__ATTR(aml_soft_buffer_threshold, S_IRUGO | S_IWUSR | S_IWGRP, show_softbuffer_threshold, store_softbuffer_threshold),
++	__ATTR(aml_soft_latency, S_IRUGO | S_IWUSR | S_IWGRP, show_soft_latency, store_soft_latency),
+ 	__ATTR_RO(status),
+ 	__ATTR_NULL
+ };
+-- 
+2.19.0
+

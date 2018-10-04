@@ -1,0 +1,655 @@
+From 6ad9da369210cf3e1b1d8cfca4b90d659b40aa0d Mon Sep 17 00:00:00 2001
+From: Yukang Zhong <yukang.zhong@amlogic.com>
+Date: Thu, 17 Sep 2015 12:20:13 +0800
+Subject: [PATCH 5837/5965] PD#110801: i2c: epprom: add bus switch function
+
+Change-Id: I1e2e92103862e7f933aa87a56fa309363bf32d21
+---
+ drivers/amlogic/i2c/aml_i2c.c | 109 ++++++++++++++++++----------------
+ drivers/amlogic/i2c/aml_i2c.h | 109 +++++++++++++++++-----------------
+ drivers/misc/eeprom/at24.c    |  36 ++++++++++-
+ 3 files changed, 148 insertions(+), 106 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/i2c/aml_i2c.h
+
+diff --git a/drivers/amlogic/i2c/aml_i2c.c b/drivers/amlogic/i2c/aml_i2c.c
+index 4ccc60d3bf01..0d11fcbc60b1 100755
+--- a/drivers/amlogic/i2c/aml_i2c.c
++++ b/drivers/amlogic/i2c/aml_i2c.c
+@@ -169,7 +169,7 @@ static int aml_i2c_wait_ack(struct aml_i2c *i2c)
+ 		ctrl = (struct aml_i2c_reg_ctrl*)&(i2c->master_regs->i2c_ctrl);
+ 		if(ctrl->status == IDLE){
+       i2c->cur_token = ctrl->cur_token;
+-      return (ctrl->error ? (-EIO) : 0);		  
++      return (ctrl->error ? (-EIO) : 0);
+ 		}
+     if (!in_atomic() && (i2c->mode == I2C_DELAY_MODE))
+ 			cond_resched();
+@@ -256,7 +256,7 @@ static void aml_i2c_stop(struct aml_i2c *i2c)
+   	udelay(i2c->wait_xfer_interval);
+ #endif
+   }
+-	aml_i2c_clear_token_list(i2c);	
++	aml_i2c_clear_token_list(i2c);
+ }
+ 
+ static int aml_i2c_read(struct aml_i2c *i2c, unsigned char *buf,
+@@ -267,10 +267,10 @@ static int aml_i2c_read(struct aml_i2c *i2c, unsigned char *buf,
+ 	size_t rd_len;
+ 	int tagnum=0;
+ 
+-	if(!buf || !len) return -EINVAL; 
+-	aml_i2c_clear_token_list(i2c);
++	if (!buf || !len) return -EINVAL;
++		aml_i2c_clear_token_list(i2c);
+ 
+-	if(! (i2c->msg_flags & I2C_M_NOSTART)){
++	if (! (i2c->msg_flags & I2C_M_NOSTART)) {
+ 		i2c->token_tag[tagnum++]=TOKEN_START;
+ 		i2c->token_tag[tagnum++]=TOKEN_SLAVE_ADDR_READ;
+ 
+@@ -319,8 +319,8 @@ static int aml_i2c_write(struct aml_i2c *i2c, unsigned char *buf,
+         int ret;
+         size_t wr_len;
+ 	int tagnum=0;
+-	if(!buf || !len) return -EINVAL; 
+-	aml_i2c_clear_token_list(i2c);
++	if (!buf || !len) return -EINVAL;
++		aml_i2c_clear_token_list(i2c);
+ 	if(! (i2c->msg_flags & I2C_M_NOSTART)){
+ 		i2c->token_tag[tagnum++]=TOKEN_START;
+ 		i2c->token_tag[tagnum++]=TOKEN_SLAVE_ADDR_WRITE;
+@@ -412,7 +412,7 @@ static int aml_i2c_handle_data(struct aml_i2c *i2c, int tag_num)
+ static int aml_i2c_handle_msg(struct aml_i2c *i2c, struct i2c_msg *msg)
+ {
+   int tag_num = 0;
+-  
++
+ 	aml_i2c_dbg(i2c, "msg%d: addr=0x%x, flag=0x%x, len=%d\n",
+ 				i2c->msgs_num, msg->addr, msg->flags, msg->len);
+ 	i2c->msg_flags = msg->flags;
+@@ -436,7 +436,7 @@ static int aml_i2c_handle_msg(struct aml_i2c *i2c, struct i2c_msg *msg)
+ static int aml_i2c_int_xfer(struct aml_i2c *i2c, struct i2c_msg *msgs, int num)
+ {
+   int ret;
+-    
++
+   i2c->state = I2C_STATE_WORKING;
+   i2c->msgs = msgs;
+   i2c->msgs_num = num;
+@@ -463,7 +463,7 @@ static irqreturn_t aml_i2c_complete_isr(int irq, void *dev_id)
+ {
+   int ret;
+   struct aml_i2c *i2c = (struct aml_i2c *)dev_id;
+-  
++
+ 	if (i2c->state != I2C_STATE_WORKING) {
+     i2c->state = I2C_STATE_IDLE;
+     return IRQ_HANDLED;
+@@ -491,7 +491,7 @@ static irqreturn_t aml_i2c_complete_isr(int irq, void *dev_id)
+     i2c->state = I2C_STATE_IDLE;
+     complete(&i2c->aml_i2c_completion);
+   }
+-  
++
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -540,13 +540,14 @@ static int aml_i2c_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
+ 	struct i2c_msg * p=NULL;
+ 	unsigned int i;
+ 	unsigned int ret=0, speed=0;
++	if (!i2c->i2c_bus_status) return -1;
+ 
+-	if(!msgs || !num) return -1;
++	if (!msgs || !num) return -1;
+ 	BUG_ON(!i2c);
+ 	/*should not use spin_lock, cond_resched in wait ack*/
+ 	mutex_lock(i2c->lock);
+ 
+-	if(i2c->state != I2C_STATE_IDLE) {
++	if (i2c->state != I2C_STATE_IDLE) {
+ 	  mutex_unlock(i2c->lock);
+     return -EPERM;
+ 	}
+@@ -560,7 +561,7 @@ static int aml_i2c_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
+ 	else {
+ 		speed = 0;
+ 	}
+-	
++
+ 	i2c->ops->xfer_prepare(i2c, i2c->master_i2c_speed);
+ 	/*make sure change speed before start*/
+     mb();
+@@ -607,7 +608,7 @@ static int aml_i2c_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
+ 
+ 	mutex_unlock(i2c->lock);
+ 	/* Return the number of messages processed, or the error code*/
+-	return ( ret ? (-EAGAIN) : num);	
++	return ( ret ? (-EAGAIN) : num);
+ 	}
+ 
+ static u32 aml_i2c_func(struct i2c_adapter *i2c_adap)
+@@ -625,7 +626,7 @@ static const struct i2c_algorithm aml_i2c_algorithm = {
+ static int aml_i2c_set_mode(struct aml_i2c *i2c, int mode, int irq)
+ {
+ 	int err = 0;
+-	
++
+ 	if (mode > I2C_TIMER_POLLING_MODE) {
+     printk("error mode\n");
+     err = -EINVAL;
+@@ -663,8 +664,8 @@ static int aml_i2c_test_slave(struct aml_i2c *i2c, int argn, char *argv[])
+   char wbuf[8]={0}, rbuf[64]={0};
+   int i;
+   bool nostart;
+-	
+-	if (argn < 3) goto err_arg; 
++
++	if (argn < 3) goto err_arg;
+ 	addr = simple_strtol(argv[0], NULL, 16);
+ 	wnum = simple_strtol(argv[1], NULL, 0);
+ 	rnum = simple_strtol(argv[2], NULL, 0);
+@@ -693,9 +694,9 @@ static int aml_i2c_test_slave(struct aml_i2c *i2c, int argn, char *argv[])
+ 	  msgp->len   = rnum;
+ 	  msgp->buf   = rbuf;
+ 	  msg_num++;
+-	  msgp++;	  
++	  msgp++;
+ 	}
+-	  
++
+  	if (i2c_transfer(&i2c->adap, &msgs[0], msg_num) == msg_num) {
+     for (i=0; i<rnum; i++)
+       printk("0x%x, ", rbuf[i]);
+@@ -706,7 +707,7 @@ static int aml_i2c_test_slave(struct aml_i2c *i2c, int argn, char *argv[])
+   	printk("test failed!\n");
+   	return -1;
+   }
+-  
++
+ err_arg:
+ 	printk("error argurment\n");
+ 	return -1;
+@@ -716,7 +717,7 @@ err_arg:
+ static int aml_i2c_set_trig_gpio(struct aml_i2c *i2c, char *gpio_name)
+ {
+ 	int gpio;
+-	
++
+ 	mutex_lock(i2c->lock);
+ 	if (i2c->trig_gpio >= 0) {
+ 	  printk("free old trig_gpio(%d)!\n", i2c->trig_gpio);
+@@ -740,7 +741,7 @@ static int aml_i2c_set_trig_gpio(struct aml_i2c *i2c, char *gpio_name)
+ #endif
+ 
+ static ssize_t show_aml_i2c(struct class *class,
+-	struct class_attribute *attr, char *buf) 
++	struct class_attribute *attr, char *buf)
+ {
+ 	int ret;
+ 	struct aml_i2c *i2c = container_of(class, struct aml_i2c, cls);
+@@ -756,6 +757,8 @@ static ssize_t show_aml_i2c(struct class *class,
+ 
+ 	else if (!strcmp(attr->attr.name, "slave"))
+ 		ret = sprintf(buf, "slave=%d\n", i2c->cur_slave_addr);
++	else if (!strcmp(attr->attr.name, "i2c_bus_status"))
++		ret = sprintf(buf, "i2c_bus_status=%d\n", !!i2c->i2c_bus_status);
+ 
+ #ifdef ENABLE_GPIO_TRIGGER
+ 	else if (!strcmp(attr->attr.name, "trig_gpio"))
+@@ -766,19 +769,19 @@ static ssize_t show_aml_i2c(struct class *class,
+ 		printk("error attribute access\n");
+ 		ret = 0;
+ 	}
+-	
++
+ 	return ret;
+ }
+ 
+ #define MAX_ARG_NUM 16
+-static ssize_t store_aml_i2c(struct class *class, 
++static ssize_t store_aml_i2c(struct class *class,
+ 	struct class_attribute *attr, const char *buf, size_t count)
+ {
+ 	struct aml_i2c *i2c = container_of(class, struct aml_i2c, cls);
+ 	char *kbuf, *p, *argv[MAX_ARG_NUM];
+ 	int argn;
+ 	unsigned int val=0, val2=0;
+-	
++
+ 	kbuf = kstrdup(buf, GFP_KERNEL);
+ 	p = kbuf;
+ 	for (argn = 0; argn < MAX_ARG_NUM; argn++) {
+@@ -788,7 +791,7 @@ static ssize_t store_aml_i2c(struct class *class,
+ 	}
+ 	val = argn ? simple_strtol(argv[0], NULL, 0) : 0;
+ 	val2 = (argn > 1) ? simple_strtol(argv[1], NULL, 0) : 0;
+-	
++
+ 	if (!strcmp(attr->attr.name, "speed")) {
+ 		mutex_lock(i2c->lock);
+ 		i2c->master_i2c_speed = val;
+@@ -801,7 +804,7 @@ static ssize_t store_aml_i2c(struct class *class,
+ 		aml_i2c_set_mode(i2c, val, val2);
+ 		mutex_unlock(i2c->lock);
+ 	}
+-	
++
+ 	else if (!strcmp(attr->attr.name, "debug")) {
+ 		mutex_lock(i2c->lock);
+ 		i2c->i2c_debug = !!val;
+@@ -812,22 +815,26 @@ static ssize_t store_aml_i2c(struct class *class,
+ 	else if (!strcmp(attr->attr.name, "slave")) {
+ 		aml_i2c_test_slave(i2c, argn, argv);
+ 	}
+-	
++
++	else if (!strcmp(attr->attr.name, "i2c_bus_status")) {
++		i2c->i2c_bus_status = !!val;
++	}
++
+ #ifdef ENABLE_GPIO_TRIGGER
+ 	else if (!strcmp(attr->attr.name, "trig_gpio")) {
+ 		aml_i2c_set_trig_gpio(i2c, argv[0]);
+ 	}
+ #endif
+-	
++
+ 	kfree(kbuf);
+ 	return count;
+ }
+-
+ static struct class_attribute i2c_class_attrs[] = {
+     __ATTR(speed, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
+     __ATTR(mode, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
+     __ATTR(debug, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
+     __ATTR(slave, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
++    __ATTR(i2c_bus_status, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
+ #ifdef ENABLE_GPIO_TRIGGER
+     __ATTR(trig_gpio, S_IRUGO|S_IWUSR, show_aml_i2c, store_aml_i2c),
+ #endif
+@@ -919,19 +926,19 @@ static int aml_i2c_probe(struct platform_device *pdev)
+ 
+ 	ret=of_property_read_string(pdev->dev.of_node,"pinctrl-names",&plat->master_state_name);
+ 	printk(KERN_DEBUG "plat->state_name:%s\n",plat->master_state_name);
+-	
+-  i2c->ops = &aml_i2c_m1_ops;
+-  i2c->dev=&pdev->dev;
++	i2c->i2c_bus_status = 1;
++	i2c->ops = &aml_i2c_m1_ops;
++	i2c->dev=&pdev->dev;
+ 
+ 
+-  res_start = of_iomap(pdev->dev.of_node,0);
++	res_start = of_iomap(pdev->dev.of_node,0);
+ 	i2c->master_regs = (struct aml_i2c_reg_master __iomem*)(res_start);
+ 
+-  BUG_ON(!i2c->master_regs);
+-  BUG_ON(!plat);
++	BUG_ON(!i2c->master_regs);
++	BUG_ON(!plat);
+ 	aml_i2c_set_platform_data(i2c, plat);
+ 	printk(KERN_DEBUG "master_no = %d, master_regs=%p\n", i2c->master_no, i2c->master_regs);
+-	
++
+ 	i2c->p=devm_pinctrl_get_select(i2c->dev,i2c->master_state_name);
+ 	if(IS_ERR(i2c->p)){
+ 		printk(KERN_ERR "set i2c pinmux error\n");
+@@ -1042,21 +1049,21 @@ static const struct of_device_id meson6_i2c_dt_match[]={
+ //static	int aml_i2c_suspend(struct platform_device *pdev, pm_message_t state)
+ static	int aml_i2c_suspend(struct device *dev)
+ {
+-    struct platform_device *pdev = to_platform_device(dev); 
++	struct platform_device *pdev = to_platform_device(dev);
+ 	struct i2c_adapter *adapter;
+ 	struct aml_i2c *i2c;
+ 
+-    printk("%s\n", __func__);
++	printk("%s\n", __func__);
+ 	adapter = i2c_get_adapter(pdev->id==-1? 0: pdev->id);
+ 	BUG_ON(!adapter);
+ 	i2c = i2c_get_adapdata(adapter);
+ 	BUG_ON(!i2c);
+ 	if (i2c->mode == I2C_INTERRUPT_MODE) {
+-  	mutex_lock(i2c->lock);
+-  	i2c->state = I2C_STATE_SUSPEND;
++		mutex_lock(i2c->lock);
++		i2c->state = I2C_STATE_SUSPEND;
+ 		disable_irq(i2c->irq);
+-	  mutex_unlock(i2c->lock);
+-	  printk("%s: disable #%d irq\n", __func__, i2c->irq);
++		mutex_unlock(i2c->lock);
++		printk("%s: disable #%d irq\n", __func__, i2c->irq);
+ 	}
+ 
+ 	return 0;
+@@ -1065,21 +1072,21 @@ static	int aml_i2c_suspend(struct device *dev)
+ //static	int aml_i2c_resume(struct platform_device *pdev)
+ static	int aml_i2c_resume(struct device *dev)
+ {
+-    struct platform_device *pdev = to_platform_device(dev); 
++	struct platform_device *pdev = to_platform_device(dev);
+ 	struct i2c_adapter *adapter;
+ 	struct aml_i2c *i2c;
+ 
+-    printk("%s\n", __func__);
++	printk("%s\n", __func__);
+ 	adapter = i2c_get_adapter(pdev->id==-1? 0: pdev->id);
+ 	BUG_ON(!adapter);
+ 	i2c = i2c_get_adapdata(adapter);
+ 	BUG_ON(!i2c);
+ 	if (i2c->mode == I2C_INTERRUPT_MODE) {
+-    mutex_lock(i2c->lock);
+-    i2c->state = I2C_STATE_IDLE;
++		mutex_lock(i2c->lock);
++		i2c->state = I2C_STATE_IDLE;
+ 		enable_irq(i2c->irq);
+-	  mutex_unlock(i2c->lock);
+-	  printk("%s: enable #%d irq\n", __func__, i2c->irq);
++		mutex_unlock(i2c->lock);
++		printk("%s: enable #%d irq\n", __func__, i2c->irq);
+ 	}
+ 	return 0;
+ }
+@@ -1096,7 +1103,7 @@ static struct platform_driver aml_i2c_driver = {
+         .name = "aml-i2c",
+         .owner = THIS_MODULE,
+         .of_match_table=meson6_i2c_dt_match,
+-        .pm = &aml_i2c_pm_ops, 
++        .pm = &aml_i2c_pm_ops,
+     },
+ //	.suspend = aml_i2c_suspend,
+ //	.resume = aml_i2c_resume,
+diff --git a/drivers/amlogic/i2c/aml_i2c.h b/drivers/amlogic/i2c/aml_i2c.h
+old mode 100755
+new mode 100644
+index 9c709d8ae1fe..9e2c1e1d04b4
+--- a/drivers/amlogic/i2c/aml_i2c.h
++++ b/drivers/amlogic/i2c/aml_i2c.h
+@@ -36,17 +36,17 @@
+ /*I2C_CONTROL_REG	0x2140*/
+ struct aml_i2c_reg_ctrl {
+ 	unsigned int start:1;		/*[0] Set to 1 to start list processing*/
+-	/*Setting this bit to 0 while the list processor is operating causes the list 
++	/*Setting this bit to 0 while the list processor is operating causes the list
+ 		processor to abort the current I2C operation and generate an I2C STOP
+-		command on the I2C bus.   Normally this bit is set to 1 and left high 
+-		until processing is complete.  To re-start the list processor with a 
+-		new list (after a previous list has been exhausted), simply set this 
++		command on the I2C bus.   Normally this bit is set to 1 and left high
++		until processing is complete.  To re-start the list processor with a
++		new list (after a previous list has been exhausted), simply set this
+ 		bit to zero then to one.*/
+ 	unsigned int ack_ignore:1;	/*[1] Set to 1 to disable I2C ACK detection.*/
+-	/*The I2C bus uses an ACK signal after every byte transfer to detect 
++	/*The I2C bus uses an ACK signal after every byte transfer to detect
+ 		problems during the transfer.  Current Software implementations of the
+-		I2C bus ignore this ACK.  This bit is for compatibility with the current 
+-		Amlogic software.   This bit should be set to 0 to allow NACK 
++		I2C bus ignore this ACK.  This bit is for compatibility with the current
++		Amlogic software.   This bit should be set to 0 to allow NACK
+ 		operations to abort I2C bus transactions.  If a NACK occurs, the ERROR
+ 		bit above will be set. */
+ 	unsigned int status:1;		/*[2] the status of the List processor*/
+@@ -54,29 +54,29 @@ struct aml_i2c_reg_ctrl {
+ 	#define 	RUNNING	1
+ 	/*	0:	IDLE
+ 		1: 	Running.  The list processor will enter this state on the clock cycle
+-		after the START bit is set.  The software can poll the status register to 
++		after the START bit is set.  The software can poll the status register to
+ 		determine when processing is complete.
+ 	*/
+ 	unsigned int error:1;		/*[3] */
+-	/*This read only bit is set if the I2C device generates a NACK during writing. 
+-		This bit is cleared at on the clock cycle after the START bit is set to 1 
+-		indicating the start of list processing.  Errors can be ignored by setting 
+-		the ACK_IGNORE bit below.  Errors will be generated on Writes to 
+-		devices that return NACK instead of ACK.  A NACK is returned by a 
+-		device if it is unable to accept any more data (for example because it 
+-		is processing some other real-time function).  In the event of an 
+-		ERROR, the I2C module will automatically generate a STOP condition 
++	/*This read only bit is set if the I2C device generates a NACK during writing.
++		This bit is cleared at on the clock cycle after the START bit is set to 1
++		indicating the start of list processing.  Errors can be ignored by setting
++		the ACK_IGNORE bit below.  Errors will be generated on Writes to
++		devices that return NACK instead of ACK.  A NACK is returned by a
++		device if it is unable to accept any more data (for example because it
++		is processing some other real-time function).  In the event of an
++		ERROR, the I2C module will automatically generate a STOP condition
+ 		on the bus.*/
+ 	unsigned int cur_token:4;	/*[7:4] the current token being processed*/
+ 	unsigned int rd_data_cnt:4;/*[11:8] number of bytes READ over the I2C bus*/
+-	/*If this value is zero, then no data has been read.  If this value is 1, then 
+-		bits [7:0] in TOKEN_RDATA_REG0 contains valid data.  The software can 
++	/*If this value is zero, then no data has been read.  If this value is 1, then
++		bits [7:0] in TOKEN_RDATA_REG0 contains valid data.  The software can
+ 		read this register after an I2C transaction to get the number of bytes to
+ 		read from the I2C device*/
+ 	unsigned int clk_delay:10;	/*[21:12] Quarter clock delay*/
+ 	/*This value corresponds to period of the SCL clock divided by 4
+ 		Quarter Clock Delay = * System Clock Frequency
+-		For example, if the system clock is 133Mhz, and the I2C clock period 
++		For example, if the system clock is 133Mhz, and the I2C clock period
+ 		is 10uS (100khz), then
+ 		Quarter Clock Delay = * 133 Mhz = 332
+ 	*/
+@@ -86,7 +86,7 @@ struct aml_i2c_reg_ctrl {
+ 	/*if manual mode is enabled.  If this bit is '0', then the SCL line is
+ 		pulled low.  If this bit is '1' then the SCL line is tri-stated.*/
+ 	unsigned int wrsda:1; 		/*[24] Sets the level of the SDA line */
+-	/*if manual mode is enabled.  If this bit is '0', 	then the SDA line is 
++	/*if manual mode is enabled.  If this bit is '0', 	then the SDA line is
+ 		pulled low.  If this bit is '1' then the SDA line is tri-stated.*/
+ 	unsigned int rdscl:1; 		/*[25] Read back level of the SCL line*/
+ 	unsigned int rdsda:1; 		/*[26] Read back level of the SDA line*/
+@@ -101,21 +101,21 @@ struct aml_i2c_reg_ctrl {
+ 
+ struct aml_i2c_reg_slave_addr {
+ 	unsigned int slave_addr:8;	/*[7:0] SLAVE ADDRESS.*/
+-	/*This is a 7-bit value for a 7-bit I2C device, or (0xF0 | {A9,A8}) for a 
+-		10 bit I2C device.  By convention, the slave address is typically 
++	/*This is a 7-bit value for a 7-bit I2C device, or (0xF0 | {A9,A8}) for a
++		10 bit I2C device.  By convention, the slave address is typically
+ 		stored in by first left shifting it so that it's MSB is D7 (The I2C bus
+-		assumes the 7-bit address is left shifted one).  Additionally, since 
+-		the SLAVE address is always an 7-bit value, D0 is always 0. 
++		assumes the 7-bit address is left shifted one).  Additionally, since
++		the SLAVE address is always an 7-bit value, D0 is always 0.
+ 
+ 		NOTE:  The I2C always transfers 8-bits even for address.  The I2C
+-		hardware will use D0 to dictate the direction of the bus.  Therefore, 
++		hardware will use D0 to dictate the direction of the bus.  Therefore,
+ 		D0 should always be '0' when this register is set.
+ 	*/
+ 	unsigned int sda_filter:3;	/*[10:8] SDA FILTER*/
+-	/*A filter was added in the SCL input path to allow for filtering of slow 
++	/*A filter was added in the SCL input path to allow for filtering of slow
+ 		rise times.  0 = no filtering, 7 = max filtering*/
+ 	unsigned int scl_filter:3;	/*[13:11] SCL FILTER*/
+-	/*A filter was added in the SCL input path to allow for filtering of slow 
++	/*A filter was added in the SCL input path to allow for filtering of slow
+ 		rise times.  0 = no filtering, 7 = max filtering*/
+ #if MESON_CPU_TYPE > MESON_CPU_TYPE_MESON8
+ 	unsigned int unused:2;	/*[15:14]*/
+@@ -127,11 +127,11 @@ struct aml_i2c_reg_slave_addr {
+ #endif
+ };
+ 
+-/*Write data associated with the DATA token should be placed into the 
+-	I2C_TOKEN_WDATA_REG0 or I2C_TOKEN_WDATA_REG1 registers.   
++/*Write data associated with the DATA token should be placed into the
++	I2C_TOKEN_WDATA_REG0 or I2C_TOKEN_WDATA_REG1 registers.
+ 	Read data associated with the DATA or DATA-LAST token can be read from
+ 	the I2C_TOKEN_RDATA_REG0 or I2C_TOKEN_RDATA_REG1 registers*/
+-	
++
+ enum aml_i2c_token {
+ 	TOKEN_END,
+ 	TOKEN_START,
+@@ -150,55 +150,55 @@ struct aml_i2c_reg_master {
+ 	volatile unsigned int i2c_token_wdata_0;
+ 	volatile unsigned int i2c_token_wdata_1;
+ 	volatile unsigned int i2c_token_rdata_0;
+-	volatile unsigned int i2c_token_rdata_1;	
++	volatile unsigned int i2c_token_rdata_1;
+ };
+ 
+ 
+ struct aml_i2c_reg_slave_ctrl {
+ 	unsigned int samp_rate:7;	/*[6:0] sampling rate*/
+-	/*Defined as MPEG system clock / (value + 1).  The SDA and SCL inputs into 
+-		the slave module are sampled as a way of filtering the inputs.   A 
+-		rising or falling edge is determined by when 3 successive samples are 
+-		either high or low respectively*/	
++	/*Defined as MPEG system clock / (value + 1).  The SDA and SCL inputs into
++		the slave module are sampled as a way of filtering the inputs.   A
++		rising or falling edge is determined by when 3 successive samples are
++		either high or low respectively*/
+ 	unsigned int enable:1;		/*[7] A '1' enables the I2C slave state machine*/
+ 	unsigned int hold_time:8;	/*[15:8]*/
+-	/*Data hold time after the falling edge of SCL.  
++	/*Data hold time after the falling edge of SCL.
+ 		Hold time = (MPEG system clock period) * (value + 1).
+ 	*/
+ 	unsigned int slave_addr:8;	/*[23-16]*/
+-	/*Bits [7:1] are used to identify the device.  
++	/*Bits [7:1] are used to identify the device.
+ 		Bit [0] is ignored since this corresponds to the R/W bit.*/
+ 	unsigned int ack_always:1;	/*[24]*/
+-	/*Typically the ACK of a slave I2C device is dependent upon the 
+-		availability of data (if reading) and room to store data (when we are 
++	/*Typically the ACK of a slave I2C device is dependent upon the
++		availability of data (if reading) and room to store data (when we are
+ 		being written).  Our I2C module has a status register that can be read
+-		continuously.  This bit can be set if the I2C master wants to 
++		continuously.  This bit can be set if the I2C master wants to
+ 		continually read the status register. */
+ 	unsigned int irq_en:1;		/*[25]*/
+-	/*If this bit is set, then an interrupt will be sent to the ARC whenever 4 
+-		bytes have been read or 4 bytes have been written to the I2C slave 
++	/*If this bit is set, then an interrupt will be sent to the ARC whenever 4
++		bytes have been read or 4 bytes have been written to the I2C slave
+ 		module.*/
+ 	unsigned int busy:1;		/*[26] */
+ 	/*Read only status bit.  '1' indicates that the I2C slave module is sending
+ 		or receiving data.*/
+ 	unsigned int rx_rdy:1;		/*[27] */
+-	/*This bit is set to '1' by the ARC to indicate to the slave machine that 
+-		the I2C slave module is ready to receive data.  This bit is cleared by 
+-		the I2C module when it has received 4 bytes from the I2C master.  
+-		This bit is also available in the status register that can be read by 
+-		the I2C master.   The I2C master can read the status register to see 
++	/*This bit is set to '1' by the ARC to indicate to the slave machine that
++		the I2C slave module is ready to receive data.  This bit is cleared by
++		the I2C module when it has received 4 bytes from the I2C master.
++		This bit is also available in the status register that can be read by
++		the I2C master.   The I2C master can read the status register to see
+ 		when the I2C slave module is ready to receive data.*/
+ 	unsigned int tx_rdy:1;		/*[28] */
+-	/*This bit is set to '1' by the ARC to indicate to the slave machine that 
+-		the I2C slave module is ready to send data.  This bit is cleared by 
++	/*This bit is set to '1' by the ARC to indicate to the slave machine that
++		the I2C slave module is ready to send data.  This bit is cleared by
+ 		the I2C module when it has sent 4 bytes to the I2C master.  This bit
+-		is also available in the status register that can be read by the I2C 
++		is also available in the status register that can be read by the I2C
+ 		master.   The I2C master can read the status register to see when the
+ 		I2C slave module has data to send.*/
+ 	unsigned int reg_ptr:3;		/*[31:29] */
+-	/*There are 5 internal registers inside the I2C slave module.  The I2C 
+-		Master sets this value using the byte that follows the address byte 
+-		in the I2C data stream.  Register 4 (numbered 0,1,бн4) is the 
++	/*There are 5 internal registers inside the I2C slave module.  The I2C
++		Master sets this value using the byte that follows the address byte
++		in the I2C data stream.  Register 4 (numbered 0,1,бн4) is the
+ 		status register.*/
+ };
+ 
+@@ -241,7 +241,7 @@ struct aml_i2c {
+ 	struct aml_i2c_reg_master __iomem* master_regs;
+ 
+ 	pinmux_set_t	master_pinmux;
+-	
++
+ 	unsigned int		master_i2c_speed;
+ 	struct mutex     *lock;
+       struct class      cls;
+@@ -254,6 +254,7 @@ struct aml_i2c {
+ 	struct device *dev;
+ 	struct pinctrl *p;
+ 	const char *master_state_name;
++	int i2c_bus_status;
+ };
+ 
+ struct aml_i2c_ops {
+diff --git a/drivers/misc/eeprom/at24.c b/drivers/misc/eeprom/at24.c
+index c30a79309053..02aec8b68d50 100644
+--- a/drivers/misc/eeprom/at24.c
++++ b/drivers/misc/eeprom/at24.c
+@@ -132,6 +132,36 @@ static const struct i2c_device_id at24_ids[] = {
+ MODULE_DEVICE_TABLE(i2c, at24_ids);
+ 
+ #define MODULE_NAME  "at24"
++static struct at24_data *gp_at24;
++
++static ssize_t at24_wp_show(struct class *class, struct class_attribute *attr, char *buf)
++{
++    return sprintf(buf, "%d\n", amlogic_get_value(gp_at24->chip.wp_port,MODULE_NAME));
++}
++static ssize_t at24_wp_store(struct class *class,struct class_attribute *attr, const char *buf, size_t count)
++{
++    u8 wp;
++    sscanf(buf, "%x", (int*)&wp);
++
++    mutex_lock(&gp_at24->lock);
++    if (wp == 0) {
++        //write 0
++	amlogic_gpio_direction_output(gp_at24->chip.wp_port,0,MODULE_NAME);
++    }
++    else if (wp == 1) {
++        //write 1
++	amlogic_gpio_direction_output(gp_at24->chip.wp_port,1,MODULE_NAME);
++    } else {
++        printk("only support 1 or 0\n");
++    }
++
++    mutex_unlock(&gp_at24->lock);
++    return count;
++}
++
++
++struct class *at24_class;
++static CLASS_ATTR(at24_wp,S_IWUSR | S_IRUGO, at24_wp_show, at24_wp_store);
+ 
+ /*eeprom protect gpio enable*/
+ void at24_wp_enable(struct at24_platform_data *chip)
+@@ -637,7 +667,7 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ 		err = -ENOMEM;
+ 		goto err_out;
+ 	}
+-
++	gp_at24 = at24;
+ 	mutex_init(&at24->lock);
+ 	at24->use_smbus = use_smbus;
+ 	at24->chip = chip;
+@@ -720,6 +750,8 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ 	/* export data to kernel code */
+ 	if (chip.setup)
+ 		chip.setup(&at24->macc, chip.context);
++	at24_class = class_create(THIS_MODULE,"at24_wp");
++	err = class_create_file(at24_class,&class_attr_at24_wp);
+ 
+ 	return 0;
+ 
+@@ -747,6 +779,8 @@ static int at24_remove(struct i2c_client *client)
+ 	for (i = 1; i < at24->num_addresses; i++)
+ 		i2c_unregister_device(at24->client[i]);
+ 
++	class_destroy(at24_class);
++
+ 	kfree(at24->writebuf);
+ 	kfree(at24);
+ 	return 0;
+-- 
+2.19.0
+

@@ -1,0 +1,159 @@
+From da8b7a2257ca1599198d213fd66c2f77d5f4bf70 Mon Sep 17 00:00:00 2001
+From: jiwei chen <jiwei.chen@amlogic.com>
+Date: Thu, 28 Nov 2013 21:24:07 +0800
+Subject: [PATCH 2086/5965] PD #83457: isp,change the ae sequence.
+
+---
+ drivers/amlogic/camera/ov5647.c   |  4 +-
+ drivers/amlogic/tvin/isp/isp_sm.c | 92 ++++++++++++++++++++++---------
+ 2 files changed, 69 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index c2ebcf68fa96..07628ff34541 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -1898,7 +1898,7 @@ struct aml_camera_i2c_fig_s OV5647_capture_5M_script[] = {
+ {0x4002, 0xc5},
+ {0x4004, 0x06},
+ {0x4005, 0x1a},
+-{0x3503, 0x13},
++{0x3503, 0x03},
+ {0x3501, 0x10},
+ {0x3502, 0x80},
+ {0x350a, 0x00},
+@@ -2137,7 +2137,7 @@ static CLASS_ATTR(aet_debug, 0664, aet_manual_show, aet_manual_store);
+ static bool OV5647_set_aet_new_step(unsigned int new_step, bool exp_mode, bool ag_mode){
+   unsigned int exp = 0, ag = 0, vts = 0;
+ 
+-  if ((!exp_mode) || (!ag_mode) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
++  if (((!exp_mode) && (!ag_mode)) || (new_step > sensor_aet_info[current_fmt].tbl_max_step))
+ 		return(false);
+ 	else
+ 	{
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 718ad92c89af..8a93433413b8 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -332,7 +332,8 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 	static int sum = 0;
+ 	int step = 0;
+ 	unsigned short targrate;
+-	unsigned int targstep, newstep;
++	unsigned int targstep; 
++	static unsigned int newstep;
+ 	u8 lpfcoef;
+ 	u8 radium_outer;
+ 	u8 radium_inner;
+@@ -385,16 +386,32 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			break;
+ 		case AE_ORI_SET:
+ 			newstep = find_step(func,0,aepa->max_step,aepa->pre_gain);
+-			ae_sens.send = 1;
+-			ae_sens.new_step = newstep;
+-			ae_sens.shutter = 1;
+-			ae_sens.gain = 1;
+-			//printk("ae_sens.send \n");
+-			sm_state.status = ISP_AE_STATUS_UNSTABLE;
+-			if(ae_debug&0x10)
+-			printk("ISP_AE_STATUS_UNSTABLE\n");
+-			sm_state.ae_down = false;
+-			sm_state.isp_ae_parm.isp_ae_state = AE_REST;
++			if(aep->ae_skip[1] == 0x1)
++			{
++				ae_sens.send = 1;
++				ae_sens.new_step = newstep;
++				ae_sens.shutter = 1;
++				ae_sens.gain = 1;
++				//printk("ae_sens.send \n");
++				sm_state.status = ISP_AE_STATUS_UNSTABLE;
++				if(ae_debug&0x10)
++				printk("ISP_AE_STATUS_UNSTABLE\n");
++				sm_state.ae_down = false;
++				sm_state.isp_ae_parm.isp_ae_state = AE_REST;
++			}
++			else
++			{
++				ae_sens.send = 1;
++				ae_sens.new_step = newstep;
++				ae_sens.shutter = 1;
++				ae_sens.gain = 0;
++				//printk("ae_sens.send \n");
++				sm_state.status = ISP_AE_STATUS_UNSTABLE;
++				if(ae_debug&0x10)
++				printk("ISP_AE_STATUS_UNSTABLE\n");
++				sm_state.ae_down = false;
++				sm_state.isp_ae_parm.isp_ae_state = AE_GAIN_ADJUST;//AE_REST;
++			}
+ 			break;
+ 		case AE_LOW_GAIN:
+ 			aepa->cur_gain = func->get_aet_current_gain;
+@@ -615,17 +632,34 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 							step = AE_SET_NEWSTEP;
+ 						break;
+ 					case AE_SET_NEWSTEP:
+-						ae_sens.send = 1;
+-						ae_sens.new_step = newstep;
+-						ae_sens.shutter = 1;
+-						ae_sens.gain = 1;
+-						//printk("ae_sens.send \n");
+-						sm_state.status = ISP_AE_STATUS_UNSTABLE;
+-						if(ae_debug&0x10)
+-						printk("ISP_AE_STATUS_UNSTABLE\n");
+-						sm_state.ae_down = false;
+-						sm_state.isp_ae_parm.isp_ae_state = AE_REST;
+-						step = AE_SUCCESS;
++						if(aep->ae_skip[1] == 0x1)
++						{
++							ae_sens.send = 1;
++							ae_sens.new_step = newstep;
++							ae_sens.shutter = 1;
++							ae_sens.gain = 1;
++							//printk("ae_sens.send \n");
++							sm_state.status = ISP_AE_STATUS_UNSTABLE;
++							if(ae_debug&0x10)
++							printk("ISP_AE_STATUS_UNSTABLE\n");
++							sm_state.ae_down = false;
++							sm_state.isp_ae_parm.isp_ae_state = AE_REST;
++							step = AE_SUCCESS;
++						}
++						else
++						{
++							ae_sens.send = 1;
++							ae_sens.new_step = newstep;
++							ae_sens.shutter = 1;
++							ae_sens.gain = 0;
++							//printk("ae_sens.send \n");
++							sm_state.status = ISP_AE_STATUS_UNSTABLE;
++							if(ae_debug&0x10)
++							printk("ISP_AE_STATUS_UNSTABLE\n");
++							sm_state.ae_down = false;
++							sm_state.isp_ae_parm.isp_ae_state = AE_GAIN_ADJUST;//AE_REST;
++							step = AE_SUCCESS;
++						}
+ 						break;
+ 					case AE_MAX_CHECK_STOP:
+ 						if(ae_debug4)
+@@ -650,9 +684,17 @@ void isp_ae_base_sm(isp_dev_t *devp)
+ 			}
+ 			break;
+ 		case AE_GAIN_ADJUST:
+-			//if(func&&func->set_aet_new_step)
+-			//func->set_aet_new_step(newstep,false,true);
+-			sm_state.isp_ae_parm.isp_ae_state = AE_REST;
++			if(ae_sens.send == 0)
++			{
++				ae_sens.send = 1;
++				ae_sens.new_step = newstep;
++				ae_sens.shutter = 0;
++				ae_sens.gain = 1;
++
++				//if(func&&func->set_aet_new_step)
++				//func->set_aet_new_step(newstep,false,true);
++				sm_state.isp_ae_parm.isp_ae_state = AE_REST;
++			}
+ 			break;
+ 		case AE_REST:
+ 			sm_state.ae_down = true;
+-- 
+2.19.0
+

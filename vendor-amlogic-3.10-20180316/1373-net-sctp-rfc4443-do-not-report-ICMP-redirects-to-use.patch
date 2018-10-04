@@ -1,0 +1,65 @@
+From e4e7ba12fab4eba6eb6fe2863a6e0e91cd77c7cc Mon Sep 17 00:00:00 2001
+From: Daniel Borkmann <dborkman@redhat.com>
+Date: Mon, 16 Sep 2013 12:36:02 +0200
+Subject: [PATCH 1373/5965] net: sctp: rfc4443: do not report ICMP redirects to
+ user space
+
+[ Upstream commit 3f96a532113131d5a65ac9e00fc83cfa31b0295f ]
+
+Adapt the same behaviour for SCTP as present in TCP for ICMP redirect
+messages. For IPv6, RFC4443, section 2.4. says:
+
+  ...
+  (e) An ICMPv6 error message MUST NOT be originated as a result of
+      receiving the following:
+  ...
+       (e.2) An ICMPv6 redirect message [IPv6-DISC].
+  ...
+
+Therefore, do not report an error to user space, just invoke dst's redirect
+callback and leave, same for IPv4 as done in TCP as well. The implication
+w/o having this patch could be that the reception of such packets would
+generate a poll notification and in worst case it could even tear down the
+whole connection. Therefore, stop updating sk_err on redirects.
+
+Reported-by: Duan Jiong <duanj.fnst@cn.fujitsu.com>
+Reported-by: Hannes Frederic Sowa <hannes@stressinduktion.org>
+Suggested-by: Vlad Yasevich <vyasevich@gmail.com>
+Signed-off-by: Daniel Borkmann <dborkman@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/sctp/input.c | 3 +--
+ net/sctp/ipv6.c  | 2 +-
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/net/sctp/input.c b/net/sctp/input.c
+index 4b2c83146aa7..bd4fb459c63b 100644
+--- a/net/sctp/input.c
++++ b/net/sctp/input.c
+@@ -648,8 +648,7 @@ void sctp_v4_err(struct sk_buff *skb, __u32 info)
+ 		break;
+ 	case ICMP_REDIRECT:
+ 		sctp_icmp_redirect(sk, transport, skb);
+-		err = 0;
+-		break;
++		/* Fall through to out_unlock. */
+ 	default:
+ 		goto out_unlock;
+ 	}
+diff --git a/net/sctp/ipv6.c b/net/sctp/ipv6.c
+index d70cabbe5b8b..422d8bdacc0d 100644
+--- a/net/sctp/ipv6.c
++++ b/net/sctp/ipv6.c
+@@ -189,7 +189,7 @@ SCTP_STATIC void sctp_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
+ 		break;
+ 	case NDISC_REDIRECT:
+ 		sctp_icmp_redirect(sk, transport, skb);
+-		break;
++		goto out_unlock;
+ 	default:
+ 		break;
+ 	}
+-- 
+2.19.0
+

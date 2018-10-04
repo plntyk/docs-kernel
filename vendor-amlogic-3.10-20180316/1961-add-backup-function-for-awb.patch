@@ -1,0 +1,92 @@
+From 58bd37bdb8cf8c2ae81263975542b0ef47d37ec3 Mon Sep 17 00:00:00 2001
+From: "frank.zhao" <frank.zhao@amlogic.com>
+Date: Sun, 17 Nov 2013 18:03:02 +0800
+Subject: [PATCH 1961/5965] add backup function for awb.
+
+---
+ drivers/amlogic/tvin/isp/isp_drv.c |  8 +++++++-
+ drivers/amlogic/tvin/isp/isp_sm.c  | 27 ++++++++++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 001bf6010c7a..9017d7735e9e 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -111,6 +111,12 @@ static ssize_t debug_store(struct device *dev,struct device_attribute *attr, con
+ 		width = simple_strtol(parm[1],NULL,10);
+ 		height = simple_strtol(parm[2],NULL,10);
+ 		isp_set_init(width,height,width+26,height+16);
++	} else if(!strcmp(parm[0],"rgb")){
++        unsigned int b,r,g;
++        b = RD_BITS(ISP_GAIN_GRBG23, GAIN_GRBG2_BIT, GAIN_GRBG2_WID);
++        r = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG1_BIT, GAIN_GRBG1_WID);
++        g = RD_BITS(ISP_GAIN_GRBG01, GAIN_GRBG0_BIT, GAIN_GRBG0_WID);
++        pr_info("%s: r:%d, g:%d b:%d.\n",__func__,r,g,b);
+ 	}
+ 	return len;
+ }
+@@ -707,7 +713,7 @@ static int isp_thread(isp_dev_t *devp) {
+ 	if(ae_sens.send)
+ 	{
+ 		if(isp_debug)
+-		printk("set new step %d \n",ae_sens.new_step);
++		    printk("[isp] set new step:%d \n",ae_sens.new_step);
+ 		if(func&&func->set_aet_new_step)
+ 		{
+ 			if(ae_adjust_enable)
+diff --git a/drivers/amlogic/tvin/isp/isp_sm.c b/drivers/amlogic/tvin/isp/isp_sm.c
+index 1e791d453ad2..084ef45899d8 100755
+--- a/drivers/amlogic/tvin/isp/isp_sm.c
++++ b/drivers/amlogic/tvin/isp/isp_sm.c
+@@ -633,6 +633,25 @@ static inline int matrix_yuv709_rgb_b(unsigned int y, unsigned int u, unsigned i
+ 
+ static struct isp_awb_gain_s awb_gain, awb_gain_pre;
+ 
++unsigned int isp_awb_load_pre_para(isp_dev_t *devp)
++{
++    memcpy(&awb_gain, &awb_gain_pre, sizeof(struct isp_awb_gain_s));
++    isp_awb_set_gain(awb_gain.r_val, awb_gain.g_val,awb_gain.b_val);
++    pr_info("[isp] %s load pre awb, r:%d g:%d b:%d ... ...\n",
++                __func__, awb_gain.r_val, awb_gain.g_val,awb_gain.b_val);
++
++    return 0;
++}
++
++int isp_awb_save_current_para(isp_dev_t *devp)
++{
++    isp_awb_get_gain(&awb_gain_pre);
++
++    pr_info("[isp] %s save awb, r:%d g:%d b:%d ... ...\n",
++                __func__, awb_gain_pre.r_val, awb_gain_pre.g_val,awb_gain_pre.b_val);
++
++    return 0;
++}
+ void isp_awb_base_sm(isp_dev_t *devp)
+ {
+ 	struct isp_awb_stat_s *awb = &devp->isp_awb;
+@@ -669,7 +688,11 @@ void isp_awb_base_sm(isp_dev_t *devp)
+ 			awba->countlimitym	= ((awba->pixel_sum >> 2) * awbp->ratio_ym) >> 6;
+ 			awba->countlimityl	= ((awba->pixel_sum >> 2) * awbp->ratio_yl) >> 6;
+ 			awba->status = ISP_AWB_STATUS_STABLE;
+-			sm_state.isp_awb_parm.isp_awb_state = AWB_CHECK;
++			if (devp->flag & ISP_FLAG_CAPTURE) {
++			    isp_awb_load_pre_para(devp);
++			    sm_state.isp_awb_parm.isp_awb_state = AWB_IDLE;
++			} else
++			    sm_state.isp_awb_parm.isp_awb_state = AWB_CHECK;
+ 			break;
+ 		case AWB_CHECK:
+ 			while(step != AWB_SUCCESS)
+@@ -1867,7 +1890,9 @@ void isp_awb_sm(isp_dev_t *devp)
+ void isp_sm_uninit(isp_dev_t *devp)
+ {
+     isp_ae_save_current_para(devp);
++    isp_awb_save_current_para(devp);
+ }
++
+ module_param(best_step_debug,uint,0664);
+ MODULE_PARM_DESC(best_step_debug,"\n debug flag for calc best focus position.\n");
+ 
+-- 
+2.19.0
+

@@ -1,0 +1,241 @@
+From 547eb6b9a64038ad8782098bc2c1e5c6765382df Mon Sep 17 00:00:00 2001
+From: Jets Yan <jets.yan@amlogic.com>
+Date: Fri, 11 Sep 2015 16:51:36 +0800
+Subject: [PATCH 5861/5965] PD#112016: hdmitx: framerate-automation
+ optimization for osd/hdmitx
+
+when framerate-automation rollback vmode (such as 1080p59->1080p),
+hdmitx driver may reset hdcp which cause snowball on screen, and osd driver
+may reset setting which cause screen flick.
+
+Change-Id: I41efc19e36c898319131a86e9a30d857b0ff3d13
+---
+ drivers/amlogic/amports/video.c          |  43 ++++-----
+ drivers/amlogic/display/vout/tvconf.c    |   2 +-
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c   | 107 ++++++++++++-----------
+ include/linux/amlogic/vout/vout_notify.h |   1 +
+ 4 files changed, 82 insertions(+), 71 deletions(-)
+
+diff --git a/drivers/amlogic/amports/video.c b/drivers/amlogic/amports/video.c
+index 73559f1e5a6c..f188bf5d1b6a 100644
+--- a/drivers/amlogic/amports/video.c
++++ b/drivers/amlogic/amports/video.c
+@@ -5993,35 +5993,36 @@ static struct device *amvideo_dev;
+ 
+ int vout_notify_callback(struct notifier_block *block, unsigned long cmd , void *para)
+ {
+-    const vinfo_t *info;
+-    ulong flags;
++	const vinfo_t *info;
++	ulong flags;
+ 
+ #ifdef CONFIG_SUPPORT_VIDEO_ON_VPP2
+-    if(cur_dev != &video_dev[0]){
+-        return 0;
+-    }
++	if (cur_dev != &video_dev[0]) {
++		return 0;
++	}
+ #endif
+-    switch (cmd)
+-    {
+-  	case  VOUT_EVENT_MODE_CHANGE:
+-	info = get_current_vinfo();
+-	spin_lock_irqsave(&lock, flags);
+-  	vinfo = info;
+-	/* pre-calculate vsync_pts_inc in 90k unit */
+-    	vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
+-        vsync_pts_inc_scale = vinfo->sync_duration_den;
+-        vsync_pts_inc_scale_base = vinfo->sync_duration_num;
+-	spin_unlock_irqrestore(&lock, flags);
+-	new_vmode = vinfo->mode;
++	switch (cmd)
++	{
++	case VOUT_EVENT_MODE_CHANGE:
++	case VOUT_EVENT_MODE_CHANGE_SIMILAR:
++		info = get_current_vinfo();
++		spin_lock_irqsave(&lock, flags);
++		vinfo = info;
++		/* pre-calculate vsync_pts_inc in 90k unit */
++		vsync_pts_inc = 90000 * vinfo->sync_duration_den / vinfo->sync_duration_num;
++		vsync_pts_inc_scale = vinfo->sync_duration_den;
++		vsync_pts_inc_scale_base = vinfo->sync_duration_num;
++		spin_unlock_irqrestore(&lock, flags);
++		new_vmode = vinfo->mode;
+ 	break;
+ 	case VOUT_EVENT_OSD_PREBLEND_ENABLE:
+-	vpp_set_osd_layer_preblend(para);
++		vpp_set_osd_layer_preblend(para);
+ 	break;
+ 	case VOUT_EVENT_OSD_DISP_AXIS:
+-	vpp_set_osd_layer_position(para);
++		vpp_set_osd_layer_position(para);
+ 	break;
+-    }
+-    return 0;
++	}
++	return 0;
+ }
+ 
+ #ifdef CONFIG_SUPPORT_VIDEO_ON_VPP2
+diff --git a/drivers/amlogic/display/vout/tvconf.c b/drivers/amlogic/display/vout/tvconf.c
+index 6f197cdf1eaa..b83e99e044ff 100644
+--- a/drivers/amlogic/display/vout/tvconf.c
++++ b/drivers/amlogic/display/vout/tvconf.c
+@@ -1208,7 +1208,7 @@ static int framerate_automation_set_mode(vmode_t mode_target)
+ 		 	update_vmode_status(get_name_from_vmode(mode_target));
+ 			update_current_vinfo(mode_target);
+ 			clock_fine_tune();
+-			vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE,&mode_target) ;
++			vout_notifier_call_chain(VOUT_EVENT_MODE_CHANGE_SIMILAR,&mode_target) ;
+ 			break;
+ 		case 2:
+ 			// change vmode and notify all client
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+index eb31ec4758ab..5cb6fda5ed89 100644
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx.c
+@@ -1005,70 +1005,79 @@ static int hdmitx_notify_callback_v(struct notifier_block *block, unsigned long
+ 	const vinfo_t *info = NULL;
+ 	HDMI_Video_Codes_t vic_ready = HDMI_Unkown;
+ #endif
+-	if(get_cur_vout_index()!=1)
+-        return 0;
+ 
+-    if (cmd != VOUT_EVENT_MODE_CHANGE)
+-        return 0;
+-	
+-#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION	
+-	if(suspend_flag==1)
+- 		return 0;
+-	// vic_ready got from IP
+-    vic_ready = hdmitx_device.HWOp.GetState(&hdmitx_device, STAT_VIDEO_VIC, 0);
+-	// get current vinfo
+-    info = hdmi_get_current_vinfo();
+-    if(info == NULL) {
+-        hdmi_print(ERR, VID "cann't get valid mode\n");
+-        return -1;
+-    }
+-    else {
+-        hdmi_print(IMP, VID "get current mode: %s\n", info->name);
+-    }
+-    if ( ((vic_ready == HDMI_1080p24) && (info->mode == VMODE_1080P_23HZ)) ||
+-        ((vic_ready == HDMI_1080p24) && (info->mode == VMODE_1080P_24HZ)) ) {
+-        if (hdmitx_device.HWOp.SetAudN) {
+-            hdmitx_device.HWOp.SetAudN();
+-        }
+-    }
++	if (get_cur_vout_index() != 1)
++		return 0;
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++// vic_ready got from IP
++	vic_ready = hdmitx_device.HWOp.GetState(&hdmitx_device, STAT_VIDEO_VIC, 0);
++// get current vinfo
++	info = hdmi_get_current_vinfo();
++	if (info == NULL) {
++		hdmi_print(ERR, VID "cann't get valid mode\n");
++		return -1;
++	}
++	else {
++		hdmi_print(IMP, VID "get current mode: %s\n", info->name);
++	}
++
++	if ((cmd == VOUT_EVENT_MODE_CHANGE) ||
++	(cmd == VOUT_EVENT_MODE_CHANGE_SIMILAR)) {
++		if ( ((vic_ready == HDMI_1080p24) && (info->mode == VMODE_1080P_23HZ)) ||
++		((vic_ready == HDMI_1080p24) && (info->mode == VMODE_1080P_24HZ)) ) {
++			if (hdmitx_device.HWOp.SetAudN)
++			hdmitx_device.HWOp.SetAudN();
++		}
++	}
++#endif
++
++	if (cmd != VOUT_EVENT_MODE_CHANGE)
++		return 0;
++
++#ifdef CONFIG_AML_VOUT_FRAMERATE_AUTOMATION
++	if (suspend_flag == 1)
++		return 0;
++
+ 	if( is_similar_hdmi_vic(vic_ready, info->mode) )
+ 		return 0;
+ #endif
+-    if(hdmitx_device.vic_count == 0){
+-        if(is_dispmode_valid_for_hdmi()){
+-            hdmitx_device.mux_hpd_if_pin_high_flag = 1;
+-            if(hdmitx_device.unplug_powerdown){
+-                      return 0;
+-                  }
+-            }
+-    }
+ 
+-    set_disp_mode_auto();
++	if (hdmitx_device.vic_count == 0) {
++		if (is_dispmode_valid_for_hdmi()) {
++			hdmitx_device.mux_hpd_if_pin_high_flag = 1;
++			if (hdmitx_device.unplug_powerdown) {
++				return 0;
++			}
++		}
++	}
+ 
+-    return 0;
++	set_disp_mode_auto();
++
++	return 0;
+ }
+ 
+ #ifdef CONFIG_AMLOGIC_VOUT2
+ static int hdmitx_notify_callback_v2(struct notifier_block *block, unsigned long cmd , void *para)
+ {
+-    if(get_cur_vout_index()!=2)
+-        return 0;
++	if (get_cur_vout_index() != 2)
++		return 0;
+ 
+-    if (cmd != VOUT_EVENT_MODE_CHANGE)
+-        return 0;
++	if (cmd != VOUT_EVENT_MODE_CHANGE)
++		return 0;
+ 
+-    if(hdmitx_device.vic_count == 0){
+-        if(is_dispmode_valid_for_hdmi()){
+-            hdmitx_device.mux_hpd_if_pin_high_flag = 1;
+-            if(hdmitx_device.unplug_powerdown){
+-                      return 0;
+-                  }
+-            }
+-    }
++	if (hdmitx_device.vic_count == 0) {
++		if (is_dispmode_valid_for_hdmi()) {
++			hdmitx_device.mux_hpd_if_pin_high_flag = 1;
++			if (hdmitx_device.unplug_powerdown) {
++				return 0;
++			}
++		}
++	}
+ 
+-    set_disp_mode_auto();
++	set_disp_mode_auto();
+ 
+-    return 0;
++	return 0;
+ }
+ #endif
+ 
+diff --git a/include/linux/amlogic/vout/vout_notify.h b/include/linux/amlogic/vout/vout_notify.h
+index 45d2b2ec36fe..73462ef5d8dc 100755
+--- a/include/linux/amlogic/vout/vout_notify.h
++++ b/include/linux/amlogic/vout/vout_notify.h
+@@ -78,6 +78,7 @@ extern int get_power_level(void);
+ 
+ 
+ #define VOUT_EVENT_MODE_CHANGE			0x00010000
++#define VOUT_EVENT_MODE_CHANGE_SIMILAR	0x00010001
+ #define VOUT_EVENT_OSD_BLANK			0x00020000
+ #define VOUT_EVENT_OSD_DISP_AXIS		0x00030000
+ #define  VOUT_EVENT_OSD_PREBLEND_ENABLE		0x00040000
+-- 
+2.19.0
+

@@ -1,0 +1,198 @@
+From 9ac84706a9b03d639aa182362790febf348235b4 Mon Sep 17 00:00:00 2001
+From: "yvonne.chen" <yvonne.chen@amlogic.com>
+Date: Wed, 6 Aug 2014 13:07:45 +0800
+Subject: [PATCH 4867/5965] pd#95427 integrated deinterlace's & vdec's mem in
+ dtd for tvp L1 mem securing
+
+Change-Id: Ib66a4635d6af91987b1236bb681432f29c8a6d88
+
+Conflicts:
+
+	arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
+---
+ .../dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd | 19 ++++++--
+ drivers/amlogic/amports/vdec.c                | 47 ++++++++++++++++---
+ drivers/amlogic/deinterlace/deinterlace.c     | 37 +++++++++++++--
+ 3 files changed, 87 insertions(+), 16 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
+index 86fdcf1ab9eb..251dcde55ba0 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_1G_emmc_sdhc.dtd
+@@ -150,6 +150,13 @@ void root_func(){
+  		display_size_default = <1920 1080 1920 3240 32>; //1920*1080*4*3 = 0x17BB000
+ 	};
+ 	
++	continuemem{
++                compatible = "amlogic,contimuemem";
++                dev_name = "contimuemem";
++                reserve-memory = <0x05800000>; // 88M deinterlace+vdec
++	};
++
++	
+ //$$ DEVICE="deinterlace"
+ //$$ L2 PROP_STR = "status"
+ //$$ L2 PROP_U32 2 = "reg"
+@@ -157,6 +164,8 @@ void root_func(){
+ 		compatible = "amlogic,deinterlace";
+ 		dev_name = "deinterlace";
+ 		status = "ok";
++		share-memory-name = "continuemem0";
++                share-memory-offset = <0>;
+ 		reserve-memory = <0x02100000>; //10x1920x1088x3/2=33M
+ 	};
+ 
+@@ -184,7 +193,9 @@ void root_func(){
+                 compatible = "amlogic,vdec";
+                 dev_name = "vdec.0";
+                 status = "okay";
+-                reserve-memory = <0x04000000>; // 64M
++                share-memory-name = "continuemem0";
++                share-memory-offset = <0x02100000>;
++                share-memory-size = <0x04000000>; //64M
+ //		reserve-iomap = "true";
+ 		linux,contiguous-region = <&mem_4k2k_decoder>;
+         };
+@@ -197,9 +208,9 @@ void root_func(){
+ 		compatible = "amlogic,picdec";
+ 		dev_name = "picdec";								
+ 		status = "okay";
+-        share-memory-name = "vdec0";
+-        share-memory-offset = <0>;
+-        share-memory-size = <0x04000000>; //64M
++                share-memory-name = "continuemem0";
++                share-memory-offset = <0x02100000>;
++                share-memory-size = <0x04000000>; //64M
+ 	}; 
+ 
+ /// ***************************************************************************************
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index 6a45714ac9c2..6d1fdb0303d4 100755
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -680,10 +680,12 @@ static struct class vdec_class = {
+         .class_attrs = vdec_class_attrs,
+     };
+ 
+-static int  vdec_probe(struct platform_device *pdev)
++static int vdec_probe(struct platform_device *pdev)
+ {
+     s32 r;
+     static struct resource res;
++    const void * name;
++    int offset, size;
+ 
+     r = class_register(&vdec_class);
+     if (r) {
+@@ -691,15 +693,46 @@ static int  vdec_probe(struct platform_device *pdev)
+         return r;
+     }
+     r = find_reserve_block(pdev->dev.of_node->name,0);
++
+     if(r < 0){
+-        printk("can not find %s%d reserve block\n",vdec_class.name,0);
+-	    r = -EFAULT;
+-	    goto error;
++        name = of_get_property(pdev->dev.of_node,"share-memory-name",NULL);
++	if(!name){
++            printk("can not find %s%d reserve block1\n",vdec_class.name,0);
++            r = -EFAULT;
++            goto error;
++
++	}else{
++            r= find_reserve_block_by_name(name);
++            if(r<0){
++                printk("can not find %s%d reserve block2\n",vdec_class.name,0);
++                r = -EFAULT;
++                goto error;
++            }
++            name= of_get_property(pdev->dev.of_node,"share-memory-offset",NULL);
++            if(name)
++                offset= of_read_ulong(name,1);
++            else{
++                printk("can not find %s%d reserve block3\n",vdec_class.name,0);
++                r = -EFAULT;
++                goto error;
++            }
++            name= of_get_property(pdev->dev.of_node,"share-memory-size",NULL);
++            if(name)
++                size= of_read_ulong(name,1);
++            else{
++                printk("can not find %s%d reserve block4\n",vdec_class.name,0);
++                r = -EFAULT;
++                goto error;
++            }			
++            res.start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
++            res.end = res.start+ size-1;		
++		}
++    }else{
++        res.start = (phys_addr_t)get_reserve_block_addr(r);
++        res.end = res.start+ (phys_addr_t)get_reserve_block_size(r)-1;
+     }
+-    res.start = (phys_addr_t)get_reserve_block_addr(r);
+-    res.end = res.start+ (phys_addr_t)get_reserve_block_size(r)-1;
+ 
+-    printk("init vdec memsource %d->%d\n",res.start,res.end);
++    printk("init vdec memsource %x->%x\n",res.start,res.end);
+     res.flags = IORESOURCE_MEM;
+ 
+     vdec_set_resource(&res, &pdev->dev);
+diff --git a/drivers/amlogic/deinterlace/deinterlace.c b/drivers/amlogic/deinterlace/deinterlace.c
+index 6eaf86cc12f3..bd96e7e76cf7 100755
+--- a/drivers/amlogic/deinterlace/deinterlace.c
++++ b/drivers/amlogic/deinterlace/deinterlace.c
+@@ -6958,7 +6958,8 @@ static int di_probe(struct platform_device *pdev)
+     struct resource *mem;
+     int buf_num_avail;
+     pr_dbg("di_probe\n");
+-
++    const void*name;
++    int offset,size;
+     vout_register_client(&display_mode_notifier_nb_v);
+ 
+     memset(&di_post_stru, 0, sizeof(di_post_stru));
+@@ -7043,11 +7044,37 @@ static int di_probe(struct platform_device *pdev)
+     mem = &memobj;
+     r = find_reserve_block(pdev->dev.of_node->name,0);
+     if(r < 0){
+-        pr_error("\ndeinterlace memory resource undefined.\n");
+-        return -EFAULT;
++        name = of_get_property(pdev->dev.of_node,"share-memory-name",NULL);
++        if(!name){
++            pr_error("\ndeinterlace memory resource undefined.\n");
++            return -EFAULT;
++        }else{
++            r= find_reserve_block_by_name(name);
++            if(r<0){
++                pr_error("\ndeinterlace memory resource undefined2.\n");
++                return -EFAULT;
++            }
++            name= of_get_property(pdev->dev.of_node,"share-memory-offset",NULL);
++            if(name)
++                offset= of_read_ulong(name,1);
++            else{
++                pr_error("\ndeinterlace memory resource undefined3.\n");
++                return -EFAULT;
++            }
++            name= of_get_property(pdev->dev.of_node,"share-memory-size",NULL);
++            if(name)
++                size= of_read_ulong(name,1);
++            else{
++	        pr_error("\ndeinterlace memory resource undefined4.\n");
++	        return -EFAULT;
++        }			
++	mem->start = (phys_addr_t)get_reserve_block_addr(r)+ offset;
++	mem->end = mem->start+ size-1;
++	}
++    }else{
++        mem->start = (phys_addr_t)get_reserve_block_addr(r);
++        mem->end = mem->start+ (phys_addr_t)get_reserve_block_size(r)-1;
+     }
+-    mem->start = (phys_addr_t)get_reserve_block_addr(r);
+-    mem->end = mem->start+ (phys_addr_t)get_reserve_block_size(r)-1;
+ 
+     for(i=0; i<USED_LOCAL_BUF_MAX; i++){
+     	used_local_buf_index[i] = -1;
+-- 
+2.19.0
+

@@ -1,0 +1,3723 @@
+From f47fda237eeda483b84207d4d821287b0fd138ab Mon Sep 17 00:00:00 2001
+From: "benlong.zhou" <benlong.zhou@amlogic.com>
+Date: Thu, 23 Jan 2014 20:03:29 +0800
+Subject: [PATCH 3352/5965] PD #86815: crypto: aes: using Kernel AES as
+ NANDKEY's crypto algorithm    1.   remove polarssl aes algorithm    2.  
+ kernel itself possess aes algorithm to be used    3.   aes of kernel itself
+ is compatible polarssl aes
+
+---
+ drivers/amlogic/secure/Makefile               |    3 +-
+ drivers/amlogic/secure/aes_crypto.c           |  179 +++
+ drivers/amlogic/secure/polarssl_aes/Makefile  |    8 -
+ drivers/amlogic/secure/polarssl_aes/aes.c     | 1349 -----------------
+ .../secure/polarssl_aes/aes_algorithm.c       |  144 --
+ .../polarssl_aes/include/polarssl/aes.h       |  184 ---
+ .../polarssl_aes/include/polarssl/config.h    |  892 -----------
+ .../polarssl_aes/include/polarssl/sha2.h      |  171 ---
+ drivers/amlogic/secure/polarssl_aes/sha2.c    |  705 ---------
+ 9 files changed, 180 insertions(+), 3455 deletions(-)
+ create mode 100644 drivers/amlogic/secure/aes_crypto.c
+ delete mode 100644 drivers/amlogic/secure/polarssl_aes/Makefile
+ delete mode 100755 drivers/amlogic/secure/polarssl_aes/aes.c
+ delete mode 100644 drivers/amlogic/secure/polarssl_aes/aes_algorithm.c
+ delete mode 100755 drivers/amlogic/secure/polarssl_aes/include/polarssl/aes.h
+ delete mode 100755 drivers/amlogic/secure/polarssl_aes/include/polarssl/config.h
+ delete mode 100755 drivers/amlogic/secure/polarssl_aes/include/polarssl/sha2.h
+ delete mode 100755 drivers/amlogic/secure/polarssl_aes/sha2.c
+
+diff --git a/drivers/amlogic/secure/Makefile b/drivers/amlogic/secure/Makefile
+index 58a0bbfad8f3..2c3e7df268ca 100755
+--- a/drivers/amlogic/secure/Makefile
++++ b/drivers/amlogic/secure/Makefile
+@@ -4,6 +4,5 @@
+ 
+ obj-y += aml_aes/
+ 
+-obj-y += polarssl_aes/
+-
++obj-y += aes_crypto.o
+ 
+diff --git a/drivers/amlogic/secure/aes_crypto.c b/drivers/amlogic/secure/aes_crypto.c
+new file mode 100644
+index 000000000000..bb4de63da492
+--- /dev/null
++++ b/drivers/amlogic/secure/aes_crypto.c
+@@ -0,0 +1,179 @@
++#include <linux/err.h>
++#include <linux/scatterlist.h>
++#include <linux/crypto.h>
++
++#include <linux/slab.h>
++#include <linux/string.h>
++
++#ifdef CONFIG_CRYPTO_AES
++/* the aes(cbc mode) algorithm in kernel is same as polarssl aes(cbc mode),
++ * in kernel the aes is possessed by kernel itself, in uboot the aes is polarssl aes
++ * */
++
++//AES key table
++static unsigned char default_AESkey[] = {
++0xAD,0x93,0x00,0xC4,0x8E,0x50,0x20,0xC5,0x3F,0xBF,0x23,0x32,0x80,0x5A,0xC6,0xDF,
++0x2F,0x7D,0x49,0xD9,0x15,0x8B,0x7F,0x04,0x2C,0x80,0xB0,0x62,0x78,0x25,0x8D,0x9C,
++0x13,0x22,0x02,0x4A,0x55,0x23,0xBB,0xCB,0xF1,0xFB,0x2A,0xCC,0xBB,0x95,0xF4,0x50,
++0xAE,0x08,0xD7,0xFB,0x80,0xF2,0x64,0x72,0xE3,0x3C,0xC4,0xB4,0xA3,0x50,0xD9,0xF1,
++0x2A,0xDE,0xFC,0xD7,0x67,0xC8,0xDE,0xD0,0xF0,0x1E,0xE8,0x12,0xF9,0x57,0x25,0x36,
++0x6D,0x71,0xD2,0xF8,0x1E,0x32,0x25,0x59,0x89,0x80,0xA3,0x59,0xD4,0xB6,0xDA,0x00,
++0x8D,0xB8,0x5B,0x95,0x96,0x47,0x07,0xBD,0xED,0x68,0xDF,0xB9,0xD5,0x93,0x34,0x8F,
++0xC6,0x66,0x06,0x64,0x94,0xCC,0x27,0x29,0x3A,0x8F,0x58,0x2E,0x70,0x7D,0x22,0xE7,
++0x9D,0x62,0xAA,0xD1,0x0C,0xD2,0xD7,0x76,0xBD,0x40,0xCD,0x87,0x4E,0xC8,0x4C,0x80,
++0x86,0xC2,0xB8,0x97,0xA3,0xDC,0x8F,0x8C,0x45,0xCC,0x26,0x40,0xBD,0xEB,0x3F,0xAF,
++0x55,0x1E,0x88,0xFC,0x38,0xC0,0x06,0x1C,0xDA,0xDB,0xE4,0xFA,0x2B,0xFB,0x6D,0x6F,
++0x19,0x62,0x0A,0xC4,0xEA,0xF0,0xE3,0x47,0xDB,0x47,0x83,0xE8,0x50,0x17,0xDF,0xA8,
++0x29,0x37,0xB4,0x0A,0x19,0x1B,0x2D,0xDB,0x86,0xC8,0xBB,0xD1,0x52,0xD5,0x8F,0xC8,
++0x2B,0xBC,0xE7,0x8A,0xF4,0xA1,0xE2,0x4D,0xAC,0xFC,0xB2,0x6F,0xDA,0x82,0xAB,0x86,
++0xB7,0x95,0x6B,0xD7,0xA9,0x07,0xC7,0xB8,0x2D,0xBF,0x86,0xB4,0xBF,0xF4,0xC8,0xFD,
++0x50,0x43,0xEB,0x8D,0xAB,0x16,0x91,0xBB,0x6B,0x5E,0x60,0x21,0x57,0x44,0x61,0x06,
++};
++
++
++/**
++ * Crypto API
++ */
++static struct crypto_blkcipher *aml_keybox_crypto_alloc_cipher(void)
++{
++    return crypto_alloc_blkcipher("cbc(aes)", 0, CRYPTO_ALG_ASYNC);
++}
++
++static int aml_keybox_aes_encrypt(const void *key, int key_len,
++                                  const u8 *aes_iv, void *dst, size_t *dst_len,
++                                  const void *src, size_t src_len)
++{
++    struct scatterlist sg_in[1], sg_out[1];
++    struct crypto_blkcipher *tfm = aml_keybox_crypto_alloc_cipher();
++    struct blkcipher_desc desc =
++        { .tfm = tfm, .flags = 0 };
++	int ret;
++	void *iv;
++	int ivsize;
++	if(src_len & 0x0f){
++		printk("%s:%d,src_len %d is not 16byte align",__func__,__LINE__,src_len);
++		return -1;
++	}
++
++	if (IS_ERR(tfm)){
++		printk("%s:%d,crypto_alloc fail\n",__func__,__LINE__);
++		return PTR_ERR(tfm);
++	}
++
++	*dst_len = src_len ;
++
++	crypto_blkcipher_setkey((void *) tfm, key, key_len);
++	sg_init_table(sg_in, 1);
++	sg_set_buf(&sg_in[0], src, src_len);
++	sg_init_table(sg_out, 1);
++	sg_set_buf(sg_out, dst, *dst_len);
++	iv = crypto_blkcipher_crt(tfm)->iv;
++	ivsize = crypto_blkcipher_ivsize(tfm);
++
++	//printk("key_len:%d,ivsize:%d\n",key_len,ivsize);
++
++	memcpy(iv, aes_iv, ivsize);
++
++    ret = crypto_blkcipher_encrypt(&desc, sg_out, sg_in,src_len);
++    crypto_free_blkcipher(tfm);
++    if (ret < 0){
++        printk("%s:%d,ceph_aes_crypt failed %d\n", __func__,__LINE__,ret);
++        return ret;
++	}
++    return 0;
++}
++static int aml_keybox_aes_decrypt(const void *key, int key_len,
++                                      const u8 *aes_iv, void *dst,
++                                      size_t *dst_len, const void *src,
++                                      size_t src_len)
++{
++    struct scatterlist sg_in[1], sg_out[1];
++    struct crypto_blkcipher *tfm = aml_keybox_crypto_alloc_cipher();
++    struct blkcipher_desc desc =
++        { .tfm = tfm };
++    void *iv;
++    int ivsize;
++    int ret;
++//    int last_byte;
++	if(src_len &0x0f){
++		printk("%s:%d,src_len %d is not 16byte align",__func__,__LINE__,src_len);
++		return -1;
++	}
++
++	if (IS_ERR(tfm)){
++		printk("%s:%d,crypto_alloc fail\n",__func__,__LINE__);
++		return PTR_ERR(tfm);
++	}
++
++	crypto_blkcipher_setkey((void *) tfm, key, key_len);
++	sg_init_table(sg_in, 1);
++	sg_init_table(sg_out, 1);
++	sg_set_buf(sg_in, src, src_len);
++	sg_set_buf(&sg_out[0], dst, *dst_len);
++
++	iv = crypto_blkcipher_crt(tfm)->iv;
++	ivsize = crypto_blkcipher_ivsize(tfm);
++
++	//printk("key_len:%d,ivsize:%d\n",key_len,ivsize);
++
++	memcpy(iv, aes_iv, ivsize);
++
++	ret = crypto_blkcipher_decrypt(&desc, sg_out, sg_in, src_len);
++	crypto_free_blkcipher(tfm);
++	if (ret < 0){
++		printk("%s:%d,ceph_aes_decrypt failed %d\n", __func__,__LINE__,ret);
++		return ret;
++	}
++	*dst_len = src_len;
++    return 0;
++}
++
++int aes_crypto_encrypt(void *dst,size_t *dst_len,const void *src,size_t src_len)
++{
++	int ret;
++	unsigned char iv_aes[16];
++	unsigned char key_aes[32];
++	memcpy(iv_aes,&default_AESkey[0],16);
++	memcpy(key_aes,&default_AESkey[16],32);
++
++	ret = aml_keybox_aes_encrypt(key_aes,sizeof(key_aes),iv_aes,dst,dst_len,src,src_len);
++	return ret;
++}
++
++int aes_crypto_decrypt(void *dst,size_t *dst_len,const void *src,size_t src_len)
++{
++	int ret;
++	unsigned char iv_aes[16];
++	unsigned char key_aes[32];
++	memcpy(iv_aes,&default_AESkey[0],16);
++	memcpy(key_aes,&default_AESkey[16],32);
++
++	ret = aml_keybox_aes_decrypt(key_aes,sizeof(key_aes),iv_aes,dst,dst_len,src,src_len);
++	return ret;
++}
++
++//int __aml_aes_encrypt(unsigned char *output,unsigned char *input,int size)
++int aml_aes_encrypt(unsigned char *output,unsigned char *input,int size)
++{
++	size_t out_len = size;
++	return aes_crypto_encrypt(output,&out_len,input,size);
++}
++//int __aml_aes_decrypt(unsigned char *output,unsigned char *input,int size)
++int aml_aes_decrypt(unsigned char *output,unsigned char *input,int size)
++{
++	size_t out_len = size;
++	return aes_crypto_decrypt(output,&out_len,input,size);
++}
++#else
++int aml_aes_encrypt(unsigned char *output,unsigned char *input,int size)
++{
++	return -1;
++}
++int aml_aes_decrypt(unsigned char *output,unsigned char *input,int size)
++{
++	return -1;
++}
++
++#endif  //CONFIG_CRYPTO_AES
++
++
+diff --git a/drivers/amlogic/secure/polarssl_aes/Makefile b/drivers/amlogic/secure/polarssl_aes/Makefile
+deleted file mode 100644
+index 3dd30f7533be..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/Makefile
++++ /dev/null
+@@ -1,8 +0,0 @@
+-
+-
+-ccflags-y += -I$(srctree)/drivers/amlogic/secure/polarssl_aes/include
+-
+-obj-y		+= aes.o
+-obj-y		+= aes_algorithm.o
+-obj-y		+= sha2.o
+-
+diff --git a/drivers/amlogic/secure/polarssl_aes/aes.c b/drivers/amlogic/secure/polarssl_aes/aes.c
+deleted file mode 100755
+index df4a79a68673..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/aes.c
++++ /dev/null
+@@ -1,1349 +0,0 @@
+-/*
+- *  FIPS-197 compliant AES implementation
+- *
+- *  Copyright (C) 2006-2010, Brainspark B.V.
+- *
+- *  This file is part of PolarSSL (http://www.polarssl.org)
+- *  Lead Maintainer: Paul Bakker <polarssl_maintainer at polarssl.org>
+- *
+- *  All rights reserved.
+- *
+- *  This program is free software; you can redistribute it and/or modify
+- *  it under the terms of the GNU General Public License as published by
+- *  the Free Software Foundation; either version 2 of the License, or
+- *  (at your option) any later version.
+- *
+- *  This program is distributed in the hope that it will be useful,
+- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- *  GNU General Public License for more details.
+- *
+- *  You should have received a copy of the GNU General Public License along
+- *  with this program; if not, write to the Free Software Foundation, Inc.,
+- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-/*
+- *  The AES block cipher was designed by Vincent Rijmen and Joan Daemen.
+- *
+- *  http://csrc.nist.gov/encryption/aes/rijndael/Rijndael.pdf
+- *  http://csrc.nist.gov/publications/fips/fips197/fips-197.pdf
+- */
+-
+-#include "polarssl/config.h"
+-
+-#if defined(POLARSSL_AES_C)
+-
+-#include "polarssl/aes.h"
+-#if defined(POLARSSL_PADLOCK_C)
+-#include "polarssl/padlock.h"
+-#endif
+-
+-/*
+- * 32-bit integer manipulation macros (little endian)
+- */
+-#ifndef GET_UINT32_LE
+-#define GET_UINT32_LE(n,b,i)                            \
+-{                                                       \
+-    (n) = ( (uint32_t) (b)[(i)    ]       )             \
+-        | ( (uint32_t) (b)[(i) + 1] <<  8 )             \
+-        | ( (uint32_t) (b)[(i) + 2] << 16 )             \
+-        | ( (uint32_t) (b)[(i) + 3] << 24 );            \
+-}
+-#endif
+-
+-#ifndef PUT_UINT32_LE
+-#define PUT_UINT32_LE(n,b,i)                            \
+-{                                                       \
+-    (b)[(i)    ] = (unsigned char) ( (n)       );       \
+-    (b)[(i) + 1] = (unsigned char) ( (n) >>  8 );       \
+-    (b)[(i) + 2] = (unsigned char) ( (n) >> 16 );       \
+-    (b)[(i) + 3] = (unsigned char) ( (n) >> 24 );       \
+-}
+-#endif
+-
+-#if defined(POLARSSL_PADLOCK_C) &&                      \
+-    ( defined(POLARSSL_HAVE_X86) || defined(PADLOCK_ALIGN16) )
+-static int aes_padlock_ace = -1;
+-#endif
+-
+-#if defined(POLARSSL_AES_ROM_TABLES)
+-/*
+- * Forward S-box
+- */
+-static const unsigned char FSb[256] =
+-{
+-    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5,
+-    0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
+-    0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0,
+-    0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
+-    0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F, 0xF7, 0xCC,
+-    0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15,
+-    0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A,
+-    0x07, 0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75,
+-    0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0,
+-    0x52, 0x3B, 0xD6, 0xB3, 0x29, 0xE3, 0x2F, 0x84,
+-    0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B,
+-    0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58, 0xCF,
+-    0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85,
+-    0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8,
+-    0x51, 0xA3, 0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5,
+-    0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2,
+-    0xCD, 0x0C, 0x13, 0xEC, 0x5F, 0x97, 0x44, 0x17,
+-    0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73,
+-    0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88,
+-    0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB,
+-    0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C,
+-    0xC2, 0xD3, 0xAC, 0x62, 0x91, 0x95, 0xE4, 0x79,
+-    0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9,
+-    0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A, 0xAE, 0x08,
+-    0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6,
+-    0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A,
+-    0x70, 0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E,
+-    0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E,
+-    0xE1, 0xF8, 0x98, 0x11, 0x69, 0xD9, 0x8E, 0x94,
+-    0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF,
+-    0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68,
+-    0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16
+-};
+-
+-/*
+- * Forward tables
+- */
+-#define FT \
+-\
+-    V(A5,63,63,C6), V(84,7C,7C,F8), V(99,77,77,EE), V(8D,7B,7B,F6), \
+-    V(0D,F2,F2,FF), V(BD,6B,6B,D6), V(B1,6F,6F,DE), V(54,C5,C5,91), \
+-    V(50,30,30,60), V(03,01,01,02), V(A9,67,67,CE), V(7D,2B,2B,56), \
+-    V(19,FE,FE,E7), V(62,D7,D7,B5), V(E6,AB,AB,4D), V(9A,76,76,EC), \
+-    V(45,CA,CA,8F), V(9D,82,82,1F), V(40,C9,C9,89), V(87,7D,7D,FA), \
+-    V(15,FA,FA,EF), V(EB,59,59,B2), V(C9,47,47,8E), V(0B,F0,F0,FB), \
+-    V(EC,AD,AD,41), V(67,D4,D4,B3), V(FD,A2,A2,5F), V(EA,AF,AF,45), \
+-    V(BF,9C,9C,23), V(F7,A4,A4,53), V(96,72,72,E4), V(5B,C0,C0,9B), \
+-    V(C2,B7,B7,75), V(1C,FD,FD,E1), V(AE,93,93,3D), V(6A,26,26,4C), \
+-    V(5A,36,36,6C), V(41,3F,3F,7E), V(02,F7,F7,F5), V(4F,CC,CC,83), \
+-    V(5C,34,34,68), V(F4,A5,A5,51), V(34,E5,E5,D1), V(08,F1,F1,F9), \
+-    V(93,71,71,E2), V(73,D8,D8,AB), V(53,31,31,62), V(3F,15,15,2A), \
+-    V(0C,04,04,08), V(52,C7,C7,95), V(65,23,23,46), V(5E,C3,C3,9D), \
+-    V(28,18,18,30), V(A1,96,96,37), V(0F,05,05,0A), V(B5,9A,9A,2F), \
+-    V(09,07,07,0E), V(36,12,12,24), V(9B,80,80,1B), V(3D,E2,E2,DF), \
+-    V(26,EB,EB,CD), V(69,27,27,4E), V(CD,B2,B2,7F), V(9F,75,75,EA), \
+-    V(1B,09,09,12), V(9E,83,83,1D), V(74,2C,2C,58), V(2E,1A,1A,34), \
+-    V(2D,1B,1B,36), V(B2,6E,6E,DC), V(EE,5A,5A,B4), V(FB,A0,A0,5B), \
+-    V(F6,52,52,A4), V(4D,3B,3B,76), V(61,D6,D6,B7), V(CE,B3,B3,7D), \
+-    V(7B,29,29,52), V(3E,E3,E3,DD), V(71,2F,2F,5E), V(97,84,84,13), \
+-    V(F5,53,53,A6), V(68,D1,D1,B9), V(00,00,00,00), V(2C,ED,ED,C1), \
+-    V(60,20,20,40), V(1F,FC,FC,E3), V(C8,B1,B1,79), V(ED,5B,5B,B6), \
+-    V(BE,6A,6A,D4), V(46,CB,CB,8D), V(D9,BE,BE,67), V(4B,39,39,72), \
+-    V(DE,4A,4A,94), V(D4,4C,4C,98), V(E8,58,58,B0), V(4A,CF,CF,85), \
+-    V(6B,D0,D0,BB), V(2A,EF,EF,C5), V(E5,AA,AA,4F), V(16,FB,FB,ED), \
+-    V(C5,43,43,86), V(D7,4D,4D,9A), V(55,33,33,66), V(94,85,85,11), \
+-    V(CF,45,45,8A), V(10,F9,F9,E9), V(06,02,02,04), V(81,7F,7F,FE), \
+-    V(F0,50,50,A0), V(44,3C,3C,78), V(BA,9F,9F,25), V(E3,A8,A8,4B), \
+-    V(F3,51,51,A2), V(FE,A3,A3,5D), V(C0,40,40,80), V(8A,8F,8F,05), \
+-    V(AD,92,92,3F), V(BC,9D,9D,21), V(48,38,38,70), V(04,F5,F5,F1), \
+-    V(DF,BC,BC,63), V(C1,B6,B6,77), V(75,DA,DA,AF), V(63,21,21,42), \
+-    V(30,10,10,20), V(1A,FF,FF,E5), V(0E,F3,F3,FD), V(6D,D2,D2,BF), \
+-    V(4C,CD,CD,81), V(14,0C,0C,18), V(35,13,13,26), V(2F,EC,EC,C3), \
+-    V(E1,5F,5F,BE), V(A2,97,97,35), V(CC,44,44,88), V(39,17,17,2E), \
+-    V(57,C4,C4,93), V(F2,A7,A7,55), V(82,7E,7E,FC), V(47,3D,3D,7A), \
+-    V(AC,64,64,C8), V(E7,5D,5D,BA), V(2B,19,19,32), V(95,73,73,E6), \
+-    V(A0,60,60,C0), V(98,81,81,19), V(D1,4F,4F,9E), V(7F,DC,DC,A3), \
+-    V(66,22,22,44), V(7E,2A,2A,54), V(AB,90,90,3B), V(83,88,88,0B), \
+-    V(CA,46,46,8C), V(29,EE,EE,C7), V(D3,B8,B8,6B), V(3C,14,14,28), \
+-    V(79,DE,DE,A7), V(E2,5E,5E,BC), V(1D,0B,0B,16), V(76,DB,DB,AD), \
+-    V(3B,E0,E0,DB), V(56,32,32,64), V(4E,3A,3A,74), V(1E,0A,0A,14), \
+-    V(DB,49,49,92), V(0A,06,06,0C), V(6C,24,24,48), V(E4,5C,5C,B8), \
+-    V(5D,C2,C2,9F), V(6E,D3,D3,BD), V(EF,AC,AC,43), V(A6,62,62,C4), \
+-    V(A8,91,91,39), V(A4,95,95,31), V(37,E4,E4,D3), V(8B,79,79,F2), \
+-    V(32,E7,E7,D5), V(43,C8,C8,8B), V(59,37,37,6E), V(B7,6D,6D,DA), \
+-    V(8C,8D,8D,01), V(64,D5,D5,B1), V(D2,4E,4E,9C), V(E0,A9,A9,49), \
+-    V(B4,6C,6C,D8), V(FA,56,56,AC), V(07,F4,F4,F3), V(25,EA,EA,CF), \
+-    V(AF,65,65,CA), V(8E,7A,7A,F4), V(E9,AE,AE,47), V(18,08,08,10), \
+-    V(D5,BA,BA,6F), V(88,78,78,F0), V(6F,25,25,4A), V(72,2E,2E,5C), \
+-    V(24,1C,1C,38), V(F1,A6,A6,57), V(C7,B4,B4,73), V(51,C6,C6,97), \
+-    V(23,E8,E8,CB), V(7C,DD,DD,A1), V(9C,74,74,E8), V(21,1F,1F,3E), \
+-    V(DD,4B,4B,96), V(DC,BD,BD,61), V(86,8B,8B,0D), V(85,8A,8A,0F), \
+-    V(90,70,70,E0), V(42,3E,3E,7C), V(C4,B5,B5,71), V(AA,66,66,CC), \
+-    V(D8,48,48,90), V(05,03,03,06), V(01,F6,F6,F7), V(12,0E,0E,1C), \
+-    V(A3,61,61,C2), V(5F,35,35,6A), V(F9,57,57,AE), V(D0,B9,B9,69), \
+-    V(91,86,86,17), V(58,C1,C1,99), V(27,1D,1D,3A), V(B9,9E,9E,27), \
+-    V(38,E1,E1,D9), V(13,F8,F8,EB), V(B3,98,98,2B), V(33,11,11,22), \
+-    V(BB,69,69,D2), V(70,D9,D9,A9), V(89,8E,8E,07), V(A7,94,94,33), \
+-    V(B6,9B,9B,2D), V(22,1E,1E,3C), V(92,87,87,15), V(20,E9,E9,C9), \
+-    V(49,CE,CE,87), V(FF,55,55,AA), V(78,28,28,50), V(7A,DF,DF,A5), \
+-    V(8F,8C,8C,03), V(F8,A1,A1,59), V(80,89,89,09), V(17,0D,0D,1A), \
+-    V(DA,BF,BF,65), V(31,E6,E6,D7), V(C6,42,42,84), V(B8,68,68,D0), \
+-    V(C3,41,41,82), V(B0,99,99,29), V(77,2D,2D,5A), V(11,0F,0F,1E), \
+-    V(CB,B0,B0,7B), V(FC,54,54,A8), V(D6,BB,BB,6D), V(3A,16,16,2C)
+-
+-#define V(a,b,c,d) 0x##a##b##c##d
+-static const uint32_t FT0[256] = { FT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##b##c##d##a
+-static const uint32_t FT1[256] = { FT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##c##d##a##b
+-static const uint32_t FT2[256] = { FT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##d##a##b##c
+-static const uint32_t FT3[256] = { FT };
+-#undef V
+-
+-#undef FT
+-
+-/*
+- * Reverse S-box
+- */
+-static const unsigned char RSb[256] =
+-{
+-    0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38,
+-    0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB,
+-    0x7C, 0xE3, 0x39, 0x82, 0x9B, 0x2F, 0xFF, 0x87,
+-    0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB,
+-    0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2, 0x23, 0x3D,
+-    0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E,
+-    0x08, 0x2E, 0xA1, 0x66, 0x28, 0xD9, 0x24, 0xB2,
+-    0x76, 0x5B, 0xA2, 0x49, 0x6D, 0x8B, 0xD1, 0x25,
+-    0x72, 0xF8, 0xF6, 0x64, 0x86, 0x68, 0x98, 0x16,
+-    0xD4, 0xA4, 0x5C, 0xCC, 0x5D, 0x65, 0xB6, 0x92,
+-    0x6C, 0x70, 0x48, 0x50, 0xFD, 0xED, 0xB9, 0xDA,
+-    0x5E, 0x15, 0x46, 0x57, 0xA7, 0x8D, 0x9D, 0x84,
+-    0x90, 0xD8, 0xAB, 0x00, 0x8C, 0xBC, 0xD3, 0x0A,
+-    0xF7, 0xE4, 0x58, 0x05, 0xB8, 0xB3, 0x45, 0x06,
+-    0xD0, 0x2C, 0x1E, 0x8F, 0xCA, 0x3F, 0x0F, 0x02,
+-    0xC1, 0xAF, 0xBD, 0x03, 0x01, 0x13, 0x8A, 0x6B,
+-    0x3A, 0x91, 0x11, 0x41, 0x4F, 0x67, 0xDC, 0xEA,
+-    0x97, 0xF2, 0xCF, 0xCE, 0xF0, 0xB4, 0xE6, 0x73,
+-    0x96, 0xAC, 0x74, 0x22, 0xE7, 0xAD, 0x35, 0x85,
+-    0xE2, 0xF9, 0x37, 0xE8, 0x1C, 0x75, 0xDF, 0x6E,
+-    0x47, 0xF1, 0x1A, 0x71, 0x1D, 0x29, 0xC5, 0x89,
+-    0x6F, 0xB7, 0x62, 0x0E, 0xAA, 0x18, 0xBE, 0x1B,
+-    0xFC, 0x56, 0x3E, 0x4B, 0xC6, 0xD2, 0x79, 0x20,
+-    0x9A, 0xDB, 0xC0, 0xFE, 0x78, 0xCD, 0x5A, 0xF4,
+-    0x1F, 0xDD, 0xA8, 0x33, 0x88, 0x07, 0xC7, 0x31,
+-    0xB1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xEC, 0x5F,
+-    0x60, 0x51, 0x7F, 0xA9, 0x19, 0xB5, 0x4A, 0x0D,
+-    0x2D, 0xE5, 0x7A, 0x9F, 0x93, 0xC9, 0x9C, 0xEF,
+-    0xA0, 0xE0, 0x3B, 0x4D, 0xAE, 0x2A, 0xF5, 0xB0,
+-    0xC8, 0xEB, 0xBB, 0x3C, 0x83, 0x53, 0x99, 0x61,
+-    0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6, 0x26,
+-    0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D
+-};
+-
+-/*
+- * Reverse tables
+- */
+-#define RT \
+-\
+-    V(50,A7,F4,51), V(53,65,41,7E), V(C3,A4,17,1A), V(96,5E,27,3A), \
+-    V(CB,6B,AB,3B), V(F1,45,9D,1F), V(AB,58,FA,AC), V(93,03,E3,4B), \
+-    V(55,FA,30,20), V(F6,6D,76,AD), V(91,76,CC,88), V(25,4C,02,F5), \
+-    V(FC,D7,E5,4F), V(D7,CB,2A,C5), V(80,44,35,26), V(8F,A3,62,B5), \
+-    V(49,5A,B1,DE), V(67,1B,BA,25), V(98,0E,EA,45), V(E1,C0,FE,5D), \
+-    V(02,75,2F,C3), V(12,F0,4C,81), V(A3,97,46,8D), V(C6,F9,D3,6B), \
+-    V(E7,5F,8F,03), V(95,9C,92,15), V(EB,7A,6D,BF), V(DA,59,52,95), \
+-    V(2D,83,BE,D4), V(D3,21,74,58), V(29,69,E0,49), V(44,C8,C9,8E), \
+-    V(6A,89,C2,75), V(78,79,8E,F4), V(6B,3E,58,99), V(DD,71,B9,27), \
+-    V(B6,4F,E1,BE), V(17,AD,88,F0), V(66,AC,20,C9), V(B4,3A,CE,7D), \
+-    V(18,4A,DF,63), V(82,31,1A,E5), V(60,33,51,97), V(45,7F,53,62), \
+-    V(E0,77,64,B1), V(84,AE,6B,BB), V(1C,A0,81,FE), V(94,2B,08,F9), \
+-    V(58,68,48,70), V(19,FD,45,8F), V(87,6C,DE,94), V(B7,F8,7B,52), \
+-    V(23,D3,73,AB), V(E2,02,4B,72), V(57,8F,1F,E3), V(2A,AB,55,66), \
+-    V(07,28,EB,B2), V(03,C2,B5,2F), V(9A,7B,C5,86), V(A5,08,37,D3), \
+-    V(F2,87,28,30), V(B2,A5,BF,23), V(BA,6A,03,02), V(5C,82,16,ED), \
+-    V(2B,1C,CF,8A), V(92,B4,79,A7), V(F0,F2,07,F3), V(A1,E2,69,4E), \
+-    V(CD,F4,DA,65), V(D5,BE,05,06), V(1F,62,34,D1), V(8A,FE,A6,C4), \
+-    V(9D,53,2E,34), V(A0,55,F3,A2), V(32,E1,8A,05), V(75,EB,F6,A4), \
+-    V(39,EC,83,0B), V(AA,EF,60,40), V(06,9F,71,5E), V(51,10,6E,BD), \
+-    V(F9,8A,21,3E), V(3D,06,DD,96), V(AE,05,3E,DD), V(46,BD,E6,4D), \
+-    V(B5,8D,54,91), V(05,5D,C4,71), V(6F,D4,06,04), V(FF,15,50,60), \
+-    V(24,FB,98,19), V(97,E9,BD,D6), V(CC,43,40,89), V(77,9E,D9,67), \
+-    V(BD,42,E8,B0), V(88,8B,89,07), V(38,5B,19,E7), V(DB,EE,C8,79), \
+-    V(47,0A,7C,A1), V(E9,0F,42,7C), V(C9,1E,84,F8), V(00,00,00,00), \
+-    V(83,86,80,09), V(48,ED,2B,32), V(AC,70,11,1E), V(4E,72,5A,6C), \
+-    V(FB,FF,0E,FD), V(56,38,85,0F), V(1E,D5,AE,3D), V(27,39,2D,36), \
+-    V(64,D9,0F,0A), V(21,A6,5C,68), V(D1,54,5B,9B), V(3A,2E,36,24), \
+-    V(B1,67,0A,0C), V(0F,E7,57,93), V(D2,96,EE,B4), V(9E,91,9B,1B), \
+-    V(4F,C5,C0,80), V(A2,20,DC,61), V(69,4B,77,5A), V(16,1A,12,1C), \
+-    V(0A,BA,93,E2), V(E5,2A,A0,C0), V(43,E0,22,3C), V(1D,17,1B,12), \
+-    V(0B,0D,09,0E), V(AD,C7,8B,F2), V(B9,A8,B6,2D), V(C8,A9,1E,14), \
+-    V(85,19,F1,57), V(4C,07,75,AF), V(BB,DD,99,EE), V(FD,60,7F,A3), \
+-    V(9F,26,01,F7), V(BC,F5,72,5C), V(C5,3B,66,44), V(34,7E,FB,5B), \
+-    V(76,29,43,8B), V(DC,C6,23,CB), V(68,FC,ED,B6), V(63,F1,E4,B8), \
+-    V(CA,DC,31,D7), V(10,85,63,42), V(40,22,97,13), V(20,11,C6,84), \
+-    V(7D,24,4A,85), V(F8,3D,BB,D2), V(11,32,F9,AE), V(6D,A1,29,C7), \
+-    V(4B,2F,9E,1D), V(F3,30,B2,DC), V(EC,52,86,0D), V(D0,E3,C1,77), \
+-    V(6C,16,B3,2B), V(99,B9,70,A9), V(FA,48,94,11), V(22,64,E9,47), \
+-    V(C4,8C,FC,A8), V(1A,3F,F0,A0), V(D8,2C,7D,56), V(EF,90,33,22), \
+-    V(C7,4E,49,87), V(C1,D1,38,D9), V(FE,A2,CA,8C), V(36,0B,D4,98), \
+-    V(CF,81,F5,A6), V(28,DE,7A,A5), V(26,8E,B7,DA), V(A4,BF,AD,3F), \
+-    V(E4,9D,3A,2C), V(0D,92,78,50), V(9B,CC,5F,6A), V(62,46,7E,54), \
+-    V(C2,13,8D,F6), V(E8,B8,D8,90), V(5E,F7,39,2E), V(F5,AF,C3,82), \
+-    V(BE,80,5D,9F), V(7C,93,D0,69), V(A9,2D,D5,6F), V(B3,12,25,CF), \
+-    V(3B,99,AC,C8), V(A7,7D,18,10), V(6E,63,9C,E8), V(7B,BB,3B,DB), \
+-    V(09,78,26,CD), V(F4,18,59,6E), V(01,B7,9A,EC), V(A8,9A,4F,83), \
+-    V(65,6E,95,E6), V(7E,E6,FF,AA), V(08,CF,BC,21), V(E6,E8,15,EF), \
+-    V(D9,9B,E7,BA), V(CE,36,6F,4A), V(D4,09,9F,EA), V(D6,7C,B0,29), \
+-    V(AF,B2,A4,31), V(31,23,3F,2A), V(30,94,A5,C6), V(C0,66,A2,35), \
+-    V(37,BC,4E,74), V(A6,CA,82,FC), V(B0,D0,90,E0), V(15,D8,A7,33), \
+-    V(4A,98,04,F1), V(F7,DA,EC,41), V(0E,50,CD,7F), V(2F,F6,91,17), \
+-    V(8D,D6,4D,76), V(4D,B0,EF,43), V(54,4D,AA,CC), V(DF,04,96,E4), \
+-    V(E3,B5,D1,9E), V(1B,88,6A,4C), V(B8,1F,2C,C1), V(7F,51,65,46), \
+-    V(04,EA,5E,9D), V(5D,35,8C,01), V(73,74,87,FA), V(2E,41,0B,FB), \
+-    V(5A,1D,67,B3), V(52,D2,DB,92), V(33,56,10,E9), V(13,47,D6,6D), \
+-    V(8C,61,D7,9A), V(7A,0C,A1,37), V(8E,14,F8,59), V(89,3C,13,EB), \
+-    V(EE,27,A9,CE), V(35,C9,61,B7), V(ED,E5,1C,E1), V(3C,B1,47,7A), \
+-    V(59,DF,D2,9C), V(3F,73,F2,55), V(79,CE,14,18), V(BF,37,C7,73), \
+-    V(EA,CD,F7,53), V(5B,AA,FD,5F), V(14,6F,3D,DF), V(86,DB,44,78), \
+-    V(81,F3,AF,CA), V(3E,C4,68,B9), V(2C,34,24,38), V(5F,40,A3,C2), \
+-    V(72,C3,1D,16), V(0C,25,E2,BC), V(8B,49,3C,28), V(41,95,0D,FF), \
+-    V(71,01,A8,39), V(DE,B3,0C,08), V(9C,E4,B4,D8), V(90,C1,56,64), \
+-    V(61,84,CB,7B), V(70,B6,32,D5), V(74,5C,6C,48), V(42,57,B8,D0)
+-
+-#define V(a,b,c,d) 0x##a##b##c##d
+-static const uint32_t RT0[256] = { RT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##b##c##d##a
+-static const uint32_t RT1[256] = { RT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##c##d##a##b
+-static const uint32_t RT2[256] = { RT };
+-#undef V
+-
+-#define V(a,b,c,d) 0x##d##a##b##c
+-static const uint32_t RT3[256] = { RT };
+-#undef V
+-
+-#undef RT
+-
+-/*
+- * Round constants
+- */
+-static const uint32_t RCON[10] =
+-{
+-    0x00000001, 0x00000002, 0x00000004, 0x00000008,
+-    0x00000010, 0x00000020, 0x00000040, 0x00000080,
+-    0x0000001B, 0x00000036
+-};
+-
+-#else
+-
+-/*
+- * Forward S-box & tables
+- */
+-static unsigned char FSb[256];
+-static uint32_t FT0[256]; 
+-static uint32_t FT1[256]; 
+-static uint32_t FT2[256]; 
+-static uint32_t FT3[256]; 
+-
+-/*
+- * Reverse S-box & tables
+- */
+-static unsigned char RSb[256];
+-static uint32_t RT0[256];
+-static uint32_t RT1[256];
+-static uint32_t RT2[256];
+-static uint32_t RT3[256];
+-
+-/*
+- * Round constants
+- */
+-static uint32_t RCON[10];
+-
+-/*
+- * Tables generation code
+- */
+-#define ROTL8(x) ( ( x << 8 ) & 0xFFFFFFFF ) | ( x >> 24 )
+-#define XTIME(x) ( ( x << 1 ) ^ ( ( x & 0x80 ) ? 0x1B : 0x00 ) )
+-#define MUL(x,y) ( ( x && y ) ? pow[(log[x]+log[y]) % 255] : 0 )
+-
+-static int aes_init_done = 0;
+-
+-static void aes_gen_tables( void )
+-{
+-    int i, x, y, z;
+-    static int pow[256];
+-    static int log[256];
+-
+-    /*
+-     * compute pow and log tables over GF(2^8)
+-     */
+-    for( i = 0, x = 1; i < 256; i++ )
+-    {
+-        pow[i] = x;
+-        log[x] = i;
+-        x = ( x ^ XTIME( x ) ) & 0xFF;
+-    }
+-
+-    /*
+-     * calculate the round constants
+-     */
+-    for( i = 0, x = 1; i < 10; i++ )
+-    {
+-        RCON[i] = (uint32_t) x;
+-        x = XTIME( x ) & 0xFF;
+-    }
+-
+-    /*
+-     * generate the forward and reverse S-boxes
+-     */
+-    FSb[0x00] = 0x63;
+-    RSb[0x63] = 0x00;
+-
+-    for( i = 1; i < 256; i++ )
+-    {
+-        x = pow[255 - log[i]];
+-
+-        y  = x; y = ( (y << 1) | (y >> 7) ) & 0xFF;
+-        x ^= y; y = ( (y << 1) | (y >> 7) ) & 0xFF;
+-        x ^= y; y = ( (y << 1) | (y >> 7) ) & 0xFF;
+-        x ^= y; y = ( (y << 1) | (y >> 7) ) & 0xFF;
+-        x ^= y ^ 0x63;
+-
+-        FSb[i] = (unsigned char) x;
+-        RSb[x] = (unsigned char) i;
+-    }
+-
+-    /*
+-     * generate the forward and reverse tables
+-     */
+-    for( i = 0; i < 256; i++ )
+-    {
+-        x = FSb[i];
+-        y = XTIME( x ) & 0xFF;
+-        z =  ( y ^ x ) & 0xFF;
+-
+-        FT0[i] = ( (uint32_t) y       ) ^
+-                 ( (uint32_t) x <<  8 ) ^
+-                 ( (uint32_t) x << 16 ) ^
+-                 ( (uint32_t) z << 24 );
+-
+-        FT1[i] = ROTL8( FT0[i] );
+-        FT2[i] = ROTL8( FT1[i] );
+-        FT3[i] = ROTL8( FT2[i] );
+-
+-        x = RSb[i];
+-
+-        RT0[i] = ( (uint32_t) MUL( 0x0E, x )       ) ^
+-                 ( (uint32_t) MUL( 0x09, x ) <<  8 ) ^
+-                 ( (uint32_t) MUL( 0x0D, x ) << 16 ) ^
+-                 ( (uint32_t) MUL( 0x0B, x ) << 24 );
+-
+-        RT1[i] = ROTL8( RT0[i] );
+-        RT2[i] = ROTL8( RT1[i] );
+-        RT3[i] = ROTL8( RT2[i] );
+-    }
+-}
+-
+-#endif
+-
+-/*
+- * AES key schedule (encryption)
+- */
+-int aes_setkey_enc( aes_context *ctx, const unsigned char *key, unsigned int keysize )
+-{
+-    unsigned int i;
+-    uint32_t *RK;
+-
+-#if !defined(POLARSSL_AES_ROM_TABLES)
+-    if( aes_init_done == 0 )
+-    {
+-        aes_gen_tables();
+-        aes_init_done = 1;
+-
+-    }
+-#endif
+-
+-    switch( keysize )
+-    {
+-        case 128: ctx->nr = 10; break;
+-        case 192: ctx->nr = 12; break;
+-        case 256: ctx->nr = 14; break;
+-        default : return( POLARSSL_ERR_AES_INVALID_KEY_LENGTH );
+-    }
+-
+-#if defined(POLARSSL_PADLOCK_C) && defined(PADLOCK_ALIGN16)
+-    if( aes_padlock_ace == -1 )
+-        aes_padlock_ace = padlock_supports( PADLOCK_ACE );
+-
+-    if( aes_padlock_ace )
+-        ctx->rk = RK = PADLOCK_ALIGN16( ctx->buf );
+-    else
+-#endif
+-    ctx->rk = RK = ctx->buf;
+-
+-    for( i = 0; i < (keysize >> 5); i++ )
+-    {
+-        GET_UINT32_LE( RK[i], key, i << 2 );
+-    }
+-
+-    switch( ctx->nr )
+-    {
+-        case 10:
+-
+-            for( i = 0; i < 10; i++, RK += 4 )
+-            {
+-                RK[4]  = RK[0] ^ RCON[i] ^
+-                ( (uint32_t) FSb[ ( RK[3] >>  8 ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( RK[3] >> 16 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( RK[3] >> 24 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( RK[3]       ) & 0xFF ] << 24 );
+-
+-                RK[5]  = RK[1] ^ RK[4];
+-                RK[6]  = RK[2] ^ RK[5];
+-                RK[7]  = RK[3] ^ RK[6];
+-            }
+-            break;
+-
+-        case 12:
+-
+-            for( i = 0; i < 8; i++, RK += 6 )
+-            {
+-                RK[6]  = RK[0] ^ RCON[i] ^
+-                ( (uint32_t) FSb[ ( RK[5] >>  8 ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( RK[5] >> 16 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( RK[5] >> 24 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( RK[5]       ) & 0xFF ] << 24 );
+-
+-                RK[7]  = RK[1] ^ RK[6];
+-                RK[8]  = RK[2] ^ RK[7];
+-                RK[9]  = RK[3] ^ RK[8];
+-                RK[10] = RK[4] ^ RK[9];
+-                RK[11] = RK[5] ^ RK[10];
+-            }
+-            break;
+-
+-        case 14:
+-
+-            for( i = 0; i < 7; i++, RK += 8 )
+-            {
+-                RK[8]  = RK[0] ^ RCON[i] ^
+-                ( (uint32_t) FSb[ ( RK[7] >>  8 ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( RK[7] >> 16 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( RK[7] >> 24 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( RK[7]       ) & 0xFF ] << 24 );
+-
+-                RK[9]  = RK[1] ^ RK[8];
+-                RK[10] = RK[2] ^ RK[9];
+-                RK[11] = RK[3] ^ RK[10];
+-
+-                RK[12] = RK[4] ^
+-                ( (uint32_t) FSb[ ( RK[11]       ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( RK[11] >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( RK[11] >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( RK[11] >> 24 ) & 0xFF ] << 24 );
+-
+-                RK[13] = RK[5] ^ RK[12];
+-                RK[14] = RK[6] ^ RK[13];
+-                RK[15] = RK[7] ^ RK[14];
+-            }
+-            break;
+-
+-        default:
+-
+-            break;
+-    }
+-
+-    return( 0 );
+-}
+-
+-/*
+- * AES key schedule (decryption)
+- */
+-int aes_setkey_dec( aes_context *ctx, const unsigned char *key, unsigned int keysize )
+-{
+-    int i, j;
+-    aes_context cty;
+-    uint32_t *RK;
+-    uint32_t *SK;
+-    int ret;
+-
+-    switch( keysize )
+-    {
+-        case 128: ctx->nr = 10; break;
+-        case 192: ctx->nr = 12; break;
+-        case 256: ctx->nr = 14; break;
+-        default : return( POLARSSL_ERR_AES_INVALID_KEY_LENGTH );
+-    }
+-
+-#if defined(POLARSSL_PADLOCK_C) && defined(PADLOCK_ALIGN16)
+-    if( aes_padlock_ace == -1 )
+-        aes_padlock_ace = padlock_supports( PADLOCK_ACE );
+-
+-    if( aes_padlock_ace )
+-        ctx->rk = RK = PADLOCK_ALIGN16( ctx->buf );
+-    else
+-#endif
+-    ctx->rk = RK = ctx->buf;
+-
+-    ret = aes_setkey_enc( &cty, key, keysize );
+-    if( ret != 0 )
+-        return( ret );
+-
+-    SK = cty.rk + cty.nr * 4;
+-
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-
+-    for( i = ctx->nr - 1, SK -= 8; i > 0; i--, SK -= 8 )
+-    {
+-        for( j = 0; j < 4; j++, SK++ )
+-        {
+-            *RK++ = RT0[ FSb[ ( *SK       ) & 0xFF ] ] ^
+-                    RT1[ FSb[ ( *SK >>  8 ) & 0xFF ] ] ^
+-                    RT2[ FSb[ ( *SK >> 16 ) & 0xFF ] ] ^
+-                    RT3[ FSb[ ( *SK >> 24 ) & 0xFF ] ];
+-        }
+-    }
+-
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-    *RK++ = *SK++;
+-
+-    memset( &cty, 0, sizeof( aes_context ) );
+-
+-    return( 0 );
+-}
+-
+-#define AES_FROUND(X0,X1,X2,X3,Y0,Y1,Y2,Y3)     \
+-{                                               \
+-    X0 = *RK++ ^ FT0[ ( Y0       ) & 0xFF ] ^   \
+-                 FT1[ ( Y1 >>  8 ) & 0xFF ] ^   \
+-                 FT2[ ( Y2 >> 16 ) & 0xFF ] ^   \
+-                 FT3[ ( Y3 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X1 = *RK++ ^ FT0[ ( Y1       ) & 0xFF ] ^   \
+-                 FT1[ ( Y2 >>  8 ) & 0xFF ] ^   \
+-                 FT2[ ( Y3 >> 16 ) & 0xFF ] ^   \
+-                 FT3[ ( Y0 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X2 = *RK++ ^ FT0[ ( Y2       ) & 0xFF ] ^   \
+-                 FT1[ ( Y3 >>  8 ) & 0xFF ] ^   \
+-                 FT2[ ( Y0 >> 16 ) & 0xFF ] ^   \
+-                 FT3[ ( Y1 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X3 = *RK++ ^ FT0[ ( Y3       ) & 0xFF ] ^   \
+-                 FT1[ ( Y0 >>  8 ) & 0xFF ] ^   \
+-                 FT2[ ( Y1 >> 16 ) & 0xFF ] ^   \
+-                 FT3[ ( Y2 >> 24 ) & 0xFF ];    \
+-}
+-
+-#define AES_RROUND(X0,X1,X2,X3,Y0,Y1,Y2,Y3)     \
+-{                                               \
+-    X0 = *RK++ ^ RT0[ ( Y0       ) & 0xFF ] ^   \
+-                 RT1[ ( Y3 >>  8 ) & 0xFF ] ^   \
+-                 RT2[ ( Y2 >> 16 ) & 0xFF ] ^   \
+-                 RT3[ ( Y1 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X1 = *RK++ ^ RT0[ ( Y1       ) & 0xFF ] ^   \
+-                 RT1[ ( Y0 >>  8 ) & 0xFF ] ^   \
+-                 RT2[ ( Y3 >> 16 ) & 0xFF ] ^   \
+-                 RT3[ ( Y2 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X2 = *RK++ ^ RT0[ ( Y2       ) & 0xFF ] ^   \
+-                 RT1[ ( Y1 >>  8 ) & 0xFF ] ^   \
+-                 RT2[ ( Y0 >> 16 ) & 0xFF ] ^   \
+-                 RT3[ ( Y3 >> 24 ) & 0xFF ];    \
+-                                                \
+-    X3 = *RK++ ^ RT0[ ( Y3       ) & 0xFF ] ^   \
+-                 RT1[ ( Y2 >>  8 ) & 0xFF ] ^   \
+-                 RT2[ ( Y1 >> 16 ) & 0xFF ] ^   \
+-                 RT3[ ( Y0 >> 24 ) & 0xFF ];    \
+-}
+-
+-/*
+- * AES-ECB block encryption/decryption
+- */
+-int aes_crypt_ecb( aes_context *ctx,
+-                    int mode,
+-                    const unsigned char input[16],
+-                    unsigned char output[16] )
+-{
+-    int i;
+-    uint32_t *RK, X0, X1, X2, X3, Y0, Y1, Y2, Y3;
+-
+-#if defined(POLARSSL_PADLOCK_C) && defined(POLARSSL_HAVE_X86)
+-    if( aes_padlock_ace )
+-    {
+-        if( padlock_xcryptecb( ctx, mode, input, output ) == 0 )
+-            return( 0 );
+-
+-        // If padlock data misaligned, we just fall back to
+-        // unaccelerated mode
+-        //
+-    }
+-#endif
+-
+-    RK = ctx->rk;
+-
+-    GET_UINT32_LE( X0, input,  0 ); X0 ^= *RK++;
+-    GET_UINT32_LE( X1, input,  4 ); X1 ^= *RK++;
+-    GET_UINT32_LE( X2, input,  8 ); X2 ^= *RK++;
+-    GET_UINT32_LE( X3, input, 12 ); X3 ^= *RK++;
+-
+-    if( mode == AES_DECRYPT )
+-    {
+-        for( i = (ctx->nr >> 1) - 1; i > 0; i-- )
+-        {
+-            AES_RROUND( Y0, Y1, Y2, Y3, X0, X1, X2, X3 );
+-            AES_RROUND( X0, X1, X2, X3, Y0, Y1, Y2, Y3 );
+-        }
+-
+-        AES_RROUND( Y0, Y1, Y2, Y3, X0, X1, X2, X3 );
+-
+-        X0 = *RK++ ^ \
+-                ( (uint32_t) RSb[ ( Y0       ) & 0xFF ]       ) ^
+-                ( (uint32_t) RSb[ ( Y3 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) RSb[ ( Y2 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) RSb[ ( Y1 >> 24 ) & 0xFF ] << 24 );
+-
+-        X1 = *RK++ ^ \
+-                ( (uint32_t) RSb[ ( Y1       ) & 0xFF ]       ) ^
+-                ( (uint32_t) RSb[ ( Y0 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) RSb[ ( Y3 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) RSb[ ( Y2 >> 24 ) & 0xFF ] << 24 );
+-
+-        X2 = *RK++ ^ \
+-                ( (uint32_t) RSb[ ( Y2       ) & 0xFF ]       ) ^
+-                ( (uint32_t) RSb[ ( Y1 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) RSb[ ( Y0 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) RSb[ ( Y3 >> 24 ) & 0xFF ] << 24 );
+-
+-        X3 = *RK++ ^ \
+-                ( (uint32_t) RSb[ ( Y3       ) & 0xFF ]       ) ^
+-                ( (uint32_t) RSb[ ( Y2 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) RSb[ ( Y1 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) RSb[ ( Y0 >> 24 ) & 0xFF ] << 24 );
+-    }
+-    else /* AES_ENCRYPT */
+-    {
+-        for( i = (ctx->nr >> 1) - 1; i > 0; i-- )
+-        {
+-            AES_FROUND( Y0, Y1, Y2, Y3, X0, X1, X2, X3 );
+-            AES_FROUND( X0, X1, X2, X3, Y0, Y1, Y2, Y3 );
+-        }
+-
+-        AES_FROUND( Y0, Y1, Y2, Y3, X0, X1, X2, X3 );
+-
+-        X0 = *RK++ ^ \
+-                ( (uint32_t) FSb[ ( Y0       ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( Y1 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( Y2 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( Y3 >> 24 ) & 0xFF ] << 24 );
+-
+-        X1 = *RK++ ^ \
+-                ( (uint32_t) FSb[ ( Y1       ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( Y2 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( Y3 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( Y0 >> 24 ) & 0xFF ] << 24 );
+-
+-        X2 = *RK++ ^ \
+-                ( (uint32_t) FSb[ ( Y2       ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( Y3 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( Y0 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( Y1 >> 24 ) & 0xFF ] << 24 );
+-
+-        X3 = *RK++ ^ \
+-                ( (uint32_t) FSb[ ( Y3       ) & 0xFF ]       ) ^
+-                ( (uint32_t) FSb[ ( Y0 >>  8 ) & 0xFF ] <<  8 ) ^
+-                ( (uint32_t) FSb[ ( Y1 >> 16 ) & 0xFF ] << 16 ) ^
+-                ( (uint32_t) FSb[ ( Y2 >> 24 ) & 0xFF ] << 24 );
+-    }
+-
+-    PUT_UINT32_LE( X0, output,  0 );
+-    PUT_UINT32_LE( X1, output,  4 );
+-    PUT_UINT32_LE( X2, output,  8 );
+-    PUT_UINT32_LE( X3, output, 12 );
+-
+-    return( 0 );
+-}
+-
+-/*
+- * AES-CBC buffer encryption/decryption
+- */
+-int aes_crypt_cbc( aes_context *ctx,
+-                    int mode,
+-                    size_t length,
+-                    unsigned char iv[16],
+-                    const unsigned char *input,
+-                    unsigned char *output )
+-{
+-    int i;
+-    unsigned char temp[16];
+-
+-    if( length % 16 )
+-        return( POLARSSL_ERR_AES_INVALID_INPUT_LENGTH );
+-
+-#if defined(POLARSSL_PADLOCK_C) && defined(POLARSSL_HAVE_X86)
+-    if( aes_padlock_ace )
+-    {
+-        if( padlock_xcryptcbc( ctx, mode, length, iv, input, output ) == 0 )
+-            return( 0 );
+-        
+-        // If padlock data misaligned, we just fall back to
+-        // unaccelerated mode
+-        //
+-    }
+-#endif
+-
+-    if( mode == AES_DECRYPT )
+-    {
+-        while( length > 0 )
+-        {
+-            memcpy( temp, input, 16 );
+-            aes_crypt_ecb( ctx, mode, input, output );
+-
+-            for( i = 0; i < 16; i++ )
+-                output[i] = (unsigned char)( output[i] ^ iv[i] );
+-
+-            memcpy( iv, temp, 16 );
+-
+-            input  += 16;
+-            output += 16;
+-            length -= 16;
+-        }
+-    }
+-    else
+-    {
+-        while( length > 0 )
+-        {
+-            for( i = 0; i < 16; i++ )
+-                output[i] = (unsigned char)( input[i] ^ iv[i] );
+-
+-            aes_crypt_ecb( ctx, mode, output, output );
+-            memcpy( iv, output, 16 );
+-
+-            input  += 16;
+-            output += 16;
+-            length -= 16;
+-        }
+-    }
+-
+-    return( 0 );
+-}
+-
+-#if defined(POLARSSL_CIPHER_MODE_CFB)
+-/*
+- * AES-CFB128 buffer encryption/decryption
+- */
+-int aes_crypt_cfb128( aes_context *ctx,
+-                       int mode,
+-                       size_t length,
+-                       size_t *iv_off,
+-                       unsigned char iv[16],
+-                       const unsigned char *input,
+-                       unsigned char *output )
+-{
+-    int c;
+-    size_t n = *iv_off;
+-
+-    if( mode == AES_DECRYPT )
+-    {
+-        while( length-- )
+-        {
+-            if( n == 0 )
+-                aes_crypt_ecb( ctx, AES_ENCRYPT, iv, iv );
+-
+-            c = *input++;
+-            *output++ = (unsigned char)( c ^ iv[n] );
+-            iv[n] = (unsigned char) c;
+-
+-            n = (n + 1) & 0x0F;
+-        }
+-    }
+-    else
+-    {
+-        while( length-- )
+-        {
+-            if( n == 0 )
+-                aes_crypt_ecb( ctx, AES_ENCRYPT, iv, iv );
+-
+-            iv[n] = *output++ = (unsigned char)( iv[n] ^ *input++ );
+-
+-            n = (n + 1) & 0x0F;
+-        }
+-    }
+-
+-    *iv_off = n;
+-
+-    return( 0 );
+-}
+-#endif /*POLARSSL_CIPHER_MODE_CFB */
+-
+-#if defined(POLARSSL_CIPHER_MODE_CTR)
+-/*
+- * AES-CTR buffer encryption/decryption
+- */
+-int aes_crypt_ctr( aes_context *ctx,
+-                       size_t length,
+-                       size_t *nc_off,
+-                       unsigned char nonce_counter[16],
+-                       unsigned char stream_block[16],
+-                       const unsigned char *input,
+-                       unsigned char *output )
+-{
+-    int c, i;
+-    size_t n = *nc_off;
+-
+-    while( length-- )
+-    {
+-        if( n == 0 ) {
+-            aes_crypt_ecb( ctx, AES_ENCRYPT, nonce_counter, stream_block );
+-
+-            for( i = 16; i > 0; i-- )
+-                if( ++nonce_counter[i - 1] != 0 )
+-                    break;
+-        }
+-        c = *input++;
+-        *output++ = (unsigned char)( c ^ stream_block[n] );
+-
+-        n = (n + 1) & 0x0F;
+-    }
+-
+-    *nc_off = n;
+-
+-    return( 0 );
+-}
+-#endif /* POLARSSL_CIPHER_MODE_CTR */
+-
+-#if defined(POLARSSL_SELF_TEST)
+-
+-#include <stdio.h>
+-
+-/*
+- * AES test vectors from:
+- *
+- * http://csrc.nist.gov/archive/aes/rijndael/rijndael-vals.zip
+- */
+-static const unsigned char aes_test_ecb_dec[3][16] =
+-{
+-    { 0x44, 0x41, 0x6A, 0xC2, 0xD1, 0xF5, 0x3C, 0x58,
+-      0x33, 0x03, 0x91, 0x7E, 0x6B, 0xE9, 0xEB, 0xE0 },
+-    { 0x48, 0xE3, 0x1E, 0x9E, 0x25, 0x67, 0x18, 0xF2,
+-      0x92, 0x29, 0x31, 0x9C, 0x19, 0xF1, 0x5B, 0xA4 },
+-    { 0x05, 0x8C, 0xCF, 0xFD, 0xBB, 0xCB, 0x38, 0x2D,
+-      0x1F, 0x6F, 0x56, 0x58, 0x5D, 0x8A, 0x4A, 0xDE }
+-};
+-
+-static const unsigned char aes_test_ecb_enc[3][16] =
+-{
+-    { 0xC3, 0x4C, 0x05, 0x2C, 0xC0, 0xDA, 0x8D, 0x73,
+-      0x45, 0x1A, 0xFE, 0x5F, 0x03, 0xBE, 0x29, 0x7F },
+-    { 0xF3, 0xF6, 0x75, 0x2A, 0xE8, 0xD7, 0x83, 0x11,
+-      0x38, 0xF0, 0x41, 0x56, 0x06, 0x31, 0xB1, 0x14 },
+-    { 0x8B, 0x79, 0xEE, 0xCC, 0x93, 0xA0, 0xEE, 0x5D,
+-      0xFF, 0x30, 0xB4, 0xEA, 0x21, 0x63, 0x6D, 0xA4 }
+-};
+-
+-static const unsigned char aes_test_cbc_dec[3][16] =
+-{
+-    { 0xFA, 0xCA, 0x37, 0xE0, 0xB0, 0xC8, 0x53, 0x73,
+-      0xDF, 0x70, 0x6E, 0x73, 0xF7, 0xC9, 0xAF, 0x86 },
+-    { 0x5D, 0xF6, 0x78, 0xDD, 0x17, 0xBA, 0x4E, 0x75,
+-      0xB6, 0x17, 0x68, 0xC6, 0xAD, 0xEF, 0x7C, 0x7B },
+-    { 0x48, 0x04, 0xE1, 0x81, 0x8F, 0xE6, 0x29, 0x75,
+-      0x19, 0xA3, 0xE8, 0x8C, 0x57, 0x31, 0x04, 0x13 }
+-};
+-
+-static const unsigned char aes_test_cbc_enc[3][16] =
+-{
+-    { 0x8A, 0x05, 0xFC, 0x5E, 0x09, 0x5A, 0xF4, 0x84,
+-      0x8A, 0x08, 0xD3, 0x28, 0xD3, 0x68, 0x8E, 0x3D },
+-    { 0x7B, 0xD9, 0x66, 0xD5, 0x3A, 0xD8, 0xC1, 0xBB,
+-      0x85, 0xD2, 0xAD, 0xFA, 0xE8, 0x7B, 0xB1, 0x04 },
+-    { 0xFE, 0x3C, 0x53, 0x65, 0x3E, 0x2F, 0x45, 0xB5,
+-      0x6F, 0xCD, 0x88, 0xB2, 0xCC, 0x89, 0x8F, 0xF0 }
+-};
+-
+-#if defined(POLARSSL_CIPHER_MODE_CFB)
+-/*
+- * AES-CFB128 test vectors from:
+- *
+- * http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf
+- */
+-static const unsigned char aes_test_cfb128_key[3][32] =
+-{
+-    { 0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+-      0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C },
+-    { 0x8E, 0x73, 0xB0, 0xF7, 0xDA, 0x0E, 0x64, 0x52,
+-      0xC8, 0x10, 0xF3, 0x2B, 0x80, 0x90, 0x79, 0xE5,
+-      0x62, 0xF8, 0xEA, 0xD2, 0x52, 0x2C, 0x6B, 0x7B },
+-    { 0x60, 0x3D, 0xEB, 0x10, 0x15, 0xCA, 0x71, 0xBE,
+-      0x2B, 0x73, 0xAE, 0xF0, 0x85, 0x7D, 0x77, 0x81,
+-      0x1F, 0x35, 0x2C, 0x07, 0x3B, 0x61, 0x08, 0xD7,
+-      0x2D, 0x98, 0x10, 0xA3, 0x09, 0x14, 0xDF, 0xF4 }
+-};
+-
+-static const unsigned char aes_test_cfb128_iv[16] =
+-{
+-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+-    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+-};
+-
+-static const unsigned char aes_test_cfb128_pt[64] =
+-{
+-    0x6B, 0xC1, 0xBE, 0xE2, 0x2E, 0x40, 0x9F, 0x96,
+-    0xE9, 0x3D, 0x7E, 0x11, 0x73, 0x93, 0x17, 0x2A,
+-    0xAE, 0x2D, 0x8A, 0x57, 0x1E, 0x03, 0xAC, 0x9C,
+-    0x9E, 0xB7, 0x6F, 0xAC, 0x45, 0xAF, 0x8E, 0x51,
+-    0x30, 0xC8, 0x1C, 0x46, 0xA3, 0x5C, 0xE4, 0x11,
+-    0xE5, 0xFB, 0xC1, 0x19, 0x1A, 0x0A, 0x52, 0xEF,
+-    0xF6, 0x9F, 0x24, 0x45, 0xDF, 0x4F, 0x9B, 0x17,
+-    0xAD, 0x2B, 0x41, 0x7B, 0xE6, 0x6C, 0x37, 0x10
+-};
+-
+-static const unsigned char aes_test_cfb128_ct[3][64] =
+-{
+-    { 0x3B, 0x3F, 0xD9, 0x2E, 0xB7, 0x2D, 0xAD, 0x20,
+-      0x33, 0x34, 0x49, 0xF8, 0xE8, 0x3C, 0xFB, 0x4A,
+-      0xC8, 0xA6, 0x45, 0x37, 0xA0, 0xB3, 0xA9, 0x3F,
+-      0xCD, 0xE3, 0xCD, 0xAD, 0x9F, 0x1C, 0xE5, 0x8B,
+-      0x26, 0x75, 0x1F, 0x67, 0xA3, 0xCB, 0xB1, 0x40,
+-      0xB1, 0x80, 0x8C, 0xF1, 0x87, 0xA4, 0xF4, 0xDF,
+-      0xC0, 0x4B, 0x05, 0x35, 0x7C, 0x5D, 0x1C, 0x0E,
+-      0xEA, 0xC4, 0xC6, 0x6F, 0x9F, 0xF7, 0xF2, 0xE6 },
+-    { 0xCD, 0xC8, 0x0D, 0x6F, 0xDD, 0xF1, 0x8C, 0xAB,
+-      0x34, 0xC2, 0x59, 0x09, 0xC9, 0x9A, 0x41, 0x74,
+-      0x67, 0xCE, 0x7F, 0x7F, 0x81, 0x17, 0x36, 0x21,
+-      0x96, 0x1A, 0x2B, 0x70, 0x17, 0x1D, 0x3D, 0x7A,
+-      0x2E, 0x1E, 0x8A, 0x1D, 0xD5, 0x9B, 0x88, 0xB1,
+-      0xC8, 0xE6, 0x0F, 0xED, 0x1E, 0xFA, 0xC4, 0xC9,
+-      0xC0, 0x5F, 0x9F, 0x9C, 0xA9, 0x83, 0x4F, 0xA0,
+-      0x42, 0xAE, 0x8F, 0xBA, 0x58, 0x4B, 0x09, 0xFF },
+-    { 0xDC, 0x7E, 0x84, 0xBF, 0xDA, 0x79, 0x16, 0x4B,
+-      0x7E, 0xCD, 0x84, 0x86, 0x98, 0x5D, 0x38, 0x60,
+-      0x39, 0xFF, 0xED, 0x14, 0x3B, 0x28, 0xB1, 0xC8,
+-      0x32, 0x11, 0x3C, 0x63, 0x31, 0xE5, 0x40, 0x7B,
+-      0xDF, 0x10, 0x13, 0x24, 0x15, 0xE5, 0x4B, 0x92,
+-      0xA1, 0x3E, 0xD0, 0xA8, 0x26, 0x7A, 0xE2, 0xF9,
+-      0x75, 0xA3, 0x85, 0x74, 0x1A, 0xB9, 0xCE, 0xF8,
+-      0x20, 0x31, 0x62, 0x3D, 0x55, 0xB1, 0xE4, 0x71 }
+-};
+-#endif /* POLARSSL_CIPHER_MODE_CFB */
+-
+-#if defined(POLARSSL_CIPHER_MODE_CTR)
+-/*
+- * AES-CTR test vectors from:
+- *
+- * http://www.faqs.org/rfcs/rfc3686.html
+- */
+-
+-static const unsigned char aes_test_ctr_key[3][16] =
+-{
+-    { 0xAE, 0x68, 0x52, 0xF8, 0x12, 0x10, 0x67, 0xCC,
+-      0x4B, 0xF7, 0xA5, 0x76, 0x55, 0x77, 0xF3, 0x9E },
+-    { 0x7E, 0x24, 0x06, 0x78, 0x17, 0xFA, 0xE0, 0xD7,
+-      0x43, 0xD6, 0xCE, 0x1F, 0x32, 0x53, 0x91, 0x63 },
+-    { 0x76, 0x91, 0xBE, 0x03, 0x5E, 0x50, 0x20, 0xA8,
+-      0xAC, 0x6E, 0x61, 0x85, 0x29, 0xF9, 0xA0, 0xDC }
+-};
+-
+-static const unsigned char aes_test_ctr_nonce_counter[3][16] =
+-{
+-    { 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
+-    { 0x00, 0x6C, 0xB6, 0xDB, 0xC0, 0x54, 0x3B, 0x59,
+-      0xDA, 0x48, 0xD9, 0x0B, 0x00, 0x00, 0x00, 0x01 },
+-    { 0x00, 0xE0, 0x01, 0x7B, 0x27, 0x77, 0x7F, 0x3F,
+-      0x4A, 0x17, 0x86, 0xF0, 0x00, 0x00, 0x00, 0x01 }
+-};
+-
+-static const unsigned char aes_test_ctr_pt[3][48] =
+-{
+-    { 0x53, 0x69, 0x6E, 0x67, 0x6C, 0x65, 0x20, 0x62,
+-      0x6C, 0x6F, 0x63, 0x6B, 0x20, 0x6D, 0x73, 0x67 },
+-
+-    { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+-      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+-      0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+-      0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F },
+-
+-    { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+-      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+-      0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+-      0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+-      0x20, 0x21, 0x22, 0x23 }
+-};
+-
+-static const unsigned char aes_test_ctr_ct[3][48] =
+-{
+-    { 0xE4, 0x09, 0x5D, 0x4F, 0xB7, 0xA7, 0xB3, 0x79,
+-      0x2D, 0x61, 0x75, 0xA3, 0x26, 0x13, 0x11, 0xB8 },
+-    { 0x51, 0x04, 0xA1, 0x06, 0x16, 0x8A, 0x72, 0xD9,
+-      0x79, 0x0D, 0x41, 0xEE, 0x8E, 0xDA, 0xD3, 0x88,
+-      0xEB, 0x2E, 0x1E, 0xFC, 0x46, 0xDA, 0x57, 0xC8,
+-      0xFC, 0xE6, 0x30, 0xDF, 0x91, 0x41, 0xBE, 0x28 },
+-    { 0xC1, 0xCF, 0x48, 0xA8, 0x9F, 0x2F, 0xFD, 0xD9,
+-      0xCF, 0x46, 0x52, 0xE9, 0xEF, 0xDB, 0x72, 0xD7,
+-      0x45, 0x40, 0xA4, 0x2B, 0xDE, 0x6D, 0x78, 0x36,
+-      0xD5, 0x9A, 0x5C, 0xEA, 0xAE, 0xF3, 0x10, 0x53,
+-      0x25, 0xB2, 0x07, 0x2F }
+-};
+-
+-static const int aes_test_ctr_len[3] =
+-    { 16, 32, 36 };
+-#endif /* POLARSSL_CIPHER_MODE_CTR */
+-
+-/*
+- * Checkup routine
+- */
+-int aes_self_test( int verbose )
+-{
+-    int i, j, u, v;
+-    unsigned char key[32];
+-    unsigned char buf[64];
+-    unsigned char prv[16];
+-    unsigned char iv[16];
+-#if defined(POLARSSL_CIPHER_MODE_CTR) || defined(POLARSSL_CIPHER_MODE_CFB)
+-    size_t offset;
+-#endif
+-#if defined(POLARSSL_CIPHER_MODE_CTR)
+-    int len;
+-    unsigned char nonce_counter[16];
+-    unsigned char stream_block[16];
+-#endif
+-    aes_context ctx;
+-
+-    memset( key, 0, 32 );
+-
+-    /*
+-     * ECB mode
+-     */
+-    for( i = 0; i < 6; i++ )
+-    {
+-        u = i >> 1;
+-        v = i  & 1;
+-
+-        if( verbose != 0 )
+-            printf( "  AES-ECB-%3d (%s): ", 128 + u * 64,
+-                    ( v == AES_DECRYPT ) ? "dec" : "enc" );
+-
+-        memset( buf, 0, 16 );
+-
+-        if( v == AES_DECRYPT )
+-        {
+-            aes_setkey_dec( &ctx, key, 128 + u * 64 );
+-
+-            for( j = 0; j < 10000; j++ )
+-                aes_crypt_ecb( &ctx, v, buf, buf );
+-
+-            if( memcmp( buf, aes_test_ecb_dec[u], 16 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-        else
+-        {
+-            aes_setkey_enc( &ctx, key, 128 + u * 64 );
+-
+-            for( j = 0; j < 10000; j++ )
+-                aes_crypt_ecb( &ctx, v, buf, buf );
+-
+-            if( memcmp( buf, aes_test_ecb_enc[u], 16 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-
+-    /*
+-     * CBC mode
+-     */
+-    for( i = 0; i < 6; i++ )
+-    {
+-        u = i >> 1;
+-        v = i  & 1;
+-
+-        if( verbose != 0 )
+-            printf( "  AES-CBC-%3d (%s): ", 128 + u * 64,
+-                    ( v == AES_DECRYPT ) ? "dec" : "enc" );
+-
+-        memset( iv , 0, 16 );
+-        memset( prv, 0, 16 );
+-        memset( buf, 0, 16 );
+-
+-        if( v == AES_DECRYPT )
+-        {
+-            aes_setkey_dec( &ctx, key, 128 + u * 64 );
+-
+-            for( j = 0; j < 10000; j++ )
+-                aes_crypt_cbc( &ctx, v, 16, iv, buf, buf );
+-
+-            if( memcmp( buf, aes_test_cbc_dec[u], 16 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-        else
+-        {
+-            aes_setkey_enc( &ctx, key, 128 + u * 64 );
+-
+-            for( j = 0; j < 10000; j++ )
+-            {
+-                unsigned char tmp[16];
+-
+-                aes_crypt_cbc( &ctx, v, 16, iv, buf, buf );
+-
+-                memcpy( tmp, prv, 16 );
+-                memcpy( prv, buf, 16 );
+-                memcpy( buf, tmp, 16 );
+-            }
+-
+-            if( memcmp( prv, aes_test_cbc_enc[u], 16 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-
+-#if defined(POLARSSL_CIPHER_MODE_CFB)
+-    /*
+-     * CFB128 mode
+-     */
+-    for( i = 0; i < 6; i++ )
+-    {
+-        u = i >> 1;
+-        v = i  & 1;
+-
+-        if( verbose != 0 )
+-            printf( "  AES-CFB128-%3d (%s): ", 128 + u * 64,
+-                    ( v == AES_DECRYPT ) ? "dec" : "enc" );
+-
+-        memcpy( iv,  aes_test_cfb128_iv, 16 );
+-        memcpy( key, aes_test_cfb128_key[u], 16 + u * 8 );
+-
+-        offset = 0;
+-        aes_setkey_enc( &ctx, key, 128 + u * 64 );
+-
+-        if( v == AES_DECRYPT )
+-        {
+-            memcpy( buf, aes_test_cfb128_ct[u], 64 );
+-            aes_crypt_cfb128( &ctx, v, 64, &offset, iv, buf, buf );
+-
+-            if( memcmp( buf, aes_test_cfb128_pt, 64 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-        else
+-        {
+-            memcpy( buf, aes_test_cfb128_pt, 64 );
+-            aes_crypt_cfb128( &ctx, v, 64, &offset, iv, buf, buf );
+-
+-            if( memcmp( buf, aes_test_cfb128_ct[u], 64 ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-#endif /* POLARSSL_CIPHER_MODE_CFB */
+-
+-#if defined(POLARSSL_CIPHER_MODE_CTR)
+-    /*
+-     * CTR mode
+-     */
+-    for( i = 0; i < 6; i++ )
+-    {
+-        u = i >> 1;
+-        v = i  & 1;
+-
+-        if( verbose != 0 )
+-            printf( "  AES-CTR-128 (%s): ",
+-                    ( v == AES_DECRYPT ) ? "dec" : "enc" );
+-
+-        memcpy( nonce_counter, aes_test_ctr_nonce_counter[u], 16 );
+-        memcpy( key, aes_test_ctr_key[u], 16 );
+-
+-        offset = 0;
+-        aes_setkey_enc( &ctx, key, 128 );
+-
+-        if( v == AES_DECRYPT )
+-        {
+-            len = aes_test_ctr_len[u];
+-            memcpy( buf, aes_test_ctr_ct[u], len );
+-
+-            aes_crypt_ctr( &ctx, len, &offset, nonce_counter, stream_block, buf, buf );
+-
+-            if( memcmp( buf, aes_test_ctr_pt[u], len ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-        else
+-        {
+-            len = aes_test_ctr_len[u];
+-            memcpy( buf, aes_test_ctr_pt[u], len );
+-
+-            aes_crypt_ctr( &ctx, len, &offset, nonce_counter, stream_block, buf, buf );
+-
+-            if( memcmp( buf, aes_test_ctr_ct[u], len ) != 0 )
+-            {
+-                if( verbose != 0 )
+-                    printf( "failed\n" );
+-
+-                return( 1 );
+-            }
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-#endif /* POLARSSL_CIPHER_MODE_CTR */
+-
+-    return( 0 );
+-}
+-
+-#endif
+-
+-#endif
+diff --git a/drivers/amlogic/secure/polarssl_aes/aes_algorithm.c b/drivers/amlogic/secure/polarssl_aes/aes_algorithm.c
+deleted file mode 100644
+index 83fd2c41ac3f..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/aes_algorithm.c
++++ /dev/null
+@@ -1,144 +0,0 @@
+-#include "polarssl/config.h"
+-#include "polarssl/aes.h"
+-#include "polarssl/sha2.h"
+-
+-#include <linux/cdev.h>
+-#include <linux/types.h>
+-#include <linux/fs.h>
+-#include <linux/device.h>
+-#include <linux/slab.h>
+-#include <linux/delay.h>
+-#include <asm/uaccess.h>
+-
+-//AES key table
+-static unsigned char default_AESkey[] = {
+-0xAD,0x93,0x00,0xC4,0x8E,0x50,0x20,0xC5,0x3F,0xBF,0x23,0x32,0x80,0x5A,0xC6,0xDF,
+-0x2F,0x7D,0x49,0xD9,0x15,0x8B,0x7F,0x04,0x2C,0x80,0xB0,0x62,0x78,0x25,0x8D,0x9C,
+-0x13,0x22,0x02,0x4A,0x55,0x23,0xBB,0xCB,0xF1,0xFB,0x2A,0xCC,0xBB,0x95,0xF4,0x50,
+-0xAE,0x08,0xD7,0xFB,0x80,0xF2,0x64,0x72,0xE3,0x3C,0xC4,0xB4,0xA3,0x50,0xD9,0xF1,
+-0x2A,0xDE,0xFC,0xD7,0x67,0xC8,0xDE,0xD0,0xF0,0x1E,0xE8,0x12,0xF9,0x57,0x25,0x36,
+-0x6D,0x71,0xD2,0xF8,0x1E,0x32,0x25,0x59,0x89,0x80,0xA3,0x59,0xD4,0xB6,0xDA,0x00,
+-0x8D,0xB8,0x5B,0x95,0x96,0x47,0x07,0xBD,0xED,0x68,0xDF,0xB9,0xD5,0x93,0x34,0x8F,
+-0xC6,0x66,0x06,0x64,0x94,0xCC,0x27,0x29,0x3A,0x8F,0x58,0x2E,0x70,0x7D,0x22,0xE7,
+-0x9D,0x62,0xAA,0xD1,0x0C,0xD2,0xD7,0x76,0xBD,0x40,0xCD,0x87,0x4E,0xC8,0x4C,0x80,
+-0x86,0xC2,0xB8,0x97,0xA3,0xDC,0x8F,0x8C,0x45,0xCC,0x26,0x40,0xBD,0xEB,0x3F,0xAF,
+-0x55,0x1E,0x88,0xFC,0x38,0xC0,0x06,0x1C,0xDA,0xDB,0xE4,0xFA,0x2B,0xFB,0x6D,0x6F,
+-0x19,0x62,0x0A,0xC4,0xEA,0xF0,0xE3,0x47,0xDB,0x47,0x83,0xE8,0x50,0x17,0xDF,0xA8,
+-0x29,0x37,0xB4,0x0A,0x19,0x1B,0x2D,0xDB,0x86,0xC8,0xBB,0xD1,0x52,0xD5,0x8F,0xC8,
+-0x2B,0xBC,0xE7,0x8A,0xF4,0xA1,0xE2,0x4D,0xAC,0xFC,0xB2,0x6F,0xDA,0x82,0xAB,0x86,
+-0xB7,0x95,0x6B,0xD7,0xA9,0x07,0xC7,0xB8,0x2D,0xBF,0x86,0xB4,0xBF,0xF4,0xC8,0xFD,
+-0x50,0x43,0xEB,0x8D,0xAB,0x16,0x91,0xBB,0x6B,0x5E,0x60,0x21,0x57,0x44,0x61,0x06,
+-};
+-
+-
+-/* function: polarssl_aes_algorithm
+- * mode: AES_DECRYPT, AES_ENCRYPT
+- * way: 0: 128bit, 1:192bit,2:256bit
+- * output: 
+- * input:
+- * size: input buf size
+- * keyiv: iv
+- * keykey: key
+- * */
+-int polarssl_aes_algorithm(int mode,int way,unsigned char *output,unsigned char *input,int size,unsigned char *keyiv,unsigned char *keykey)
+-{
+-	unsigned char iv[16];
+-	unsigned char key[32];
+-	//unsigned char buf[64];
+-	
+-	aes_context ctx;
+-	if((way <0)||(way > 2)){
+-		return -1;
+-	}
+-	if((output == NULL)||(input == NULL)||(keyiv == NULL)||(keykey == NULL)||(size&0xf) || (size == 0)){
+-		return -1;
+-	}
+-	//size = ((size+15)>>4)<<4;
+-	ctx.nr = 0;
+-	ctx.rk = 0;
+-	memset(ctx.buf,0,sizeof(ctx.buf));
+-	
+-	memcpy( key, keykey, 32 );
+-	
+-	memcpy( iv , keyiv, 16 );
+-	//memcpy( buf, input, 16 );
+-	if( mode == AES_DECRYPT ){
+-		
+-		aes_setkey_dec( &ctx, key, 128 + way * 64 );
+-		
+-		aes_crypt_cbc( &ctx, mode, size, iv, input, output );
+-	}
+-	else {
+-		aes_setkey_enc( &ctx, key, 128 + way * 64 );
+-		aes_crypt_cbc( &ctx, mode, size, iv, input, output );
+-	}
+-	return 0;
+-}
+-int aes_algorithm_decrypt(unsigned char *output,unsigned char *input,int size,unsigned char *keyiv,unsigned char *keykey)
+-{
+-	int ret;
+-	ret = polarssl_aes_algorithm(AES_DECRYPT,2,output,input,size,keyiv,keykey);
+-	return ret;
+-}
+-int aes_algorithm_encrypt(unsigned char *output,unsigned char *input,int size,unsigned char *keyiv,unsigned char *keykey)
+-{
+-	int ret;
+-	
+-	ret = polarssl_aes_algorithm(AES_ENCRYPT,2,output,input,size,keyiv,keykey);
+-	return ret;
+-}
+-
+-int aml_aes_encrypt(unsigned char *output,unsigned char *input,int size)
+-{
+-	int ret;
+-	unsigned char *keyiv, *keykey;
+-	keyiv = &default_AESkey[0];
+-	keykey = &default_AESkey[16];
+-	ret = aes_algorithm_encrypt(output,input,size,keyiv,keykey);
+-	return ret;
+-}
+-int aml_aes_decrypt(unsigned char *output,unsigned char *input,int size)
+-{
+-	int ret;
+-	unsigned char *keyiv, *keykey;
+-	keyiv = &default_AESkey[0];
+-	keykey = &default_AESkey[16];
+-	ret = aes_algorithm_decrypt(output,input,size,keyiv,keykey);
+-	return ret;
+-}
+-
+-
+-/******hash sha256*************/
+-/* sha2_calculate
+- * mode: 0:256bit, 1:224bit
+- * buf :
+- * len :
+- * hash:
+- * */
+-int  sha2_calculate(int mode,unsigned char *buf,int len,unsigned char *hash)
+-{
+-	sha2_context ctx;
+-	unsigned char sha2sum[32];
+-
+-	if(mode < 0 || mode > 1){
+-		return -1;
+-	}
+-	if((buf == NULL) || (len <=0) ||(hash == NULL)){
+-		return -1;
+-	}
+-	sha2_starts( &ctx, mode );
+-	sha2_update(&ctx,buf,len);
+-	sha2_finish( &ctx, sha2sum );
+-	memcpy(hash,sha2sum,32);
+-	return 0;
+-}
+-
+-int hash_sha256(unsigned char *buf,int len,unsigned char *hash)
+-{
+-	int ret;
+-	ret = sha2_calculate(0,buf,len,hash);
+-	return ret;
+-}
+-
+-
+-
+diff --git a/drivers/amlogic/secure/polarssl_aes/include/polarssl/aes.h b/drivers/amlogic/secure/polarssl_aes/include/polarssl/aes.h
+deleted file mode 100755
+index f8c45fcbd8da..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/include/polarssl/aes.h
++++ /dev/null
+@@ -1,184 +0,0 @@
+-/**
+- * \file aes.h
+- *
+- * \brief AES block cipher
+- *
+- *  Copyright (C) 2006-2010, Brainspark B.V.
+- *
+- *  This file is part of PolarSSL (http://www.polarssl.org)
+- *  Lead Maintainer: Paul Bakker <polarssl_maintainer at polarssl.org>
+- *
+- *  All rights reserved.
+- *
+- *  This program is free software; you can redistribute it and/or modify
+- *  it under the terms of the GNU General Public License as published by
+- *  the Free Software Foundation; either version 2 of the License, or
+- *  (at your option) any later version.
+- *
+- *  This program is distributed in the hope that it will be useful,
+- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- *  GNU General Public License for more details.
+- *
+- *  You should have received a copy of the GNU General Public License along
+- *  with this program; if not, write to the Free Software Foundation, Inc.,
+- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-#ifndef POLARSSL_AES_H
+-#define POLARSSL_AES_H
+-
+-#include <linux/string.h>
+-
+-#ifdef _MSC_VER
+-#include <basetsd.h>
+-typedef UINT32 uint32_t;
+-#else
+-//#include <inttypes.h>
+-#include <linux/types.h>
+-#endif
+-
+-#define AES_ENCRYPT     1
+-#define AES_DECRYPT     0
+-
+-#define POLARSSL_ERR_AES_INVALID_KEY_LENGTH                -0x0020  /**< Invalid key length. */
+-#define POLARSSL_ERR_AES_INVALID_INPUT_LENGTH              -0x0022  /**< Invalid data input length. */
+-
+-/**
+- * \brief          AES context structure
+- */
+-typedef struct
+-{
+-    int nr;                     /*!<  number of rounds  */
+-    uint32_t *rk;               /*!<  AES round keys    */
+-    uint32_t buf[68];           /*!<  unaligned data    */
+-}
+-aes_context;
+-
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-
+-/**
+- * \brief          AES key schedule (encryption)
+- *
+- * \param ctx      AES context to be initialized
+- * \param key      encryption key
+- * \param keysize  must be 128, 192 or 256
+- *
+- * \return         0 if successful, or POLARSSL_ERR_AES_INVALID_KEY_LENGTH
+- */
+-int aes_setkey_enc( aes_context *ctx, const unsigned char *key, unsigned int keysize );
+-
+-/**
+- * \brief          AES key schedule (decryption)
+- *
+- * \param ctx      AES context to be initialized
+- * \param key      decryption key
+- * \param keysize  must be 128, 192 or 256
+- *
+- * \return         0 if successful, or POLARSSL_ERR_AES_INVALID_KEY_LENGTH
+- */
+-int aes_setkey_dec( aes_context *ctx, const unsigned char *key, unsigned int keysize );
+-
+-/**
+- * \brief          AES-ECB block encryption/decryption
+- *
+- * \param ctx      AES context
+- * \param mode     AES_ENCRYPT or AES_DECRYPT
+- * \param input    16-byte input block
+- * \param output   16-byte output block
+- *
+- * \return         0 if successful
+- */
+-int aes_crypt_ecb( aes_context *ctx,
+-                    int mode,
+-                    const unsigned char input[16],
+-                    unsigned char output[16] );
+-
+-/**
+- * \brief          AES-CBC buffer encryption/decryption
+- *                 Length should be a multiple of the block
+- *                 size (16 bytes)
+- *
+- * \param ctx      AES context
+- * \param mode     AES_ENCRYPT or AES_DECRYPT
+- * \param length   length of the input data
+- * \param iv       initialization vector (updated after use)
+- * \param input    buffer holding the input data
+- * \param output   buffer holding the output data
+- *
+- * \return         0 if successful, or POLARSSL_ERR_AES_INVALID_INPUT_LENGTH
+- */
+-int aes_crypt_cbc( aes_context *ctx,
+-                    int mode,
+-                    size_t length,
+-                    unsigned char iv[16],
+-                    const unsigned char *input,
+-                    unsigned char *output );
+-
+-/**
+- * \brief          AES-CFB128 buffer encryption/decryption.
+- *
+- * Note: Due to the nature of CFB you should use the same key schedule for
+- * both encryption and decryption. So a context initialized with
+- * aes_setkey_enc() for both AES_ENCRYPT and AES_DECRYPT.
+- *
+- * both 
+- * \param ctx      AES context
+- * \param mode     AES_ENCRYPT or AES_DECRYPT
+- * \param length   length of the input data
+- * \param iv_off   offset in IV (updated after use)
+- * \param iv       initialization vector (updated after use)
+- * \param input    buffer holding the input data
+- * \param output   buffer holding the output data
+- *
+- * \return         0 if successful
+- */
+-int aes_crypt_cfb128( aes_context *ctx,
+-                       int mode,
+-                       size_t length,
+-                       size_t *iv_off,
+-                       unsigned char iv[16],
+-                       const unsigned char *input,
+-                       unsigned char *output );
+-
+-/**
+- * \brief               AES-CTR buffer encryption/decryption
+- *
+- * Warning: You have to keep the maximum use of your counter in mind!
+- *
+- * Note: Due to the nature of CTR you should use the same key schedule for
+- * both encryption and decryption. So a context initialized with
+- * aes_setkey_enc() for both AES_ENCRYPT and AES_DECRYPT.
+- *
+- * \param length        The length of the data
+- * \param nc_off        The offset in the current stream_block (for resuming
+- *                      within current cipher stream). The offset pointer to
+- *                      should be 0 at the start of a stream.
+- * \param nonce_counter The 128-bit nonce and counter.
+- * \param stream_block  The saved stream-block for resuming. Is overwritten
+- *                      by the function.
+- * \param input         The input data stream
+- * \param output        The output data stream
+- *
+- * \return         0 if successful
+- */
+-int aes_crypt_ctr( aes_context *ctx,
+-                       size_t length,
+-                       size_t *nc_off,
+-                       unsigned char nonce_counter[16],
+-                       unsigned char stream_block[16],
+-                       const unsigned char *input,
+-                       unsigned char *output );
+-/**
+- * \brief          Checkup routine
+- *
+- * \return         0 if successful, or 1 if the test failed
+- */
+-int aes_self_test( int verbose );
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#endif /* aes.h */
+diff --git a/drivers/amlogic/secure/polarssl_aes/include/polarssl/config.h b/drivers/amlogic/secure/polarssl_aes/include/polarssl/config.h
+deleted file mode 100755
+index c6694082b813..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/include/polarssl/config.h
++++ /dev/null
+@@ -1,892 +0,0 @@
+-/**
+- * \file config.h
+- *
+- * \brief Configuration options (set of defines)
+- *
+- *  Copyright (C) 2006-2012, Brainspark B.V.
+- *
+- *  This file is part of PolarSSL (http://www.polarssl.org)
+- *  Lead Maintainer: Paul Bakker <polarssl_maintainer at polarssl.org>
+- *
+- *  All rights reserved.
+- *
+- *  This program is free software; you can redistribute it and/or modify
+- *  it under the terms of the GNU General Public License as published by
+- *  the Free Software Foundation; either version 2 of the License, or
+- *  (at your option) any later version.
+- *
+- *  This program is distributed in the hope that it will be useful,
+- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- *  GNU General Public License for more details.
+- *
+- *  You should have received a copy of the GNU General Public License along
+- *  with this program; if not, write to the Free Software Foundation, Inc.,
+- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * This set of compile-time options may be used to enable
+- * or disable features selectively, and reduce the global
+- * memory footprint.
+- */
+-#ifndef POLARSSL_CONFIG_H
+-#define POLARSSL_CONFIG_H
+-
+-#if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_DEPRECATE)
+-#define _CRT_SECURE_NO_DEPRECATE 1
+-#endif
+-
+-/**
+- * \name SECTION: System support
+- *
+- * This section sets system specific settings.
+- * \{
+- */
+-
+-/**
+- * \def POLARSSL_HAVE_INT8
+- *
+- * The system uses 8-bit wide native integers.
+- *
+- * Uncomment if native integers are 8-bit wide.
+-#define POLARSSL_HAVE_INT8
+- */
+-
+-/**
+- * \def POLARSSL_HAVE_INT16
+- *
+- * The system uses 16-bit wide native integers.
+- *
+- * Uncomment if native integers are 16-bit wide.
+-#define POLARSSL_HAVE_INT16
+- */
+-
+-/**
+- * \def POLARSSL_HAVE_LONGLONG
+- *
+- * The compiler supports the 'long long' type.
+- * (Only used on 32-bit platforms)
+- */
+-#define POLARSSL_HAVE_LONGLONG
+-
+-/**
+- * \def POLARSSL_HAVE_ASM
+- *
+- * The compiler has support for asm()
+- *
+- * Uncomment to enable the use of assembly code.
+- *
+- * Requires support for asm() in compiler.
+- *
+- * Used in:
+- *      library/timing.c
+- *      library/padlock.c
+- *      include/polarssl/bn_mul.h
+- *
+- */
+-#define POLARSSL_HAVE_ASM
+-
+-/**
+- * \def POLARSSL_HAVE_SSE2
+- *
+- * CPU supports SSE2 instruction set.
+- *
+- * Uncomment if the CPU supports SSE2 (IA-32 specific).
+- *
+-#define POLARSSL_HAVE_SSE2
+- */
+-/* \} name */
+-
+-/**
+- * \name SECTION: PolarSSL feature support
+- *
+- * This section sets support for features that are or are not needed
+- * within the modules that are enabled.
+- * \{
+- */
+-
+-/**
+- * \def POLARSSL_AES_ROM_TABLES
+- *
+- * Store the AES tables in ROM.
+- *
+- * Uncomment this macro to store the AES tables in ROM.
+- *
+-#define POLARSSL_AES_ROM_TABLES
+- */
+-
+-/**
+- * \def POLARSSL_CIPHER_MODE_CFB
+- *
+- * Enable Cipher Feedback mode (CFB) for symmetric ciphers.
+- */
+-#define POLARSSL_CIPHER_MODE_CFB
+-
+-/**
+- * \def POLARSSL_CIPHER_MODE_CTR
+- *
+- * Enable Counter Block Cipher mode (CTR) for symmetric ciphers.
+- */
+-#define POLARSSL_CIPHER_MODE_CTR
+-
+-/**
+- * \def POLARSSL_CIPHER_NULL_CIPHER
+- *
+- * Enable NULL cipher.
+- * Warning: Only do so when you know what you are doing. This allows for
+- * encryption or channels without any security!
+- *
+- * Requires POLARSSL_ENABLE_WEAK_CIPHERSUITES as well to enable
+- * the following ciphersuites:
+- *      TLS_RSA_WITH_NULL_MD5
+- *      TLS_RSA_WITH_NULL_SHA
+- *      TLS_RSA_WITH_NULL_SHA256
+- *
+- * Uncomment this macro to enable the NULL cipher and ciphersuites
+-#define POLARSSL_CIPHER_NULL_CIPHER
+- */
+-
+-/**
+- * \def POLARSSL_ENABLE_WEAK_CIPHERSUITES
+- *
+- * Enable weak ciphersuites in SSL / TLS
+- * Warning: Only do so when you know what you are doing. This allows for
+- * channels with virtually no security at all!
+- *
+- * This enables the following ciphersuites:
+- *      TLS_RSA_WITH_DES_CBC_SHA
+- *      TLS_DHE_RSA_WITH_DES_CBC_SHA
+- *
+- * Uncomment this macro to enable weak ciphersuites
+-#define POLARSSL_ENABLE_WEAK_CIPHERSUITES
+- */
+-
+-/**
+- * \def POLARSSL_ERROR_STRERROR_DUMMY
+- *
+- * Enable a dummy error function to make use of error_strerror() in
+- * third party libraries easier.
+- *
+- * Disable if you run into name conflicts and want to really remove the
+- * error_strerror()
+- */
+-#define POLARSSL_ERROR_STRERROR_DUMMY
+-
+-/**
+- * \def POLARSSL_GENPRIME
+- *
+- * Requires: POLARSSL_BIGNUM_C, POLARSSL_RSA_C
+- *
+- * Enable the RSA prime-number generation code.
+-#define POLARSSL_GENPRIME
+- */
+-
+-/**
+- * \def POLARSSL_FS_IO
+- *
+- * Enable functions that use the filesystem.
+-#define POLARSSL_FS_IO
+- */
+-
+-/**
+- * \def POLARSSL_NO_DEFAULT_ENTROPY_SOURCES
+- *
+- * Do not add default entropy sources. These are the platform specific,
+- * hardclock and HAVEGE based poll functions.
+- *
+- * This is useful to have more control over the added entropy sources in an 
+- * application.
+- *
+- * Uncomment this macro to prevent loading of default entropy functions.
+-#define POLARSSL_NO_DEFAULT_ENTROPY_SOURCES
+- */
+-
+-/**
+- * \def POLARSSL_NO_PLATFORM_ENTROPY
+- *
+- * Do not use built-in platform entropy functions.
+- * This is useful if your platform does not support
+- * standards like the /dev/urandom or Windows CryptoAPI.
+- *
+- * Uncomment this macro to disable the built-in platform entropy functions.
+-#define POLARSSL_NO_PLATFORM_ENTROPY
+- */
+-
+-/**
+- * \def POLARSSL_PKCS1_V21
+- *
+- * Requires: POLARSSL_MD_C, POLARSSL_RSA_C
+- *
+- * Enable support for PKCS#1 v2.1 encoding.
+- * This enables support for RSAES-OAEP and RSASSA-PSS operations.
+-#define POLARSSL_PKCS1_V21
+- */
+-
+-/**
+- * \def POLARSSL_RSA_NO_CRT
+- *
+- * Do not use the Chinese Remainder Theorem for the RSA private operation.
+- *
+- * Uncomment this macro to disable the use of CRT in RSA.
+- *
+-#define POLARSSL_RSA_NO_CRT
+- */
+-
+-/**
+- * \def POLARSSL_SELF_TEST
+- *
+- * Enable the checkup functions (*_self_test).
+-#define POLARSSL_SELF_TEST
+- */
+-
+-/**
+- * \def POLARSSL_SSL_ALL_ALERT_MESSAGES
+- *
+- * Enable sending of alert messages in case of encountered errors as per RFC.
+- * If you choose not to send the alert messages, PolarSSL can still communicate
+- * with other servers, only debugging of failures is harder.
+- *
+- * The advantage of not sending alert messages, is that no information is given
+- * about reasons for failures thus preventing adversaries of gaining intel.
+- *
+- * Enable sending of all alert messages
+- */
+-#define POLARSSL_SSL_ALERT_MESSAGES
+-
+-/**
+- * \def POLARSSL_SSL_DEBUG_ALL
+- *
+- * Enable the debug messages in SSL module for all issues.
+- * Debug messages have been disabled in some places to prevent timing
+- * attacks due to (unbalanced) debugging function calls.
+- *
+- * If you need all error reporting you should enable this during debugging,
+- * but remove this for production servers that should log as well.
+- *
+- * Uncomment this macro to report all debug messages on errors introducing
+- * a timing side-channel.
+- *
+-#define POLARSSL_SSL_DEBUG_ALL
+- */
+-
+-/**
+- * \def POLARSSL_SSL_HW_RECORD_ACCEL
+- *
+- * Enable hooking functions in SSL module for hardware acceleration of
+- * individual records.
+- *
+- * Uncomment this macro to enable hooking functions.
+-#define POLARSSL_SSL_HW_RECORD_ACCEL
+- */
+-
+-/**
+- * \def POLARSSL_SSL_SRV_SUPPORT_SSLV2_CLIENT_HELLO
+- *
+- * Enable support for receiving and parsing SSLv2 Client Hello messages for the
+- * SSL Server module (POLARSSL_SSL_SRV_C)
+- *
+- * Comment this macro to disable support for SSLv2 Client Hello messages.
+- */
+-#define POLARSSL_SSL_SRV_SUPPORT_SSLV2_CLIENT_HELLO
+-
+-/**
+- * \def POLARSSL_X509_ALLOW_UNSUPPORTED_CRITICAL_EXTENSION
+- *
+- * If set, the X509 parser will not break-off when parsing an X509 certificate
+- * and encountering an unknown critical extension.
+- *
+- * Uncomment to prevent an error.
+- *
+-#define POLARSSL_X509_ALLOW_UNSUPPORTED_CRITICAL_EXTENSION
+- */
+-
+-/**
+- * \def POLARSSL_ZLIB_SUPPORT
+- *
+- * If set, the SSL/TLS module uses ZLIB to support compression and
+- * decompression of packet data.
+- *
+- * Used in: library/ssl_tls.c
+- *          library/ssl_cli.c
+- *          library/ssl_srv.c
+- *
+- * This feature requires zlib library and headers to be present.
+- *
+- * Uncomment to enable use of ZLIB
+-#define POLARSSL_ZLIB_SUPPORT
+- */
+-/* \} name */
+-
+-/**
+- * \name SECTION: PolarSSL modules
+- *
+- * This section enables or disables entire modules in PolarSSL
+- * \{
+- */
+-
+-/**
+- * \def POLARSSL_AES_C
+- *
+- * Enable the AES block cipher.
+- *
+- * Module:  library/aes.c
+- * Caller:  library/ssl_tls.c
+- *          library/pem.c
+- *          library/ctr_drbg.c
+- *
+- * This module enables the following ciphersuites (if other requisites are
+- * enabled as well):
+- *      TLS_RSA_WITH_AES_128_CBC_SHA
+- *      TLS_RSA_WITH_AES_256_CBC_SHA
+- *      TLS_DHE_RSA_WITH_AES_128_CBC_SHA
+- *      TLS_DHE_RSA_WITH_AES_256_CBC_SHA
+- *      TLS_RSA_WITH_AES_128_CBC_SHA256
+- *      TLS_RSA_WITH_AES_256_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
+- *      TLS_RSA_WITH_AES_128_GCM_SHA256
+- *      TLS_RSA_WITH_AES_256_GCM_SHA384
+- *
+- * PEM uses AES for decrypting encrypted keys.
+- */
+-#define POLARSSL_AES_C
+-
+-/**
+- * \def POLARSSL_ARC4_C
+- *
+- * Enable the ARCFOUR stream cipher.
+- *
+- * Module:  library/arc4.c
+- * Caller:  library/ssl_tls.c
+- *
+- * This module enables the following ciphersuites:
+- *      TLS_RSA_WITH_RC4_128_MD5
+- *      TLS_RSA_WITH_RC4_128_SHA
+- */
+-#define POLARSSL_ARC4_C
+-
+-/**
+- * \def POLARSSL_ASN1_PARSE_C
+- *
+- * Enable the generic ASN1 parser.
+- *
+- * Module:  library/asn1.c
+- * Caller:  library/x509parse.c
+- */
+-#define POLARSSL_ASN1_PARSE_C
+-
+-/**
+- * \def POLARSSL_ASN1_WRITE_C
+- *
+- * Enable the generic ASN1 writer.
+- *
+- * Module:  library/asn1write.c
+- */
+-#define POLARSSL_ASN1_WRITE_C
+-
+-/**
+- * \def POLARSSL_BASE64_C
+- *
+- * Enable the Base64 module.
+- *
+- * Module:  library/base64.c
+- * Caller:  library/pem.c
+- *
+- * This module is required for PEM support (required by X.509).
+- */
+-#define POLARSSL_BASE64_C
+-
+-/**
+- * \def POLARSSL_BIGNUM_C
+- *
+- * Enable the multi-precision integer library.
+- *
+- * Module:  library/bignum.c
+- * Caller:  library/dhm.c
+- *          library/rsa.c
+- *          library/ssl_tls.c
+- *          library/x509parse.c
+- *
+- * This module is required for RSA and DHM support.
+- */
+-#define POLARSSL_BIGNUM_C
+-
+-/**
+- * \def POLARSSL_BLOWFISH_C
+- *
+- * Enable the Blowfish block cipher.
+- *
+- * Module:  library/blowfish.c
+- */
+-#define POLARSSL_BLOWFISH_C
+-
+-/**
+- * \def POLARSSL_CAMELLIA_C
+- *
+- * Enable the Camellia block cipher.
+- *
+- * Module:  library/camellia.c
+- * Caller:  library/ssl_tls.c
+- *
+- * This module enables the following ciphersuites (if other requisites are
+- * enabled as well):
+- *      TLS_RSA_WITH_CAMELLIA_128_CBC_SHA
+- *      TLS_RSA_WITH_CAMELLIA_256_CBC_SHA
+- *      TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA
+- *      TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA
+- *      TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256
+- *      TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256
+- */
+-#define POLARSSL_CAMELLIA_C
+-
+-/**
+- * \def POLARSSL_CERTS_C
+- *
+- * Enable the test certificates.
+- *
+- * Module:  library/certs.c
+- * Caller:
+- *
+- * This module is used for testing (ssl_client/server).
+- */
+-#define POLARSSL_CERTS_C
+-
+-/**
+- * \def POLARSSL_CIPHER_C
+- *
+- * Enable the generic cipher layer.
+- *
+- * Module:  library/cipher.c
+- * Caller:
+- *
+- * Uncomment to enable generic cipher wrappers.
+- */
+-#define POLARSSL_CIPHER_C
+-
+-/**
+- * \def POLARSSL_CTR_DRBG_C
+- *
+- * Enable the CTR_DRBG AES-256-based random generator
+- *
+- * Module:  library/ctr_drbg.c
+- * Caller:
+- *
+- * Requires: POLARSSL_AES_C
+- *
+- * This module provides the CTR_DRBG AES-256 random number generator.
+- */
+-#define POLARSSL_CTR_DRBG_C
+-
+-/**
+- * \def POLARSSL_DEBUG_C
+- *
+- * Enable the debug functions.
+- *
+- * Module:  library/debug.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *          library/ssl_tls.c
+- *
+- * This module provides debugging functions.
+- */
+-#define POLARSSL_DEBUG_C
+-
+-/**
+- * \def POLARSSL_DES_C
+- *
+- * Enable the DES block cipher.
+- *
+- * Module:  library/des.c
+- * Caller:  library/pem.c
+- *          library/ssl_tls.c
+- *
+- * This module enables the following ciphersuites (if other requisites are
+- * enabled as well):
+- *      TLS_RSA_WITH_3DES_EDE_CBC_SHA
+- *      TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA
+- *
+- * PEM uses DES/3DES for decrypting encrypted keys.
+- */
+-#define POLARSSL_DES_C
+-
+-/**
+- * \def POLARSSL_DHM_C
+- *
+- * Enable the Diffie-Hellman-Merkle key exchange.
+- *
+- * Module:  library/dhm.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *
+- * This module enables the following ciphersuites (if other requisites are
+- * enabled as well):
+- *      TLS_DHE_RSA_WITH_DES_CBC_SHA
+- *      TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA
+- *      TLS_DHE_RSA_WITH_AES_128_CBC_SHA
+- *      TLS_DHE_RSA_WITH_AES_256_CBC_SHA
+- *      TLS_DHE_RSA_WITH_AES_128_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA
+- *      TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA
+- *      TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256
+- *      TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
+- *      TLS_DHE_RSA_WITH_AES_256_GCM_SHA384
+- */
+-#define POLARSSL_DHM_C
+-
+-/**
+- * \def POLARSSL_ENTROPY_C
+- *
+- * Enable the platform-specific entropy code.
+- *
+- * Module:  library/entropy.c
+- * Caller:
+- *
+- * Requires: POLARSSL_SHA4_C
+- *
+- * This module provides a generic entropy pool
+- */
+-#define POLARSSL_ENTROPY_C
+-
+-/**
+- * \def POLARSSL_ERROR_C
+- *
+- * Enable error code to error string conversion.
+- *
+- * Module:  library/error.c
+- * Caller:
+- *
+- * This module enables err_strerror().
+- */
+-#define POLARSSL_ERROR_C
+-
+-/**
+- * \def POLARSSL_GCM_C
+- *
+- * Enable the Galois/Counter Mode (GCM) for AES
+- *
+- * Module:  library/gcm.c
+- *
+- * Requires: POLARSSL_AES_C
+- *
+- * This module enables the following ciphersuites (if other requisites are
+- * enabled as well):
+- *      TLS_RSA_WITH_AES_128_GCM_SHA256
+- *      TLS_RSA_WITH_AES_256_GCM_SHA384
+- */
+-#define POLARSSL_GCM_C
+-
+-/**
+- * \def POLARSSL_HAVEGE_C
+- *
+- * Enable the HAVEGE random generator.
+- *
+- * Module:  library/havege.c
+- * Caller:
+- *
+- * Requires: POLARSSL_TIMING_C
+- *
+- * This module enables the HAVEGE random number generator.
+- */
+-#define POLARSSL_HAVEGE_C
+-
+-/**
+- * \def POLARSSL_MD_C
+- *
+- * Enable the generic message digest layer.
+- *
+- * Module:  library/md.c
+- * Caller:
+- *
+- * Uncomment to enable generic message digest wrappers.
+- */
+-#define POLARSSL_MD_C
+-
+-/**
+- * \def POLARSSL_MD2_C
+- *
+- * Enable the MD2 hash algorithm
+- *
+- * Module:  library/md2.c
+- * Caller:  library/x509parse.c
+- *
+- * Uncomment to enable support for (rare) MD2-signed X.509 certs.
+- *
+-#define POLARSSL_MD2_C
+- */
+-
+-/**
+- * \def POLARSSL_MD4_C
+- *
+- * Enable the MD4 hash algorithm
+- *
+- * Module:  library/md4.c
+- * Caller:  library/x509parse.c
+- *
+- * Uncomment to enable support for (rare) MD4-signed X.509 certs.
+- *
+-#define POLARSSL_MD4_C
+- */
+-
+-/**
+- * \def POLARSSL_MD5_C
+- *
+- * Enable the MD5 hash algorithm
+- *
+- * Module:  library/md5.c
+- * Caller:  library/pem.c
+- *          library/ssl_tls.c
+- *          library/x509parse.c
+- *
+- * This module is required for SSL/TLS and X.509.
+- * PEM uses MD5 for decrypting encrypted keys.
+- */
+-#define POLARSSL_MD5_C
+-
+-/**
+- * \def POLARSSL_NET_C
+- *
+- * Enable the TCP/IP networking routines.
+- *
+- * Module:  library/net.c
+- * Caller:
+- *
+- * This module provides TCP/IP networking routines.
+- */
+-#define POLARSSL_NET_C
+-
+-/**
+- * \def POLARSSL_PADLOCK_C
+- *
+- * Enable VIA Padlock support on x86.
+- *
+- * Module:  library/padlock.c
+- * Caller:  library/aes.c
+- *
+- * This modules adds support for the VIA PadLock on x86.
+-#define POLARSSL_PADLOCK_C
+- */
+-
+-/**
+- * \def POLARSSL_PBKDF2_C
+- *
+- * Enable PKCS#5 PBKDF2 key derivation function
+- *
+- * Module:  library/pbkdf2.c
+- *
+- * Requires: POLARSSL_MD_C
+- *
+- * This module adds support for the PKCS#5 PBKDF2 key derivation function.
+-#define POLARSSL_PBKDF2_C
+- */
+-
+-/**
+- * \def POLARSSL_PEM_C
+- *
+- * Enable PEM decoding
+- *
+- * Module:  library/pem.c
+- * Caller:  library/x509parse.c
+- *
+- * Requires: POLARSSL_BASE64_C
+- *
+- * This modules adds support for decoding PEM files.
+- */
+-#define POLARSSL_PEM_C
+-
+-/**
+- * \def POLARSSL_PKCS11_C
+- *
+- * Enable wrapper for PKCS#11 smartcard support.
+- *
+- * Module:  library/ssl_srv.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *
+- * Requires: POLARSSL_SSL_TLS_C
+- *
+- * This module enables SSL/TLS PKCS #11 smartcard support.
+- * Requires the presence of the PKCS#11 helper library (libpkcs11-helper)
+-#define POLARSSL_PKCS11_C
+- */
+-
+-/**
+- * \def POLARSSL_RSA_C
+- *
+- * Enable the RSA public-key cryptosystem.
+- *
+- * Module:  library/rsa.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *          library/ssl_tls.c
+- *          library/x509.c
+- *
+- * Requires: POLARSSL_BIGNUM_C
+- *
+- * This module is required for SSL/TLS and MD5-signed certificates.
+- */
+-#define POLARSSL_RSA_C
+-
+-/**
+- * \def POLARSSL_SHA1_C
+- *
+- * Enable the SHA1 cryptographic hash algorithm.
+- *
+- * Module:  library/sha1.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *          library/ssl_tls.c
+- *          library/x509parse.c
+- *
+- * This module is required for SSL/TLS and SHA1-signed certificates.
+-#define POLARSSL_SHA1_C
+- */
+-
+-/**
+- * \def POLARSSL_SHA2_C
+- *
+- * Enable the SHA-224 and SHA-256 cryptographic hash algorithms.
+- *
+- * Module:  library/sha2.c
+- * Caller:  library/md_wrap.c
+- *          library/x509parse.c
+- *
+- * This module adds support for SHA-224 and SHA-256.
+- * This module is required for the SSL/TLS 1.2 PRF function.
+- */
+-#define POLARSSL_SHA2_C
+-
+-/**
+- * \def POLARSSL_SHA4_C
+- *
+- * Enable the SHA-384 and SHA-512 cryptographic hash algorithms.
+- *
+- * Module:  library/sha4.c
+- * Caller:  library/md_wrap.c
+- *          library/x509parse.c
+- *
+- * This module adds support for SHA-384 and SHA-512.
+- */
+-#define POLARSSL_SHA4_C
+-
+-/**
+- * \def POLARSSL_SSL_CACHE_C
+- *
+- * Enable simple SSL cache implementation.
+- *
+- * Module:  library/ssl_cache.c
+- * Caller:
+- *
+- * Requires: POLARSSL_SSL_CACHE_C
+- */
+-#define POLARSSL_SSL_CACHE_C
+-
+-/**
+- * \def POLARSSL_SSL_CLI_C
+- *
+- * Enable the SSL/TLS client code.
+- *
+- * Module:  library/ssl_cli.c
+- * Caller:
+- *
+- * Requires: POLARSSL_SSL_TLS_C
+- *
+- * This module is required for SSL/TLS client support.
+- */
+-#define POLARSSL_SSL_CLI_C
+-
+-/**
+- * \def POLARSSL_SSL_SRV_C
+- *
+- * Enable the SSL/TLS server code.
+- *
+- * Module:  library/ssl_srv.c
+- * Caller:
+- *
+- * Requires: POLARSSL_SSL_TLS_C
+- *
+- * This module is required for SSL/TLS server support.
+- */
+-#define POLARSSL_SSL_SRV_C
+-
+-/**
+- * \def POLARSSL_SSL_TLS_C
+- *
+- * Enable the generic SSL/TLS code.
+- *
+- * Module:  library/ssl_tls.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *
+- * Requires: POLARSSL_MD5_C, POLARSSL_SHA1_C, POLARSSL_X509_PARSE_C
+- *
+- * This module is required for SSL/TLS.
+- */
+-#define POLARSSL_SSL_TLS_C
+-
+-/**
+- * \def POLARSSL_TIMING_C
+- *
+- * Enable the portable timing interface.
+- *
+- * Module:  library/timing.c
+- * Caller:  library/havege.c
+- *
+- * This module is used by the HAVEGE random number generator.
+- */
+-#define POLARSSL_TIMING_C
+-
+-/**
+- * \def POLARSSL_VERSION_C
+- *
+- * Enable run-time version information.
+- *
+- * Module:  library/version.c
+- *
+- * This module provides run-time version information.
+- */
+-#define POLARSSL_VERSION_C
+-
+-/**
+- * \def POLARSSL_X509_PARSE_C
+- *
+- * Enable X.509 certificate parsing.
+- *
+- * Module:  library/x509parse.c
+- * Caller:  library/ssl_cli.c
+- *          library/ssl_srv.c
+- *          library/ssl_tls.c
+- *
+- * Requires: POLARSSL_ASN1_PARSE_C, POLARSSL_BIGNUM_C, POLARSSL_RSA_C
+- *
+- * This module is required for X.509 certificate parsing.
+- */
+-#define POLARSSL_X509_PARSE_C
+-
+-/**
+- * \def POLARSSL_X509_WRITE_C
+- *
+- * Enable X.509 buffer writing.
+- *
+- * Module:  library/x509write.c
+- *
+- * Requires: POLARSSL_BIGNUM_C, POLARSSL_RSA_C
+- *
+- * This module is required for X.509 certificate request writing.
+- */
+-#define POLARSSL_X509_WRITE_C
+-
+-/**
+- * \def POLARSSL_XTEA_C
+- *
+- * Enable the XTEA block cipher.
+- *
+- * Module:  library/xtea.c
+- * Caller:
+- */
+-#define POLARSSL_XTEA_C
+-/* \} name */
+-
+-#endif /* config.h */
+diff --git a/drivers/amlogic/secure/polarssl_aes/include/polarssl/sha2.h b/drivers/amlogic/secure/polarssl_aes/include/polarssl/sha2.h
+deleted file mode 100755
+index 917204138bbb..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/include/polarssl/sha2.h
++++ /dev/null
+@@ -1,171 +0,0 @@
+-/**
+- * \file sha2.h
+- *
+- * \brief SHA-224 and SHA-256 cryptographic hash function
+- *
+- *  Copyright (C) 2006-2010, Brainspark B.V.
+- *
+- *  This file is part of PolarSSL (http://www.polarssl.org)
+- *  Lead Maintainer: Paul Bakker <polarssl_maintainer at polarssl.org>
+- *
+- *  All rights reserved.
+- *
+- *  This program is free software; you can redistribute it and/or modify
+- *  it under the terms of the GNU General Public License as published by
+- *  the Free Software Foundation; either version 2 of the License, or
+- *  (at your option) any later version.
+- *
+- *  This program is distributed in the hope that it will be useful,
+- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- *  GNU General Public License for more details.
+- *
+- *  You should have received a copy of the GNU General Public License along
+- *  with this program; if not, write to the Free Software Foundation, Inc.,
+- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-#ifndef POLARSSL_SHA2_H
+-#define POLARSSL_SHA2_H
+-
+-#include <linux/string.h>
+-
+-#ifdef _MSC_VER
+-#include <basetsd.h>
+-typedef UINT32 uint32_t;
+-#else
+-//#include <inttypes.h>
+-#include <linux/types.h>
+-#endif
+-
+-#define POLARSSL_ERR_SHA2_FILE_IO_ERROR                -0x0078  /**< Read/write error in file. */
+-
+-/**
+- * \brief          SHA-256 context structure
+- */
+-typedef struct
+-{
+-    uint32_t total[2];          /*!< number of bytes processed  */
+-    uint32_t state[8];          /*!< intermediate digest state  */
+-    unsigned char buffer[64];   /*!< data block being processed */
+-
+-    unsigned char ipad[64];     /*!< HMAC: inner padding        */
+-    unsigned char opad[64];     /*!< HMAC: outer padding        */
+-    int is224;                  /*!< 0 => SHA-256, else SHA-224 */
+-}
+-sha2_context;
+-
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-
+-/**
+- * \brief          SHA-256 context setup
+- *
+- * \param ctx      context to be initialized
+- * \param is224    0 = use SHA256, 1 = use SHA224
+- */
+-void sha2_starts( sha2_context *ctx, int is224 );
+-
+-/**
+- * \brief          SHA-256 process buffer
+- *
+- * \param ctx      SHA-256 context
+- * \param input    buffer holding the  data
+- * \param ilen     length of the input data
+- */
+-void sha2_update( sha2_context *ctx, const unsigned char *input, size_t ilen );
+-
+-/**
+- * \brief          SHA-256 final digest
+- *
+- * \param ctx      SHA-256 context
+- * \param output   SHA-224/256 checksum result
+- */
+-void sha2_finish( sha2_context *ctx, unsigned char output[32] );
+-
+-/**
+- * \brief          Output = SHA-256( input buffer )
+- *
+- * \param input    buffer holding the  data
+- * \param ilen     length of the input data
+- * \param output   SHA-224/256 checksum result
+- * \param is224    0 = use SHA256, 1 = use SHA224
+- */
+-void sha2( const unsigned char *input, size_t ilen,
+-           unsigned char output[32], int is224 );
+-
+-/**
+- * \brief          Output = SHA-256( file contents )
+- *
+- * \param path     input file name
+- * \param output   SHA-224/256 checksum result
+- * \param is224    0 = use SHA256, 1 = use SHA224
+- *
+- * \return         0 if successful, or POLARSSL_ERR_SHA2_FILE_IO_ERROR
+- */
+-int sha2_file( const char *path, unsigned char output[32], int is224 );
+-
+-/**
+- * \brief          SHA-256 HMAC context setup
+- *
+- * \param ctx      HMAC context to be initialized
+- * \param key      HMAC secret key
+- * \param keylen   length of the HMAC key
+- * \param is224    0 = use SHA256, 1 = use SHA224
+- */
+-void sha2_hmac_starts( sha2_context *ctx, const unsigned char *key, size_t keylen,
+-                       int is224 );
+-
+-/**
+- * \brief          SHA-256 HMAC process buffer
+- *
+- * \param ctx      HMAC context
+- * \param input    buffer holding the  data
+- * \param ilen     length of the input data
+- */
+-void sha2_hmac_update( sha2_context *ctx, const unsigned char *input, size_t ilen );
+-
+-/**
+- * \brief          SHA-256 HMAC final digest
+- *
+- * \param ctx      HMAC context
+- * \param output   SHA-224/256 HMAC checksum result
+- */
+-void sha2_hmac_finish( sha2_context *ctx, unsigned char output[32] );
+-
+-/**
+- * \brief          SHA-256 HMAC context reset
+- *
+- * \param ctx      HMAC context to be reset
+- */
+-void sha2_hmac_reset( sha2_context *ctx );
+-
+-/**
+- * \brief          Output = HMAC-SHA-256( hmac key, input buffer )
+- *
+- * \param key      HMAC secret key
+- * \param keylen   length of the HMAC key
+- * \param input    buffer holding the  data
+- * \param ilen     length of the input data
+- * \param output   HMAC-SHA-224/256 result
+- * \param is224    0 = use SHA256, 1 = use SHA224
+- */
+-void sha2_hmac( const unsigned char *key, size_t keylen,
+-                const unsigned char *input, size_t ilen,
+-                unsigned char output[32], int is224 );
+-
+-/**
+- * \brief          Checkup routine
+- *
+- * \return         0 if successful, or 1 if the test failed
+- */
+-int sha2_self_test( int verbose );
+-
+-/* Internal use */
+-void sha2_process( sha2_context *ctx, const unsigned char data[64] );
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#endif /* sha2.h */
+diff --git a/drivers/amlogic/secure/polarssl_aes/sha2.c b/drivers/amlogic/secure/polarssl_aes/sha2.c
+deleted file mode 100755
+index af3a6eed90b2..000000000000
+--- a/drivers/amlogic/secure/polarssl_aes/sha2.c
++++ /dev/null
+@@ -1,705 +0,0 @@
+-/*
+- *  FIPS-180-2 compliant SHA-256 implementation
+- *
+- *  Copyright (C) 2006-2010, Brainspark B.V.
+- *
+- *  This file is part of PolarSSL (http://www.polarssl.org)
+- *  Lead Maintainer: Paul Bakker <polarssl_maintainer at polarssl.org>
+- *
+- *  All rights reserved.
+- *
+- *  This program is free software; you can redistribute it and/or modify
+- *  it under the terms of the GNU General Public License as published by
+- *  the Free Software Foundation; either version 2 of the License, or
+- *  (at your option) any later version.
+- *
+- *  This program is distributed in the hope that it will be useful,
+- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- *  GNU General Public License for more details.
+- *
+- *  You should have received a copy of the GNU General Public License along
+- *  with this program; if not, write to the Free Software Foundation, Inc.,
+- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-/*
+- *  The SHA-256 Secure Hash Standard was published by NIST in 2002.
+- *
+- *  http://csrc.nist.gov/publications/fips/fips180-2/fips180-2.pdf
+- */
+-
+-#include "polarssl/config.h"
+-
+-#if defined(POLARSSL_SHA2_C)
+-
+-#include "polarssl/sha2.h"
+-
+-#if defined(POLARSSL_FS_IO) || defined(POLARSSL_SELF_TEST)
+-#include <stdio.h>
+-#endif
+-
+-/*
+- * 32-bit integer manipulation macros (big endian)
+- */
+-#ifndef GET_UINT32_BE
+-#define GET_UINT32_BE(n,b,i)                            \
+-{                                                       \
+-    (n) = ( (uint32_t) (b)[(i)    ] << 24 )             \
+-        | ( (uint32_t) (b)[(i) + 1] << 16 )             \
+-        | ( (uint32_t) (b)[(i) + 2] <<  8 )             \
+-        | ( (uint32_t) (b)[(i) + 3]       );            \
+-}
+-#endif
+-
+-#ifndef PUT_UINT32_BE
+-#define PUT_UINT32_BE(n,b,i)                            \
+-{                                                       \
+-    (b)[(i)    ] = (unsigned char) ( (n) >> 24 );       \
+-    (b)[(i) + 1] = (unsigned char) ( (n) >> 16 );       \
+-    (b)[(i) + 2] = (unsigned char) ( (n) >>  8 );       \
+-    (b)[(i) + 3] = (unsigned char) ( (n)       );       \
+-}
+-#endif
+-
+-/*
+- * SHA-256 context setup
+- */
+-void sha2_starts( sha2_context *ctx, int is224 )
+-{
+-    ctx->total[0] = 0;
+-    ctx->total[1] = 0;
+-
+-    if( is224 == 0 )
+-    {
+-        /* SHA-256 */
+-        ctx->state[0] = 0x6A09E667;
+-        ctx->state[1] = 0xBB67AE85;
+-        ctx->state[2] = 0x3C6EF372;
+-        ctx->state[3] = 0xA54FF53A;
+-        ctx->state[4] = 0x510E527F;
+-        ctx->state[5] = 0x9B05688C;
+-        ctx->state[6] = 0x1F83D9AB;
+-        ctx->state[7] = 0x5BE0CD19;
+-    }
+-    else
+-    {
+-        /* SHA-224 */
+-        ctx->state[0] = 0xC1059ED8;
+-        ctx->state[1] = 0x367CD507;
+-        ctx->state[2] = 0x3070DD17;
+-        ctx->state[3] = 0xF70E5939;
+-        ctx->state[4] = 0xFFC00B31;
+-        ctx->state[5] = 0x68581511;
+-        ctx->state[6] = 0x64F98FA7;
+-        ctx->state[7] = 0xBEFA4FA4;
+-    }
+-
+-    ctx->is224 = is224;
+-}
+-
+-void sha2_process( sha2_context *ctx, const unsigned char data[64] )
+-{
+-    uint32_t temp1, temp2, W[64];
+-    uint32_t A, B, C, D, E, F, G, H;
+-
+-    GET_UINT32_BE( W[ 0], data,  0 );
+-    GET_UINT32_BE( W[ 1], data,  4 );
+-    GET_UINT32_BE( W[ 2], data,  8 );
+-    GET_UINT32_BE( W[ 3], data, 12 );
+-    GET_UINT32_BE( W[ 4], data, 16 );
+-    GET_UINT32_BE( W[ 5], data, 20 );
+-    GET_UINT32_BE( W[ 6], data, 24 );
+-    GET_UINT32_BE( W[ 7], data, 28 );
+-    GET_UINT32_BE( W[ 8], data, 32 );
+-    GET_UINT32_BE( W[ 9], data, 36 );
+-    GET_UINT32_BE( W[10], data, 40 );
+-    GET_UINT32_BE( W[11], data, 44 );
+-    GET_UINT32_BE( W[12], data, 48 );
+-    GET_UINT32_BE( W[13], data, 52 );
+-    GET_UINT32_BE( W[14], data, 56 );
+-    GET_UINT32_BE( W[15], data, 60 );
+-
+-#define  SHR(x,n) ((x & 0xFFFFFFFF) >> n)
+-#define ROTR(x,n) (SHR(x,n) | (x << (32 - n)))
+-
+-#define S0(x) (ROTR(x, 7) ^ ROTR(x,18) ^  SHR(x, 3))
+-#define S1(x) (ROTR(x,17) ^ ROTR(x,19) ^  SHR(x,10))
+-
+-#define S2(x) (ROTR(x, 2) ^ ROTR(x,13) ^ ROTR(x,22))
+-#define S3(x) (ROTR(x, 6) ^ ROTR(x,11) ^ ROTR(x,25))
+-
+-#define F0(x,y,z) ((x & y) | (z & (x | y)))
+-#define F1(x,y,z) (z ^ (x & (y ^ z)))
+-
+-#define R(t)                                    \
+-(                                               \
+-    W[t] = S1(W[t -  2]) + W[t -  7] +          \
+-           S0(W[t - 15]) + W[t - 16]            \
+-)
+-
+-#define P(a,b,c,d,e,f,g,h,x,K)                  \
+-{                                               \
+-    temp1 = h + S3(e) + F1(e,f,g) + K + x;      \
+-    temp2 = S2(a) + F0(a,b,c);                  \
+-    d += temp1; h = temp1 + temp2;              \
+-}
+-
+-    A = ctx->state[0];
+-    B = ctx->state[1];
+-    C = ctx->state[2];
+-    D = ctx->state[3];
+-    E = ctx->state[4];
+-    F = ctx->state[5];
+-    G = ctx->state[6];
+-    H = ctx->state[7];
+-
+-    P( A, B, C, D, E, F, G, H, W[ 0], 0x428A2F98 );
+-    P( H, A, B, C, D, E, F, G, W[ 1], 0x71374491 );
+-    P( G, H, A, B, C, D, E, F, W[ 2], 0xB5C0FBCF );
+-    P( F, G, H, A, B, C, D, E, W[ 3], 0xE9B5DBA5 );
+-    P( E, F, G, H, A, B, C, D, W[ 4], 0x3956C25B );
+-    P( D, E, F, G, H, A, B, C, W[ 5], 0x59F111F1 );
+-    P( C, D, E, F, G, H, A, B, W[ 6], 0x923F82A4 );
+-    P( B, C, D, E, F, G, H, A, W[ 7], 0xAB1C5ED5 );
+-    P( A, B, C, D, E, F, G, H, W[ 8], 0xD807AA98 );
+-    P( H, A, B, C, D, E, F, G, W[ 9], 0x12835B01 );
+-    P( G, H, A, B, C, D, E, F, W[10], 0x243185BE );
+-    P( F, G, H, A, B, C, D, E, W[11], 0x550C7DC3 );
+-    P( E, F, G, H, A, B, C, D, W[12], 0x72BE5D74 );
+-    P( D, E, F, G, H, A, B, C, W[13], 0x80DEB1FE );
+-    P( C, D, E, F, G, H, A, B, W[14], 0x9BDC06A7 );
+-    P( B, C, D, E, F, G, H, A, W[15], 0xC19BF174 );
+-    P( A, B, C, D, E, F, G, H, R(16), 0xE49B69C1 );
+-    P( H, A, B, C, D, E, F, G, R(17), 0xEFBE4786 );
+-    P( G, H, A, B, C, D, E, F, R(18), 0x0FC19DC6 );
+-    P( F, G, H, A, B, C, D, E, R(19), 0x240CA1CC );
+-    P( E, F, G, H, A, B, C, D, R(20), 0x2DE92C6F );
+-    P( D, E, F, G, H, A, B, C, R(21), 0x4A7484AA );
+-    P( C, D, E, F, G, H, A, B, R(22), 0x5CB0A9DC );
+-    P( B, C, D, E, F, G, H, A, R(23), 0x76F988DA );
+-    P( A, B, C, D, E, F, G, H, R(24), 0x983E5152 );
+-    P( H, A, B, C, D, E, F, G, R(25), 0xA831C66D );
+-    P( G, H, A, B, C, D, E, F, R(26), 0xB00327C8 );
+-    P( F, G, H, A, B, C, D, E, R(27), 0xBF597FC7 );
+-    P( E, F, G, H, A, B, C, D, R(28), 0xC6E00BF3 );
+-    P( D, E, F, G, H, A, B, C, R(29), 0xD5A79147 );
+-    P( C, D, E, F, G, H, A, B, R(30), 0x06CA6351 );
+-    P( B, C, D, E, F, G, H, A, R(31), 0x14292967 );
+-    P( A, B, C, D, E, F, G, H, R(32), 0x27B70A85 );
+-    P( H, A, B, C, D, E, F, G, R(33), 0x2E1B2138 );
+-    P( G, H, A, B, C, D, E, F, R(34), 0x4D2C6DFC );
+-    P( F, G, H, A, B, C, D, E, R(35), 0x53380D13 );
+-    P( E, F, G, H, A, B, C, D, R(36), 0x650A7354 );
+-    P( D, E, F, G, H, A, B, C, R(37), 0x766A0ABB );
+-    P( C, D, E, F, G, H, A, B, R(38), 0x81C2C92E );
+-    P( B, C, D, E, F, G, H, A, R(39), 0x92722C85 );
+-    P( A, B, C, D, E, F, G, H, R(40), 0xA2BFE8A1 );
+-    P( H, A, B, C, D, E, F, G, R(41), 0xA81A664B );
+-    P( G, H, A, B, C, D, E, F, R(42), 0xC24B8B70 );
+-    P( F, G, H, A, B, C, D, E, R(43), 0xC76C51A3 );
+-    P( E, F, G, H, A, B, C, D, R(44), 0xD192E819 );
+-    P( D, E, F, G, H, A, B, C, R(45), 0xD6990624 );
+-    P( C, D, E, F, G, H, A, B, R(46), 0xF40E3585 );
+-    P( B, C, D, E, F, G, H, A, R(47), 0x106AA070 );
+-    P( A, B, C, D, E, F, G, H, R(48), 0x19A4C116 );
+-    P( H, A, B, C, D, E, F, G, R(49), 0x1E376C08 );
+-    P( G, H, A, B, C, D, E, F, R(50), 0x2748774C );
+-    P( F, G, H, A, B, C, D, E, R(51), 0x34B0BCB5 );
+-    P( E, F, G, H, A, B, C, D, R(52), 0x391C0CB3 );
+-    P( D, E, F, G, H, A, B, C, R(53), 0x4ED8AA4A );
+-    P( C, D, E, F, G, H, A, B, R(54), 0x5B9CCA4F );
+-    P( B, C, D, E, F, G, H, A, R(55), 0x682E6FF3 );
+-    P( A, B, C, D, E, F, G, H, R(56), 0x748F82EE );
+-    P( H, A, B, C, D, E, F, G, R(57), 0x78A5636F );
+-    P( G, H, A, B, C, D, E, F, R(58), 0x84C87814 );
+-    P( F, G, H, A, B, C, D, E, R(59), 0x8CC70208 );
+-    P( E, F, G, H, A, B, C, D, R(60), 0x90BEFFFA );
+-    P( D, E, F, G, H, A, B, C, R(61), 0xA4506CEB );
+-    P( C, D, E, F, G, H, A, B, R(62), 0xBEF9A3F7 );
+-    P( B, C, D, E, F, G, H, A, R(63), 0xC67178F2 );
+-
+-    ctx->state[0] += A;
+-    ctx->state[1] += B;
+-    ctx->state[2] += C;
+-    ctx->state[3] += D;
+-    ctx->state[4] += E;
+-    ctx->state[5] += F;
+-    ctx->state[6] += G;
+-    ctx->state[7] += H;
+-}
+-
+-/*
+- * SHA-256 process buffer
+- */
+-void sha2_update( sha2_context *ctx, const unsigned char *input, size_t ilen )
+-{
+-    size_t fill;
+-    uint32_t left;
+-
+-    if( ilen <= 0 )
+-        return;
+-
+-    left = ctx->total[0] & 0x3F;
+-    fill = 64 - left;
+-
+-    ctx->total[0] += (uint32_t) ilen;
+-    ctx->total[0] &= 0xFFFFFFFF;
+-
+-    if( ctx->total[0] < (uint32_t) ilen )
+-        ctx->total[1]++;
+-
+-    if( left && ilen >= fill )
+-    {
+-        memcpy( (void *) (ctx->buffer + left),
+-                (void *) input, fill );
+-        sha2_process( ctx, ctx->buffer );
+-        input += fill;
+-        ilen  -= fill;
+-        left = 0;
+-    }
+-
+-    while( ilen >= 64 )
+-    {
+-        sha2_process( ctx, input );
+-        input += 64;
+-        ilen  -= 64;
+-    }
+-
+-    if( ilen > 0 )
+-    {
+-        memcpy( (void *) (ctx->buffer + left),
+-                (void *) input, ilen );
+-    }
+-}
+-
+-static const unsigned char sha2_padding[64] =
+-{
+- 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+-};
+-
+-/*
+- * SHA-256 final digest
+- */
+-void sha2_finish( sha2_context *ctx, unsigned char output[32] )
+-{
+-    uint32_t last, padn;
+-    uint32_t high, low;
+-    unsigned char msglen[8];
+-
+-    high = ( ctx->total[0] >> 29 )
+-         | ( ctx->total[1] <<  3 );
+-    low  = ( ctx->total[0] <<  3 );
+-
+-    PUT_UINT32_BE( high, msglen, 0 );
+-    PUT_UINT32_BE( low,  msglen, 4 );
+-
+-    last = ctx->total[0] & 0x3F;
+-    padn = ( last < 56 ) ? ( 56 - last ) : ( 120 - last );
+-
+-    sha2_update( ctx, (unsigned char *) sha2_padding, padn );
+-    sha2_update( ctx, msglen, 8 );
+-
+-    PUT_UINT32_BE( ctx->state[0], output,  0 );
+-    PUT_UINT32_BE( ctx->state[1], output,  4 );
+-    PUT_UINT32_BE( ctx->state[2], output,  8 );
+-    PUT_UINT32_BE( ctx->state[3], output, 12 );
+-    PUT_UINT32_BE( ctx->state[4], output, 16 );
+-    PUT_UINT32_BE( ctx->state[5], output, 20 );
+-    PUT_UINT32_BE( ctx->state[6], output, 24 );
+-
+-    if( ctx->is224 == 0 )
+-        PUT_UINT32_BE( ctx->state[7], output, 28 );
+-}
+-
+-/*
+- * output = SHA-256( input buffer )
+- */
+-void sha2( const unsigned char *input, size_t ilen,
+-           unsigned char output[32], int is224 )
+-{
+-    sha2_context ctx;
+-
+-    sha2_starts( &ctx, is224 );
+-    sha2_update( &ctx, input, ilen );
+-    sha2_finish( &ctx, output );
+-
+-    memset( &ctx, 0, sizeof( sha2_context ) );
+-}
+-
+-#if defined(POLARSSL_FS_IO)
+-/*
+- * output = SHA-256( file contents )
+- */
+-int sha2_file( const char *path, unsigned char output[32], int is224 )
+-{
+-    FILE *f;
+-    size_t n;
+-    sha2_context ctx;
+-    unsigned char buf[1024];
+-
+-    if( ( f = fopen( path, "rb" ) ) == NULL )
+-        return( POLARSSL_ERR_SHA2_FILE_IO_ERROR );
+-
+-    sha2_starts( &ctx, is224 );
+-
+-    while( ( n = fread( buf, 1, sizeof( buf ), f ) ) > 0 )
+-        sha2_update( &ctx, buf, n );
+-
+-    sha2_finish( &ctx, output );
+-
+-    memset( &ctx, 0, sizeof( sha2_context ) );
+-
+-    if( ferror( f ) != 0 )
+-    {
+-        fclose( f );
+-        return( POLARSSL_ERR_SHA2_FILE_IO_ERROR );
+-    }
+-
+-    fclose( f );
+-    return( 0 );
+-}
+-#endif /* POLARSSL_FS_IO */
+-
+-/*
+- * SHA-256 HMAC context setup
+- */
+-void sha2_hmac_starts( sha2_context *ctx, const unsigned char *key, size_t keylen,
+-                       int is224 )
+-{
+-    size_t i;
+-    unsigned char sum[32];
+-
+-    if( keylen > 64 )
+-    {
+-        sha2( key, keylen, sum, is224 );
+-        keylen = ( is224 ) ? 28 : 32;
+-        key = sum;
+-    }
+-
+-    memset( ctx->ipad, 0x36, 64 );
+-    memset( ctx->opad, 0x5C, 64 );
+-
+-    for( i = 0; i < keylen; i++ )
+-    {
+-        ctx->ipad[i] = (unsigned char)( ctx->ipad[i] ^ key[i] );
+-        ctx->opad[i] = (unsigned char)( ctx->opad[i] ^ key[i] );
+-    }
+-
+-    sha2_starts( ctx, is224 );
+-    sha2_update( ctx, ctx->ipad, 64 );
+-
+-    memset( sum, 0, sizeof( sum ) );
+-}
+-
+-/*
+- * SHA-256 HMAC process buffer
+- */
+-void sha2_hmac_update( sha2_context *ctx, const unsigned char *input, size_t ilen )
+-{
+-    sha2_update( ctx, input, ilen );
+-}
+-
+-/*
+- * SHA-256 HMAC final digest
+- */
+-void sha2_hmac_finish( sha2_context *ctx, unsigned char output[32] )
+-{
+-    int is224, hlen;
+-    unsigned char tmpbuf[32];
+-
+-    is224 = ctx->is224;
+-    hlen = ( is224 == 0 ) ? 32 : 28;
+-
+-    sha2_finish( ctx, tmpbuf );
+-    sha2_starts( ctx, is224 );
+-    sha2_update( ctx, ctx->opad, 64 );
+-    sha2_update( ctx, tmpbuf, hlen );
+-    sha2_finish( ctx, output );
+-
+-    memset( tmpbuf, 0, sizeof( tmpbuf ) );
+-}
+-
+-/*
+- * SHA-256 HMAC context reset
+- */
+-void sha2_hmac_reset( sha2_context *ctx )
+-{
+-    sha2_starts( ctx, ctx->is224 );
+-    sha2_update( ctx, ctx->ipad, 64 );
+-}
+-
+-/*
+- * output = HMAC-SHA-256( hmac key, input buffer )
+- */
+-void sha2_hmac( const unsigned char *key, size_t keylen,
+-                const unsigned char *input, size_t ilen,
+-                unsigned char output[32], int is224 )
+-{
+-    sha2_context ctx;
+-
+-    sha2_hmac_starts( &ctx, key, keylen, is224 );
+-    sha2_hmac_update( &ctx, input, ilen );
+-    sha2_hmac_finish( &ctx, output );
+-
+-    memset( &ctx, 0, sizeof( sha2_context ) );
+-}
+-
+-#if defined(POLARSSL_SELF_TEST)
+-/*
+- * FIPS-180-2 test vectors
+- */
+-static unsigned char sha2_test_buf[3][57] = 
+-{
+-    { "abc" },
+-    { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" },
+-    { "" }
+-};
+-
+-static const int sha2_test_buflen[3] =
+-{
+-    3, 56, 1000
+-};
+-
+-static const unsigned char sha2_test_sum[6][32] =
+-{
+-    /*
+-     * SHA-224 test vectors
+-     */
+-    { 0x23, 0x09, 0x7D, 0x22, 0x34, 0x05, 0xD8, 0x22,
+-      0x86, 0x42, 0xA4, 0x77, 0xBD, 0xA2, 0x55, 0xB3,
+-      0x2A, 0xAD, 0xBC, 0xE4, 0xBD, 0xA0, 0xB3, 0xF7,
+-      0xE3, 0x6C, 0x9D, 0xA7 },
+-    { 0x75, 0x38, 0x8B, 0x16, 0x51, 0x27, 0x76, 0xCC,
+-      0x5D, 0xBA, 0x5D, 0xA1, 0xFD, 0x89, 0x01, 0x50,
+-      0xB0, 0xC6, 0x45, 0x5C, 0xB4, 0xF5, 0x8B, 0x19,
+-      0x52, 0x52, 0x25, 0x25 },
+-    { 0x20, 0x79, 0x46, 0x55, 0x98, 0x0C, 0x91, 0xD8,
+-      0xBB, 0xB4, 0xC1, 0xEA, 0x97, 0x61, 0x8A, 0x4B,
+-      0xF0, 0x3F, 0x42, 0x58, 0x19, 0x48, 0xB2, 0xEE,
+-      0x4E, 0xE7, 0xAD, 0x67 },
+-
+-    /*
+-     * SHA-256 test vectors
+-     */
+-    { 0xBA, 0x78, 0x16, 0xBF, 0x8F, 0x01, 0xCF, 0xEA,
+-      0x41, 0x41, 0x40, 0xDE, 0x5D, 0xAE, 0x22, 0x23,
+-      0xB0, 0x03, 0x61, 0xA3, 0x96, 0x17, 0x7A, 0x9C,
+-      0xB4, 0x10, 0xFF, 0x61, 0xF2, 0x00, 0x15, 0xAD },
+-    { 0x24, 0x8D, 0x6A, 0x61, 0xD2, 0x06, 0x38, 0xB8,
+-      0xE5, 0xC0, 0x26, 0x93, 0x0C, 0x3E, 0x60, 0x39,
+-      0xA3, 0x3C, 0xE4, 0x59, 0x64, 0xFF, 0x21, 0x67,
+-      0xF6, 0xEC, 0xED, 0xD4, 0x19, 0xDB, 0x06, 0xC1 },
+-    { 0xCD, 0xC7, 0x6E, 0x5C, 0x99, 0x14, 0xFB, 0x92,
+-      0x81, 0xA1, 0xC7, 0xE2, 0x84, 0xD7, 0x3E, 0x67,
+-      0xF1, 0x80, 0x9A, 0x48, 0xA4, 0x97, 0x20, 0x0E,
+-      0x04, 0x6D, 0x39, 0xCC, 0xC7, 0x11, 0x2C, 0xD0 }
+-};
+-
+-/*
+- * RFC 4231 test vectors
+- */
+-static unsigned char sha2_hmac_test_key[7][26] =
+-{
+-    { "\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B\x0B"
+-      "\x0B\x0B\x0B\x0B" },
+-    { "Jefe" },
+-    { "\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA"
+-      "\xAA\xAA\xAA\xAA" },
+-    { "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10"
+-      "\x11\x12\x13\x14\x15\x16\x17\x18\x19" },
+-    { "\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C\x0C"
+-      "\x0C\x0C\x0C\x0C" },
+-    { "" }, /* 0xAA 131 times */
+-    { "" }
+-};
+-
+-static const int sha2_hmac_test_keylen[7] =
+-{
+-    20, 4, 20, 25, 20, 131, 131
+-};
+-
+-static unsigned char sha2_hmac_test_buf[7][153] =
+-{
+-    { "Hi There" },
+-    { "what do ya want for nothing?" },
+-    { "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+-      "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+-      "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+-      "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+-      "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD" },
+-    { "\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD"
+-      "\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD"
+-      "\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD"
+-      "\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD"
+-      "\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD\xCD" },
+-    { "Test With Truncation" },
+-    { "Test Using Larger Than Block-Size Key - Hash Key First" },
+-    { "This is a test using a larger than block-size key "
+-      "and a larger than block-size data. The key needs to "
+-      "be hashed before being used by the HMAC algorithm." }
+-};
+-
+-static const int sha2_hmac_test_buflen[7] =
+-{
+-    8, 28, 50, 50, 20, 54, 152
+-};
+-
+-static const unsigned char sha2_hmac_test_sum[14][32] =
+-{
+-    /*
+-     * HMAC-SHA-224 test vectors
+-     */
+-    { 0x89, 0x6F, 0xB1, 0x12, 0x8A, 0xBB, 0xDF, 0x19,
+-      0x68, 0x32, 0x10, 0x7C, 0xD4, 0x9D, 0xF3, 0x3F,
+-      0x47, 0xB4, 0xB1, 0x16, 0x99, 0x12, 0xBA, 0x4F,
+-      0x53, 0x68, 0x4B, 0x22 },
+-    { 0xA3, 0x0E, 0x01, 0x09, 0x8B, 0xC6, 0xDB, 0xBF,
+-      0x45, 0x69, 0x0F, 0x3A, 0x7E, 0x9E, 0x6D, 0x0F,
+-      0x8B, 0xBE, 0xA2, 0xA3, 0x9E, 0x61, 0x48, 0x00,
+-      0x8F, 0xD0, 0x5E, 0x44 },
+-    { 0x7F, 0xB3, 0xCB, 0x35, 0x88, 0xC6, 0xC1, 0xF6,
+-      0xFF, 0xA9, 0x69, 0x4D, 0x7D, 0x6A, 0xD2, 0x64,
+-      0x93, 0x65, 0xB0, 0xC1, 0xF6, 0x5D, 0x69, 0xD1,
+-      0xEC, 0x83, 0x33, 0xEA },
+-    { 0x6C, 0x11, 0x50, 0x68, 0x74, 0x01, 0x3C, 0xAC,
+-      0x6A, 0x2A, 0xBC, 0x1B, 0xB3, 0x82, 0x62, 0x7C,
+-      0xEC, 0x6A, 0x90, 0xD8, 0x6E, 0xFC, 0x01, 0x2D,
+-      0xE7, 0xAF, 0xEC, 0x5A },
+-    { 0x0E, 0x2A, 0xEA, 0x68, 0xA9, 0x0C, 0x8D, 0x37,
+-      0xC9, 0x88, 0xBC, 0xDB, 0x9F, 0xCA, 0x6F, 0xA8 },
+-    { 0x95, 0xE9, 0xA0, 0xDB, 0x96, 0x20, 0x95, 0xAD,
+-      0xAE, 0xBE, 0x9B, 0x2D, 0x6F, 0x0D, 0xBC, 0xE2,
+-      0xD4, 0x99, 0xF1, 0x12, 0xF2, 0xD2, 0xB7, 0x27,
+-      0x3F, 0xA6, 0x87, 0x0E },
+-    { 0x3A, 0x85, 0x41, 0x66, 0xAC, 0x5D, 0x9F, 0x02,
+-      0x3F, 0x54, 0xD5, 0x17, 0xD0, 0xB3, 0x9D, 0xBD,
+-      0x94, 0x67, 0x70, 0xDB, 0x9C, 0x2B, 0x95, 0xC9,
+-      0xF6, 0xF5, 0x65, 0xD1 },
+-
+-    /*
+-     * HMAC-SHA-256 test vectors
+-     */
+-    { 0xB0, 0x34, 0x4C, 0x61, 0xD8, 0xDB, 0x38, 0x53,
+-      0x5C, 0xA8, 0xAF, 0xCE, 0xAF, 0x0B, 0xF1, 0x2B,
+-      0x88, 0x1D, 0xC2, 0x00, 0xC9, 0x83, 0x3D, 0xA7,
+-      0x26, 0xE9, 0x37, 0x6C, 0x2E, 0x32, 0xCF, 0xF7 },
+-    { 0x5B, 0xDC, 0xC1, 0x46, 0xBF, 0x60, 0x75, 0x4E,
+-      0x6A, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xC7,
+-      0x5A, 0x00, 0x3F, 0x08, 0x9D, 0x27, 0x39, 0x83,
+-      0x9D, 0xEC, 0x58, 0xB9, 0x64, 0xEC, 0x38, 0x43 },
+-    { 0x77, 0x3E, 0xA9, 0x1E, 0x36, 0x80, 0x0E, 0x46,
+-      0x85, 0x4D, 0xB8, 0xEB, 0xD0, 0x91, 0x81, 0xA7,
+-      0x29, 0x59, 0x09, 0x8B, 0x3E, 0xF8, 0xC1, 0x22,
+-      0xD9, 0x63, 0x55, 0x14, 0xCE, 0xD5, 0x65, 0xFE },
+-    { 0x82, 0x55, 0x8A, 0x38, 0x9A, 0x44, 0x3C, 0x0E,
+-      0xA4, 0xCC, 0x81, 0x98, 0x99, 0xF2, 0x08, 0x3A,
+-      0x85, 0xF0, 0xFA, 0xA3, 0xE5, 0x78, 0xF8, 0x07,
+-      0x7A, 0x2E, 0x3F, 0xF4, 0x67, 0x29, 0x66, 0x5B },
+-    { 0xA3, 0xB6, 0x16, 0x74, 0x73, 0x10, 0x0E, 0xE0,
+-      0x6E, 0x0C, 0x79, 0x6C, 0x29, 0x55, 0x55, 0x2B },
+-    { 0x60, 0xE4, 0x31, 0x59, 0x1E, 0xE0, 0xB6, 0x7F,
+-      0x0D, 0x8A, 0x26, 0xAA, 0xCB, 0xF5, 0xB7, 0x7F,
+-      0x8E, 0x0B, 0xC6, 0x21, 0x37, 0x28, 0xC5, 0x14,
+-      0x05, 0x46, 0x04, 0x0F, 0x0E, 0xE3, 0x7F, 0x54 },
+-    { 0x9B, 0x09, 0xFF, 0xA7, 0x1B, 0x94, 0x2F, 0xCB,
+-      0x27, 0x63, 0x5F, 0xBC, 0xD5, 0xB0, 0xE9, 0x44,
+-      0xBF, 0xDC, 0x63, 0x64, 0x4F, 0x07, 0x13, 0x93,
+-      0x8A, 0x7F, 0x51, 0x53, 0x5C, 0x3A, 0x35, 0xE2 }
+-};
+-
+-/*
+- * Checkup routine
+- */
+-int sha2_self_test( int verbose )
+-{
+-    int i, j, k, buflen;
+-    unsigned char buf[1024];
+-    unsigned char sha2sum[32];
+-    sha2_context ctx;
+-
+-    for( i = 0; i < 6; i++ )
+-    {
+-        j = i % 3;
+-        k = i < 3;
+-
+-        if( verbose != 0 )
+-            printf( "  SHA-%d test #%d: ", 256 - k * 32, j + 1 );
+-
+-        sha2_starts( &ctx, k );
+-
+-        if( j == 2 )
+-        {
+-            memset( buf, 'a', buflen = 1000 );
+-
+-            for( j = 0; j < 1000; j++ )
+-                sha2_update( &ctx, buf, buflen );
+-        }
+-        else
+-            sha2_update( &ctx, sha2_test_buf[j],
+-                               sha2_test_buflen[j] );
+-
+-        sha2_finish( &ctx, sha2sum );
+-
+-        if( memcmp( sha2sum, sha2_test_sum[i], 32 - k * 4 ) != 0 )
+-        {
+-            if( verbose != 0 )
+-                printf( "failed\n" );
+-
+-            return( 1 );
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-
+-    for( i = 0; i < 14; i++ )
+-    {
+-        j = i % 7;
+-        k = i < 7;
+-
+-        if( verbose != 0 )
+-            printf( "  HMAC-SHA-%d test #%d: ", 256 - k * 32, j + 1 );
+-
+-        if( j == 5 || j == 6 )
+-        {
+-            memset( buf, '\xAA', buflen = 131 );
+-            sha2_hmac_starts( &ctx, buf, buflen, k );
+-        }
+-        else
+-            sha2_hmac_starts( &ctx, sha2_hmac_test_key[j],
+-                                    sha2_hmac_test_keylen[j], k );
+-
+-        sha2_hmac_update( &ctx, sha2_hmac_test_buf[j],
+-                                sha2_hmac_test_buflen[j] );
+-
+-        sha2_hmac_finish( &ctx, sha2sum );
+-
+-        buflen = ( j == 4 ) ? 16 : 32 - k * 4;
+-
+-        if( memcmp( sha2sum, sha2_hmac_test_sum[i], buflen ) != 0 )
+-        {
+-            if( verbose != 0 )
+-                printf( "failed\n" );
+-
+-            return( 1 );
+-        }
+-
+-        if( verbose != 0 )
+-            printf( "passed\n" );
+-    }
+-
+-    if( verbose != 0 )
+-        printf( "\n" );
+-
+-    return( 0 );
+-}
+-
+-#endif
+-
+-#endif
+-- 
+2.19.0
+

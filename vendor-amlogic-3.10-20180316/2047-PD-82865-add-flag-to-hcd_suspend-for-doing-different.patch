@@ -1,0 +1,96 @@
+From fc30944967f8ba1aa423f52ce3c1665922dce547 Mon Sep 17 00:00:00 2001
+From: "qi.duan" <qi.duan@amlogic.com>
+Date: Thu, 21 Nov 2013 18:22:11 +0800
+Subject: [PATCH 2047/5965] PD#82865 add flag to hcd_suspend for doing
+ different between pm_runtime suspend and real suspend
+
+---
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c       | 3 ++-
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.h       | 1 +
+ drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c | 7 +++++--
+ drivers/usb/core/hcd.c                              | 4 ++++
+ 4 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+index 93103f43ab85..c5f92c199bab 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.c
+@@ -497,7 +497,8 @@ static void dwc_otg_hcd_power_save(dwc_otg_hcd_t * hcd, int power_on)
+ 	}
+ 	
+ 	DWC_WRITE_REG32(&hcd->core_if->pcgcctl, pcgcctl.d32);
+-//	DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
++	if(!hcd->auto_pm_suspend_flag)
++		DWC_WRITE_REG32(&hcd->core_if->usb_peri_reg->dbg_uart,uart.d32);
+ }
+ /** dwc_otg_hcd suspend */
+ int dwc_otg_hcd_suspend(dwc_otg_hcd_t * hcd)
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.h b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.h
+index 368995e4ff5a..7c0109abfbba 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.h
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd.h
+@@ -575,6 +575,7 @@ struct dwc_otg_hcd {
+ 	uint64_t hfnum_other_frrem_accum_b;
+ #endif
+ 	uint8_t  ssplit_lock;
++	uint8_t  auto_pm_suspend_flag;
+ };
+ 
+ /** @name Transaction Execution Functions */
+diff --git a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
+index 17ac96a64784..5fd1eeeec01e 100755
+--- a/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
++++ b/drivers/amlogic/usb/dwc_otg/310/dwc_otg_hcd_linux.c
+@@ -713,10 +713,12 @@ void hcd_stop(struct usb_hcd *hcd)
+ int hcd_suspend(struct usb_hcd *hcd)
+ {
+ 	dwc_otg_hcd_t *dwc_otg_hcd = hcd_to_dwc_otg_hcd(hcd);
++	dwc_otg_hcd->auto_pm_suspend_flag = (hcd->flags>>31)&1;
+ 
+ 	DWC_DEBUGPL(DBG_HCD, "HCD SUSPEND\n");
+ 
+ 	dwc_otg_hcd_suspend(dwc_otg_hcd);
++	hcd->flags &= (~(1<<31));
+ 
+ 	return 0;
+ }
+@@ -725,11 +727,12 @@ int hcd_suspend(struct usb_hcd *hcd)
+ int hcd_resume(struct usb_hcd *hcd)
+ {
+ 	dwc_otg_hcd_t *dwc_otg_hcd = hcd_to_dwc_otg_hcd(hcd);
+-
++	dwc_otg_hcd->auto_pm_suspend_flag = (hcd->flags>>31)&1;
++	
+ 	DWC_DEBUGPL(DBG_HCD, "HCD RESUME\n");
+ 	
+ 	dwc_otg_hcd_resume(dwc_otg_hcd);
+-
++	hcd->flags &= (~(1<<31));
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/core/hcd.c b/drivers/usb/core/hcd.c
+index e551a376b8a8..c71200421024 100755
+--- a/drivers/usb/core/hcd.c
++++ b/drivers/usb/core/hcd.c
+@@ -2049,6 +2049,8 @@ int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg)
+ 	} else {
+ 		clear_bit(HCD_FLAG_RH_RUNNING, &hcd->flags);
+ 		hcd->state = HC_STATE_QUIESCING;
++		if(PMSG_IS_AUTO(msg))
++			hcd->flags |= (1<<31);
+ 		status = hcd->driver->bus_suspend(hcd);
+ 	}
+ 	if (status == 0) {
+@@ -2097,6 +2099,8 @@ int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg)
+ 		return 0;
+ 
+ 	hcd->state = HC_STATE_RESUMING;
++	if(PMSG_IS_AUTO(msg))
++		hcd->flags |= (1<<31);
+ 	status = hcd->driver->bus_resume(hcd);
+ 	clear_bit(HCD_FLAG_WAKEUP_PENDING, &hcd->flags);
+ 	if (status == 0) {
+-- 
+2.19.0
+

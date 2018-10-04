@@ -1,0 +1,304 @@
+From 6bf63d20b16920e0c516cd2e73be33aa6e54d0cc Mon Sep 17 00:00:00 2001
+From: "shi.liu" <shi.liu@amlogic.com>
+Date: Wed, 30 Oct 2013 22:45:14 +0800
+Subject: [PATCH 1558/5965] cpufreq:add cpufreq subsystem
+
+---
+ drivers/amlogic/cpufreq/meson-cpufreq.c | 13 ++++++----
+ drivers/cpufreq/Kconfig                 | 11 +++++++++
+ drivers/cpufreq/Kconfig.arm             |  1 +
+ drivers/cpufreq/cpufreq.c               |  9 ++++++-
+ drivers/cpufreq/cpufreq_governor.c      | 29 +++++++++++++++++++---
+ drivers/cpufreq/cpufreq_governor.h      | 33 ++++++++++++++++++++++++-
+ 6 files changed, 86 insertions(+), 10 deletions(-)
+ mode change 100644 => 100755 drivers/cpufreq/Kconfig
+ mode change 100644 => 100755 drivers/cpufreq/Kconfig.arm
+ mode change 100644 => 100755 drivers/cpufreq/cpufreq.c
+ mode change 100644 => 100755 drivers/cpufreq/cpufreq_governor.c
+ mode change 100644 => 100755 drivers/cpufreq/cpufreq_governor.h
+
+diff --git a/drivers/amlogic/cpufreq/meson-cpufreq.c b/drivers/amlogic/cpufreq/meson-cpufreq.c
+index db830dc5be3e..f8a571dd79f5 100755
+--- a/drivers/amlogic/cpufreq/meson-cpufreq.c
++++ b/drivers/amlogic/cpufreq/meson-cpufreq.c
+@@ -65,7 +65,8 @@ static struct cpufreq_frequency_table meson_freq_table[]=
+ 	{12	, 1296000  },
+ 	{13	, 1416000  },
+ 	{14	, 1512000  },
+-	{15	, CPUFREQ_TABLE_END},
++	{15	, 1608000  },
++	{16	, CPUFREQ_TABLE_END},
+ };
+ 
+ //static struct cpufreq_frequency_table *p_meson_freq_table;
+@@ -155,7 +156,7 @@ static int meson_cpufreq_target_locked(struct cpufreq_policy *policy,
+     }
+ 
+ 
+-    cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
++    cpufreq_notify_transition(policy, &freqs, CPUFREQ_PRECHANGE);
+ 
+ #ifndef CONFIG_CPU_FREQ_DEBUG
+     pr_debug("cpufreq-meson: CPU%d transition: %u --> %u\n",
+@@ -198,7 +199,7 @@ out:
+     if (ret) {
+         adjust_jiffies(freqInt != 0 ? freqInt : freqs.old, freqs.new);
+     }
+-    cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
++    cpufreq_notify_transition(policy, &freqs, CPUFREQ_POSTCHANGE);
+ 
+     return ret;
+ }
+@@ -240,17 +241,19 @@ static int meson_cpufreq_init(struct cpufreq_policy *policy)
+         printk(KERN_ERR "cpu %d on current thread error\n", policy->cpu);
+         return -1;
+     }
+-
++#if 0
+     /* Finish platform specific initialization */
+     freq_table = aml_dvfs_get_freq_table(AML_DVFS_ID_VCCK);
+     if (freq_table) {
+ 	    cpufreq_frequency_table_get_attr(freq_table,
+                                          policy->cpu);
+     } else {
++#endif
+ 	    cpufreq_frequency_table_get_attr(meson_freq_table,
+                                          policy->cpu);
++#if 0
+     }
+-
++#endif
+     freq_table = cpufreq_frequency_get_table(policy->cpu);
+ 	while(freq_table[index].frequency != CPUFREQ_TABLE_END)
+ 		index++;
+diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
+old mode 100644
+new mode 100755
+index 62236d633391..f50d04be7966
+--- a/drivers/cpufreq/Kconfig
++++ b/drivers/cpufreq/Kconfig
+@@ -90,6 +90,10 @@ config CPU_FREQ_DEFAULT_GOV_ONDEMAND
+ 	  Be aware that not all cpufreq drivers support the ondemand
+ 	  governor. If unsure have a look at the help section of the
+ 	  driver. Fallback governor will be the performance governor.
++config CPU_FREQ_DEFAULT_GOV_HOTPLUG
++	bool "hotplug"
++	select CPU_FREQ_GOV_HOTPLUG
++	help
+ 
+ config CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
+ 	bool "conservative"
+@@ -170,6 +174,13 @@ config CPU_FREQ_GOV_ONDEMAND
+ 
+ 	  If in doubt, say N.
+ 
++config CPU_FREQ_GOV_HOTPLUG
++	tristate "'hotplug' cpufreq policy governor"
++	select CPU_FREQ_TABLE
++	select CPU_FREQ_GOV_COMMON
++	depends on SMP
++	default y
++	help
+ config CPU_FREQ_GOV_INTERACTIVE
+ 	tristate "'interactive' cpufreq policy governor"
+ 	help
+diff --git a/drivers/cpufreq/Kconfig.arm b/drivers/cpufreq/Kconfig.arm
+old mode 100644
+new mode 100755
+index 6e57543fe0b9..a106a4f8b385
+--- a/drivers/cpufreq/Kconfig.arm
++++ b/drivers/cpufreq/Kconfig.arm
+@@ -150,3 +150,4 @@ config ARM_SPEAR_CPUFREQ
+ 	default y
+ 	help
+ 	  This adds the CPUFreq driver support for SPEAr SOCs.
++source "drivers/amlogic/cpufreq/Kconfig"
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+old mode 100644
+new mode 100755
+index 648554742a99..a3823d8aa5a2
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -410,15 +410,22 @@ static ssize_t store_##file_name					\
+ (struct cpufreq_policy *policy, const char *buf, size_t count)		\
+ {									\
+ 	unsigned int ret;						\
++	unsigned long freq;						\
+ 	struct cpufreq_policy new_policy;				\
+ 									\
+ 	ret = cpufreq_get_policy(&new_policy, policy->cpu);		\
+ 	if (ret)							\
+ 		return -EINVAL;						\
+ 									\
+-	ret = sscanf(buf, "%u", &new_policy.object);			\
++	ret = sscanf(buf, "%u", &freq);			\
+ 	if (ret != 1)							\
+ 		return -EINVAL;						\
++		\
++	if(freq > policy->cpuinfo.max_freq)	\
++		freq = policy->cpuinfo.max_freq;   \
++	if(freq < policy->cpuinfo.min_freq)	\
++		freq = policy->cpuinfo.min_freq;   \
++	new_policy.object = freq;	\
+ 									\
+ 	ret = __cpufreq_set_policy(policy, &new_policy);		\
+ 	policy->user_policy.object = policy->object;			\
+diff --git a/drivers/cpufreq/cpufreq_governor.c b/drivers/cpufreq/cpufreq_governor.c
+old mode 100644
+new mode 100755
+index a86ff72141f3..f29b2287a675
+--- a/drivers/cpufreq/cpufreq_governor.c
++++ b/drivers/cpufreq/cpufreq_governor.c
+@@ -85,13 +85,16 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
+ 	struct cpu_dbs_common_info *cdbs = dbs_data->cdata->get_cpu_cdbs(cpu);
+ 	struct od_dbs_tuners *od_tuners = dbs_data->tuners;
+ 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
++	struct hg_dbs_tuners *hg_tuners = dbs_data->tuners;
+ 	struct cpufreq_policy *policy;
+-	unsigned int max_load = 0;
++	unsigned int max_load = 0, total_load = 0, avg_load = 0;
+ 	unsigned int ignore_nice;
+ 	unsigned int j;
+ 
+ 	if (dbs_data->cdata->governor == GOV_ONDEMAND)
+ 		ignore_nice = od_tuners->ignore_nice_load;
++	else if(dbs_data->cdata->governor == GOV_HOTPLUG)
++		ignore_nice = hg_tuners->ignore_nice_load;
+ 	else
+ 		ignore_nice = cs_tuners->ignore_nice_load;
+ 
+@@ -156,10 +159,19 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
+ 			load *= freq_avg;
+ 		}
+ 
++		if (dbs_data->cdata->governor == GOV_HOTPLUG) {
++			total_load += load;
++		}
+ 		if (load > max_load)
+ 			max_load = load;
+ 	}
+ 
++	if (dbs_data->cdata->governor == GOV_HOTPLUG) {
++		/* calculate the average load across all related CPUs */
++		avg_load = total_load / num_online_cpus();
++		hg_tuners->hotplug_load_history[hg_tuners->hotplug_load_index] = avg_load;
++		hg_tuners->max_load_freq = max_load * policy->cur;
++	}
+ 	dbs_data->cdata->gov_check_cpu(cpu, max_load);
+ }
+ EXPORT_SYMBOL_GPL(dbs_check_cpu);
+@@ -235,9 +247,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 	struct dbs_data *dbs_data;
+ 	struct od_cpu_dbs_info_s *od_dbs_info = NULL;
+ 	struct cs_cpu_dbs_info_s *cs_dbs_info = NULL;
++	struct hg_cpu_dbs_info_s *hg_dbs_info = NULL;
+ 	struct od_ops *od_ops = NULL;
+ 	struct od_dbs_tuners *od_tuners = NULL;
+ 	struct cs_dbs_tuners *cs_tuners = NULL;
++	struct hg_dbs_tuners *hg_tuners = NULL;
+ 	struct cpu_dbs_common_info *cpu_cdbs;
+ 	unsigned int sampling_rate, latency, ignore_nice, j, cpu = policy->cpu;
+ 	int io_busy = 0;
+@@ -337,7 +351,12 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 		cs_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
+ 		sampling_rate = cs_tuners->sampling_rate;
+ 		ignore_nice = cs_tuners->ignore_nice_load;
+-	} else {
++	}else if(dbs_data->cdata->governor == GOV_HOTPLUG){
++		hg_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
++		sampling_rate = &hg_tuners->sampling_rate;
++		ignore_nice = hg_tuners->ignore_nice_load;
++	}
++	else {
+ 		od_tuners = dbs_data->tuners;
+ 		od_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
+ 		sampling_rate = od_tuners->sampling_rate;
+@@ -403,7 +422,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 		mutex_destroy(&cpu_cdbs->timer_mutex);
+ 
+ 		mutex_unlock(&dbs_data->mutex);
+-
++		if(dbs_data->cdata->governor == GOV_HOTPLUG)
++			if(hg_tuners->hotplug_load_history){
++				kfree(hg_tuners->hotplug_load_history);
++				hg_tuners->hotplug_load_history = NULL;
++			}
+ 		break;
+ 
+ 	case CPUFREQ_GOV_LIMITS:
+diff --git a/drivers/cpufreq/cpufreq_governor.h b/drivers/cpufreq/cpufreq_governor.h
+old mode 100644
+new mode 100755
+index 0d9e6befe1d5..860b0024f03c
+--- a/drivers/cpufreq/cpufreq_governor.h
++++ b/drivers/cpufreq/cpufreq_governor.h
+@@ -37,6 +37,11 @@
+ #define MIN_LATENCY_MULTIPLIER			(20)
+ #define TRANSITION_LATENCY_LIMIT		(10 * 1000 * 1000)
+ 
++/* default number of sampling periods to average before hotplug-in decision */
++#define DEFAULT_HOTPLUG_IN_SAMPLING_PERIODS		(5)
++
++/* default number of sampling periods to average before hotplug-out decision */
++#define DEFAULT_HOTPLUG_OUT_SAMPLING_PERIODS		(20)
+ /* Ondemand Sampling types */
+ enum {OD_NORMAL_SAMPLE, OD_SUB_SAMPLE};
+ 
+@@ -145,7 +150,10 @@ struct cpu_dbs_common_info {
+ 	struct mutex timer_mutex;
+ 	ktime_t time_stamp;
+ };
+-
++struct hg_cpu_dbs_info_s {
++	struct cpu_dbs_common_info cdbs;
++	struct cpufreq_frequency_table *freq_table;
++};
+ struct od_cpu_dbs_info_s {
+ 	struct cpu_dbs_common_info cdbs;
+ 	struct cpufreq_frequency_table *freq_table;
+@@ -183,12 +191,31 @@ struct cs_dbs_tuners {
+ 	unsigned int freq_step;
+ };
+ 
++struct hg_dbs_tuners {
++	unsigned int sampling_rate;
++	unsigned int up_threshold;
++	unsigned int down_differential;
++	unsigned int down_threshold;
++	unsigned int hotplug_in_sampling_periods;
++	unsigned int hotplug_out_sampling_periods;
++	unsigned int hotplug_load_index;
++	unsigned int *hotplug_load_history;
++	unsigned int ignore_nice_load;
++	unsigned int io_is_busy;
++	unsigned int max_load_freq;
++	unsigned int default_freq;
++	unsigned int cpu_num_unplug_once;
++	unsigned int cpu_num_plug_once;
++	unsigned int hotplug_min_freq;
++	unsigned int hotplug_max_freq;
++} ;
+ /* Common Governer data across policies */
+ struct dbs_data;
+ struct common_dbs_data {
+ 	/* Common across governors */
+ 	#define GOV_ONDEMAND		0
+ 	#define GOV_CONSERVATIVE	1
++	#define GOV_HOTPLUG			2
+ 	int governor;
+ 	struct attribute_group *attr_group_gov_sys; /* one governor - system */
+ 	struct attribute_group *attr_group_gov_pol; /* one governor - policy */
+@@ -230,6 +257,10 @@ struct cs_ops {
+ 	struct notifier_block *notifier_block;
+ };
+ 
++struct hg_ops {
++	int (*io_busy)(void);
++	void (*powersave_bias_init_cpu)(int cpu);
++};
+ static inline int delay_for_sampling_rate(unsigned int sampling_rate)
+ {
+ 	int delay = usecs_to_jiffies(sampling_rate);
+-- 
+2.19.0
+

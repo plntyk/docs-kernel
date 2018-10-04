@@ -1,0 +1,2067 @@
+From 807321e6246e8b14c3a776eba69fe722c3dcac5b Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Thu, 13 Feb 2014 20:19:25 +0800
+Subject: [PATCH 3368/5965] PD #87062: Change pmu algorithm to ko files and
+ remove from Kernel source code
+
+---
+ drivers/amlogic/power/Kconfig                 |   3 +-
+ drivers/amlogic/power/Makefile                |  19 +-
+ drivers/amlogic/power/aml_dvfs/aml_dvfs.c     |   3 +-
+ drivers/amlogic/power/aml_pmu/Kconfig         |   2 -
+ drivers/amlogic/power/aml_pmu/aml1212-sply.c  |  57 ++++--
+ drivers/amlogic/power/aml_pmu/aml1216-rw.c    |   3 +-
+ drivers/amlogic/power/aml_pmu/aml1216-sply.c  |  63 +++++--
+ drivers/amlogic/power/aml_pmu_algorithm_lib.z | Bin 115741 -> 0 bytes
+ drivers/amlogic/power/aml_pmu_of_common.c     | 175 +++++++++++++++++-
+ drivers/amlogic/power/axp_power/Kconfig       |   1 -
+ drivers/amlogic/power/axp_power/axp20-sply.c  |  62 +++++--
+ drivers/amlogic/power/pmu_mutex.c             |  12 +-
+ drivers/amlogic/power/ricoh/Kconfig           |   1 -
+ drivers/amlogic/power/ricoh/rn5t618-sply.c    |  60 ++++--
+ drivers/amlogic/rtc/aml_rtc.c                 |   3 +
+ include/linux/amlogic/aml_pmu_common.h        |  35 ++--
+ 16 files changed, 392 insertions(+), 107 deletions(-)
+ delete mode 100755 drivers/amlogic/power/aml_pmu_algorithm_lib.z
+
+diff --git a/drivers/amlogic/power/Kconfig b/drivers/amlogic/power/Kconfig
+index f80da7e61336..43a5aa2c008a 100755
+--- a/drivers/amlogic/power/Kconfig
++++ b/drivers/amlogic/power/Kconfig
+@@ -56,8 +56,7 @@ config UBOOT_BATTERY_PARAMETERS
+ 	    Say y if you want to get battery parameters from uboot
+ 
+ config AML_PMU_ALGORITHM_SUPPORT
+-    bool "Amlogic PMU battery algorithm support"
+-    default n
++    tristate "Amlogic PMU battery algorithm support"
+     select AML_RTC
+     help
+         Say y if your pmu device need this algorithm support
+diff --git a/drivers/amlogic/power/Makefile b/drivers/amlogic/power/Makefile
+index 70588324b58c..9d5fced42a3e 100755
+--- a/drivers/amlogic/power/Makefile
++++ b/drivers/amlogic/power/Makefile
+@@ -13,21 +13,6 @@ ifneq ($(KBUILD_SRC),)
+ TOP_KBUILD_SRC := $(KBUILD_SRC)/
+ endif
+ 
+-MAKE_FOR_LIB := n
+-ifeq ($(MAKE_FOR_LIB), n)
+-$(obj)/aml_pmu_algorithm_lib:
+-	@cp $(TOP_KBUILD_SRC)drivers/amlogic/power/aml_pmu_algorithm_lib.z \
+-        drivers/amlogic/power/aml_pmu_algorithm_lib.o 
+-endif
+-
+-ifeq ($(MAKE_FOR_LIB), y)
+-    aml_pmu_algorithm_lib-y := aml_pmu_algorithm.o
+-else 
+-    # add FORCE to make compile force copy obj file, so no need to delete obj file
+-    # when .z has updated
+-    $(obj)/aml_pmu_algorithm_lib.o: $(obj)/aml_pmu_algorithm_lib FORCE
+-endif
+-
+ #obj-$(CONFIG_SMBA10XX_BATTERY)             += smba10xx_battery/
+ #obj-$(CONFIG_BQ27x00_BATTERY)              += bq27x00_battery.o
+ #obj-$(CONFIG_PMU_ACT8xxx)                  += act8xxx_pmu/
+@@ -36,8 +21,8 @@ obj-$(CONFIG_AW_AXP)                        += axp_power/
+ obj-$(CONFIG_AML_PMU)                       += aml_pmu/
+ obj-$(CONFIG_RICOH_PMU)                     += ricoh/
+ obj-$(CONFIG_UBOOT_BATTERY_PARAMETERS)      += battery_parameter.o
+-obj-$(CONFIG_AMLOGIC_PMU_OF)                += aml_pmu_of_common.o 
+-obj-$(CONFIG_AML_PMU_ALGORITHM_SUPPORT)     += aml_pmu_algorithm_lib.o pmu_mutex.o
++obj-$(CONFIG_AMLOGIC_PMU_OF)                += aml_pmu_of_common.o pmu_mutex.o 
++obj-$(CONFIG_AML_PMU_ALGORITHM_SUPPORT)     += aml_pmu_algorithm.o 
+ 
+ endif
+ 
+diff --git a/drivers/amlogic/power/aml_dvfs/aml_dvfs.c b/drivers/amlogic/power/aml_dvfs/aml_dvfs.c
+index 0b1cb443173b..af53a73f9b21 100755
+--- a/drivers/amlogic/power/aml_dvfs/aml_dvfs.c
++++ b/drivers/amlogic/power/aml_dvfs/aml_dvfs.c
+@@ -40,7 +40,7 @@ LIST_HEAD(__aml_dvfs_list);
+ int aml_dvfs_register_driver(struct aml_dvfs_driver *driver)
+ {
+     struct list_head *element;
+-    struct aml_dvfs_master *master;
++    struct aml_dvfs_master *master = NULL;
+     int    success = 0;
+ 
+     if (driver == NULL) {
+@@ -333,7 +333,6 @@ static int aml_dvfs_init_for_master(struct aml_dvfs_master *master)
+ {
+     int ret = 0;
+     int i, size;
+-    struct cpufreq_frequency_table *freq_table;
+ 
+     mutex_init(&master->mutex);
+     size = sizeof(struct cpufreq_frequency_table) * (master->table_count + 1);
+diff --git a/drivers/amlogic/power/aml_pmu/Kconfig b/drivers/amlogic/power/aml_pmu/Kconfig
+index 7a89d7448b2e..30763a5cdf9a 100755
+--- a/drivers/amlogic/power/aml_pmu/Kconfig
++++ b/drivers/amlogic/power/aml_pmu/Kconfig
+@@ -13,13 +13,11 @@ choice
+ 
+ config AML1212
+     bool "AML1212 driver"
+-    select AML_PMU_ALGORITHM_SUPPORT
+     ---help---
+         drivers for AML1212
+ 
+ config AML1216
+     bool "AML1216 driver"
+-    select AML_PMU_ALGORITHM_SUPPORT
+     ---help---
+         drivers for amlogic pmu AML1216 
+ 
+diff --git a/drivers/amlogic/power/aml_pmu/aml1212-sply.c b/drivers/amlogic/power/aml_pmu/aml1212-sply.c
+index dfee1a212f4d..8dccb1782d61 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1212-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1212-sply.c
+@@ -1383,11 +1383,14 @@ static ssize_t dbg_info_show(struct device *dev, struct device_attribute *attr,
+ {
+     struct power_supply   *battery = dev_get_drvdata(dev);
+     struct aml1212_supply *supply= container_of(battery, struct aml1212_supply, batt); 
+-    int size;
+-
+-    size = aml_pmu_format_dbg_buffer(&supply->aml_charger, buf);
++    struct aml_pmu_api  *api;
+ 
+-    return size;
++    api = aml_pmu_get_api();
++    if (api && api->pmu_format_dbg_buffer) {
++        return api->pmu_format_dbg_buffer(charger, buf);
++    } else {
++        return sprintf("api not found, please insert pmu.ko\n");
++    }
+ }
+ 
+ static ssize_t dbg_info_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+@@ -1430,18 +1433,27 @@ static ssize_t battery_para_store(struct device *dev, struct device_attribute *a
+ 
+ static ssize_t report_delay_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "report_delay = %d\n", aml_pmu_get_report_delay()); 
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    if (api && api->pmu_get_report_delay) {
++        return sprintf(buf, "report_delay = %d\n", api->pmu_get_report_delay()); 
++    } else {
++        return sprintf(buf, "error, api not found\n");
++    }
+ }
+ 
+ static ssize_t report_delay_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+ {
+-    uint32_t tmp = simple_strtoul(buf, NULL, 10);
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    uint32_t tmp = simple_strtoul(buf, NULL, 10); 
+ 
+     if (tmp > 200) {
+         AML_PMU_DBG("input too large, failed to set report_delay\n");    
+-        return count;
++    }    
++    if (api && api->pmu_set_report_delay) {
++        api->pmu_set_report_delay(tmp);
++    } else {
++        AML_PMU_DBG("API not found\n");
+     }
+-    aml_pmu_set_report_delay(tmp);
+     return count;
+ }
+ 
+@@ -1453,6 +1465,8 @@ static void aml_pmu_charging_monitor(struct work_struct *work)
+     uint8_t  v[2] = {};
+     int32_t pre_rest_cap;
+     uint8_t pre_chg_status;
++    struct aml_pmu_api *api;
++    static bool api_flag = false;
+ 
+     supply  = container_of(work, struct aml1212_supply, work.work);
+     charger = &supply->aml_charger;
+@@ -1465,7 +1479,18 @@ static void aml_pmu_charging_monitor(struct work_struct *work)
+      * 3. read coulomb value and calculate movement of energy
+      * 4. if battery capacity is larger than 429496 mAh, will cause over flow
+      */
+-    aml_pmu_update_battery_capacity(charger, aml_pmu_battery);
++    api     = aml_pmu_get_api();
++    if (!api) {
++        schedule_delayed_work(&supply->work, supply->interval);
++        return ;                                                // KO is not ready
++    }
++    if (api && !api_flag) {
++        api_flag = true;
++        if (api->probe_process) {
++            api->probe_process(charger, aml_pmu_battery);
++        }
++    }
++    api->pmu_update_battery_capacity(charger, aml_pmu_battery); 
+ 
+     if (charger->ocv > 5000) {
+         // SAR ADC error, only occur when battery voltage is very low
+@@ -1770,7 +1795,6 @@ static int aml_pmu_battery_probe(struct platform_device *pdev)
+     register_early_suspend(&aml_pmu_early_suspend);
+ #endif
+ 
+-    aml_pmu_probe_process(charger, aml_pmu_battery);
+     power_supply_changed(&supply->batt);                   // update battery status
+     
+     aml_pmu_set_gpio(1, 0);                                 // open LCD backlight, test
+@@ -1826,6 +1850,7 @@ static int aml_pmu_suspend(struct platform_device *dev, pm_message_t state)
+ {
+     struct aml1212_supply *supply  = platform_get_drvdata(dev);
+     struct aml_charger    *charger = &supply->aml_charger;
++    struct aml_pmu_api    *api;
+ 
+     cancel_delayed_work_sync(&supply->work);
+     aml_pmu_set_charge_current(aml_pmu_battery->pmu_suspend_chgcur);
+@@ -1834,7 +1859,11 @@ static int aml_pmu_suspend(struct platform_device *dev, pm_message_t state)
+     } else {
+         aml_pmu_set_usb_current_limit(500, supply->usb_connect_type);  // pc, limit to 500mA
+     }
+-    aml_pmu_suspend_process(charger);
++
++    api = aml_pmu_get_api();
++    if (api && api->pmu_suspend_process) {
++        api->pmu_suspend_process(charger);
++    }
+ 
+     return 0;
+ }
+@@ -1843,8 +1872,12 @@ static int aml_pmu_resume(struct platform_device *dev)
+ {
+     struct   aml1212_supply *supply  = platform_get_drvdata(dev);
+     struct   aml_charger    *charger = &supply->aml_charger;
++    struct aml_pmu_api  *api;
+ 
+-    aml_pmu_resume_process(charger, aml_pmu_battery);
++    api = aml_pmu_get_api();
++    if (api && api->pmu_resume_process) {
++        api->pmu_resume_process(charger, aml_pmu_battery);
++    }
+     schedule_work(&supply->work.work);
+     aml_pmu_set_charge_current(aml_pmu_battery->pmu_resume_chgcur);
+ #ifdef CONFIG_RESET_TO_SYSTEM
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-rw.c b/drivers/amlogic/power/aml_pmu/aml1216-rw.c
+index 96047b7a4a38..5ceb042d69e6 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-rw.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-rw.c
+@@ -270,7 +270,7 @@ int aml1216_set_dcdc_voltage(int dcdc, uint32_t voltage)
+     int start    = 700 * 1000;
+     int bit_mask = 0x3f;
+     int idx_cur;
+-    int val;
++    uint8_t val = 0;
+     static uint8_t dcdc_val[3] = {};
+ 
+     if (dcdc > 3 || dcdc < 0) {
+@@ -312,7 +312,6 @@ int aml1216_get_dcdc_voltage(int dcdc, uint32_t *uV)
+     int addr;
+     uint8_t val;
+     int ret;
+-    int step  = 25000;
+ 
+     if (dcdc > 3 || dcdc < 0) {
+         return -EINVAL;    
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-sply.c b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+index c528f9e4e579..f0007ff755f4 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+@@ -308,7 +308,7 @@ int aml1216_set_charging_current(int curr)
+         curr = 1050;    
+     }
+     idx_to = (curr - 300) / 150;
+-    aml1216_read(0x012b, &val);
++    aml1216_read(0x012b, (unsigned char *)&val);
+     AML_DBG("%s to %dmA, idx_to:%x, idx_cur:%x\n", __func__, idx_to * 150 + 300, idx_to, val);
+     idx_cur = val & 0x0f;
+ 
+@@ -961,11 +961,14 @@ static ssize_t dbg_info_show(struct device *dev, struct device_attribute *attr,
+ {
+     struct power_supply   *battery = dev_get_drvdata(dev);
+     struct aml1216_supply *supply = container_of(battery, struct aml1216_supply, batt); 
+-    int size;
+-
+-    size = aml_pmu_format_dbg_buffer(&supply->aml_charger, buf);
++    struct aml_pmu_api  *api;
+ 
+-    return size;
++    api = aml_pmu_get_api();
++    if (api && api->pmu_format_dbg_buffer) {
++        return api->pmu_format_dbg_buffer(&supply->aml_charger, buf);
++    } else {
++        return sprintf(buf, "api not found, please insert pmu.ko\n");
++    }
+ }
+ 
+ static ssize_t dbg_info_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+@@ -1011,18 +1014,28 @@ static ssize_t battery_para_store(struct device *dev, struct device_attribute *a
+ 
+ static ssize_t report_delay_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "report_delay = %d\n", aml_pmu_get_report_delay()); 
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    if (api && api->pmu_get_report_delay) {
++        return sprintf(buf, "report_delay = %d\n", api->pmu_get_report_delay());
++    } else {
++        return sprintf(buf, "error, api not found\n");
++    }
+ }
+ 
+ static ssize_t report_delay_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+ {
++    struct aml_pmu_api *api = aml_pmu_get_api();
+     uint32_t tmp = simple_strtoul(buf, NULL, 10);
+ 
+     if (tmp > 200) {
+-        AML_DBG("input too large, failed to set report_delay\n");    
++        AML_DBG("input too large, failed to set report_delay\n");
+         return count;
+     }
+-    aml_pmu_set_report_delay(tmp);
++    if (api && api->pmu_set_report_delay) {
++        api->pmu_set_report_delay(tmp);
++    } else {
++        AML_DBG("API not found\n");
++    }
+     return count;
+ }
+ 
+@@ -1191,9 +1204,11 @@ static void aml1216_charging_monitor(struct work_struct *work)
+ {
+     struct   aml1216_supply *supply;
+     struct   aml_charger    *charger;
+-    int32_t pre_rest_cap;
+-    uint8_t pre_chg_status;
++    int32_t  pre_rest_cap;
++    uint8_t  pre_chg_status;
+     uint8_t  pre_pwr_status;
++    struct   aml_pmu_api *api = aml_pmu_get_api();
++    static bool api_flag = false;
+ 
+     supply  = container_of(work, struct aml1216_supply, work.work);
+     charger = &supply->aml_charger;
+@@ -1208,10 +1223,21 @@ static void aml1216_charging_monitor(struct work_struct *work)
+      * 4. if battery capacity is larger than 429496 mAh, will cause over flow
+      */
+     if (aml1216_battery) {
+-        aml_pmu_update_battery_capacity(charger, aml1216_battery);
++        if (!api) {
++            schedule_delayed_work(&supply->work, supply->interval);
++            return ;                                                // KO is not ready
++        }
++        if (api && !api_flag) {
++            api_flag = true;
++            if (api->pmu_probe_process) {
++                api->pmu_probe_process(charger, aml1216_battery);
++            }
++        }
++        api->pmu_update_battery_capacity(charger, aml1216_battery); 
+     } else {
+         aml1216_update_state(charger);
+     }
++
+     /*
+      * protection for over-discharge with large loading usage
+      */
+@@ -1453,7 +1479,6 @@ static int aml1216_battery_probe(struct platform_device *pdev)
+     register_early_suspend(&aml1216_early_suspend);
+ #endif
+     if (aml1216_battery) {
+-        aml_pmu_probe_process(charger, aml1216_battery);
+         power_supply_changed(&supply->batt);                    // update battery status
+     }
+     
+@@ -1501,11 +1526,15 @@ static int aml1216_battery_remove(struct platform_device *dev)
+ static int aml1216_suspend(struct platform_device *dev, pm_message_t state)
+ {
+     struct aml1216_supply *supply = platform_get_drvdata(dev);
++    struct aml_pmu_api  *api;
+ 
+     cancel_delayed_work_sync(&supply->work);
+     if (aml1216_battery) {
+         aml1216_set_charging_current(aml1216_battery->pmu_suspend_chgcur);
+-        aml_pmu_suspend_process(&supply->aml_charger);
++        api = aml_pmu_get_api();
++        if (api && api->pmu_suspend_process) {
++            api->pmu_suspend_process(&supply->aml_charger);
++        }
+     }
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+     if (early_power_status != supply->aml_charger.ext_valid) {
+@@ -1522,10 +1551,14 @@ static int aml1216_suspend(struct platform_device *dev, pm_message_t state)
+ 
+ static int aml1216_resume(struct platform_device *dev)
+ {
+-    struct   aml1216_supply *supply = platform_get_drvdata(dev);
++    struct aml1216_supply *supply = platform_get_drvdata(dev);
++    struct aml_pmu_api    *api;
+ 
+     if (aml1216_battery) {
+-         aml_pmu_resume_process(&supply->aml_charger, aml1216_battery);
++        api = aml_pmu_get_api();
++        if (api && api->pmu_resume_process) {
++            api->pmu_resume_process(&supply->aml_charger, aml1216_battery);
++        }
+         aml1216_set_charging_current(aml1216_battery->pmu_resume_chgcur);
+     }
+     schedule_work(&supply->work.work);
+diff --git a/drivers/amlogic/power/aml_pmu_algorithm_lib.z b/drivers/amlogic/power/aml_pmu_algorithm_lib.z
+deleted file mode 100755
+index 91e85b950e2f113102f17ef341d238f55a5d08d4..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 115741
+zcmcG$d3;nw);?bM_U&}{O_SVCcSDmD;X)@NkOUeCA*|^@2mulZn<6qoNW!8ai6J=X
+z=oofX7}-GtiHajSj>er)(IDaq4l}@rh%+5xD{eEmjPfd@-{(}_4(QDLd*45PFCWrf
+zPc5fTojT{#sk(Lh)-k2UilVUCKZRwoONg=Ta)Io*qCzGc$%Zi&V(rXqZfBt|zE?z3
+zf9%&L@(8od0`t(GC^L~}Q`%F_=0m7=STi?7oygZ>ZDO4gJ+#%Vwm+wJ39pDU*4$40
+zIm0<0vrze2jj`kf#-8W`wkP_-k3W9OSft(Abl}`96aBMI_$zO>Go}+SVbm-6Sv}3z
+zj5?FsRn&1?X`<;vUGrykS!j8bXvf&5Zxesz_&Yxd{Dhm^@<Yd>rN_$7D&@^>&gKnK
+zg-s>e$&AfxXU*3>0cn0>rC%m~SE3)t67t&;wX^0nUcV)Js_9^x(XugW&e;+@zw&6C
+zwqaw`*R(O3Z=8tcMz%x)ty`kQjrGyY=Jip{*b;R&Z;2i&I@*?oyg<wP=!Njnw&CTw
+zqvnS7(NNR+D62=kIqRcF`TD3YvOdaN*GIFP*GJvxn|LTaw*Kt-JLR~RVk{TNU@YMO
+z>!v+X&UQotb9Pv=o!*`ZImLlbyV2Yx<z3#cV|;<ojwt0T&CTsRv^g3GtrczT7+VYa
+zY3Yz9#*aEwpFuVO(Bom6gK6!4nkQpA=Crvj0ck<MzWi)F=yS-2@_A@=2i+N<JHw(&
+zd{TV}>RecL;2aNciSjwy1l^B+{4qIJPO`Uy9`O}Gd)~oUq@CK4e#vjfz#F@WKNFL7
+zzEH}<ynatq2{*T?bHEGR4*KQoPSA_Vg0nT?lO<mS?TZ%ec<AK$We3htozFshqQ?v;
+z#=Tj}w5j}T9O@rI{SzHy*)Gar?E>X%qj8Y8FDzvm2yc(>C@1}%*4`OyohWl+JUh@n
+z(6mal<!r0?CYe#+j9t-g2j7@0DOd3AK-)O9D@WgRe%80&;+dCAxl{j)O>h4UvW)e|
+zn^s2Ce%6k3SoX&l`HUjSj{Ysc_Xhkug}-{T-E#Ch2mFR;j;6NPHyv<twoULH2+MgR
+zyP>@Lu#nv+0q6kHr}`kH`=I*+;R|T4NfzILw=aME5%z_D@F}7n@=1{m(W*Jk?KE$`
+z*3Hq<Zd$t*+7K-?$X_+LtKenZ+ZmA?=KT1fZNX}x*EC)QWi)3R(yEmvy|*D9<0+rU
+z0=favn*_exjGbmkS0desu{ZP0WAFh}gnt=^G(#G4*LRqhzw%8{`{d>}=*uTM>bG6f
+zeB5TWM;dlDwcSNDLMNgs(&VFtAx+~)z2s@oC04!}G*(4cfe!In6hU5VbDJA{QajDu
+z63xXNnXSL+&<75=naHR5^hY|J-*g~Avdy<-Eo6v~2n2lrzD;RrZp)nu+V$kC<eY&w
+zU4yL?KhR-a%!RQ%nr3bTzmqYp?RK(-ff(OK1@_?C6TL7=&Sie+9oWfs;UBY5ClfRk
+zb8e)$nf$^OtSfV$u!Wi;_ZO^)kj)+nHMeaF9*T59KRa#q$eWYE$A;$io%h`l88MW#
+zzcX-ry9?vqG%YQn_v+Mszd5!&zGY=()A&^pl{L26%Aby~@Iz-e&)gf?boC<<=wG`Q
+z-i7Z6&TgLYKqM{L+?GBNel2HtTe$U|XqvG)T68bQ%Vr5#p9;U(rkR@}_R#&23+9_`
+zBf&q78$K)9#F(?8v%Z5^+c54l@JQpMIqN}VE8hj5Q5DHH)}hU`b{4LB;*@y=KC~%v
+zZ}(-9gP5x=g@+@WIR*3&f&P&;FJzVmnY6a<iP}Ju{BFKUG^db`37WQ0MI;S04^0Y2
+z4oxbG{G8@SO^GO=d9XmzG(zOBrncD`dpO3QFSNrRGPl_wTSjx}Gj~Ko==W6kRUvPU
+zO#z?BBha^pnE~HuzS?F$Ht>0{GmOPNc@}#4oX?_-^l4@`V?CF3Gui6s1#4|_qL9|g
+zn9byuAH#U2i}izK37WbOwljc@2F-G^i-%J~E6&=$gA!_fG7wt%H1u@8n{A2Kgf>Dh
+z<!!K~H)A$Iy0)|j{4@AO-Ds|{Jc|0~j8^yu@G}cK=mxFaP*b!j)O<hcJb?0jKG1{C
+z!G<M$1$u=3+V@5<Z{Q^XWi-YXU`nH(=M?beZe4fQ0N-E3?<B$}C>To<Yl^H0t%!KQ
+z3!A(wV(Y&wvbS|>bT49yeG&Y@FRNxvL@{b2_ZBRRB(OOVq1z!dLbe!SE2H~DTQRn#
+z2&IXClF@&n_Xy}c^1q<>$j|68Me_9s{Nldy4bi==_#^(XCMA@wiaY|Feqi=0!Q<ib
+z=C*tPf%>q;x8Wbi9*O@$q3Xyco8+0XRUN!ydf5f|L}d<idNS-MO#WhP)NT0*6bnB=
+zeu-pEewNm#m@f(-pJE}JbA$90F%NtR`O@TkV{0@F8>4s)z9%`qVh`e=T~Rg%{;0kp
+z634D=OJ!`R5*mGWID@T02RQVUXbm^Eo`ml>O*AgTriccue?(tFnsmQP`sw6h$fI(&
+zzGR}0zCJmEHlPu0tw-Bd>a!x^W>-K@R`eXs)}*7abky&oKqrT@RfC3FG$^K_wE#3u
+z=bO~mly;0Oxe9qkXsaK*CK;hs{z}M#_(j<#WZ%S#7;{Maeu}YTdd|$1e(?JV(SRNw
+zLc7Dz&o{}2pyy8lKV5)!glP;u_<xcw$@#+1{Cfxu>sijnO<{`5H$*kqiW;hk6rgR`
+zT=z23b%*9!xb)?4`IhLqgEbLayVcfp5l6^<)?uzYyJ~WEgnXsi+Wfd}<f_P#9?+Hk
+zup`ym9>%y7b9s_7;E-1{SNp@E)qZ^2Rhze+^2s*qnOql0e<+srA%?zC1zAJ?XzdYe
+zC#^fp8=`I#v8$y|;7{n29b==ogvLqVgkw78+pr^QJgc^c;G=2%I>lZUWiHgaTV)Y7
+z+}u{xBG>xvhn?*qV@LGUgJarvh1Nz4^trERbKAb<D<XHRb0hsRFG|zemn)$k8(pqr
+zK67>Sc#d}HU}E#Zxn|*^UA+$;dt*=YpEeyl*cvdmMhm?Qj~(>RX`O_2n6uOQ>?Cxc
+zyq)6PVMxOxwo`lypYn+hbx7V+2mY_!jyeqX&DdPXw!EFOIZwplyApIFhxSB^7{=4G
+zE9%%VCvr#29g*L?bVuYZc2(Of*gzp@7#p@?KB;}AjVVnLrp}4DHZ(<CY*rie^0`Vj
+zqaEvv=#O|JS;lyR?&(g^_hgD0pCg&F@cL+t4gR%h?OBp7$wo2YYcWpP0c5orePLZd
+zo)bDl>mU5qX&O6dpB@&X@roD;`=QCg?-O03L$sBqlCuWr$7oBsqt6oE-k__776_V<
+z-D$E9*a>w0Kharx_K5m(Ix7Sn_<&DTHiO2GHIU>ywLJ;)Cmz;rBEK+|=H_9dOLiC=
+zcN6Gc8uwjMYs{c|8)&dk#9YAtVElcG>Q_f~@JI3Aa`c7yJss<d_6k2AbLM5dlJ637
+z4AB}eL##WwCgcNp@NI|zi03KoDWH>&{1b?&s0`yu&NVlR^l*GTpfk`ZUBkSB=JMh7
+z%T}?_s#Tec-M*LF7*uz1TTkEs{2KPD)Yrp?L48ebhu=Ic{3ynPc2P_i{OF9f;pVoJ
+zkR5#4w&)D2Z@b`y^m+>R@X#UfNIVJu30}y5hENx6qiN*7(Kqo&zEb$l`gQQ1tJ2AT
+zs*vIE`qhJmS~Mu$yW~G*A2eUme{Qq<=W5G;u8LCJg!xOR`5_%a+yoy_GL!Q;3~3r4
+zGgtZ5P_qYXz-4}P)nUXr&?)#)v-wGsKaP4&+t|!D*e?9<N%)@Kq%$O|<RQRR7xOFj
+zR3`eQ^^QZHcFX_dL$5-n)GHQh_6`p(_veR}`wOhLB%^H0KT{hY?ZvGa8M-9?%|K_5
+z;E#d1Y53cRKl0n>9av|Zv3_C==i%Mh?{0{WY&sUz>Q_a~4I82l-nu3dXU>f<*!gSl
+zd)w7GtdY%auXe|N1^qUgJEN}F%7{L;Q~QXSto{D**!Fj(j&I-Yc1N6`yJ_BQku4c3
+zphpdD_Ry0NX6`$?HSfO2mcb84FqU@J+==h|&u;B?f260axh?3$-l$Vko12wKj&wg5
+znGM-0=$rZ?|H49lIy)1-q&c)R%9^mh`B}ft*5<a&|81X$*+rj-+5bbIMd%CqDdKI7
+zO>YZBN1N++Mi2Ib-<pH9HQY0zl=qBaPTTY~o!Vb}412opw1}<zaAZrb6_F7;G5#iu
+zfAjeEIPkGW*CX2>=!LjvO=QQYRS_rl5H7KY`0d%drtFREm<oQ%FYO`j8jU>!WRMOS
+z*dYTG{0N_oF~e3LZf?Su&HA$})OMCNW9;)G^PAA;9Q3((e7lZ5U*7|nm#m6xa;cFW
+z!OV!gd~IY~+6v5BLz_d$|KYRSbMK368}w6IY)}8G{Gn6m8+{pVXU{thoTKwHT2qH(
+zO>JEPT`b3%3Vk3y%jg^ib4}|E$9my5H%GJC`luO(E|WdCY=yovopf`6IOp3DjqUl+
+zkI1KepGLZm`Js9aL((>}mnhHE+Dj|<M0MyP#bIfT?F_@m!%oEB+Avm~^)+utT)pvJ
+zdMo4!KFkQwS{2=S|637X)AlH@-->fXtocni-vVzt*WDH|aHd6PSr_0tcir7Pa=z(k
+z+l3~%t`iN4Ey)haCN=CqXg`;Ywb~b69X0TmA6gw95;`0mZk>I(OxO{0gSD)W#>QZ5
+zR|Ss;3vi}kJK9F^g9$#;@OMl-+IB2>6n?;r*o+>LV?8Ndj`Tqh$NR7+yo+Ls7AXr3
+zKFBwip{-FJ@^PXccNl+c{keRMf%eSV@D(&CCi!60%S4`TR75z+8T!<aN9E+N4U{>p
+zb;FH(hBWy(C;AcdioKZ+^hRNhj)8YJhkQJ2(D>6?Exe-H7OrZk!kG~HwE)_aKZRRK
+zrZLgHv(WLgSaYAFJs$k`b5#b-jiobeb%ZeDe#lnl`HZzu_`y%Gw>|sQx{)?fcg||~
+z5wb;jK2>E@oTWCW*y}=$taWQNtqn0H+W;Bf8>vDpc>!fuPfk~vaz6=Q9QB2MgLRSg
+zdlq=4Sa;Ra$b0&f`Fb0JT<Fa0ym_>Z_OT=fk~_&f&0Gulu0?uB^aY%E>CKf9lIOO>
+znY7joHBgWII@avx5L35@Xf1^f;w%Mn+>X7`o~Y5fEV{{NiyVSaafX(`R+foAhz^b2
+zXVJhK|0cB~d%!x<&RSPRYta6JiE~}hAik&#L;Y;F8@jn8nhD+@cj(~SsA4vINeA=I
+zwSJ`AhnR<<yE~+=UbZ$|gdlPupcn9$W@l_E{+jW341Z~u*g5zU=hEfPZDGXHxpXdF
+z54sw3#V6w<I?IX0(*Kh^lU);EG5#}QLmK`F4~LDRcVRDV1N=)YZOXH=G;_VE$C~B&
+z8MR5nT1qxSakw5rj4k}a`e;Mbk018jFZ-cbDIPSaoMObas6%bd)~!*p1M)i@vTUTb
+zt+EfYhXufw+e7IHt-TOufi}d)So4L>&w<WEbZ^@54Ig*9GPL&Wt4Mc6Oq6Z)6WFjd
+zN`8raloLD{=#y=L9-`l!55Yf$k-q`w=?t+=1hNE=<ez*D=kv%jBGPA(k2(Vzz1&az
+z20Ei-Z2z6#QCcu&gSEd!YZ&Cla9$Y-Z^ZtL&T)H2;ti~4|H0=7A7x5em?0_SwAS75
+z!Od;6z=H-~5>N7MT_1IZt$Bf+BgWGedQM@!M`zN{(HW}Nv=-}a7-utAwfQ!zIO%Iz
+zaTsNvIGd^>Yy)ej*n({c3tRLx-3I%-?P*`rwkX-WlgT+0_77hX!#?<8iV6R}>M%yM
+z!|gt!NyOUZ4^?CNS&CC_m@~3f&^WEZS7AQijKz4EPYeTNFy1?h`1J|$4?4!8nxk;0
+zG?nK5VTz%xSQT-J9Is-oxDRr@7e3~JOZ)2o91r>;+oLvv&XTu5|8Ul-?1^sv%^MLX
+z<auHF(YEa7-O<dJ-O<}OHn-iethw!X_uSTY>b|3Gdee?b{Dy}j&U>Nrk2kkvzH~?1
+zDb#m1?~J%weiu34j5VxTu3==CPHT^Qxm}V^NrTO0<1Y>CgdH-@Hs!iOYtH^*3_4C{
+zuk6jG@HwfdZv&4EXI?aKYX>Urbk<LGazf3=3vqrBD=!S6j5fZ_+KW(5I=SUYb|log
+z8h+!aF=;ahy@0=S_%k5T8Tcc=(~R$9_^XEl+=oB<r(u#R7S+tIU$kU)L-qWHiyNyO
+zW>+;VyrH_GBY#P4M@eNxP0iej%IiAH{=MW9y(RTk6^+%it81$p=HDp06VGZW`LTr;
+zTHhrQBK;d6zt|iL!`8*W+wrLkyt=$>`Y+NKXPaZDOqn!g=)~!zrKV&SI`r@5vdBzd
+zY%Zu+Y*y4XR994)7ROck<@Iao7B`v;7uDA_G*;9$n)8;_RyHoIt6fZFS>w?3{3Y3D
+z!|WUCYKEo{tjab=&#oMro+}bnGBIXodjC*O4YC#wO%DxNnr+U*cRs!$vZ3h%P*8WN
+zeckK@vRPf_4KlHCZUwp_k~egu7R*NB05JN~vBl<q#?>)3RO>SNTwbTP4g*?P`)_nG
+zm35VvAal`@#_FZ!yo!Z2)uPg6bUNyE5WG|^)?Y^v_=yP@!=67hz5XXMzP#ST*mT@z
+zRxgFpT|UOeOBUBx*H)QfGo7SH5+boSRx~bwY{B7W{8d)e_G&ceS2voKbxUgM7R{ya
+zTIetlwCV+eLR*5tY_qn`gmh7Sqghp5*+~B{(Hl9)lp0G@ws39(M3ZecE~=khcLQcn
+zvH}}f+$iS}86EXRvD9<HVMpI1`~M%%9PocYbKw60&Ak8rX_nU2&NmwuE~+*yErD59
+zFUIu8=Ea<QqX{!@te9VYxlYAq9aWdq4<)6VJ#R@(&4}2vRxhe=yip)sPUDDlVa!x9
+zMp_h;pR|b0uB@mRd6w$UuKWptW9U%d4xI(9C175vc6~$j4YMoZNl;Iut7KYMij`Q%
+zDwEvJu39(`{srw8)|&Oz4VBfk@E&Bmmd;n#RMao7u7U-bi>oW^YOCNgX)M%Dj4v7(
+zm=TctBg96$)y<<;6^$_ockq6>EJUNr)&DYkGb<NVG|aDVxMZ?mQ#dv7E4`a=GcjIi
+z`eO5A@z7W&c$f!ErI`g=+2(?Vj+qd>$C|{<4)b+s{Fn43*1Q59CDw#SJGZ*J7Jj~_
+z#$xx9ANZf!RxMmC$5>^8Q=vPTjlXo^TyyS{g*A;rQHQ3BMI<<2pgFay+$^6mW=vW6
+zG;`X5CFb~wT62imfAG*jLx%PrXpWvb%^VQwpBs~l+0a-ydr|cwYaNlR$)(SZc`+AP
+z+<>W$4Nf{rVHcLCqE!WxCzqE>TDtO)Qza9ZWM)<_X=s2VnRDx~V#LUpLT|*%_rIkB
+zkzY2Yu#$?(g^f3w6_u5B4OI(az+mPwd37-UKiVd=mw5ZB9{e8}?4|X?{E5v8w?M1H
+zWqJqm{SP(>%e$o59a0dg-O<48FyxpNenR%AI{zPJ2C^pBQt|}UTSGNPFte**{x_0p
+z%KV0f6*ZQ6EUcDGD1{X4W-G=L03Xj=iE-BVK&$+?g<Tfj3ml6X(JQ9oQm-8aSd;(z
+z0&*quU?G<UnH|mqKB{hRHGNiAFJ9b159O6hYABwxBsF{Pjk7_gqr$wphD8+^``r1n
+z=PsEy?=sTT1^gRDYX$kY{Qum)70kvukIiRC_f|QL493!tO=9?2I9*v&UGZ-*c1Ilj
+zv&tO-UIUh!|3&QWd|X-9(!y5Kl*#mLktW>I($eI!zSFF4dfrd@bFA-r>pRxShdFO~
+zEU5_(0~nsSu&=QZZ)tg?DXh`=!%cgwZ#VWA4>=!iI*;$i@Eykfg0Kmt{T;rK;Q*$k
+z<-VplAky*}cCC2u)Y9_Xrl;^gpyjcIrbqA~q2)1mQz7~g|Hh6UJ=DysY^YnjxUsIT
+zCTHSUvu0s!MMGUq|GxbP_U)gO+jnpd+~vT&p#eFe{vsI~FrdGgW0s0~CMb|Ur3$@G
+z)b2Y_z|eruATtxLq@fxUvADW7E9{FNE2=BzE@TSH#XdNvkj3eaLZ{+VlQf^=SGw2&
+zN>?RWO;vj;IF4eF0{&s_*1r&CTK|UL-BGUmfb%NlBh;P|mZh<Zs?)J;G@ck}_Jy^L
+zOw}CPWYE))coP-v!|^c{e{uAoQ28Ch7;|WI0G-wNP!(s~SjJrAAvdQjc`LH?G>pT>
+zsi_)d`e)dN+q%sZNMrHe;K{Y-Z6>J1oe47*{}P_lXuc;zj`Q!mkn{E!<aB<8a#Z`|
+zJmfrHhMX>c5jl=!LF9a0jGV67$cayzge2V_V(~{yknHvY)pOc0W)_b_b*81J<I}x3
+zpV<?eDYXPCgL-r??w`l(Nz|2l2_?PMhkNnB0nF|v;_fAs>`cVni}P}sJwU|WODNfu
+zsCH5spppqxm&GpyQ*jBmAVbycJM)oK)(1H$g3T8o=eUqylb+PX^%qG$h8H(lBu`N5
+zB2jl$KP0cDuHx6AEN%vM62BBOjk`)D{|g(^xS68ve`O+hH6<MyO-XzMNIKl-D5*d+
+zj>HSpcrNC_kwn9b|0Ota_*YVHdKk&%k0@D&Ex4oGP_U*d>i3Xae6T-qy5C8Kg^;<!
+z+)2q*P&Y@;^OW2QYjWg0K*_fzA~~#uk~g@K9P=tAS5p7;-ltA`W*~X(gOuzZhh&Xl
+z@L5d0<NB{CcRL2^SbjA%yMmG{MDikZ!Lb{d#YZt_$2}r>HP!~l9+9l;jpW`j)NDo;
+zk`I1}5hQAk$GjM@{sRQ*Xd&T17g_u|q#Tc5L=D&A5H!~Dhp|+vA4cnVj*_IY6Cmao
+z(je4S<hwj%7mfo9sQOKCCXN?3%IeHjG>Rx4BrGYtY!&I(q7TQ*+eJm9M6DefmAcMB
+zNKVI}UhQb~XG&7{Z{fMA<M=6osL^huIw^z`s0wn9;LD+XfKNlAp*ghkNP84JO}~oi
+z5$5V(u8q(rw=-!hvh<fBGN&(Qm7haLoXM6|>JSohrjl-`L8qRER!&nQow*9eGsay>
+z&k&JMq0=t!7o;OWmW16gbNM9FgrU3qlB6W!>MXl+>q9u&bs-XJ(9r*h$%-MLJ_EKL
+zLjjD1xb;5N6U=nETk&b+9rTnBkm-McZi@Pc4TUT6pLBp0bNw)ZF`u3}*be5>G5vb)
+z!=e+WZ|e@!X9Nn=pr$*(fSxr^Ag6v02CQc{2;|m(1r5@3RtjW5q@WKrh-7DFDn98i
+zVJ1G1dlkOA!2jVZz`>g0&_*L|h>8xa2I)=;kxC#cXh4VUuKOW}wD@GYjiZ+rLJw0i
+zkfh080iNTzM4FzDQO9?a2qMG-(fCw6u0&0@o>l<VT_Qt&2kH}VO60>50n}5XfSx=W
+zC@o*~!1dl>AU<7|nP85nC(yiz4{%6abyBE$EGHZ3M5p`wbbJd7a(_X#2!2`oha;g<
+zUyejce2>9sxSq_+^#feKGa-2kH6VwdkRtVf>3@dyB=7{GF{I5qQN?v)4CIkG{1=!*
+zQ9Tilm8CpBAB3()lEu-ik=i5{5LJ>u9h5IIJOZHuDbdXXfC{$><V#vy#S%x|CqO`d
+zG#*8xAM#Q~-t{=#Mq&~93Qg&*2F<STVjPKMWJW4we28|5#WJHCWzfqEiDP93r;P8M
+z$S9E+DagP;t^-#NjfUXR>hPINCbh%(UcD1_Q|8TH!VH`3$pyp%<1^r349)gOI1yMF
+z|9lu=oGl5OkD>529zcifxAO@4_&4Q%oor{IUTQGF3laenZDi;e4&PM*=&{j58!*BT
+zCjchdh&45s#w(z9hSzpX$UBpd90lmJT`6FQ-vWPR_-*a;sd7HQp4xV{btxuT&Re{I
+zU2GEs&og-M{(xO=a^{!v3M{8as*Tjz7Hm>@dOC1V8%>ohxKiQw8NfjcuT%IZxxnc*
+z9n)kBZc!kmtq_bW)C)m~=Y!i^nEHpIww{kj7s(VZnn33y()26G0)0lZB$spu;YAF&
+z^;<C<&);uJqcTH(s58(vvK`ksMC|#_53_=F^eLe2`TiH(2&L(9Sfe}_Wz9_99dh-!
+zlv*&T2DAAo_zRCmk*YVG?}5BMUS*poE#d~er>C=WpMWLY2?yfosz_3$d_fXmin0)D
+zK!Wr`%pNZMh#H*6T>W4u?u46LY0PUe{)AgjBS~X+rUL!?M}ai`TGUIpH65!9#ti4P
+z2;-!h31k5Yq-qIYLNg&sA|=bI?PcX;M+tM$4wWLJ5_zv=kd&1ug(3=vol=ACNV<ZU
+zJZF+?8q&H3N0X$}@=YAB28T)UBBTkD{br$x{Tzr~i-Z*xb{k)UyJI%5u3dyC^HS)D
+zH(rav$VvB)K~`S3Mv4QQ=C4ES-cB014Kjr^D4#b$lltrC&y)iuTF~IB$oD2`86&8&
+zkC(tBdcB%7g#dpF^78sE$ax!FledcnO+FO5(*e_XKTKT*%;bN9jJyG>qip^pm3Gz6
+z3!XzMi>sM8S!*kzZu3(b8ksjmTa7YX@RZ8;VtTzf+7lR%EqGq#r=gtQ0fLk*__fMQ
+zseGW|!xp@t^8Vw1bG4DsQ(N$&%IQvycd%97Wa9&&mfn03yTOud{MiY>LqynN3$C^C
+z-IxOJa7}@vY{3mS{we0wJ6hX5itr8_zXObTi>><mZM-uk!CRs|JA}$xZ7GWuG4BM8
+zOu`mCVdMKTaUJ-SEwz~BR3_MmgR}+D*!UXaxLg|!>Dz)48^0El<(+DAeBQ>XvUi$=
+zzqWA_O$WYU<CAEfrd#C~ZTvgvulEW|LQNW92<7r#W#N@tYN-i)^(7Y8YN<DZUGFR_
+zD;09kQgMvWyw_M+-9**`5><tj#YNW5c4SpqSt%lGJ{A>kwUw1jSt<1ktC)Ab))iA>
+z3$D|68qNO#3vbZ)+0np@g+9Z3X`EIfZ=;2GXnYLm+EPpAyEINAjrT?i@6~ubT#ol9
+ztNtSzpGXp2W|g;Sye~;;d2G%!?k@yhr8&eLw`%-BQtj1N`3D-mp5}C|_8xqmE%=$n
+z?@9u`O*<*@d5uqi_wwFu;jcA*5AnNBOMnxG4r;uGW-x{?YFvZGcHkyE_mU3B%2(QX
+zH#h|EdaM0fJHN3n@SR#Uh7Ebyxdu1p-KmiSgnaD$O_E0p@38Z1;_q(ZEo{MEcK$S0
+zJnt?G@3r$^lTP1bwSUCU-$BsZfm`f+B+08;+bH_mZ|7fQpx%46r!Y)g@O3-a;RC#T
+zHCno$p?3Z<jsLe6{=m*3f^m5FX}3Vkw%|F`$5QM4y`_;C?EISi%kV`z-$?wnXkCT8
+zn&S9_G~Q=5kC)o7j7yofn0f!8Wl9r_<GBCIyw7X70&j`qt{%V#v^FsvJL33`p1?0@
+zLq++nIKF_ixm61b+#JUzkjcNS-6^`;8^?!{I>hiJar~q4z=y2zr{ee+QvFx7r=b<L
+z;0tj)h3LI%iSI}pUrp-rnnsS_7CaWmmmwDMzOG#%`a2QF&%md9-w-|+E-a3Ji*b41
+z)MknDGjaSERQ{Gm`wNIOj$=5?dsJH>%0GzX<(O#ipS3N*rJRf7Sv2008tu9uUi44u
+z^%o0&7RQrFecsh5gn^5U<GoPPdq&$Q@YiuXK;{wAb_seH;`l^TpR-z{=&#AauP60T
+z?K0R{>EPK!&u(uL<!c@MFSMq(?CS(x=iomOf1T_*1m57_?~qSRwC@#oi-XT5`FQLt
+z0`G8e_W)q8INpGII`}jMH(sCp8ByNs;8_r)*KfZIWNpE{4nBnV%e22N%7H21^Jd#+
+z@UzdsQ%N0j>~D+m7Dq}$<r3yCwA0qj7JSOV`_g<A+fR$~7aV+6AK((Z0XE>G9sE}$
+zziD<_*r47H{$?ETbPFGG@cyHLudw(%=HQb^edk#Cgo7W=0Ism`DF@bRTAp1uLya_F
+zr!0tF|1VgWFR33Uf|hmK@%p?HsjR!^iyx0l=CVv=yJ=d@w}5?q6`$Bm`}C`k=s|?g
+zn#F&D`SEq3CMZj}1>gEPtm{5bNvhEkD+G&wwm<T^%|o7R4K!Z!`$z-y$)(uF`H7++
+zwuzv*9<aOSFMJK(<|K}+QIy48YaukvA0}Pu@gzP(n+mKr{!*%&sCAD20pEgZXZP}0
+zjg=-sq%I!;1`SvX3z)82EDi2J#uZS0{X#mjGBLkIPrt7msJBF#{sd+#&_^Pto`Hb{
+zvR!C|O$c*c3C|Mf8lv5W-ao`x*8wt=VLDwf={it`?VA2JmZq+`GMsb@>37Ye@Q6az
+z#}iOCL`FnD=A!+ImK=D6NN$1flDk?YnQKB3SWfBjITewFQ+i7JOkb!01too)tF1@|
+zOeYd9+9%~E?xBs6{zn@m)GTW;eKfpa;=PiBQ||+%NxY9XWVE|l16xeI--#ea4ThjV
+z7l@P!+4~Y}XqTn8Ln{&&J%uDmjAGiv+UEq)^y@LviFK6_07dKfL(YlyxZ5NMQ&gLH
+z{Wk&`AUqnWz)k24d*@w9cT$L^2v1Rpx2*8liccr)5jra;k)*#^h4-k4jsqOpVI<`i
+zov6nu&~7emB>eYUXJX?RXuZA(-YsznC5iKyP`AVzq^UJ2NjRiuiNBnVLfXdYc#DfA
+zE|sM#J<Lu4Hx-Idw>uL@Ec1ZVr$Tjp#2L#Kq*RH&+KoK@cU{o<<|mM(j%XvCc*~y!
+z()6v+mBe5FOCSpFsSB!^K=UMdcRmY@10Q^LR%W7{+Fo8xtE59aAj+xzw?8RQAc*pd
+zAm~&vkq+&B(I5e7Co%0hLbk*c`XWOQ=OI=XNifTV@1PJ>3>3CIZ4woGk(2SL8_E0B
+z=}6ltqxw>{M6KK0n*jy2ZgYt+QHy^YQt39AD)vgpz_o5SC@%r{>j#2GzX#4q@z+D2
+zRlgV2ZT<o1!sg$L9L;|Pbi>YE4C+~)np6#$ib+cK(p->WLuj7rqs5L637!SXRKG+{
+zVUnqxC35Q?6J=fG_Seum!QxT_5(V^wpqAQIZf{LtT&c<A8q{EBQe8buO?enStHH4T
+zG8jqaByTlXq?6A~HKpyAFxOkCWTXbEt~eb_P5X;z#`HpnAT|ASfi&T8Q!_eYohJ*S
+zU0`ajOo7~(rxw(5(nvdtUE`ZbC5Vq>NTHl$=g^3AhxRnGIw?d~Rv}i9eFhn_HFa{S
+zD8VA}l_;lCP`8)L(bS6!hX^KIw_qN$?!730*Hw7B?wK@UVoGm@^XlF^7bTg0M~Tzy
+z+kmur!o){EIx%7Ky;0d5HWS&xPSztK)G3h#?&>29p0Zp9MsM`!`ZCh`0&vtr9NyE+
+zu7#+3q>#76%(D2KF}9w43o-2Y4KV1Q{YsHcBX3Zy1poFU)-atmo58jMP^b3f?t&j!
+zPEi<O@T0$DO(O^A8H2J<eh{ccf3F|Vr*HJ8vZX>7f}hP4L%mr)1R(@JCqyS5`lIMN
+z_;=ca3lC8k2K-_@dc;mb(SL)bF!<#T0oN&d$^gKxNNCurDM{DWv*0)Pi^466{@7R)
+zek%)iDEc4s0l$-Qm!i810l$}on-%>OoOSS`B)nJQ-%_`RB8&GaJWTz16j}a=!k5Bv
+z1(Os>twrHaAr=k#E&P<iYY|ZgJ1dU~UiK>-S5aB8tMXS!3?Ze$Uxgh8<)H;a5`|yH
+zo;%oGsG}|T3hEQ@JuP~#EBrWAvI8GcxT*uETjj?T{!dJ02R@<jFW`iOnO6BJg`XmN
+zF?<FX>t!%Yc^3175LDqFc>iFIRsU;+C)1?#x9|mp-!d3@fH<$gu3F)@j|U#8JT1nz
+zQsoK=1&1ro3%pk48{z*t@H&;>Nx~mt(c7T%zm;Exx2SwZGVn-+d=7TmDj(~(4DV9;
+zAK;~eh01G!ezVGZQ~M(2xWIc=esLo3III0Wm3wKtWtKc2QF%%);E7iMEh-<A2fV-<
+z&r>S@2EH(Ot%YAu`5OlCB85T-%!kTXlRWAbI@m?XsPb(vjbMZFuIT@W3WGic`*LVU
+z@#$KK!tyl#+X$<Y7S`6Ww9eLnZc<hC4J@sT4dvvQ=(IL1AWv)E`XZ=ET36C21T9HR
+zuw_n5CZoksOwxQpDMTD+l=?*sCXGufT=?g-Zqm=1dM7xZv{X7bf@js6@SWCOqL6+p
+z1Y}B-uMdI8OzR=zuCRV*cc7l>qW2PbyuX3@1o1&NFtR8zTx~t!ay-2=u%QqSE<9PX
+zJ=327HBSzmKf;&v7zBIA2zx9O-@YC%h;I%uB$W7bPAusG3Vh=~Lci%<Me;RD4k`m}
+z`(S*~Iim1q3X8uLBTmoDMow=nBV#MR{lD~rE&o3-T*a?q8dQG{Y{cgO1~I73UyS+E
+znClEhCmB;;L<2n&J!ed#B>Ap0aAz6QCHE#1dyBVGBs#Pqs>=cOjEawtm9&&)%%ueR
+zW#MVR0q8T8#NvZmGA(1_vv3do!$i$bmsu5m0lbUiKaL#LzZXo{{2quv^M48lYWF__
+z>xlF39|XDjXT#q){U1WGF8@miv~+*+D9FV>7b9@{hvZ}V@gIP;C-@zZSE9chT^asA
+zV+-Z+H(<V!{J%mSuYWPx`uzWbU-J9cpk`-(79`ZgKNp+?{4YSSy87qC$tC;02h%D3
+z!w4cd^Mx>PTE@NSXaN6&1~Pvgv{Uh$$WZ+^j3L&$fSl%kv<R#-*UL~TBjbPvlchJC
+z5Ynro(TYTx4Z0bxN#ta%09;Cb#+yT_Vs8i~<1I>3#UXI+8Aqr~=%|$acoYfQYs|MQ
+zkyvW4Lzce@n!^0wfLFzD;21#lJ0^i8=Gu?RNXz&;9Z`rVB;y~%JW>A<Bg!~0k)~&%
+zQN|Y%IVB%oQzP14h*^In)-#@O6{BfU#<$-iE2+M+o@HDhCWvS)<el*^1A?HV?Iq|c
+z;|Hpy2Gj9y8`<%uHGmY>Yd;FK3{B~eJpZu~sO%q-P9yjpUPbjU!))4Ew;=S9*)oPG
+zgE04eJJcX!gh-=5{(Jbdj3VpE+sy}~hm46<slkJo@r-F!Dd&UW%rmZ0#()kzq@bNk
+z##}{iJkt15%v(mKh=3t(z8>?JF;D4-S*C;dg^**$LW@+0w}YpQYb}_|$$m2Gl?j4!
+zKL2_Y;4hWF@I&y5HvR(!n$cu=)z@wOPK+{RnT3zoco))$<)UjGl-T$_n)p=;85-7l
+zjW2+E%~&fq6_`{e<2HqK3yZ(TKOuT|2yU=y;@q$pc%6k?HGW%f;5(J8!5;Y0xQAwG
+ztJVKgc0Sbsyu<3R)y|JXIWwMAt`qfv--27oc*>&pik-g;#xkC^FwVW!jRby9se_Dc
+z!6SBl5*C&5f>nMD=Wwv6jI$O#Vdst<;C2h2LOEtS;{ywyv2)s^WPB_(8+48)w*fS5
+zLiK4CA#Jpif1@#pT%FnHKy1Xbz$vIjAzQa%FyG|LctIuh_;tkk0rek9lm66>0DMvX
+zQE=Xr#1pZ8XS}469pH#1iGM}-ph^zj7TlM_VGXcd)t^TAkt9Bj%;vaC9?cePN#c9P
+z0iUq&Q%U?~SYgIV3-3?j6KQ7OvFN{$#J?*6KBdxT1@TQ1PlkuicvmIHF;hwWhaSME
+zEqpAA|CaRqJyou^XOcK4e8!>|N#aXL#ot%S%51?8k|2ZYA&_JPY&bJksrQly$e=P-
+zi!_PgYgEWsBS=tq>(Iy?lm7<B(lYK=k5h}MyQ0c2l^#)2i}zK)-Rj>2)L6ik0i$(j
+zRMox&A0%8c2R3FWVkBK_=Ijq5oe1d(43Ar%E80?)D;=B|y}C?6TE7h<?G<<*az&5g
+z5TjRDI;Nq$6&+&qN=~&Aa)M#_Z05rcMKCRMK0SZ){}rnT^PfXkivJu2qWYUr2j1{{
+zxJh^KAVs12`b?~nX*6@x!}DRFbSj`8Mveu_kcfI9s;(E|^|ao7=yY2rLcOzO1zPn<
+zVI10BFnEXd5mlzM*Fc}HC9q84cl#vA4rGe3sP#$7L=V){l?D*c709Vigm>%HEi8~*
+zUxxAaNxc_NjE-mi4k`EPUMk9PJVR&8v$Ez*My^gzud?P_9f*)9t4@YQnh1%q>Saje
+z)Tg6^tm|c&Ti*j>Sq-wx&~xA=vKCvRl>YnCK#j3b>h5BoC9;g`Dwxi?L6(_%71jJD
+zO#=D+!$f7No<%5Ar=JVSx>2H#{s87B>n4fv^~KP`tY1kK*2hr~YaWBWslgJx3k)J_
+zZ8EG=4VLQfLh@O+nF5t3(J^M$?R1Js&oM=$Q2{9kjlx+7O~v&w?7;TV#18>F&mlMd
+z7ez?A-lF7f=sa6oM{;!;1GUS3<}0+(O?a~GXV)M}N>K|l%-&DLXsWKlije&WS?1J}
+zV5!;9Jpo#@jq^j9vY(fzlYWq>yl}H<m%!p15qxDI*aYbMI1UP!(`!&Ktem(V%5r+&
+zha~z+!d*y~lXXBKP4~k?=2*8sV&^jBQI;?h9VSo;idK#<=X89y65$4noDk6x`^%jE
+zRFBBk)h}i_18xO-G=y20fSiHyfECZLVKO<nX;?GWpx)yU8q;d;(1<&E6h!QZr@OH(
+z_aURZmNV#cd}rYzJIl!fNvKU@1IroQ8QmZk$^1qnnd@ov;LI68`Fa7G<cySR!t|ad
+zP=P!<A*aJp#Yt3M=L=!YIira{(xQr`EN4utjah;=;zk6<l2p575z84%&H`RQj<ZCL
+z)2;7>66A~{&R{v9eiKpefe(j9KO*7$0dvt?>+7O@oqq;QmHEFzZN>j5e5(F8AQGG3
+zjnG%~A4B+saPDIOU*DuZqk;Yzl(esxl8`W-J0o!xe?kG_4kOqz!5vbTP)^$1i?U(N
+zb-R<XP%v{8j6|Gt27AksP7JlKiUs@7=>b_$`grV{vS@b?D@s~~{d#r@+8`2Pfqh{?
+zpJ=$gPbP=n?=hk`0X7p1(ercCT{_GO_CF~aImILW;K1($a_h7~2oCZ<gUPWJBWeuh
+z^%BS@G%q-Kh(H0T0X^=g1BnFj@kdJ0tU;0!k#=Y_I)_FK$hy?WWp!twYV6VfdnoFp
+zP`3#*PNB<a%a9?}jd&16$nAo3Cx!Tk<>Vmkv%z6&!8far_IHO}F@I`2P29&O2IDtS
+z3OC;aj?)=DO{Wt2Q1BOg5BWkWAHh(9XCxxE+l(sC8WcLTdnidI4vlOou-zrZ{1CDo
+zxOz&T<RSu9D8%$0M1ElO0Fgc_>JU$2!vBGUm~bz1>1gQe*M+=XQe{Ow>lc`*3s!Jb
+z34W(vSE}sL=+RlXYoN7j70(!@FT6DW7wo`OtjNnIfY=3j#wyPVeb@Nmv4AC3sgs-i
+z0LLqDz*Jzv`~x^lPni-C(BPk9!aS2id_@-);=F+677Xx02+%Xxf}A_yygXAZX!02l
+zgJ-G*)A&UPU@WB0OsSt=#XQrM4@F1WeE%qvUZKd9D8zfa0k5=RF5f|H%&;QteBMet
+z&$Qz2;rwo@e6^Ay1{mhwB1ZN6!n*lV&Yywv_f%SJ%;3YQa+L*V@hc%^&pZpx;n_ui
+z^DS7#OA%gs7FcirzYcTkiG}ht{5edjCl<=r^Nmz`omIJ!cZG3yYAm>vlmGH8vf$19
+zzYv&vY6V1KuJErgr5za8k8;h+@LC)<!TdYQaUDrR^y8_s+HX)&<~Ce+32#w&sPwY(
+z9XS3%Ea0iP>hDtct;AgnH!GaOtU54`=Vrq_bYL9MeFtaeX;41HC=k9X;!1^Qsj^hy
+zBP#DxjPjcl6>N!1B}IrEJvS@kM0k2e<yX-x+^Q^qej+ee#YV%k%;E=^PQJ&o<yoOP
+zMSEO2p>3gOm9=rfrIR)orf0QMhP7K<I-!RGp6%j_669y&l?lN6h5ln>V`D+eV4-D+
+zM*leKGzsTB{hf3JkX+m#1Q-3?;2p@Rzl9*Re<x|$ZWezFSnZ#Xheq8sPu^~Pn;x2t
+z!BoRc;z;Jh+2fR$=41%%^YGNpGyh%G>>58Bc?*cLW*F$IYZckZLXnZEPzK$A@?0x2
+za04C70D77BFY4t4f-z4unLxJabpWY(O*UxZ`l4qF2kb$e&<M7ap{!P#i^jS;Jw<dP
+zWWGw%Jc)>B6G@in_6(Xx?H0>+J%|X_Kq9!5&W^-EzUM~TrV!aH3()@8ub?F@`kP28
+zZ<Q#HI%#Y{ldPJCCCsygqUda*ZPF>VX9Z!iIE>`VXOPPRGtnj79W}ua*M31&DS+@$
+zgwC?+8*7+nBkiHhcTMDO_CqC2Hx$ORh1g-P_u<+a)gsE*3*oWVG1r$!HffuxjwLe0
+z=I8``mq_Fkr*-N$k{X3q>p@x_FOi`y!0^-w68ZE#lYmMk3MAFlF|}-l=zxpxK`oca
+zOj@+CmZ_5^O4GlFj;d1*W7;WBr3akqR7oUT_rl4k(^kTX;;Exf%Aih{Wx2Wz_pe?d
+zQNG@T+FdEpa1nZ`Gib@9Cp08b^(whdDH5x_dbM2bOZDFH=IVl93O?)M|4FRLzk{Ee
+zV{B9Cbdb|7!q~3J+n9{M2L&{CC|#!zZH+sj`o>+B?=<*=BEX$uLr)I=Fhp+LZLJjn
+z{tA{DW0&PhIiHEXjopfTs+7j>g3mDa2pd*|!}%<@f1}xgVcv!rGwxN6&!v8gguxs4
+zS*0c7MuTy`vX>?@SjvA%Jnyx*D(All06t*#J5Aoz{H=8XaTYClPzl!;kdo8$;#iDX
+zr(;vkOEE2`Y4*JGmZcu_c+GQIqBxdgcr<ZIGNoZI^Vk)6?UL~==+YBs@#kiJaVJ&T
+z0Mh*iKo>m@g}UkY1SZtu6nwD&U8#hAQ>DN^u&5%v4{7Hvd?ddC|LOE(DDMLBTcL!W
+zUgE49M#kx~f+tfHktsT~-%|_nfZUU%(8D8s6e{h>w$?w!H)E)t9EIx991f#psjott
+zMvA*bny0@)m)rciAs6O<5Q?VwA0<`vPlteQEcu_qAW+XRg*+2~oWwKST1^?Jr~aN1
+zqKMcL+aU7mA`nqo@*3#7+f%4)rM9B-D3K=LB~DHrxKz2b5FiB;2@BExrHk2@QW!5a
+z=p<r{1iHo-yQlp}WIMD`2r<Re+lw)>y;$I5=}Rcfq5TbFi0>E1uNugQd^bVX+Q8&o
+z@Tn)G;=q)lWTId%kgJJ#p`!Th7<Mk!dL&0euXB^GK(0dzQ`!FU$neo?2l17qNctN@
+z*(`h}ItL}v#ipdi3+J;z#%Q5csAoX>gFH)7lKIvsFp%dsfVA0)B__{Fc5Tj@h@^{_
+z3KpN8iL|~`(90Y0IllD<=zQK#dToU~Z&M=Busa2Udp7b4hQr$QzWB%spRp=cdw~k2
+z)6n#rx&w`(YP5<SfS%@!CLRc#!6KGdBx~Xvwi-N4Kt*||p6Jdi`881&ER6dJ3*#*o
+zB)th1J(lRpn{>3JN%>EjOpY~q4NF_z6xpd$&xc3OoBAigx?4|xh2~9@$beAuW_(HH
+zrcjfsNJb=tgAioiFJ2Ld)~LLSF4z+3L-CO}S6<p>NweowvAjx42w36r=8vaJnb5bq
+z1u;rdqO>q3sezq<#F`7)u<ng{gMNo5rVwDBNT$;K41b+w@cu$1$IujI&Bj&PyiyXJ
+z`3oXAoup<yNdvovq+xzuj${>$#OyK-$?J$;X+qB<B}|Aj*D6F9O?e@P?Vo--^7Hyj
+z&X~R&)$<0#_#BNy-av_*`Vu(Qyc!xDS$X^c7)IVABAa{x7Le^-tJ0wd{}ATxy-k&|
+z0OJ$<fVW#vlUMuhu%MGapO4aY7IbrGI^b_CXz<rez&kDI<FnuyyjxW|9i^N5w?n7A
+zcZ(xQy19Q1vc31K^b!yb#Z%~cns=`%PkJ(8Sn*)aMg19ryZ)6%PRrV0>+}sj1>O@V
+zg)EEa#C0pE`37H1M}7S>sQKU@CWs=Y|IH2bBV>+>xao;{gYC+E*^a+OR2+&V<7UYd
+zVDP@dx>5)_DT^!E;CO}lCTHNwg05-#ar02*zXMao{G%~1ivIyPTh%|jlsu(t2*hXP
+z54anZl4=`Rey*GifW<6-kUUbu1tD~spC^az#Lf<;4EIls`qNe1?EE3$AuZ1D@`qV7
+zBTh~7$xqWj^gHmKKa#3p{NiXTzd#;M`SfAvG(W7v%|p=4PEjub%Ol%q1j#WBAwP>4
+zz@0y4G_pi|kUv&(hG#5bCclIVNXQQDL9}#z51(reN%{>{r$-q>yz+ch@;k&wmmg4F
+z%-4|4G7K?v3N42Os1bAlq=uqakS<cPp?R(rXo_>#WV)lR*C1*fHbpi=Z=)b}->~U_
+zry{!2KFkV%nEqGvJ?u(ZQIpMPNQ8T75jaoh@IGB&(E1PPWO&De&<re}!?P`YfNi1c
+zzzAoUDpGJX!euS#dM0`sq0_AnI?HkW3D7yB(?Y5^do+p?<d#^*z#|f=fEGZUARy)I
+z-v!z-^2fDE`<ILb2mTqzQJ8B$Z^lXrYV252MTZ58s6M%`Ti}8UYGsE3-PaYUE(O(K
+z9{L$rT0#9i0;P#-9tGFSF=XnWC82DwRJ3fp7E4$`BS@lMNbd^v3zpEuUp1JE(~dgg
+z2UHU11H2M{4vm;`4F;L~f{oONz79HFu&ES15Mv$_XtV4<({F{RD%g^yQW;(zgF`9U
+zO5&q<`Hl%d+hRj_fv9YsA*h)8UJkTFmSu`qy5KH}=z?7jbelFO6_cS9JVhM~-70uG
+zrd!{@1Ph*tY5(&@K+j6#)W3k$7W_fdGW1tKq~JNpZ9pGEHJ_J=>mS1j7Q6uJ;MUaV
+zlTZ&xl%@}Y;uX9oQKtSVJVe1u7JqsdlE6XQdEgBQaJv`W8VZ#<v?<8-&4S%)1-qz*
+ze>Ij11XFObivR91H1W>{r#3$an+T9-q;!>5m?O5D&!P$o$GhmTd0m$IPZY_6^&T<H
+z&w~MH^^D0s0a}`c^El$gseg`+v(l&$$)9csWTo5TX>l)IVRkwyCnWm98MU2*S75o2
+z2flF&$3r;|?OxDuwSgI}u&@w0VsBSCijw629OAu`ZuLG;uzP>0Y(c(==e$ch0?jKh
+zX77!nh@9=DQGhpDyYQ7d{|jv1`zu90WLk>{XXLK;f{tLXfF=Kk!Eo=dl@!<-@0^C(
+zw|2yt0}yn1n-uHa8{PzwdgTcK#K6CVQ}QlX=!QS!z#oM!cR+)eX8^9SqH`aAt=nZV
+zz>@z6A7gk|D|DZqli7RMSd<tagq7X9)`A+h^#Ht0q5BZj?a5@o+bxLo<7qFPgm;TV
+zH}&OP2U|NRiI)zx#VE1ln=u!L_d(@IN8Nott@}`{E>DI7@jk3TU8z@=d~y=(#QT=w
+zKupT1Pwx@YCFY5Lhy9B8s3kT-JZ$#9tw=NSv2GVjVdbj#J>@z~4&MQ1<UP|de~&{2
+zz3*F46Wa*yUoBEj{t(s)Z$wNV$#^OjM*I{xJrbnleFNNr_d|s)<<s(>oCEl=)i#??
+zHv#`)!4Mxub9>%uo6B#bSl}zGG+%7?ykA?p%HgTEVYll2Q9$v|VmS3PXsMT}PyxKf
+zh?f?_d_X*MY^t=1BHo`gPgCV`P{K_TkwYbCM{lGRLx;UimDV*}W>R<ng7vyoGG|+`
+zSxH%lH=GQW1cYa=3crCy)>)-_!rdZ8zKzjUr8&l7lp^28NKxh680QuKFt$<NZWejm
+zwVGHAYzp3Bm1;_3<BiPQQ(Y$L<F1u>J0(YzZ>Qj{l~9xz#$Bts%h5iDao1`H2|k8#
+z*Gjyd(${K_yH<CRtovCQcdf+RD*aXYwhHcAiMLe-TF-`Yw@SRN62tpduEQL>F^s!b
+zA7SC@z^$r$TP4?OkGofN57!&RxO-Jkwiv@W+`Eo!CWeoxd;pBpJIHE(0{md5>%gZ}
+zel&a;#^GOxrYBY(hku*M8uG06AE>+l>t+W&r^?qA2CMRQh0jzzn5@4*CF>Dys9izx
+zIbK~O<d4I_d$D4A%T#hicst0(=_0?kN_|fyjJKWcrTME?UlHx`w$qo;6Yo3=@6`Az
+zQuT!@oonFr33zyNU%vu%;noxuC^dwer7SxIGW4#RC`)9?^!l3VeO7Hl9zRBs{DT-7
+znex8gfX@lW$=S@MehygB;N5AOUbJ9<^_l<^(7fkW2Z9s-HLwuezJjsimJ`~k{wJMa
+z5AWqd*iP>b+d$OfGq4nS@1jQ=unWdtMU@VyvE(N~@s#%=TU!z8euD<yhpiW28Q%q4
+z^8U_(PTrZ|BNjCHR&o`;w_t#$QQJo?Xma{l67ORc%;fab6yC=z7~;Ppb$G&p`FzVn
+zz$a}ostoh*XfmF*N=x`1WcSZlu$-4*z}{yqID;=61i0UVbNChHNS?Fc0zRFF`@99~
+zIjxo67c97xU&Nl?dq6;O#6E@=jTbG9BlRUDyH*QtQ20LT>!5|<RI*4*U$!ug$e&38
+zK4f8dmCqn`?<*F@4b_j}N4<wFykFtVX)S%#!mSG59Rz;O!tg>S4fS;kA5$3EgC;57
+zBQ|>fkXIrS@E*01GSJkzNo;T1WNho?)ro+A6t5@Kxt(}*^qBS9H0Ld3aDNu05hlsi
+z=ePwk`JbVw-V+uKaXKvVp0r>-{}-+C?^rO*>9ECnT4);{ue0R4F}VTndE4KJ$8uPl
+z_X~>)#&4$)eQ9Z<lXoHQ|H^`H{voYvUt2sH`~wo_H-ZjEfaruq-IJn&0KL76?bJ8O
+zaDIZ1fB}b$jPH@Q)5eG1lN0twH+s4OIO)1Xpcsu&ttT=9ck~qLzDPSXT4wP}4B%Ei
+zF1!M{v0pSO7By%C8GxIk_H(KI4ESuMYbi~yYax9TrFX+gAibK>KR^SJ-b877MGNVB
+zC{3?tA^kAYct{Bl7!M0Z&I?p}9IGDEuT#1NT_Sw~>9lJ>ZHqFhGhOfy@BEMILT}|@
+z^2PD+sK8tl(9V&rIE?B_R~)b!*>qnvpty2QuhXK(2vNSPm!RAiZ34ShksgZlfLh!Z
+zK##>pi&G&YDnuE^y;(bBtCi7#*O8}(!T0E{Q;;MMdi4TImZ(s?J2N_kkS(}e5!cN}
+za|sVAx{jD?bT<iCs`~CQV5)>THFq7=5H=Nc=>%KWS3pII0{L;WlW~~eqOKBY`ePVi
+zQL;o%{rBB~Qlz89_HZY3*iidUAtLlhM(syQaGKPJEw37q6*X}%toD}&!%qDejb?yE
+zbYB5J4;OCW95r<WJzKy{RCT0mN>fKH+SlV_4gQ3XAWXkhEXs0KLDJfo9*-g|enn+W
+z&v%dn7kJ$xA6hvkov?_*$7EPV;#XA0WV|mb(r%MlJ2WaybQWhj$Du(Vs7rB<j8R!q
+zO?7PtqGvtDSv^oGyB#ge;Sfu4Kf3+QTr-h2iu)9yum_QeX-;u}%A&Z_p^Zn%`2=c%
+z%&+MVy*UKj7T-#NmboSq$tF64V6JOna%+p{UkfLypMrpk#WO4-xdB>Id@a3FLCSav
+zc2ayDjR76#w23XQp+<B+paLGTco8v+_)<TNI>oi}u|%f+3ECIe2g;}{TmJ{qTnxhi
+zD%ZcFK{d+jmDBXMVZ6ml{wQkB(C1;|i*I-Wy{f@k`V*jC{7X4wbM%i#04=3SRfARf
+zy>KwaH^~TcK~fcd!J>HCB*9C){#zJU@p4(VRG$TYi&xN@2`v<m5(%c;DA?u<#lUY>
+zp=<sjRtG~@<y~^d|AJk!5wHG5^rdo!HO_EbhhG{$fPl;Bq{@3vPQGFSV1kHtDefK!
+zdWJ{6qmuYE_}>sS7)ciN@l6<w;a4wIQE7mGU;=hl<$yUq0~0a2sPY=P$p=6gjZ`b%
+zNb8{rl9~LKBxLtdZ7R{o=6$JAmMU+shj<F6)5un>YwA23ONo(V!7$%W1MO?U68=xf
+z#^|TY$tdR<Cdvp|<DSM>rUCZ1MmB@*=?yqQeNOZ{hY!*L2dPq37Vz>g;1G-18a@o#
+zVGI>fml~|+(}}C$R#1rLc_YypDUKIuE6m@+#2W=-M}VMC;eT=hhb@dJ+R!d$6k2$%
+z(xW$IAs$sfN)3xuvJqPl>vCrr;8=0UDc%fu7`kMXSQu}Hv_dnDaTdlpeU8{3uhP$%
+z;Et-ozd^KVOi+)`CyX~k97L~FrDsz3K>~$;0NpYss>ek+qVpcmBct46>;<*Q1i=`>
+z?)nf4u2j!~aq-H7pF};=!U(%V@T11ns(j{+u)7xxq(UYAMn|;t)uV--tT_`ZB^*=`
+z2VyRqMig%%gVE_=pm_69VJ%F*Ap>ZOM3&`lbxkH6aq5%FBDR+Z<ktTH11R2kjX;LJ
+zpDgh1dVzfUGhnNDmqY=5KGod4MwD^=&McsN9u&ybUxPsx@3|mQnr_FYt+?4ch5DoO
+z;gev{NsM<JJsQX3s&PUiE$0Si(l{x8D**0>``mzk(WEXrc^sC1;~k9#O}6xFgdD~x
+z@f?V3=`<EC<6ZG)85z%l?trJYjWtx+<ZtHyzNh_T5y3Rx0Pk&_(Y_NflTU`$8t-fN
+zS}M)vkCQ(BRqHHZh+h#0_&2MgTwY8tV!?bqJsq%3la6mV50hD()nYeNhJ*pz#Z^z*
+zy>=l5`M~<gkZJrgs(eoCB|4hH+lbUB*6?TXMyw;or`l!+1x}5RAXoCaCV$&&0e^)k
+ze_>Uw;Twwpzp`K>|2=8)*H*tb^DU%b-&$|6Hz~Y<WOqT-rZ>TOEjgn964iyp9VTIZ
+zuYEg>^bG;>5*zSEjh@*G3w)a#$G^0ZU|j6NM+^i0LHsHhwowYdnxy}u*6$iBN5K4C
+zDzIX|@;bt}^YKO|u+2U>Ltq;}P26ktB0&#7T5(kZaGdqle6z+sodoQ#L#fanKT2^2
+z)Y5R;k73?GU*l&w0lV$AY{Kw0ek&BtNV3aq9e$)@Je3E;E3mLPjn|WXrCRui#`CEE
+z?shU97`Ddg+|x+2-daDQ@p6Q|Muwg240l{K{<#CVw|E4K@!&@*vVpU$`d`!1ej21?
+z#7Rb%K<be|?4xKuGGq}wLrM@I7bs<exuE<jq@A=5;i4QR$<%SkDl(2EL$)1(%9pjh
+zM1^{hS3ao<T8_q-Q#MaTQZ^?87tK*&BGR1{GHbyna;iiQnYQGd)<I<7fQ-)KMKH2+
+zSwt86<c|hAwDrghyr&`L?5rF@n*I{rzz5p?9$yZPemBas71DB!b&z*RT7(~K9P6Zt
+z6kt&3G1et*iKO@>@+H6IJY<LB)(u31B3GS>#~&r(aun*5pra*)G<u>mr5DgBc~wKx
+z{}KioeT8s9cxdyho+2uyX09_(&HQo30U~i89%dYF21pY5{eZj@IrXzpiE)034E;@b
+z_Hmu55ydz3;`6vJ<jv_`$V)J$ae<?vEF0&xAV)wrX`Jg)wfAEfLGc-wxpTaeiUrr>
+zU6O0ud<ii&-i>}i7B5`w#abR1pL!KlygCO(-ETsY2Kxg<KHh{>siJr-XM7KN*eW08
+zj8BvCj$6M9hC4o8KGySDqOAp$1o6>`6r@h9;EikWh@Xi=+IIt@GHrss2WfvTw2}G$
+z08gO!@6APzEScV6UuQg~kh|b7xM2z{igenHH<4#}+&UhF;gI8a!n&d2<nzf6pHyUs
+z<K`J;_D@;2Obq^(7w~E8E=VSSl$^*j)?JVgf0TUMvlh(d`^W_Mcbr3-MEMWat2o2?
+zygq=>TcpDL4NRDEKroE0Eq8hVUlga5bS33migaF5KA21L#Fdl*fCsJ8Y5cdCdgEoQ
+zqZ!<db=EkfoEMd6aXOeZUQsRzIESZ^qdRQ%Tg9(R13Y3KX4mi@LjnJ2k*epLh^s$Y
+z!*7J}N#G96HXZZ+jSB*I1;JUq5!r$q{c32q(Kb*_I@AA-h157}{W_igU=mQfd?4%8
+zy?uc`kRhpCKS91cDkDNe_fWeJWk49vzogjqBZ*A?3mxd3M49?7Xru8Dy4yiNtKd2g
+z8>%lIaPkVU@+D+YI&iDS3hfz6b0t#rmnH%YdP|h4`a4jE(mZJ?_$2|%cPSp}5=p0C
+zf(W8CKW1SJuAp>?L;-yp7QfP=5}Eqlu!PcK5@qV6pnj#pB?{?XN`OYZFZ#>Z@56MI
+z7DzN){}fYK8kW3-^<1b|X`w`;^t-SYm5!1%i*z*}XtbnRqTf>lR3uTk{tclq63x&z
+zVW})FmhI-~Ee6n7NwZ4dOEgRVAb6RlKSpTWmk_@iT)<qj$6{JbH@UBb0K-`*+AK*j
+zeJ@O?bc;kzeR(?2Rw*(AF9vi5+(u$|U4zcbOLx3T6xM)R>0PlYcmTFhx>K^D>QQ3x
+zZds=3%V=o3s9O?xHdfNo-4dC4LmbdOvafvoc^b@~nDCB6r%Ib83hM#rLFv6QaeV?4
+zDZNkjSE6r*TPVF>qVZ7RSI}3oiMifa=2uqFfRoq<A(VAiXx~MF-uKYrvM!dDIC(tA
+zQWmfvo&bSdSyu}N`1UNoWXnoSek($avJ~sNM?QZU7FNcs2OY!tR*15!o8@3i_&|)W
+zEL9nF74=)nH7I{scSYL53?6`-%1p~T=kRi3qlYp>R9?X1zr_kX(Mva8;scn<iD@(x
+z*A&=rVA8TSr1e4wY|`@BG#&+KlUBs0@fM6?(n@O@^{b(KlU7OOW4?h<cCBm>Ls$Om
+zFu}}UgU%KI4ZXl9i+>enUpD*)<agJ~3W)nGx^qz$CJWD^7nsWm$-K=kGf{EWM)1O1
+zzk*PmWh06G9`Rxf@`pvsiilUSqMU;$!(|8BQK}b1&B|UR4roP*9|iQ1L{9x-c<r)Q
+zi46VLkw6C}3h3X{RK6^cso#cil^v2OQ%{BiDSJhtkUppo=<rgNddSxwD+YR1qT%@Q
+z5twv-+1s@<i4{~S`{RBj1uM|dvSaY>#It^`6VRXKa^}=YsAb3H3TX)Omz}_{QPZcB
+z_{&a86wnuwWd0Ik^9arKJ25u1CjgzoJfdBQC6A`npsY+G2DmpLWfLtI&3F+er)-jv
+zc8%bMm(Xy_75N5+lV{R+CyR#Ip+NI#IK8#9PydB)|NW3K^SgV~#6H{y1pEcy+~yA=
+zxYGOySl#UYRTz4lKNs?L`13GuCw>41x?w71-}bs1qItU%JzS`O`iXVFAJBhM0roh|
+zK5htZ!~lp$!@-h|V0w93y7DOU__H*J8OkA1nepFZkY&9rsByZhP?l*yC%2RAdRx%V
+zN6;|)DDR5427e$AFw25I{yX9++k*7^2hA1rlR)cwEH)%2WD$``Ag2WZy@7P{5X`Ar
+z7E-EbfzJh9K&`(;jqwjiX$B}ap$OB@=`L*9KxLhPPX6O0z+9`cn|C9&2U*bIFD3)#
+zS<uIyqe&lZ4JyDNpvfAl>=UFocq5jmpP#TzJarQN#aM1a4t_rqpY)etg~p^yI1ffn
+z@;hKTvn;Gk`2~jad#u}Kh066vlc&3z^k<Z^Q9zA<O%ph}L+pn`fJGf*pNgfkY>e`(
+zsBG|%AF$YhIQWNeC>yK1FG>S^GxVpd#Dbh39tJp0`9YMLybL;4HeN{;dYfiV1Tl4K
+zuwtTO(K_)iXNy?<StShgmmTGg|FoPS%6GxVIJE5@wchEdMcylcAj&C@!LI;y)Vk17
+zi&7}+f+=xm?Hv_}f5{BlbxgH1<T|uI_;ix`Cw~m7zFxLMc@R0`fppnQD|*9yTGHKB
+z*6IO$BJZ`@f}Gz=s=UT}pCnh@petJ|=+H&xF*zu`O?eh%5f`S=YjS0`E3X04X%c>Y
+z9YUtUSfo#Wl}clnyv941aNrtfFAn6}k>#ZPzM3&f(P!ftEB%y{Q7(2`{l3JqV@wut
+zF0L>erAj$!@Jc9>QKrbB2a=aLjENT1Qs^x^V~TPPM6t+=n-9j+|Hs+4z{ge9`QJN}
+zOhcN6ffgt*LV&gunq<;8#R3JIHfi%}9+UKi)#+qrG8r;Srt|0nL68;%1bGw%S0$`;
+z6{V}_f{TK?KKQ%pvMa8*vMa9aio34jF0LY|sQ>Tx_dDm#P154J{q*ME-#NeY`kmkT
+zz0SFJj1a4Hmc`FS;bCbCZv>*cGw#N!>kaR8Z{Ll&Q{BkE()|RU$+OXQ0N>(%O~9(i
+zQ;;&@x4AD0h^P#BHk@#OEnr>b=TP(Eq<eOPWy6t&F;C%9cc*}hA{T=~;jDYRfQutv
+z=ma?FJ|tiyQgt4{DVJZsV9e%o^8n`EFH7!{$TD_gkNa%_mq%WN3=9|C-wW6n`3n17
+zaxWNR*_OzsFje8J-97<ZBe$W-@HM8BYa>f3;jeWkC3jt<>;k;by+y$FkyEb#c!T?d
+zfbEf!&H;GH{W}3W&8qk?hO3|O;1js-A>0<<gGGl4B@uP;kY;)unmZ3bd(_J!{puOa
+ztv5A%!^<KqrE(Pbv6o7cYF$!_aUdH}aFC@94$VZOWg|%XM{>Daf{NLpc~wijlAIG?
+z^|MM6+isi1rOYQ$H78ETKnT?x_NwEoDS_zCBI^@KSRk`!hxRo==DUKNL=`{39mdo5
+zz_#_$0Zci|epfK5Rye=fBD1s%2UO4RCIGV<`AP{+y<$q=<<Ip)f)w?T$N}2RU04P7
+zH2ScYPnM`ug8EBd*2kD7f8@CPV*ru=N!%7+j;R3~kS6o0?m)@{;U1wbQoe|kc~$>}
+zzcnLhb@6{<$pHOdkg)hGFh%hEV?KX5AkV+VGbF>Zz>*~1L-;PNf$;hI`~vh_c)5h&
+zof-<n=9=(^0E5iYkD#9LMhPHC`7N|?dq6gKP|;xE05MME%8Uj68D?1Y8Srg*C_w)`
+z`VZ&fc{p$#aIhVFiFAPl7XJ(d(6t-!e8#HN5w;E2g}7A_`R%zVu^{x>Jt{7~#YJ5o
+zdO^Ud$fqG$!Y77)BOo+3EVghsbZUXfb&(^Ow(!ZJiv$cuuHmv>7>WtFC{j8H;3=Vf
+z0xpiAC^kew_X-$^{Fv+Xw9uyoY>0e=a%pks9|XiJDw_eG9{L{vmq$2B;WG?!V<gR*
+z&kUVbRB^EkMp-x#S|?y@WHp8zJ}dNA0oO)&%rJa*=%9e>A}yB#YzY0ifa@c_hsO~<
+zC-e^jwnwJet8+vDBVcFb^2-387g|taL%ork&jz?8v{t}@$ahZyxGc0oz~RX4=L0-H
+z^ezE+fJuG_`qtb<inoKvx$sY`xfc=P7cj&BRjp>H6M3F=`S0pqO|p%u$TILv_~q)e
+zrU=$VzQ^hRS@lK%>mtjkPX4EQOu%r2zbP92xd9hNKC}SfFRE{r+{KaMI)JZKe^S6m
+z<XtNP{<8WT0yadx*9!1e11^!5Ps6WO|5$RDM>;8ye^p(bXEz!nA7Y<>UELrcK8E4~
+z{Ef+Njl2nFcKG$`4#`~`ITd<1{M+i?0<Mc3Axr(P`g#G^%elDl@2ejWusxFFd^n+R
+z2#5n?QGjmfYpa#wTWSFYLO+z;fk+!?IvCQj!;$yFvkF&*P89Ck5&04)uR3(GfV(0G
+zsWw8PodWKTJV)I&FZ2!pQ<2-Lfldg$U%)ZU)=|t&O)!nwn#OG9!+#p&PEq8OT#Fx;
+zXR6anR{?y`oSdkNgx(DBhym*&w^afBv*5SK*!xA1=`{d9Vopvhj__BP!ygTP8WYZg
+zdgm?z_>jqMi0tHSeJr>U3xS&)e?pf3c#uan5tfYnfPC<9Py;xvk^kXRJ8C|tk8KQ2
+z&z~D`edLK2fS(L59B0|iNQgCm%ADuujr=2XKW)H)$myJbM}wye@^EAkdHk{95&?Ha
+zeijD!`QWuzu`0g8^(m04n#MN2-fwK9GghOsi^KmE;5Ykqg8w=2yOUYOkxyKQzbl9G
+z$lpB7AAUZ-bN=9OdHW#zJ+lE@7vUEvJTM$dt_1im=5XO6=Zq&ox`yzJfxloo{1K4w
+z56!lu6XEM(;eR(<npKgrNc;aVU`^z|)&u;p0qY`Pga{1(#DL+*-;+WwnT^)Pl*Eoq
+zVl+xFab<p^S1iYKASjY}+4ZE$O~KYp;FpuIWNX4V2Nz_~tFLgPZV8@+XY$K~oS9pL
+zEdo|SmoTHAoF#uiP?lQY62Yb{!Sfk^kNz(T-yXaJK;$nPQOkRRNAS!_&us^IhpjYn
+z9vS`4;8T)Y6L~M0@Gg^E7x@K+<=w#_N^aQbSJpJ67i>mVFRQ6!Su6eHUjFx)FMrS}
+z>Ou}?Ue(u;e8QI~F9%LI7u+I8<p*jzASuvg`S9$({N=(%Rq}?yK%I#L;LJ;nC?^&>
+zA=C|jdLZ1zDkv!jPU@FJV6bb@AaoeBn(D%z6{b|R@;UD)6Tib4ej>=OfxYlLVE8k^
+zhfyGUD{1zZ!JnX;(fFBoemvNW^wkM`Qak))a4Vki1+Xn3cKEI;uAIm>N!Gh%+l@r$
+z4_$>1n@u@<S)FqF9s|}yy2%{xm4eiaE?awFl`hwC<bCAhd*vr|^vo2yG_UGxG*k1h
+z;AQwfe7p#qYpDu9S;eikQ?{cJ0!kY&=u<9i#&}NoGsySgDGm6GGlHEEJ=cf-rs_}G
+zSN^_G_-pdazViE(;jhcrkOJrJj_}px@YANRxkwYa>F-Q#ULy~mLM^hIu_KTlAQkH7
+zar;%i%oJWQ?@A%46WLAXs-LIyt%|(PnopUxa<7m(a%CI9)8?H}CRnGMZt*<TbYXda
+zGJLvJOX+wM#uPqd9=FN4=Q|9k8;;C-5)Du~Ubq6_n>=uY)IZAuKM%1OK6~DqrCk^k
+z9ML&m?zbqU&-K7_2LYaEK@gjRJtGhKv?IJW#9igcHgqC<ap*&$yPe4G6c3k#J}F>T
+z<YCVBy3khytcfhU5a4B@e-*GUawo_YzC84*fEXq9%oV2WqR2h$`1+8NWO3w?^8mJm
+zG>{XC@Hkg^L+ETFSVN?K5x|WGToU>He1PqtO_IAjvI`-oa7SoVz{W@oS#Fc5xg~PT
+zMu456cS>$+Bt+_V8E|dn-E{!F4Y)4ytzLjV23#Lm9s;-}^stm|k8C*+U|;Cl0(M5?
+zG%yE3uL#&1ncyT3nobTx_K;SwP@PQ0FsS<q2wHP*j$G|b;_>@$;p2QheqtAv@lP=-
+zEaM0h!uYdzWw#_W;TfNHV)8jmz8Mn)ytR0)#t)x6!*~!D#o^t@$t>Y7SKp7c$k|;0
+zo~nk)0M2nD{{jsf{(lCnihKpSDf|@!)<mA?VE#r5YLstR4BxhTj>LPh`Vmw&uj(`S
+ztFrL>coN4+w`9R(#<k(06!qUul>juYH}${7^C2QCVsZUO3e7pqmmOC+{`P~ozxR-6
+z<S7zYn|wpXA}v9d)<n~<zT#-Dvt2@SU4q26X#r|Y5Qk3v5j25(d~g$$kW3GH`Fujw
+z$8cLb8Wn=S2hXR<>mD=}wHg+(4%TCm&t_;WYW^LN;Hc)?UKR~UiLOaLvR?MG8ki++
+z7wsfu%}0XLn--*I2^sygT;?I|CX!IVkh#apx}I4~)k;kMsFzQ}v65x=?M;$TSC&?&
+z=8MNEHF<MoRpCdx>S&hQ)Ngy0&>XF&XQnmryT>}0BqE0U6AzP?st-xZNOK1B6yz&m
+zXv8WecZNm%qNXb(pDDCzHDCJdQ4dIQuM*n2`oU#VA6bVaiyQWzWfmh~x=U}`pO$>G
+z(6h`ZVm+Tw^q+BC{PQ)!Fn=v*Y?ywcR%1y2?~?WIB*sygmE|Hq2S@*L?s0?&QWv;%
+zCMylwAjUecEWJx#$GL@CZ_XI(@Q~<pY9-zfF@$Tqd^(|(N|5y-FN+RoB}>Er@*nr|
+z>7n}a**@~0^YZDV&dRUn?mCcO^N{Gd`jGscd=s*iO52GfQ@|&bKVd8XZtxJUC4wB<
+z5G;bopAY>ruPW(b(ec%4M99dG$_dYz8M{R=xftjZ`!Ge45EIq?g@;5>S&=-!hWzIw
+zpEc5Tu2h1o*SxG%%#yLnlZaF~5Ie7mq8{G^2ZD~BF1Dibr=jeUyWGpC&+Q|i2$$7p
+zy<Yg?+e@U=ZxeJjNHs5kXf$#=o)@^(^ily*9+VU+d#%zC<}oB_Z>ab+>%+UH=BK?Z
+z8UePR|G@JCmx|xE^;-{*3g4!lh-a<%5~j-J@d;g7kK5v}tdUi=6wiuA13=^G9GU$%
+zSFe{(6F}EF>q0d-$>N++!)sBFN<Z`_vrmZu%y)U1RQ^6pVHQ8;rv#I=&@NC+5t=4q
+z_+6wfaA_4(YC!|Pkz(u@ZN_?<m@2TP0rD7-PDWNW4Z+QL5S5RUHYcBf(?Wx_??BSY
+z{GsE)`D~oNMJN3J!8(PiYCj0`VsL>%*nm5)&2duhVEE(v;ZQtx4)RX2<vxxU22Zx-
+z=7W}l3r)G&;9@{Lp^p~uUB*)YouUwa=?wyR@Kl8s)xJ9n=rn~E*Vdm1Xz}+i6eG6w
+z`5++qby&U<{24-LC}wNzN8o4=o~h8<+6xu|G9UL}SNk2%XYfs$x4!n_PC)!=7xbmQ
+zmhS`&o~=-4tqVy$Xbunc)()Hs=p4-(sLhcQ=PEQ@`x5#zXx?7kQTrJf?t@D;Z&&R}
+zCj(lh(C*qFT>$8Og;KSbcK}+h&{!?MYd(0PLb=)`Y`?)33gv5WWnbuApr57Mi~0dI
+zE407%$C$mrs6yA&{(UQ;7D7C@U3(+e<e+?7LB4E%Hw?Hz`L=?5+5T(}YPBNc%l03I
+z^ES9f!8_gBXGs2w6vU_P{{c^fZ&nbWw&!;x2G=TxPus5{%`Z{#0k^i5M7Wfkfpdx2
+z0wTM84v?_iiOva+po8tPQ%}1ZtaI%G$BCI~RtAhMW<}iAegzX0Gt*pCd*4DpW}542
+zOK{U-W}3sbkAdZ4W||k(Cg3i|%rq~qT?KzLW~Mn(`&Z`!GSl2p>wqC*W}27OehrKi
+zGt<1h_B$X~%uI7*?IoDJn3?95+NM50OWu#gjknNif6W$_y+<Ih9HM8j^A)<d_TQQS
+zEm!E0T7Gjec7Z~d*6zeK$1YT8UF`?4P+}_-x~%pH7GJDUq04K>1^_iFbVcoFHUnx_
+zXnpM`;bg?33bo;<IhF%leJ*G_uWC8|s%*OqPxbQW5)c<zoR1Se0;7FhY|XiE$3*Z`
+z!Lf^|ZMgPd;sD>g3K^V;cY!xzYZbz8aKHwOU93=D?a5dTu}d_P7_R->E<l%Vk#dV_
+z`5VZwbz=f8uDzlG&}Fv>6si3#yM6f)ff{Px!@*zilt4>rPhkt|6<S`qKMJVrMagTd
+zeJ>|>gSOXFdrA+WjS98at~v`)yZ#vJS~GI?Q$~(KbD&BO_D}^RnGIQMy)1TDvy6fp
+z^0E$kS$sk%QXLL}hrr=zS>_<?4lj$N(JZeP<bT}D=lCi`>rMHuBlU!zA(YtQUKYK^
+zOp|-L3PQX|gXwaw;FR)k$D3CGTF+(0^OyXrlH0~Y{AdQYPf%6sM?vSIAIPR>a3`|X
+z><35^z*rpmq0r*Zqq!n}6xUUx8-TPHNYw&fT)^v6L-XX>xx__#!|UDPldLF@50?(F
+zr`>ZYLx#iasnsrB0m(4Dp7pNDz+V_{6E)WQ6jB0HvV9x;HA+j7z?2kOg2@j|5%1E=
+zp&tTMv^Xwe!+|}*ysb}x<pQ^9=@r+a>LNgX7VXkCV2;3TQkI<v+{PN6*7sw92JY4Z
+zZ$klX?(Rx+cUPLbo6R|`_pWoCtqn?p18idwAfs+h>(-MTXWIhJ`cqrmHu+%QI`(+m
+zi9*NL_hIP=?$cJEwRnO1Dy`nfR;5VbPqfwZFLRvjKh>&#W{Yh9sg5FuxeMH{^(}jc
+z9mV~X`tE0am#sUg0eF8VeQ++%KyGcX4rr-Cl)8e1K?;jqL0aRP<(&2IXM4dhpXC@G
+zs7)tuE%?X%G%9ev<X(rOOhg|f11G4#XB*rU)RFtIL6_+eQj+%x;BFiRCm@3|#~pCm
+z-M3tXhaU%JY((5`klWqQGv{T^VQSvwbhwXWzTIDH4pR@AoRhA@s}p=z4w*VmWNdaH
+zT#J+sOAEwYgpr(!yZbQEJAaEt-4AmZ8<5s@Mw{b2fpoVTau3IUKZrlSd%xpMBCW?A
+z)YKk#Kp&j$r%e8P=HxdZ$LW39<j*XNHt|nhEM#M%08evj*r6@%bC8v8F(@B~WnW*w
+z^%<bM@4g<x6Z#c}em_8BA5T93n*#boT>YFzw=Bcwd!7TOy^gy#NR^akHg%`FPqGgJ
+z9_+=R)BXe<eFhIp@gN<A62QYi@aOJePvF{?z<vj}#=zCQH3Sauwm9&1-ok-0Z#BVJ
+zs+Qtj71&GA3G71+o81K@?vzlTqxc1S@gVN*bMFM@saf19cKpk@V#!Iz-9xeTDxjef
+zKFO<~yKT6h6IkGk@)!DKj(&t1Fh`4#HuxF}w4>|Yb;#X;hf|P=aj<Ld0D9zfHzKEu
+zoC_pJ)7Bx4Q`;|TF~P<Jvr3uZ*YV(V=S-d18FiMBbI8<rt*Mh~_n0~#e4{!CKM1T_
+z(3`<0%|kC<Q<A>)xO4l_;IbpaEF85k%b89MX}H<F4MNA=Borof*H<~t0o>i69t4F&
+z@Nc5v=lpkW#Hw~TU4qKEu$BIsNdKP!j3qOU+e!Lgig}UQ5QuLI2*rPk8bR?^6yHiQ
+zvkn=(xZK!JZ-8)XN76If*5Yr&c8VyQy?tI_#{%YEzb(Mboi^jj(*eGPQhvRuDe&=K
+z^HFlgBK&#g`kgj;*V%x3+0=(XGt6tS_L=L^3;Y{gjMOKP+TDT&PUfix1x5QQ)7Vb(
+z4YF0?k=+LIiaCg5g2-dGoSW|J@$fY~>{3Kwqa#RTE7wU{jOzky#=j5<cS`xAK#{q9
+z3J+w)?&nRRzchugLMTW`NGbQIlzY*X>t2K@WE(#)=*MUy0u;8POu>l}rZ^oR_{Q^F
+z-SownmOETB!x3B)sM_6r2vaV?;||K++mSZJC3hF6+#Md|P6G+_w*7c;S$q6WJfVkJ
+z7_4+~5z@cuvO<2>;ESxZ`bJynH(BYwBCRt)0rX9=fq~k2;0g;i09<!zJ-~0VTsPl@
+z_;<AP<RNLsZE?C^Hc8)>q(KT3cfeigbiZyg{>x;PBx9Acn_Y2Pi?`kxajj<ar=Ss`
+zOVCNUpKJi$cLFZ)U&eJgDs-oTp#t?g0rvlGNbLVn3v&KRHbJieJorIiQ$lt>i3d(h
+z9;IaBDAJtnr;$wJ9@6AM31yx^TJQsov-?FnxF_MMLdPi7zx$%gPOPtiWM@adev_r+
+zi|ofgBCYdt&BS9)El`Jd!nkq&{RqZ&IY3#FFCY&qlFDQRm-9iuv3R`TxWA&=@b-{^
+zBL)n^T};9WaE7}tL%Clq#p6<>p~QXz@|PR|;>~x-y-vXi1Aah3@QmdCrGiO-Z0#Eg
+zLTU^60|l=(;A;R87>J-tN6|}C0~%s?J7AYIl@-B(2w`h5N?OSbK8W1oNM$NdacZ8y
+zbJ{(42})kzx+Ed|HKz`Dclup+J}+=d$3`S>5;|TWB<=>>$6y9ZQk#5+`PpSs6XA1D
+zfWpi=?h47>2&kXC4sN5s+X?@i+@bLGg#Yy%4}O|(kVZ?B;PdAW`|B$3Wq`qnPk`|5
+z;h@W2KZ8l#g}Xa?v+em|QSH|tQG0$kNEY}L!2REX^X0x*bociGkM?f_{JtQ0Le%`d
+zqUKLQovC)@pMp9`XfR~=4!}P|J*|>9<gVm$k<}&q%038>KaRqjk6|ra9c<xL?51Vy
+z2EgQ|J`AJn3?wC8mqXZHheNzX`8RJENtu97B<e7dG67k@1ESi~LZVv%_y2nbN{$Nr
+zapubeWd!~_;N81WyUWh^xI+*UnEcHbAmwV;WxF>+0saTj+|}>4B)nSMUWiO>`)X->
+zC17p)8kgeXt$>xJ*GgMA5f+lZ!zD>O5rGi0UMJ{N05eyTSFU%(slKZ>bA(Izo$f(k
+zyI1z}rvTg=1bPt2{db-U_@LDNG~f}k_it~(*8ydT-X%Lj1MxW4r#@c>(U{Bwsh>YF
+zU=rg<1QG?c%N1JyJSq!V;n8!rn6(1T`#l)Mf?IW-Ahrh|08HNMK8gp5yB5hbI*XEh
+z@Db$5+}EIL&iz|0%5}0BcVKj4(vgo+2Irj?#}%BTew?EQ=g%yT*5g1qc=b3ZYFl5M
+zi8JiS*<o;gYH_r!hkQ7Li!uAs`9?fY3iErBWKxW*dk4}upmQ|MGBbbd$zx{fwk__T
+z;IF$pAoEU!dUT=V+=^kifAt>ARLey}d>n~Jq6D}u|CaEV+kknYXp9Z$^QONeyh7k4
+z;EhWu0~!Sm+~xHDjMi*(fIRjYWcMH0?7^L3z&$HH_=^Y>_VXJRcsH*Ref%i;)&JM4
+z0JjLtpUv(68sU`!e+TdgrrY_{ZNfHC1((RFn?FBAVDOs4{|q?!5D@!?moAa7EB&`3
+zK^rK{-?0PlK^-W}uhavEK2Vsy^Qye5@H-WTM$ksyuP{`C>4d`22?~D+F#7vd{7Kv{
+zRiVFENPquPQPE$8gV@zez5qn+uYTleF%r=}`m69Zh0$My3ksvZ3cp8TtR;o{>#Zn{
+z{%Rv%QW*U;olqG4Rrn`>(cjnb=Opk2ilV=pq`$vcRP<Nj^Wa4!8(<%3e>Vwz*CJ8-
+ztMFch(O-q{Rv7(N_!A1FzY2d{Vf0rU`8S2pUxk0EF#4<T{L|UrWGA|zecd8`JsZh@
+z(N~2h0Vj8Recd8`J*Y^at-?IPg+l17!rxOEeO35Z3Zt(Ip91v&eDqZtX;K({Rha4n
+z`RJ>{+W_NV+TGa-Zhj@;atR&<Rj)#ZJ9w8}hOfvnycdbO3}2CD_!wYaH?PXNdWo<s
+z%hv*w&SAv7`ej-EO5lqL%d-5nz}o?<ZupIqzl!-&8`1LXvaaqX{9%yD{jI={5Ptb=
+zz`qliKjPT`YCquL2dG=-MZhQff&bGxth{fOlZQ%oeQp6#@;=gC<h>@wkO(Buu`x(_
+zp9ZY*USXB@iVNZWG^j-RmwFu!p*ua<ms$i#aB2naUJjT#bd97zkJ13x=ZVT*WK&f3
+zYLV*T>yWZe_X8$5X_H%FnZis*GS%&^S{Y0Te{CY<-ww3hkSDD4F+m$-_<(*Acbb4x
+z$6|;aAdUcM%b-4O8(LD$hVC@UKd{OBCHaU+{<TehK$4F_Xt2GLz%9}e&2XnX3@&2w
+za+|ya>ecCPH_2DnWWMO_>^_8Kah8l00ZXnLMAFWHOLpX>-HywB$32!McM3~>4vET=
+zJB20rV(%z}X6{=8ba#|JcL{s_5_$b%&?{X3CcxK{-QKF~NO+uL{cQqYMOfG|F7U?y
+zk35dLd+)aFb%!i%WiNf^$3K(LdF-W${4T7r*B!FVUk9x0rLeM>;(|s`8ye-%j+p3A
+zf<{8x2S}{ci^#u5@>Ju#2AEv-0ZE&~WmOPRG(sNJ>MHy<xCl9-#~bi)!3P}Yn_4TK
+z!bX$yqDg`~xXvWKYLZqt-JK?>_OSF2)>U^7Nu2mrNg5LV!-0Msz>hc*Myg5}=OKfc
+z@?pjp;Hr4{be}x@2Mqq(wXy2p4*ECUkDBDWZL;#^OD6eaUb0|!p03^dhE0A(n=lK*
+z3BH2Qj(3j%i)-z5!5Wga7BfS!>sR{4W%R76@(eJiOjEu_dR-%<Or5C>ULm<LsS4}y
+zA;m#^wM(7UH9+du;$lSI2bhLcvXZv@b)*@$O*@2Is!jj}oU!-9qH!;zZBrdYz0TOL
+zXcfzzWp!{l6RNRz-9}n7)r?#_W8X!xEBlz$;@gZpj&<xdD@K?Y9|mDu+08^dOgKmk
+z+0fKD?AT(;UfI&D4lW|bdahB~)T|D!Wx|E$Awjk^HS{v}!%awN)mB=Faprm?Ttx9*
+z9mJzE_E8MLeX}MsFyXOtkg!%0)-mDR7b4+eO=xGr|6{Y4T!P2yARe8uZ!!FFDZ|UA
+zr?;`E?F_nTsBvsQTbcOcdzo+zmaD{Y#`uv`cY?p3Wy(#jK*H@m5;Q7niT{l~b`n#4
+zXzfuXJbL2$SdNNcV#;HiIrv8_XyR0_0g^b?i=45yZvevQH%YP8EVdMnW0$UB>a1cp
+zTkK?K>~|d9SFV*}w03HCvDg?`!TrjtVh`G4r#hMM^#EbN`<RqFf#nY4G4oz%Z6sF;
+zX0F1@ahC=DMG*fJ^sM1ma5B^6m}LPUVul>~?ZCWyIqq)}kzs;Nwo{UQh(9?MDL)Ui
+z2;vh&WY9fx7B~^fKEyxoK+2xrPC-0EMCs!NtZ`4!hj?8ZQtk@gAc$~PbOJN2?9p95
+zM4|b|fF(3<a58T{2N>TEJ|P9OEckvrW?mo*ecx9wbMNIy`BCsiLF^);P~kpu(vSRz
+zG1BF~f(z~=6;^qD9_^FlN}r`Gt-zA5EOs(`$;ZD4ZjyqKAx_N_JZ3sLPrvZD@Reqy
+z{3bXhh`=+5YX&5_(n7W$j?s>~)xdDwYA&+-QRFHodnK0g&LxKdAU%!r&q(_CB_PI?
+zpLU;;jGBjW%et6>6K>s%1@F4qI26_V3vaC!;5QfH7^-aRqmp%~B=mkuRv8g~rS{*@
+zbmUioMaXd7nwMGMNCTojCoQ^6syH1|=q-DBbPbjNU?rkzUuQ2}cl<+dMoebVJ-k?;
+zcbo=j*g)Bpm%=?hR}r)Kqi1hD&j6o>hrdjIBneggOD}-Cg8cOZKylQ&@V<Hc)dRHk
+zH{gql<$waRR%3xJJR`)HP>}VP=*@-*KT8RKpMPwR@Dr05BR4T$v}0W0WVdufD8KNm
+z3@*!e-naagZ_T@I&h5ei*?Emb9b9TuIYT$$OuEA-Bcxj+Q3q_v)SV7`kLqTw%eb!|
+zPC_Nlgp+r}Aw&W@U6%oDJq4I^57Zz+x=d^4UWy*lWeF4*0KK;#awTwF&)r_6eZC2m
+zbh$3W_FBo5`?Yr9eZh4v0fx)SeLcrkFFTEs?q6Un#WrhZ&b_G?4K9)wdnLqM>7tW!
+zzqtg%IYE2FP;33CQKOy_o^*3i8?kQ9%(>5^o>-4Uv@P^x?H>0{ph0||QbdZQODDNY
+z>le-s)}L8_l6$g{A+W@mKmT$hA*5>_L5Qjok&0#Jx?Kz1h2Xw(@cE-CQsyzE3n?|r
+zkOB@~=mzWO&%b2;rSpkbyTA$76X;sF7TubEss}m_e$*>iqj`wpoZ_Be#}f6`QqPGC
+z-AXOtQ=IebSo=wQzzHqXYD%)!g$q%uU}GW{Rn6!Cen>S~9|5<X$_BLar-5hiwOVAX
+zLuIE|x;TISg86mxS>+ktFsj+9GfjilIt<h&qcY%|1i2bR5#+Nfxs?jfKFv2CyklXh
+z;yC9lz<}B2xoc$P=Xs+6d6#%q3ptkx*)hsxhLGri<DBmeS=wKI+6)R@P~~g+LRNr%
+zMKd0mxkh#XFTEIwOC8Ooy8=Wj1L7MbTAk#qME7bc^Rx<GuOUtG%Q`Ya(!JJZ^oR3I
+z`Zvfp)>L~Fh(isnKH$wj=G0bKkk=YysqA8dEWjm|nzi0bfoj+dn=e51fXn8)5PAmR
+zSNRpDgw(gb*}0<5_LU1_eeJy)Fq}4jde=f<&W2{!lt7(cI$368rQ!f4x818k8uw5g
+zr^8=`uX0wh$yW(P)MgJ=XepJ1&_kkjR)!t`Y8MCJwXn60jd$O2gNvn(*#ctEtvBEo
+z25axyfQ(+70g>v}UFo2$yAO5Cq;xH0-Tj8Jpcz4YgU6pch&mlM1}S86z-B}o@_}f4
+z*i>V3x4sEwIHVo(cM6kit9Di{j9?LL_vL{1cSt%OfJS^s_Eum*!TIn|Y!~sMv%G<U
+zXfsImHtp$qH`Ea?uC#zptPdtR;T5+tY^gFb-`yG_MU#Ahd#L4@lAc@WeL78}X3)ZK
+znF_#Z8uJkZV73BYQO8wv6^sUFyi!I}b6#7*6zhZ=CZNt8{A5gpox2vYiYX6SW?7N*
+zULtDHq&@y5E$Sp8MFY+!Fw%hgoB9P%zb<I+;Buq*R9|#7n@bm_rb^LLVygM-^kgP_
+z)kwUxd37{7H8C+Y8BG<kd((wtG%=Bz%4Cz#{M5d5!TDbm%}yqB<y1PF%TAW}|8Ygi
+ziF`JiC{8qG(v#^zHu=Yu{-X;f3dyl(qA(G)T}BOmT$9q_|HD9~h$SvU%oDkIexe*t
+z<T6u*Y-wzw8No@%Ddx%}@l<-Wc?@&ur1$5i3MGBcPL`T-xr<r>1;Kn32$orXs+ip$
+zFCECIi<)g8QO8I*gESyzrz(|=PmNraPL|@6#0Sz;xs)y>6UnhOU@YB4X=);y^glP{
+zrY22A#RJ7rQ_j?*mDt3I39l=tx|E$@rC`e<s!u6uF`u2xO(n-YM6@|44TTH)W?&(O
+za4MbGYVw7tWV%?KDgZ<c6BxyQ%^5FP8tzME4F!|=@<gIIt_YJ;sdNP@ruW3TJ~R&y
+zn=v(+0ibOxlzc8-%1%vc7Cz*K4|wS_e$Tt?l`kbslle?3F_KF+t;(hMrgKepTG-c#
+ztEVPSdxd?)^hA>#zt)$>eB{geTo@@8(gt_3h(Yf^pc%=6C1^TFmI0BqANfQfF`+nK
+z$Ixgpkxz_dbJ>z9Uq)Rc!ZR4%!~~loR=&(J$FItcj%Fnn+=Cu!efUAe$waORJZgAN
+z6SOFvvy-D!0KlVO1}eu-nrU$zS3EgYo&?L8D$_}l)*$4vMMJ$px;RxXBn|tpPlY|@
+zblFfsU@bFN@Bt;vaXdQ}PoPpXk`=Zk=Ts^#mx_}KVN0Y}04j-eE<xge3`CEQ<g|s9
+zT^t-sqBN$dg+wa5zo{}gAlF2K;~=+>6|$4#c8C+%Od(N9$1xkG`>8!6x$*dZp(4=t
+zl&4Awtre4Ul_i%=2FB!QF^>OPMH)$zK)(ZVnd!8W63(m@D=O20inNhz3Ew-yGX^z2
+zk)Ft<6Na}T=vQfVnRIEYkdoeVvU7<MO&{9_p3$OtjHhH5MY=GVHl!ix6?xxOVca)C
+zW7*6YmWbvRODIkO0s^v=g%ZUJdIzrsN$_Sq>$(d+val!kp-}h2Oz&SW?CInGvEauJ
+zbVr>)mD|HVnO^=qD1YQJG|J~tMl)9izgYdb{tKE{w)BkkMw_C+lLD8!!50qP&>U@P
+zY>{e0-J$7d%Zi@p`!C8!snBRB1Jvj({lR?qMZx{e!TH_Nmi#%`8x1~j-TlogS8O2`
+zn~^`6EmeWwKRM08R5Q%`4(WyVkSIO9EvWHOIvVZS5==J-&uo@n>R)M9h9Cttd3AQh
+zx}rTj(cqH*X<m7-XS}8H!e~=ZXYjK7PrY!}$f}hqRt67rugXR<nVu%>h%`5^kxEBH
+zPh@Tm7Mg?g&A~!9k^*>=obFI2b7SV6(dfZUOJnerx8HzKtTbh=x`+?Kt3M~V)hy=*
+zw@A5GKDY2sV{cE>!KR*QPg67<?TXeMZt5AlQHgecXsovpxi=9nbc2B=1tKv5p(ptF
+zo!O?SjFMCy3)bG>yxK!?Lz2_g)6=y|5>ZQ6G`gy>w{d0H%ATh2;AnI33_Fw$<uI(K
+zV3Ff&iZ%sHc<63i8QjwxJhAyuaL)~xHm2|6{2?9rb<H;g%QvjLu)isIbu;FF)rD)A
+zeL^$-UUcE=f#7GVZfIV8!Rmu8)6w9`+R$j|J5NTNwrD3q-;p~w=80%iU$j++4zfna
+z^szbAlj$9dcC|!>88hIy;Je;_!|KMCOjAqGO7tg+|6S3hmd2HMSh2b%+SDIBu^YYa
+z57x3DO}J%RGMSZKjnOD7YKpF0(c6g5_CzmiP4%*~<>nULv?ur*_(!Fi^x&PnuS!Nu
+z19~D)!igcQvnn^sKP&i0W>fxj28Tw2tL#|K)JQ=YL8XX*hjht|YKw1x(T%B-%4XrT
+zd;vcQN)GAPDrWVocM_QaUBh6ILxOsLXf^33&o_XDebaILdB|jXCpZr>0JQcURKcRc
+zS(ulu;0ZMiV1ktwf#@xbQQp>!MY-HhXub|JRdZLSClmc_wC0hXo}Q*m)4_LUYCe_8
+ze0I9#6S3g5+Z{ZuJD4SJfvvz?(J1Fnrv{Z=1dix^fL$iro7KZ7X<z0*R$il*+r=jV
+zCF6r$27U;|R8T2~wwNjjvVep-0?MokcmYx5Nvf5WgMSMV^||Z1|8xa-u&L%8@FECP
+zbKWlwJpdA~zM!W?%7b9v>p9pIJv2?0#mXLow8RsZzSo;4z3Q9fX?3Ov1VgPYO-+YD
+z>aLaG;4K3yR;*gF`hrzGp!iR&t=SO+ahlg;4)#uGdZN9V%)u=yqBk}*u6pvhY1SfQ
+zu&Jk4subQCWU>%P=ps**(axgP^+c8tZ06I-*b%Js-lnFOuIW`6%FlbUjV*uLgVoov
+zlB3HsMIR(y=zir!3_H`?DRojl^=8RIW6^g;n`*w+6kUC=x2NT%gVUfx%UDm>md-!~
+zP8C!Y95v_n_~$zAHT8811f~k(KW_Ihpa1yG9U}`b!E>VzMwog={_a_D9x&_R#eauz
+z-HEHczUE-yJ+8dvz;qtVe_GO)96I5~nw#dmD|B=9EmgM$-wmwZ`g{YC@b3lS5x2d*
+z;b6_7c{he`s(x41&B0q)7q^G_kH@xo3ctO6@uAR-)i+hWD|j>W>9F!2Pw}R3Z?6v@
+zs=6_FlRuA#amSF?d5k=sbbV3F9jrPOypiRW0Omg)J{>^2?e)tK*3KP4rENqyIR>=t
+z)nWV1^NWvYzYm5ERo_^3Q}A8>zVTq7(yorJ-vm^z{oR<L<>*6u{W0j*Uca`1oy0$$
+z#p2QZ_WDSLdbb2__1DFNBCo;tJx*P_?U=cHe+cwCCSGs-4sn*^Y1ps$*+TkW4e|#j
+zm=lke5tB=lQ`r*iXqeIaOE6X^)BH2;(5;9U;eo`nrSyc8jTcAaG-aK=6EGGt={U^G
+z68uLLhEWa=5SD5Jenfol1W}}93YI_2_jtNcz-J?9Py?%!fWHQ$WFnU==V;8*V@HL8
+zO`9%>iZX~9(36T65>gj>#m<)}=?$b)4IDr&S4^kJ#hpsP2^G^i6}KjGest0)<gyd-
+zWVzt<#o|33vA&Mp_|S0M#vZ3Pwl%)BuVY)+#^JUNy&do?;&jy<7^i#DB{a4V7H%A#
+zL%Ogx?Z94!;aN_W*nRZ4ke-;@n~s;^jZK!~Mf`E#kQArj(U8s<?^MAekyvcMYpB1s
+zZMdU7zNrfh!oFAM#ThHad3KaeyfwyQD?2c3<LH9JSPDEvr!BT6KGd->-m#-=*tkTa
+zsrbG<V@@FrOT3td<Apj$_*Be}U=B0RWWi7a6%?J(1b;kTh|00Xr_kjDz0e}6NTlG{
+zCz4JfSw_bbDIrIEGF_zO<D~Xv<D*lBi3A7`-;<omgL&YSz;=(rb6vd(C#c3r8KG<2
+z#^J7Q9r3ol{yuU-VZ>=492$;qigk3v+XuJy4-cWeQNBTka8jHOR571Orkzx_P&yFL
+z(xX<sf=5NZDx~2Iz=sl-0CWN8Wf|)@;Ka$KsH^zD3%wjOGR08JoCwNfrZ82;w_S_-
+zKvH_5cKXNCa7Ic_A_oeZu9oSGfdJ|KSPH@(pwUPwOX_n-*>nnCZ*DZ6-k(O9l#?n?
+zfbyW})a2CYXk4NVfZ}6`;u!b~ZjdlTv0TijCsSAr8FFwoUM`M^GwEcpB(hg4mMlPn
+zLQ=x3#8Mh9Bsgg!@hp~73X1^0iE8Exyk!T|85{1}(h-YqY1<Ls*xSFcC%&O=sAGse
+zdb~WDn$q>2if6?EcE-_a1`CbcSb~?C<0_^znM-7fvbwbZczt`UYq(<r7Fv9`W6J<m
+z6UJF`MsxA0eV8yOHxVBJlZ`uAM1@hTHGaRG3!t<wOA6tvbUZzg#|)z`E|++FS8RBv
+zgMb@?TJWsFyG3X3XmNs`xicc{oJ#M_f{PIA%3|4qbs^3uABrH|$bnKC_bCQ(;>9vH
+z4%7SM#$g9JOW;M6DT92uLRm)vuUd#)gwxB#9Y;7r1YZ&FW{%^JUH$Bel~|=QSvyu%
+zFi<5jq!gc;<N_LZQjivV5TnYWukn50;xr0pa}=Nw#KH_i-e4sovXyZPBXNdWojvRd
+zC}^WicoYs5-gL^7T=@{b2~@9hHIkx7UvlU>JH-S$0mmGqCzXZcRNj>#M`ig+fIwD0
+zSrKzkNGEd%NKaYT#rQ-5v0Q1NnRe3QmXmAavSxAklEP;XVhfW=G?v<f1>|vz_LtN&
+zT}+`%g{cGa6q|O?-PFoBCajPJW2qoS&<GXm1x#sQSx&$$qahBZkj@w?8uperhOoy~
+zQzOYzPOxN=BvMJN3lKjEO0buO(g+uut`2CATrQqSrJ#1eq;`oUCldP$MNBZp!!(59
+zq^qmqNSZ88K|yIe!zoN)u~Uzzh7eU5FHVg@tqMa*NAl@$Sqfa^SPf)HVfHa7)~Uh)
+zXA5Nf_O^kJK9P|k)<u1cLWk}zLCtU?@ak0mhVFRZP<(jj0G6vTwP-JlNfnba0Vkh=
+z6G9k*gd$r<5Vs-^)I-DMZ47<{dfCa3Lg$Ed6HS**im-J?3gb}35D63D!xX1tGy&yo
+zl`VBhJb@@5j0do+a08l3LalAz(iZE9Z|UkY5yiL(^*WOf0_?O(1Zq3!G+1=wz*Z4S
+zUF}%-I>hYc-uONhy-?JJvct||fj}DU)isbWrO7A|!w{LNL@D7|<y_9^!Tp%R$-T+q
+zKFBFBQ<3X@Z#wDZ5>~N50Ktr5WL0Jg97w|fYY|HoI5MV@si~Y}m;{kjS#oN22yqWg
+zfIU3oA`})^je}_5WC<}gpTbS=Pp0#fq;U!C(m=!X>mr1BC2K?6@14p)7*Ti&SCugc
+z2%)S5DV@>66n0;n1VWT5N7U4#wsOX^Q^^rfoYGO4pT?akjlOt)UvF1mho}dPQ1orl
+z*)wV+CKU^qnDPdaN*RfIh~fzH40eOcd(cGWql!LGUT$h)1g#-vDttYfEx=lw5Pe2w
+z$RF@5H4)gw@oXM-m7(-VD$Eg0EyzbP2B>FXVNFb^Av!}E$-)Q2PzWb-Pztg+5HC`u
+zQaPe1)>olCIVrXa7dn)y)q^a}l7&<fzvIxp6-)-3aJVDBu^()@*=~ZMiULKQgn@OW
+zq<so2UYG<nn;NbM9Nh#dRzwZ-G1d(t{OAS*O<CsEs41>rBh6D;Oc_nxIP^=BMkKcz
+zbbmu89E_Ju7A4rKY=+^|@F*2%FNvmS(3qk``lS0jem<ixf_Vf4QMhrP4K5pJvJ5R;
+zhUOlT<$~Q7o$S8&mX0m`v7OKz`(W!9sO7hGZH|#dx*GFSxg4v+9s&pi6+P73wjmzt
+z*x1|FwMEQnHiNb3F%WGd_y<$_Ai7Iq)G)AR#9oE10p5eUroJV6b2BBrHvyv<9g~h0
+z3rTAPgQ$Ds*rkH4SmcHXRhzP-m0<BPnzB$21)pVE%%#(`dZ-bzlZLg#_H~9fh+%rA
+zO#eV{$8ZN0I5zjtN2sM4q=exxB4ie!0nH{$&3Ftdb4czujR1@_M;%J(3z^YrEG^ns
+z@h$y*{loozT^o@Pg#)co>BOcXomSPBBL@)Z*NqmKk}_hU_lEwheH%NVg@w-85tu}G
+zvtn%?Q0rx4LKM*EzO4-#8(N#++`PJBRm;lNEvs7AG%N=djn8m_4wIBtGn6(IJU)?j
+zl*!osaVD^)X-q&dJG5gZmQNFaiXOto?Ea|Yb4KIbO%m?P<a6=Sa;Z$!d0;|?mzW4C
+z?1zl|mgGQJJ2@*p)YUHAcX4bTLm5#l2*Zw=Nrv803yaPSR{~u%d@6vykvj&-p)MM!
+z%C%9P;dO~S!nJRmEU}i=XN7>qN`Tl?X(jH;(9XV%Ll}*5dujd|`K;0weF0ri8F)o!
+zONiDN@9U3kY3sF%C=L@zMVKt6i9`WxZo43kFO1wcR32txgc?W1pGsQQ2lUv$(R3rB
+z{!38gF!zjLh9{&GE(F6g>ePYLNj%|!(ITyD$_X|3RD>vjg}VF$S0jlH9#h#~H37s_
+zC1Z_%#UOA>aL){lv-u=lGq8a6k&G|$k4&SMIJ$yG4>2Jc9?RKJ{8BnOHaUfTqXQsu
+zNqtfYJHTEpjqFPlP&p*0&p@M2G4|^u+JGelVihPf>Cr%dLQR&ycxbQ;ZCqUIT-o2p
+z#kNf(5=f(Nf{5}wv<~G5v@c^4*`j6e+<|yGUz&nMq!!dQVP-+xUzM}*IH@ZeU9h-?
+zk;HEx)9$62A5XzC^~4{>J_<?VZK};RyToe{D#(hWr8d);C{NBURL--Tx<bH>`x4`6
+z_^j3r6KMyL4riJsm*-z_7SyzGitMlM>q7lP@lZf&eP$;#o+O{BT|YH7VU{7yM^V|B
+z2jN4^3v5i`(_)#vlF!mH!6ERiN(=1z@1@YE3RcgDzu66~&4rSHQWu_tjdoEh=!O{8
+zT1*7C6!${OC&$w;-RNKtNi8E-I;H)}>DqtlB&)At9YY;4{H~O!np_&*>j51M$Rq{^
+zMKF{nYLghzP$zUBrqpntOp9!=(mqm4l^)gv#3AApSQ)T6(OjH<EbI+XkSXP~*MY5l
+zmI1{Zr$3<G-U}H3i(ovS&q4A)c9jt_C}2fF<l3EcEO(JLg(8A22PmYCv1Vg)jD;Y|
+z1<6kyr7|3Yk&fdzaMVg!>>?xn0|rO+6NyR6kMblupfpT7*aUgnlA}p37?MoPqOo!*
+zMeoN16h?t4&OJO4Z0c6<5-`oI5aZG>LlsSNFP07;`(WinF%B;s%*8cgmJ^0CS~T6z
+z1;*f5pNSetaBN(?ILI0raB}8>qi2v3)_c+LEG%GSgNv^Mb3BFL`Syk65O7hZ6tiKL
+zp$axF()mFMN|_us3hY&~rO|32iY{>zheE)Ur$nGvKr%X1c9Br0sbGK|L$!cK2di%q
+zR*2Hol8Pp$dXlobQ4g(O)MnH%oh=DJf+AZOkZ~{r)-ZNP%acjWni%yHiK{R*ux21^
+zM-$~74B=$XDN=5$oO6_0VM{}w8=);0IV2q!K@22ovLc#8W7gx^fsF&k?}{THD7=p#
+zhlEMUCNtdWq(dGB9i6R1F-G^=L@Q7jkTbA`3uzu0LPrs}VbnJ}!XpeR&)Y$m6Yd)P
+zM%q`L(hS0%6zU!>Nra#yY#T}}r6Bzj)x^jY(KFY-wIMV!a~J^@I+%qD50#@2GaP_k
+zge|>ErR_$0k*kE~7;O9uf_cPe(Lurtx5b9FD`p*b<VF!w89D$VcK{p)$;d?~`exrA
+zhcO1Qk@`7)Nr^#-hNCJgO3XLQ=&A(VVfRv<_|aj7XOjn<1k&i-X2rX$2)>Fj&M9MH
+zO@bR(pJZ_`x(Iuo?@%_RYvCX$3q^0dQ4x)zG(jkMs<eResWc3D1_BZ4w$XBxzH`ZM
+z6qMzDOlcy?u&r;ZX-bP3EXrS&k8zgG^2w?QRIbP3nj3eh_<1nxF}>7NMd6V|>MF#)
+zCvhrGMgh~3M^8p&AxRXIicDlYtrm^<!wTf`^%L4!rvsa5p2qb+4pz{Jk^ZD_eqR9;
+zqNy)J$!tYf$I$u;Hsqy7n)>Tl8IVCFi+U;a53kNi1#yXyGqy*DplFq~%Vm|8MF@*r
+z;xVHp1f82g;NHYZFdZ787v+WtpTMy^257wLkmv@)s;r_o9Tq4K#QBS&Jm7kWt!iUM
+zW-=L?<uD;q7z;}yFhfy@YDDvcK2s9cKzE_&VL?u4d`g1%;+%<ApJU&sEn{m(^b*s`
+zI4Er??hELuSL+{Blq_&l330r5JR6@B=8<Vgk8_(yZ5U(OP;6yKaHP-MLTT^VCc7x?
+zye@LtCnDt~YCPBc(!Gy(Y9s@fd2|$X8dXmghpAd2h$Z|Z6!F48kU1l=Nk*L^+BFF+
+zicp&gluQ=XN5M`D;#urG%~~i*y0t!Y4kC{$O^)%gFps+#w}Z<8l0|}H)QRG_LawBf
+z(EUj#zJcK?6Sz&o?wA}Gn;k{OF@Qu6c}QzQ*;bN)hkn8h72_JB3Sn^=#k4iy(TW7-
+zj9^<MzHba-e};;uokGz)0wJTJ6G#ndMTO#aXjBI&hFdg?R#CRFM`x{wNT=uvZZd)8
+zVNWUbAfFiZGgbtQ2(e7&&K1aI_7yFs!;R+GSJX>WQ-*<B^(YVuoQTtf7TsTl=FyN$
+zGU-TYo4zFpJ%tF3Ki&y56uSm;;MIfxMQ)IoFi?EQ^k`B@Bp1O(?5fa=q6Qu}K9-mm
+zCZa<N7p@3UcxDn3L1PS9F))mw@~QE$izjm+QC|%n;$U8peH7CNu@R#tbsUry2pmfI
+zUpL~~dSP1Foj7iU&NRMc9r4U|9HDB*=ffuph(*CN+1dw{hfULXAEFi32BMl2-~K8b
+zwS;a^BZ{E|cDl3|oCgn6s-XT+qnewIM!}c>D~vquI?(L%j9;_?bIRE3b{iCXR@ll!
+ztQv-kM8>f>l!RjP4g|v*W;8KT-oICwn>K>>3I;=Nf?Cs>U1~nFv#MuE0>cJrM75LI
+z^dvN`S--MdL!YH+)IFsx00|8lZ-izFrWt#EdrXzuSB(J{!HNhJ8~>GSk`0=bW=wA}
+z@uf-$r{pt;O^e4t&VnzVn54d$K(KQRCNU~VY4}@AT~wuUCvjD{HI4v%7OaOAoCOQ+
+z$5=eS&RE&HKHInfqNagF1+`-t(UJ(drDPLRy^8~8WMU0kds0raf}3H*$;K7^Ywz^6
+z36z?+aYn=f0=qQ9ah5>ji`6!>EjMUPI5gNSO7F#1<6fLwpiO2L9?vGswB$DTGm>le
+zJycPc1JAmp3oC~1ADR>knj43h1d(_$LI!@v();6yVp8n^$csF=ho*tJ2bK@J`mh~8
+zF^&uedqrxLW5!tXT!ZMiq6z8~TO82lDrIF7v1W|URm<7u3Sju081XNtGI?@h71lih
+zwhWv=pn)qUA!I7sIl9+mylbA`H34Og2opp_oyd=2mkR{JFpW(Jv4~n^<@j9sq6irA
+zN!3G!HC@OeY{H-|{e9(0A1_ENtfq2~LM=$CTI889Bo;p`V=9puYg<VU_g1`FIFty6
+zj%(ye!lm9e@j%;VY>3I)$)@&W-+5{r61_rNk-UBJ&aTa!Hb959BKr>5_Jf2+a2b-1
+zf{&xXzAWCh=E|F^X1sWe+2iq+8sC0^cH$DCbB;)Gp)~W{3SupuJ!_*jc?_I8zr_QS
+z*ro(CLjF>ws*zw!8HuQ6<4HzCtQCmRDqf>-;IeIvZ^H4AEgL%8p)O?igaVn{2NLoV
+zmZ6#jZ$q6>eI8?2vlkxxSlvca?J0*GWKn}<t+y&69`6{3MhVoBRZWBdVs2cNlwX`c
+zQ6(X9h3jG6O=3V01pFK`cP8MwV@r%Xz!0IL>x@G{385CN-)JA3qVFExFFq>iCRQ&5
+zZMvjsR)8Q1i}^vwk2_AHrjj(~usuNg2#%C>79@H|Mv;gRVzVQaEhI!VxGT@iR@h^l
+zE@)ru_eg)CA-8QA+St~oryz89!|dLodc=+(km0psf{SC>(UL0V-v0ictph_izJNm_
+zB7nVc;qj%0ob};yg<~NL0n00yn8f)g>t%}5$VDcLg7%$}nd7ie@pb@Mn@0fF;?5``
+zTq6@o!xR|*1S6!^EWXpY7$OjW(CH9TSRxsAmIelur}gczc=q9V2S{RNnm7Tv12l@Q
+zMC=;yfC4r@CNmUV=5cl9u~jL7y(jKAscC~Sy~a9Za_N=B9E7}sIm(xiy82<h^Iat4
+zD|lO;y77z7WhP|;^xYe4Q%gXYBoyxvI)eu(Fe*9j1)qQhU_K+H6P1WBd#fBm%u<=x
+ztWFp>2*beJz-o+jYbYe20iDI&#^#rK9g4msf_99cdy57e|J<NZ`Ni0(8c3BLLYSjI
+zi%$<-z~VD&1fQgmu#k5=j@FAKQBw^hJGzSFBiQkmFy&Nf3|>rpJPWTMOIa*`wYI?u
+z^so2_kuKOJ$+GOJ!SM9FqnWOb1jC_*z-J6#FfIzZ;RqUcu8Shw5!Oc_37-}l!Ccd^
+zK!<bUz8%LCw6?n!G(gZ-gK6M0b5?<yfj$Zu$4VKSqD}o@F?EE~WnZT~){kW-Vjwjo
+z+>28R8lZI2j6oZVmWBc36BHqhIct|3FQhSkwUM!72VknghyoQ;1)OyudrII7jK!6L
+zYW18~Hk0J$yxPAoMaz>WLS~y1E|7OA#iPnjV#2aw@H2=;9m}0#y9uK9zz9IhCFw3U
+z1l=AR60(74hyYoD<2>Akg~~H1Do{m`aD`LK%gzDzQ8b>5m@-D>(UcP3_;+&D3>>8K
+z1JTSy(JOO#WJVy+d&$QxHJP1QM_c=lXevfjaB7UP2Cx(Dd|15JH|5O3J`y{(B6Uau
+zu|_GDlEsq9E&HaDZk_8+pS33-F7ZF_h@EXUotPgUlW}jF_K<E_R^s<)THYxWV-~b9
+zbb=9RTprvg%c0WgH%#*Q3`{BPXp5MEQWL(KYa<?Or$-530;VPwLI0&<$2qj<RAylQ
+z)UBQwGhmbrTtgQCD};v^aSYBot|aj$l`z~Rkdq}q7(tL6L&IW)mB=`L0vlV{BQu&0
+z`zm(!WW!4XF%;(#JCNXr*mdN5_$=}^D2OG80B~w`!gFINgOr2ReAO)$v*j|wRTk!8
+zs07Cb5nIg*gK(!&Pw>j@&2VaU<CkV0q>h?X5;gG|G%`F{mUi)(b#69jWxXJtQ^wj6
+zMIZvv1OnwWK%zi{C#R;T(Pk3opj8347Zzcrj3X!}dSOR|!z;AXp-BxZ=WXafELAeJ
+z9@Z<%Yp$3AL`7)n^>u9T-5KWzDeU5nvR7F1*n_$FV#dnVelTa&NO?JW0jp7X4|<DX
+z<;n?9bR1h&l|u;BLYvyQ_73aLq1jSFv`i1|f+Hv=B`6MKN6u$%X&V@T-6;)YNuWuQ
+zKQ{P-MI_-tu&mnC-ex#>0Xr0q3G5jbfE3Y_ibe|@L!K~*Fhibz(B=K{5lqztdBKQn
+zFZKuVo6pd$N00qmO_Z{7elpKs0T>)~VK@ceRvxlE3qf#<)@K|4Vxwp<#uyHqI`&b_
+zUQceCgRr8>c?^}(isv1nB_u65h9E4@%22=x>yQu388HzUpfJ>tY#PGsAY&SnLwBi#
+zQ}vO96{`R$nLUx3G?q$Y7z15Q8d^W1onS_)AyMISShm>OqghEK7ZVEohNBnzAV;vT
+z1Jle})I4Ul7nGM5@a0@NcfIAjuh?rE0TxeCIf|RUVw#S^Ubj8f({^fbU|%Oef5-?v
+zdDOFA;BoF#A{4@-*ECP%9GE^*?s2Wl`vkIQ>N{$}kdyQQwxsw#MHs+TW>7Weq`i_)
+zbOMgBLUJMEfPe~O-FQs_Aqc+IfW@-4Z&R%Q%8ovYe#%naxA1IKH3YG~B|fg}7c9mA
+z5jF{MA{X`$tUj(DwfcCv0x@{7X#qzC7|gP7t&?ZBZHbFV!lP<&9IoCn1X8QKHP$dY
+zYNKR&>aw?gJBv~p^5Bu(-NELU944Wg1?v!_qd4G<!;j%92W$xATnPn<u%Iz-5rJVC
+zPV8IympG<KACN}|lxHyiI3USoX`)Z#LPKzkb#nEHDC^+q?&8d2QBeK8JdbY9zey;-
+zN#ZmK=#4L~+9yP?j7(&hfYXDH^OPKqi!lD7=8puV%vuzuRb;#kmY@y>bg<~g?QYjN
+z$w=LVg-fB3$%6#wI}Vl>;fu(|KFBn#5%=6UtT$kH`VV#uw{_tx&p`jsP#51R8Q%kZ
+z25zC}JPBZ0p|3DSlgj$-eKBK%sf7*|Ji)o+LHc3v7z3Hmo?_(VNEJd;R&~n;C8P``
+z4Xh+{e384surVML`8tSf_2CS!NV1s+OFT*DSv*-B#iPk90vtk017fgGWu2i?l_6GB
+zVz#+KK%0Ua9pnJ9MR)|4o`8nwVJP4jwa6GbzfqYeYo7AF6*epO^9Y04!0{h*#<41#
+zS>@#L3^k6;a?y)74Rco46r2t{H7};Pw#%6$Env*ELpn4#tA=Goyl6a9gaWEX91ojl
+zkiW+umPUY0z{gmndW1oJWgbw_y(T#ip@CsJ>Ce3-Zyyoci0FWf0BcM;>RTlu=P>s)
+zT;eJl<mDQK8N`^<vm7%H*`P19(C7{xaH!-NNKDW?!`nAT9<H<xt18@R4x)+)LtnwX
+zmmq5c;e2lFQ5hOjSDi$OXCY?b`9!2K7nX7VJXVLj0S31xQD{a|Qo@wpgL7s|HjPtp
+z9%;U){i-id$#S(k#ujEM`z-7rrCWJ&A0pbSAtg{rt)j>HR9(Sslmi>e)JW4E8t}1J
+zV2o1THsq!yY!%s2*Mmq%5TgmZz2YRn9;VBM26@5`uatn3^wl|{>ES&gMwyOvIV1KW
+z_9E2P;GqRM;l{~_TGrzMI254v5B8z(+7b8K3wu1D46zcvPXyg+9BX`dLmX>yvgO4V
+zh(2yMC@ny7C`GP8ii0uH<RdUK$RIeOk8>ALd=pqTI4dWtChHlqol8t207^rd$KJt!
+za;$f2-|U0Eh+Emni@pX#EnyZEUyMO_xjUg+O9EkCTeftxci{lBg!W8C!g~+V&ax+p
+z%mM?qcn8mQ-%~?_+>#Q#r3Sc6KtZ;od0xY4X+$reM8&^HA_&N(BkV35ZR2pd`=*Bq
+z;30|KU_)pkHZdL0a{B5S_LdM@<9TQhr?0==92_6=Rsvp`vSJjAMpy~N#j3O~BapE~
+zhV8=(k;Za?XQ|x4uz`0l1SXpoO%lda&jsTaos7VT1SkCOh2&wv(r%T{F2QU?C*_^H
+zja%A`7@_|r$EVfU6m5dhdB?F-k7Ej{<!8KQ0*7N*L(Wci6bn`COb8Yn9#PT5QPC^o
+zJ15pH8&}K9&M$mSeczMogKnGjf|8Lt#@J}Xh#3Nx@U|^P%XP-mw;L}T`(quR_H5fa
+z+|Tj)U+J`n*zK218k(9#^F9jWx@LhfS>pk4HgJ~LzLF*`4l=+6SQfO5)J8UE?#w9*
+zu1jop9iWY@A%E`eR)jg3hv7c;qpwbjMI`end)cBeKnXiq!};Q>tJW4RLHV~IFx)Bx
+zj6@X3@~zCiAY(2xgd^`Pc>30cC#C$115Yqvaab9C8@nzZCpknOObkJSGV(SbqB6Aa
+z!IoS*8q_eSRB+4y!bDEVc{0$`0=m=49c)Z4kGW8GLjz^`(U^F7^(y}!dVCa~5Y>dl
+zc^SPIPPCk?$`FwM6;pCNzCwoA3Mym=%S^yr<%;%RV#7HJL|?FRL<w98Od}=<`^-Az
+zx;u&xuPO&tvp20f2t?F4o#;U;_Q}l1(EV0n5-J$ArsbUq(GF0A6hM$3#W93kjC05{
+zM0OY0n5`Ntw69+9)iZvtNA$j|IdKB?h&c#_V58lH;W8Gb4*_Ky88h*W17L~CwiFy}
+zczRSruskS@&~edk_ANE6Hyy4o+@WtMLXI(BWcTYK;46HrWJ83-Fi(+(PjgVbQ0XxI
+z_Nrc#eL3u8BMJ)kfN>6w**h--!KnuWX-fJ|&Y*+Eu}N&^nG<dzD=Vjoz?HDmRf)@q
+zVbazLVWUqGDFoZ9HL8kF-s=^Plr@EOK(HBUm}bQJb8tFhXjuNh+v;r_8n&lGj4h>`
+zEqcI(fy|-<Z=0%*^RD!p8<@u7eKpedlK*K7C32&%Wa)DA-6``94__$<;lNaSYQ)%N
+zT$xD4+QD0I8Wy&um3iMyy+H|p7T~dSlIN0{qQn#zGX*v(IzavsFW3ZZ&?%g+7yY1`
+zmYeM&7tH&Of8d2{9E-u{0cjycF`Fs8I3FEf+0qil7E{!`hmThn9lTG7!wbTHhF9TE
+zCa?n|PA2vW3e+a(ia0*7ysU2m?a6>7NQh4X$X*BEPe&X-A-%-D->g?p#L)2!2Uz!v
+zQS(4;JnkKcleYN@Ea6&F%G4>|=@<zl@=Zhy<#OwU2M>V4x0AadMrm>CI<qJL=1#!e
+zqh#XC$O(Ft;^bg)VT_S1ju_lu9R6k8n~tzXL=Z`kHLS>bh{YV8Mm!RSZ5cM_4qzGQ
+zS9o3>o0yddHu~+orVXKN<%szPAnjAw&0;O64QWYEUeQnFiKJ%83VaDdR04=n?=hHf
+zhW}IvUdzc+`T*#LC%f<pIt)=vlkBGCP(P-dA=bUt6~zfI^GON{Laup7oOoHBBBqRq
+z4_lwXFm;CE9++dmTnYN#kG>bK{I1rpykTq)xXCLG>OXkfQf9MB1Hows@wC{Lo_vti
+zg!z()2v(YgVC~sRv3=!_w_`_-3Y&9ybIRN1@N_6_5qU{l3?|(Ig4vQoSFupVSTGTH
+z`aWD4f@o|46J+y|Ta8}JqBt$0hij~cf_;k<7L+vNil?w7l05qt*L`@O?A0?voe*P~
+zIoYG3N{|zbm<_~LjsDd$jnHE_DT%7ZO_gJh;tR=J(yIQzlZ;mNb`9YLXtf;n(RG4k
+z_4Qx)9Tk;nqj9x(n?8DclKhCbh;%;nbCp!lvR{L<I^5?@%MoqJHhZj_CMe^^A~vy(
+zIdrwvp`<ar5YjLO<M=u$PqFK6izsB@i8ImuVjOS~{wT9Vpj6@`KqKGGq=+|Nw4eAp
+z#)?6={m~Vujg=QkR31}8nwy9RML8IVpHV5m1LCU^-~#Sc>%P9K7Va_1Dkja~ZK+2~
+z@0cHOFrjnincWXsoY>jt(NBcMu^RCz2Hyjr$V2FIBi=$B?ug+GAjb^DK;OOOYV&;`
+z#5&gIV4nEI8mAbQZG;)ewM9nB%RSz<CF4S1h|QhQ!TNS6$)sDmI5J~Ciy%=;_!K3Y
+z-=GrAN|gY*2t-BD<%gYX_WiMmF)Os?Gat?QO`cTGrEx@q<@Bu?R0285qh+!g4xZj4
+zjs-~NY>o}+uD^{6!cH@<2f(!OB%6LwU}7B0*O7PgY+xBS3S+Y4-WgQdI#8wh`jTiC
+z$TocuQ#N<3niu{T&PBf}2es_poNNbDKw=TYmc(R%_sm=5+=cT@h1sFO8N4S>g^8$w
+zR7xUw^B-IJ$BLHCwBzuOoxbjcw>%)SASj_-bcvcMzkel@hxwL>GeQ+6L3}VYCKgBE
+zMzQOFH;Kg$wzjtC3DQNtk0M|;tnE*Zhkb?>lGvN!#L?`f`30qcfQStPA(A5|){Gqv
+zYYtiKSl^G}G3e}s<Gm1vMTQ>YR5RnmBI`^!NDZ~D9M2guA4#%-4G|eo6TZz!1hW|1
+z<h#!}r~(Qgh(sOec?}YowjSeLb3#@tXs@SxaEK79v$7K_G7E#Q9P+0_B=#ha)fF7E
+zUMc?MJu**h%9$1GB?&81fWc-@VC#yXF%j#~26NjanhTF9u@9rs*Y-FLrH<^V!<+Wr
+znZ)WaGRW=%W2(_KLgZ<&ki`MU=K>f?7X|0%6^0V@urDT6P6(QhIe|;(zAiF`gIg@k
+zz{0FE6pXLY3{vY}0$Ca~pcOZBZLmW#!V;5H5D0j^9mQd%@))CdJ3NJGS&X#IVJ*UQ
+z5{CBaJ-)^zv0Hd$B3JA-m7MT707n=fV8BF)UY7+d@2JnUE{)_Sx05XXH$Q!XK|UIx
+z!9SnS<F^gWUIC;gj655#=2>ewm&RBPr&LTp><8o9NEn~^GG?~06nwLbXOY4pV5~4>
+z1wN&j+Ji-f*_gnB6^F+jV=$j(nqf0iBdI0DClDI3*DSuZz)e!&d)XWB#}1k7jEjq9
+zrJyfLsRGAlh_AP?ZDVH#4u-<+z<UwcF%YJfy*trvGGy|MiNomOP&Ow`K_g1IemK_F
+zH#E=|!xvoQom)4Xtv&J^&$Hk=)m+*}>{%@#9|hRZ-#;w7UwGpcDqe&wL{jDB!-&nx
+z$v&ThBd6)*bHu9Fae`rvjKyc8U?f56=>qeAB?n(Ik`qAObP<yf+md*bu<{8o-L%vf
+zN?>@)R6>Q2_to@~Z}adarDHD;av>HFJu3gCi{{mrovbOZJ+UY9AdYaPf$#ocp-3P>
+zR<+gk{PG6bO*ovA82ja^G<E<<W_Au*MZQG>2NXg|b|L8O@JlpuK!fi(<Ev|49UwXE
+z1;}jBR<)~4n0~7VQ4i*Tg6srN{6VOjuT(Jn&yUDhS$w<@1}rl%-*G4jrYi$~^gd^c
+zl;f2a6)|)2{ksKpp2$_OCD22@3C&}yLL<D6n@H{{BLa;z#TSHaM~`*J$iKZiw{ztD
+z8S)NcP(7JKk%Y#faUsKCDKVT1&C1svCD<94Z~1`!j9d-rp*W3FCiR#SUOD91E-bs0
+z?51F&(d<;y&ZIuqPxR@w7k8ZbX$L3@elAVSAa5g^TAgPSU|Gm|HGz&9K9(A*;<s^5
+z>2vBp=uL4;*%E1{`ND5#UXROl26#J!3%{0uzurG4-Ha>XTq}2eArsH|)};Pp{(ZPm
+z18?}n9y|{5b_7?I^K*A#nomb1V}Q3W%i|Dl{4S^B@aexbgSXeb3_h_@)QTthM{u$B
+zL+(rTc?s_?;0ij|zHD)&Y!4FALEiWqo~|>@8&S1!i_D4@caXP-aJkM_-o7D^1H9Q{
+zgVX+E&mbq@v`q6(3^Zr6hXL-=B;K^Dn9XfO(mj%UC2!0PI(I#SA3D>2tn5WxoB-bW
+z2~s>a`14;zIvV6{4B6;2Z{zYf$QuhG)s`6ssEETA!~r5cB#6WOjp#@9(U$oIDqn{r
+z4wCov^1O1I_jZ%c`#rc^=StrA%Yp%C<uvcV&}6SRfUimRwQ^ryC8JvG&#wa`VpP1{
+zERS1xBj(ImW7Ve#!XR&l<Z+lci(8qh3T}+Jj|%QK-o7l4gS?@BG`x+sDtR2_jg>Lg
+z{9{eMKqftGTBV+Wmyo3;hHWmvc3hlE-jC>W*q^@(X&5taH_PKz-tN#;-dM;tlLU|A
+zVx7G6L$Y}G>SX>ixKJl=%$`X+B0MDsgS-&|%fohwxj&HH7;l>Eu@S+rHYoR(_1SBj
+z`5(ZA#(875uWsfJ;Hq+J!}ZgA8Wx1Dyp4Go_u)xPdhHVY1uhPn_w|rQcwTOM&HOX*
+zn*eB+w^n)F&f8i|<&A}0XZzeTgOxHnSZ1A+8RSjN?C_Vl2FbO~{hmA|d_As^6FXcr
+zbhwJocjB7wT<yHt`0CPE0!z=DX2KC%3!MEAxFIi@NiX1Pb@n*HC1@oSIh~n#M}Cbn
+zbZ$Q$&o$30moe)sTfte=EcrSv+ww4eK7c=UTJMyk<vsHEtZAl=;R-p!hpV<8t~!M0
+z+i;y`T0s-5&cwkZCvy5(Y+{<358yh}kD&dlAQ9nlTxZWkvP03@Eb)$_tIy)P=>Ia<
+zS65H7EQh@D|5pB$s-+jbx^(HQt7}qcMZ5)ky{R<l)TF#b_Vh_yoaSA3eCd_tyY2`O
+zW)Cb8ZEtEEQ}K+_>?ceAH@}OGe|{R+Jf=a!djHs}&8z*+gZazw$7b5RkaOkXs<#}*
+z%G7^0okDkZ8iurfMk2fH7hYuUc3fOlyf@&R(SA|F{1h&%D&CmwTg}WpBDsUSJ%WpZ
+zW^kHMYfm8VAa8kGn!%@=HG{V=co}?pPBVC8Lt4TPiETZA%XMPB*|uWRR=bpp@n+kK
+zP4np<&EU<p6`PhP8A+@PH``XsqZHfPEo}|)W)X&FAp8h9eo}U#jkid1gZJU~us*(w
+z+lkWFpdHC_B(>mL>=d1KXYFy$J?|kml&?HSruQTF`WYBUD;RjJ@UCri9>^ZM#)(YZ
+zro9AqfTIjK1&0WH)(&~r2<h=vTxa+@Wc!BZAR1<joK<q<yemg|QkvirT;wO-pTRfA
+z@$9L1=5NFWe&UVUK7Oj?4l?&PLEOgMBe)D};i*Q7ZR3qK%w&|^Kv*XTG2V9L3OJ?3
+zyx*+Jy#1v~wv)08r5=@R&xB*u&kEYLa^GDiW5Hkj$NaYd!dQ4?HhVJQ(W-(l=trm+
+zCUq#%AT{jbZ8@%>Q#jyNFn|PY!JDh+(dbLKunc&69aq4~SMk0`YVt7IpA;@m1@B|}
+zyo7gtwjJqf?NEq&7#D`Z8?$}(MkRNUxi1Og4&I13llspiHH@EKLruIb##QI!9g5sn
+zSD*Q+<Bg5ERrtwH*V)0_Jb4`Ctp-=n*?-+MA9hLl4&IXTILKQH7f{@3J{*zs9lSj(
+zkAu7&#U-`y;dM#h!Q1cUagaCXM1#VI0bJ+{Z`<W@khdMUq#-^iSv*VNDGc=)Tp<vx
+zYVdFspP$9WpB}V?#r+FNA}T1tTZ7PcJ8#S7ae%jWdGt)MRuJbkT#%m)=;#vd^CI-2
+z0T)tj{fAH^$;9QzJF%$<Y$>L*^Z+gtOX0TPpzwa5CX+;8Fv+~XtjV@Lzm($;I7qBo
+z-oA?q<8871!TqZh44cX%Kc#Fs33?kYvMBHTr2stJA21Mte*x(r9dFE@xx!e%Q-Uza
+z+mGb&O5Pezww%eQui}D#!rO9F$>21f+HoO+w<BH#pN?t<Z?@UWx@EJENLw-9EJ8(r
+z5MiCPImFw2xY+TbX+C{HGkCL|8IsPlNSi~v*(xh4hvR!1m*qA-zl5tEa$W63F%74g
+zwg^>+oNb4zwjZwIGf4m=B_P(%G@;uBL;03{il9wfGdp#k54Pm6`F8f$qi1j}aBz6t
+ziR^RK)??C(xN4zpY#Lz_Viu~UO+9J=b-XIrqoZ@tne;fWGqk}nY+P8!_)~VyUAatK
+zXa1A8A{OVa{WPJ0!3T>)4AOszVnJx1R~1rBeV&0$%;#_|HQoFJ=tLzAFQ76wuOY;d
+z{edDx=d{nF50iRv&8832cHuhHbm*9rAi{23XZyNwOhh8(aGf&)@tAZY8rk8G7@Fmt
+z*<(10YRKh(L{*mYmV>}#V#|>2c;1bx9&G4e3QW64@N_Bg`96V-z{azKE`%}g!Sk$B
+zRs~;e2~s&HwuSY0ZpXF2x!R)9rDIYG*USo-!&I)JlblzarDyx9KWq8{Bp<<L>$Zfj
+zupQ;&STp2!_^X!j!_KS;oVM(KGID0k*fg1(gE&Lx^_cuEVy724XoNSi!rVrfn!|Oh
+zMwrggyip^}KZ=VZ!Hu*2M(BP5Q0&(@`3M$KEHZ7Cz<e2zN%W&r_JnjzPg^<UI=ig+
+zu~}B`%roo96U!FCu6Pf@u4!#q*R&_IZ7D8St~#$20S<mfDN79x%hF^9mK~K9=LkYs
+zNgj6gT3J5Jlci4J!kFR7vWC}j`8`>}tj>lFY}FMd;cuT+9?O$u%{Gtteoxk)H`|l7
+zc~(WuZp-h<THG0)EECyfzhT0~elso*iZ`zF;}eP!gBUXi#TxRs{DdOR>MWsb)pH5O
+z(ya1Wg!1RjCX_#KHlb|ZY(m*|KcQ^e3_>xHUG@{|Wxx)Y^5of45AhW{6VCvLqGJYq
+zY(YPLSP_1g9`w<;5}#RcZb*csnR6`q`15Ad$DcQwJ~q$Jj_tlp_tVFw&7cnx*=0X{
+zDADf0wQ!E;27#DCx!!P$Ok-coT9fO6%_TpBlx*V~Tz*m#X7zS3d}hJ9tj5yJITk7X
+zd9z9B&znt3n`bA|lG3L8Nomt&kdle)vY(WX0)AZ5u9f?f`n-g9{@NGzY+kSpiCXwu
+zWWd<xjrl$wlvQc&AaA8b%-zo0v$)g;<&zfkBD}95spb?CRaHKpi4t(`>a;Dti2CjU
+zp6l#n4KL{<Z~rZiF^l*kAa+X9FcDwZN1OXHa$8Wn>%7G#+19JcEvHYjabnCv<G-vy
+zg2h{h#9=8qz}r*uIBau|dPzgfX*iW_4D;5Ds|r@|*<MW?%WJqmMBaXbD*)4gcQfpE
+zTkW$*dkz;+c^j6|T*-lbRa&^xB61X~(XjFJ_{a|X;x<d>CM`x%11?K=qBQzoTRD66
+zh)l?}a(_~vm+;;KM-VLXoW+$PJcSH&nK$P9ScFx5RdNS;)7<U0@cz?b?w`pH%?zJ1
+z{Q+E<qgqS}A0NhLSK;G${;I&cB(%@xZ{ezO0N-`wx=I{2haguDIllR4(h^D9!P{ne
+z9O}jGWlgO*12y47;Gq+@ygu44KMJHT2;u;5H>3AHqO;@dshJi&vVafczPU-aA?Y4m
+zc3OzSAzRoseKX?3x8dTZ#RqXcfa@V#HrV{f;ysQCz>~NbKCsaM#t-bj<E7JxdjS_M
+zIJ))J{0$J=_TL}Mr=s75%W6kk?s(~s0QXT`U%>Sgu4i$*h|6jZTmFBGN9n%<mlc_|
+z{PEJc)+krFbnKF$$guzZP(B$jkBiK4Juc2Q=h*)HL-|g#o({uZ-f6*o%s$~zQ?vZC
+zVl&=@;5pi6q{J%+Ebvak3VY&!XIIRTg*U)5N4!S(7Cl}(OWLn0zd;ckEjjilQQx4<
+z?6)!B0G0jro%MMG%wruqc>{D-Jmb{K8{p182x%zJNm<$4`bLEJ#tK5|x24{op*crk
+z-U!$Hh9Az7$lLL6fQqJ%`To-z6~TEq{KlZZ4D<$gGf%R-0phIFgKvO|vr{wArQ6d?
+zAU3|~R&<*2`em~mhZVvbkjDj^bs3Blfy9?SaPZM-=INtm{8~+uo;(zEz6B&7ZU!Qk
+zk-V&dZ?y13N;8t=Fq+LC!Rg|?{sK4<mG;B<U=_~b8FX~lpNCUJHpet$WxyZ0pA7`M
+zauE0OuN8l(Ozl6r^9Xh1U<b(i_xw&*Htp9Th2@FIK=@Jv<Lrd|OQEhY^URyAZzY~t
+z&f+}{JbxhF;xz%s-|o|K7p@+R5?sWw?Naso>wES%^$h{fU*Ge-`bYy?->tLid;U1}
+z-88GdmwfecJhr~SnpNM6$Eojgv+8@@S08q*y!!rgR(&rWr@kM~s;_Q$g??1Ywtovj
+zJU{(@ah&>21d^YA5np}SNbu_0Fsr`Tk5k{}v+8T~)yH|Z{hORsU)7tA%`aEYs&AdI
+zKB#uDzI#o5tB}Tjb*Qh`H!!vf6zAi!+TF42*zJB~R=d5vcB#_sIKDHhzTL;E?_0C#
+z+vTed_O4f75DN&X-Z~mPPJO?hRbS3mA58|^zvfx><&RU}g~0QX%elr^A7zEDFEOjW
+z{l}^At+VR8%~v0$#;fm^S@m6ioceB@Ro@4F^-<>8{(X8@eK#MczE8}m@2Ic7bA0tZ
+zKdZhwk5k`sv+8@&SKoQQ`T{s*=AYmDP~ZEQVE)<1MYHf)mh;R(<sZk(f9EM){ssk|
+zPT)O+XIqcOI~#cZ`F$Gw`zr9(;W{6erC+mY7dQF$GU~H+Fu^{z0-*-5#d{5Sol-*o
+zFpvK(Huc#}M&ji(Oa8K-yfzp-o0Yo2KIz?#Ck8zH&)Zz$MJ<54#T%Vf-(lc290P9z
+zcz(Lvlc>nkX5d@89GF$#U!cCrKTxUAwp*T6-x1XJNRQH)G_dvEIIF&&J>@t}p}F<l
+zI}7iuzjd4pHka)`+wS36?GFFBEAzwoU5(4O`_WnT-3$jk1>Uv)h{t~q&Z=)0>Ki~~
+ztZxl2TOSWlvJZBCU;1b8!5|XMKj!h$!<se~C+2X9cF9>4m^l3R*R$F^`U%&00O@RZ
+zEiT*c-_IJyj&9d^%~k?D`v{lQ<54_11HG>EJj&XC7LRuy8JylvV%~5r<1(b*jf?Gu
+zagkSi#huqb=Q{ttu={|o>HhyXelm(mirOOxV#f|*Rjk&my+=e65)z3dMC?_2m71YO
+zr8SGt;umUEYtOb?JJs-`)cWy5t^en9zpooNH~RbE$HU`!-{0@|e81mw&OPT2H}{lq
+zcmUb^lV(;$&K16*ye+h4J%%;wvEnKx{?@7#wxhli^?fy0kbR?Bj3&pC7mHr&<-IQ6
+zL0xfISrK<t=ATWK{yoXLu({~9TK-pB-69_*X}Pq!M7@4_*y}S{Ui$L-T0Z?%m&ra*
+zWnBFhvX+mdd@kjS)s6DWA)cl@P1OExs`BrSD)YOKdcO18A?vD2|Ng3s-&~bX$a+y8
+zqDudx)cNw+2IXrh->1sFexp2<@?5e5wcmoOEbk-ge9EaZ2VYg@Q&p80ZGL2btdIIV
+zU!7N+SXBC1spZm-e(zTIw|=Ep_iw7`wL#VspJF!orfX3t*DuNH_TQ<>ybi0IWq+tE
+zWqGma68Zc>)W^w9RmQoa$~*(INWCoQCns7h_gAI7zAEd}O&*h8U&(U;dS*A-OVswA
+zG%u8Ps?0;bKBe>6Cl>u&K0gt)-C<S6Kd#EZZk|#v%k>hqewpaCNybsXmGxJpKmAO|
+z>r2@Ws?5VZhbaB`#kHv4>e2E}^3@nMuN<(td^uINM<-RvLqwfdn5g4Ms4}l;Rpu3k
+z!*LXj!%28pKF`tqee#O39{Q26_P-4ElVh*7mhCefoxgs5qx0{jO1n`w6IbF3Rodms
+zFYc82tC9oAYgJj^Q|7D&;5f0Utmh<A*K4XO>oXJQ;%B%Rm*GlWgKJSgMAdN~sSD-g
+zAbsop$)(Erd#P(=p6HKFF-(=^$Kf*Ef;X|Lyx7!sA*yUQ{ftVF1N{t3j|2S-OSj`%
+zRkp`zRodSawVi&Js_pcHRL!|W&Ay_xudnWu^CP)0IYiX<VWPJ0D=$*D-_KOpo=-(R
+zK3<5rUFAC^w(aVU+0YYnVO}hVUg(WJSWcB~>r0jqEY~FSJmD&jAzNPVl#`uuqElY#
+zl(#wMtxkEBQ{L{Bzi`Tnow7W!$!W<-pYJ-Syvr%eah{?5f{eL>JZIQ$i_B|7&H9|F
+z>Ml^du^d))(E3KdNiXf>Sn{Vl0Gm?YoZJq(VP6cxXdI5?a4OEl#kdl)h_3PmC6_Am
+zwPksoBBwFSwS;~r#3)m=WqJ78+Ua{5Z7)qMS9wFC>!<B&VMFYKI!~>S!~~pzddO<M
+z>_VGsQ8tk+{|gV{aXgP#@D@Ho7Z<a97L3Jl_zBL%MAY}gI-jk$8xP@Gyo@*T8M?cg
+z<#S?TER9vM0XD`q*bRemFecz6oP$d-3AbPh{)lH#-{<N2{Tm<RJM#KL%k}k%s_&!J
+zim2~zG=GdeFdX&$fYwjM&v8BOL^nCGv|UatiWRXAHpfmFjbm^oF2%LD2Y<w~_#0lq
+z>-Yd)<9qtLL*`cm%VQAEz(tsZ+i*Xg!pnFYpJ7%x;B=giunPuZ1P;f^n22BDH~2lC
+z!K?T;X3J{ED})uW9=674)IY7!`6c3d+=YknSG<9b(LI}4J`a|}Y8ZfRF%YA0EH1>=
+zsDDzS^ZE{t;{~++!GqNQm+UUD3$=Z2^u{Xq0k*+jI0#4JbX<sQFd2Qbn{oW{LmY$&
+zI29M+m-r1H#GmjQK0x`JmTi4<Vlk|Q-7y>!a2hVbb+`+U;CZ}-&#<68G3a(IhxM=(
+z>R$k8{U98PGcXZ1;CFZi)9?vqm-qhKUnOjSZLl{+;%J<O%W)I#!4r5H|H7B}p1e-i
+zaf@OlY=CXBH%8)UoQ2DA6Yjwicp3k~m-wE%Kd_CDm9PQ!!U!CNGjSPi#NButFX0`0
+zfu8b0K*#k$U#yR<u@^?*D4dDQa3k)<<9G@0;0yHB_boa;`eJ=-jlIzJzDU~7Brn5_
+zxEqh-CA@=fxy^Vvu_*dsL)8D5*Lg+ZM4XLFaUJUSS+)IPyo~yP^IHBIv&;K4&AG7{
+z`eI#dj$JVrhu~P8g^9Qxzr`Q$3|_^%_zd5X*YrBCJXiv&U{h>|eJ}z?;8a|WFEP8k
+zpw#~Lt2b&b9DuPn9_L`*{HDErqez!)h%Iq2j>f6D026T)eubNG8}7n=cmZ$Xf6-mu
+z6X`s1qc>K@7T6X0V+`v1VO@SU+TQ0%u36BOH^O$<69-@{&c>zqC2q&>@g$zd8~6xa
+z<psXZCl?k&U#yEQup17*VK^UG<5tw~25JAN@G9QJ*O*h@=W4s+SOptmTMWb~9E)>s
+z1#ZT@cnYuLJ$#Kh^?kICk5#ZCw#7h<!m&69SKwyci>L4^-b35_a~ao9-)D=BF#<>6
+zR9uK_Fd6sZ4Sa}}ym8ZhE1^F&!9F+y<8d@j#A!GO7vgH%f~W8ay2*P>9sga-iTSVy
+zmcX)D32R^-Y>3UU6}HE&*c*c}9HVe3j>Pde1!v)WT!Jew2{+(Y+=&PAD4xc1cnPoJ
+zEqsh_@*Z2aTW&0dzSs)8Vs8w_aE!)LI2{+`m-qu-#lO(g+sva77RS<95vyYWw#7ae
+ziKB1^F2!}Y6A$4zypE6Y9oaUzeez*xtclIAGlt?&`~(+Z5`Kd};4gR`ALBbE86Qhy
+z435J&xB@rhUOa_Y@gBa$oTbb-#jy%D#I_iS!*C+b!?pMg9>kw9mya383(H|GY>M46
+z6bIoDjK?uJ9T(%5n1YA!CO$&f(q=xnuo(JcU2K7!aV*ZlL|lhE@CW<}f5&_H5<SY8
+zc@)C3SQBG#H0uAy>*I1huE0&0f=BRIypE6XHI^-F`s;%Ia174GyZAR|D`%D~iS@BR
+z&c`LV0+Vn9ZpEE=5dXl}=uzH`R~DOKTkMJ97>}Qz{{OXZw^bNW!Q|H10lQ%z48<Wh
+z7T4neJc;+wqoV2G3oBq9Y>r*AKMuu7I3HKzR@{eI@GpFU9=>M$!dM>t@gwYlp%{k~
+zaUQP1Ew~p?;uXA$uP{d?Gmpyn0e*~qa4?R++4wnrjo;x(yn=V}73QdH#w~_bur>C;
+za2$nGa2|e%JMb`G!-troiW#pocEwPP#if{pTk!|Hh&S*dzCzEc>{l#@wXi96z-hP$
+zlW-gE$5VJ2Z{st}TFs2>h2_y7Kf*2;ig7p*=iw^cf_w2KUdB849N({Q=1~+YVjT>`
+z;W!CD#pU=lrr=Rb#lP?cdekuE`d|gDinXu-w#4q3fRphh=JaEKVi~N7jj%QL#xR_V
+ziTD*J<9B!lui}5vy`~vIH+o}b?1cR=8mHg_`~tV)UOb0s_#C}!nQ<#)ee8&RFdWC?
+zbX<TdaW@{ubC`w?(WSN-*Aok2IjoHzVrLA&Se$^L;<tDJPvcd*jn6QvznMpVEQ5{l
+zW9)=IurCh4S-1?h;{iO4cd$quGj3UIiCr)RV{jZUz~#6Ocj7@ji>Y`IpX0lA&G-e;
+z2diTvY=b>98b{#-oQ4bV3*3r(@dRGPTlfS^)-&^}jP<c4cEkP{hZArvCSfw}!;^Rk
+z|HP-5rM?+IFP6lr_yGpuARL16I2tG7Qe2H+<8C~Pzu^tc*MP?f*1+c21w%0oCt(sM
+z<9<AiSMe^sM9&Y*xL#Nu{qZC0g8eZTC*V9>fnVbuJb@SR7Cyyn4b43AV`=omCfEUk
+zFdE0=Y+Q~TF$GWHRlJKY(KCSUf%UKz_QXLr5)*L)rr<HWh_~@MdNeZQ6~T&F4_jeR
+z9E2lr1}5SLOu=J#5pUyj^k~fZSP|=CE9{A*a4{y~cKjaC;x)X7kMTLWG%@36!+hw2
+ze%J`xVIU61(Kr(maXs$B!}u%Sz{lv`)XXOjmc(k<2-{;24#DyGDXzk;xF65pHN20n
+zF-J2qkD};{^{^#&$1se?Dfk(FfyuZZPvdQTfu%k)<5$68jKYyP1?S@m+<<%V2>yb<
+z<6V4#**`Ml7Q!l64}&op$KXs%#PzrfkKix(2R^{pn4`HFzcALqrq~^);%B%LH)9GO
+z!8@40h3UT}*1~QWj8Qler{N+@!fm)8PvK>}jn6P^OEZ2xEQQsu4fez#I2LE)a@>e1
+zcofg$O?-k`S}{KQVm)k$-7yT~aWXEzHMk8A;2BKC`>0=F*3Tt!p*PmS7T6ubF#)IH
+z5?qJ7@GM@#hv?eIj9VUSViRnSff$J+aT+edB;1Dk@gm;Br<nC)Gk$(7jegh!J75q-
+z<5--H%W)&7;88q}H}MH(Y0LgcAFP3mu><zQ7@UCfa5X050X&P>@FBXkGvnvRl2{!Z
+zV+ZVqF*pI|;cEQ4z3KNf{)vS<nDR2{hmEm4_Qr6G$4_uRuENcD1^>jSn6;xBHxHJ;
+zD%b#9;dq>d^Kl8T#7(#xkKqNpg-<bSCo_-ySQ`DX33k9BjK;Az8<*ooOu?gg9&e(1
+zXET0w%#S`;9Ru)V?1ckyI8Md|xC%Gp9z2HU@!$9u-MW~0y^qDQ64t{O*cC%D7RTcp
+zT#g%X7aqcMcn$C4D}1l3nO8yd!Ri=*A7d{Zh{JI*euk@Y3;uv-@prtBuQ5kAGoPa9
+zi}kQ2cE>P`$0;}um*YCzfj{6+cn$C3Bm5g(x|?}bz*^W6yJINE;&_~c%W(tl!bA8A
+zrr~{jg`PdkJPKnutc6Xn1NOxz9ECG*DXzmqcmjXI^LQ1n<86F^Pw*9b^fdD=g#OqJ
+zJ7F-!;CP&iD=-!R!WZb#i|vBt(H}p;F1Q(Y<1xH|x9}-u?QQzckEPKMn_$&Grd<PU
+zjXiN7Cg4>34PRm2K+{htY=rGG7^874&c@}q5mWFep2wT`1he!t<K{yjtbvWOJ@&;Y
+z9E0m{OFz@!RlJQ)&@<T77sMLa5IbWKM&byZjPq~>evNzZI9|j*@fl_dG4m*ZWw0hT
+z#g5nyhu}DzgP-Fj+>OWZ0^UORP&5Af=#5qI18jr6a1hExY;CV|r{QA!3ctl4@Mru3
+zAEHZt(@!oej+L<iw#J?~5EF1JF2ZEoizo3i-ofXXeSn!qAuNZr@k8v4AsCAj@Kaog
+zoAEnL!v~l%%#2$J>tk!|j$s&&lW_sA!992c&*3$^hp(`9xEa4GcEo--1jpeWe2Q5H
+zn&tCiDXfC^uq6iKV4Q;UaU<@+!}u%Sz{lu5$c$eH8)7qTh3&B$hGHB}#Ce#Ed+{V*
+z#yj{NvqzYD6vA>?8$ZO(7=p1l0T*KuZpZKOEdGx7@ipd%H1jBmzE}@iVt16Qp4*P&
+zc$|z2a1Cz519%2g@%_Q3pORPyJ7Yf_g5z)wCgJ)h)6c~r#zsSp&4(HLVKk1#nYa|!
+z;<tDZ&tfXx#TS@8-i%Wa%b*`N#&*~TBX9&x#f7*AlW`xO#7p=mKE*7<&3y7=DXfl-
+zupI{CU>uDzF%eVn5dMJ=@HM`dV8$<k<*_z4!;UBy;k7-UqHr|Mz$N$<euLlR8N7;r
+z;d6X<1p5b@Vms`E5jX;;;zC@5$+!<s;wAhOpJJAg><_$+Pw<^lraljrz*;yF6Y)#j
+zgD3Gkrr~qUH`?^?jlS3bn`1`|#1S|H7vgH%hTq{4`~`2|Lv$Ns=8*#nV_B?&&9Ec(
+zP+csm4~9`5OOD4Wl+Pj0$CZ?C!QGVa!=sd+BVWKY%I}jOq03ma9-eAR`93?jm@4xu
+ziDjs-N_|~&Lvl;i)w0^EvRq$sxauK)7eM(q%BN92hw^2VCsBStEn!(FsXvS7RGDWg
+z^|#5-(Hdu#^H8N-VJuF01#%Tt=IM{kRGH^2RmNRR`7&IoN`LFA-%dV&KU02%{0I52
+zD%<5hs*Lvn^N%;V0ya{mT}xHw(T?(gI0hG}((ZFr+O45{6Ml<FRB3lsm3H^k5|;J1
+z>S9^1&~<|3lJfVgs?_Hv7a^A>S0MY58)G}{OnqO~)w04>87C5_;!IqHNw^Jn;88q@
+zzu{ecg4rgT@!nTuJqxHZt~XYrzAp6vl()d%ID-0d<Y_n$*Qu_Sm8{A*J1O6fS13;-
+zyHApKvOPUinNLp4qn4Dvo1(rf*`NAG*b2L=(obJ<2!^TBPYm^=$m7W~$aBd{$t%d~
+zRhicwJcswNz$a$h;;OVOg=JM4w;J{J$&JXZ$?a8Ht_KcMWxEX_e}c1dl`8AGmb?+S
+zs50Kas6R+PLjH;T8~Gaf-{gm?t7Sb=OUchHPd5D(!eXkFmr`Z?N|e{fR@ei>aX3!F
+zg}7Xm_1=Ujs*Hb7mG%F(D&yRv{y+FcmGyL)V(L9r$?ucB$i7&O^7`bK*p~7h<UsO3
+zauj(4c`SK4c@B9gc@=q`s_TVYsZXK)NAfZ9Ir2sF4f1WW%T%*|SybsaKi0$#u&pZF
+ztur}HmF*Wzj>F-qY_AE_&mzwwFDGxpWXkuDPvBWq=95PK9rAsAq{=w2sDF2w$vIS+
+zS0QqFtW0?w@(1J=<ZjrT@(3J(pHM%Yynwt^mB;PB$a~2LRhh>r%CBM?<@fQGD(jhJ
+zy0HLO!@AgBmF?e$Jd`|vyoCHEc@Oz0`FHYN@)Pu!VaD}RrT>!TnySpd5xE(*P-VM!
+zq`nV1m^_#qOCCd>NS;lePhO3iC{HHuAs-;0AfF{)CSN1}MSe(rNp_tn^OgORUzK^6
+z!HSeuRb@TvQQiuB;vgJ}GcXZ1V6rOX{762B7b#CwWt`iTKSz&QW?n_GBG$uJ*c1Dy
+zGR`paWSl|yTvf(Nq<jOW;4!?2xA8f8%r^7Mt;#qh$<?to<@Hq==OfCy;sA`tDYyu~
+z!X3Czm3|JZF7kUuc$)eP)L$q6Nq$WJoBYlkSzh*Uc2)YzM=ne*O|C$$Np6NMDep|~
+zK@KGkBo8HzAb&!huFCdWPu@)4uF8D&Qho}5raTqzs<Qr1FzZ~C3t%n$NcFI+Hsn6!
+z5b_LMP5HOvL*x_WE95ltWAbyd=ci_z+^Wp06uCUPE;)eQQI+-VNe;wdRrX6H^~1@d
+z$y3R*$V+ey<?G1X$-Br0$w$aPlh2dW$hTD4FYnGX^T?q}&ZEkFi&0(~Yf#=0+o-bs
+zeN@@*12B^E(YOr1#l3hIuj5nnm~Z+mr%Jyy$=%4I<YDAd<XPnT<Td2=<P`F0@=MI|
+znHi^uD(h3796)Y|Avm1+v8rsR8EQfK?RxSu@+$Hsax(cl^7rIZ<e$l@<m==IY61Bj
+z46^G2GhS9z#?M18NcJI@C)Xs`C4We6Mea)OMGhlJk`u^d$kWMl$cf~Y<c;L5<UML$
+z%Q{5<N%fT9StF-Wf0z8Xnoa(`p6s#EET2!6^(~=hk-s-5H>SQdxtp3xjw^Bk^%Kc+
+zR5y8FO5RF+3i+^_+p<oOFHoOGexSO`{vf+8k}T`@o+|SztiCUQcTD!Bz81NOnnQla
+zjog{~KyrkdN8X2!$520&yg<z^=Tq_y>i3gRs_)2UBgm=L|4DwL=9KsO<aZZKmigyV
+zW&Yl3Rypp-jj3-<?ykNo$31xv^+U-M)b}iF3V8+Yz@zvpreW44X8gif7X7dhw#D8!
+z5aV$Y&cl_s2~+SeUdM-MEj9Bfgk|wV?1Aw(16SZ4Jcc*%okY`b9;}Ed@>tgMj_d-<
+z)!Y2;m}VbxIaRVB*`M5$+??Er+>IPU4kO2rhm+-HmTf$FTC?@PoxGF$8~GCXDftCC
+zugu9dUse89CHs-(XG?AM`WviTA4eWew*6k0xBUJcc?<R1$@)8=+W%?tBeMQxs`gjV
+z)zo{bk^{(1$@z7j1<cjq_58d}jtTV}%&FU5a#gH{ov|<WN4-XgwqJ;=@i3mlYZxrY
+zfVS@_$GTe2%Xqe^QKt8gH#bXG$l>N@$qCEh=4QzW$l>N@`_;EM1#+pRH$m>X$;F!-
+zZ*I0<hkH}vCKoewyt!F&0(H2#S#m;jxVhOLt#1n4tbA{R+;g*J!#mvEtU?Y+>x(#L
+z*(eS-H@S?Y<IT<XD|K&5+^kY>g4}bnN;~B;PPwd8F7K2pIOU2?+1Dvoa>|vRa#g2X
+z-6_{_$~B#GZKv$-l<Q`Agt%J|UT53`E|xsx9Bvh?k`76KL0hw)JIu|+wg=nUqx7C}
+zi<URbr#~!Rocb$cTRyK-z5Yh8WB;iRS;tS4W7V<#kweyc{mom)`T&Ql^(!5+uD|}K
+zt+|=`>2J~6v)12t$hy2=`e9<$Uw_NY+|2U&+q3qp%X>RyU0#24*4)hUdI@fO)_VQT
+zS$o#y`#NN;*WZRUH?#ayhphFJ(hnn3ztJIUz5Z6HxjF9-H>(OY`Z#crBjf{7@5^b(
+zmfMK>oKl$FOVs_Z=S^*|{lB@nTZ0I?iCpCTGgb7K{V6Y1B$sw-pT$bb&_0WGO7bmT
+zM*d}PpUrwE<$5#yXR~~y?{LW_<X`6Y*{!xxuQ$^^yER0z{zkM}U+4LFTJtls_q6nR
+zMvqF}q?!BAVf~V!eGcon<i7IHY(MAzb6F)^bvE|-<g)a6NY8ruFLVF7tpOR@=eA}@
+zo-S?8{&4QUytSG3`Ve=qI3DG`x#e}*{`suk8T!v>rAi(p^M8B)1uS=-V$Aj|V3j4m
+zeg1{4mKoX?vLYm>$YkEW{VQ0rX>aCV!P4J}*ZcPTg=8Juj9<Y@maNZ0_WFI2^E%|?
+zl65S5z3un29rA6d_jbrnB>OmI4_UCBL(VH%&+_*ED#{%_i`#QuxueI6J-3iM{tmgD
+z<oXUdQgVPpj+fljA(xc<Z*E1b*;21Jv;IY_oswHf_LhH{A3sH{YZ=-XwOr)fRzvo$
+zo@X+*FK&5r?lb)tw*n;pByG*{?)-QwVfD?>zJxVi^1IUi+mDx0*6IxHOIhDbUL*ZG
+zw%7e>ZZ++9Z0hq@#_dts_B-M}QmgwUx2%!7ysom}v>y+rTv)PRw(+U#XKi0ia)7LC
+zs?1q)OQ-hw`<$LK$293n>l2*nXGm@*bvl;T>+8Kqa(^!QUrz1!N!IgwIq6f|r%DcR
+zH@}Ck`LR>`Eb<=9e$z1uOV;Pl<8oiy`#IG&mmDp1dJJfNkW>9IU0&+!^PT2Y|Cv)>
+zC0U<ueC52L{q3OM-v4o@_CGo0TTc0J$@=_f-#+i_1C5)`si0(ieh!oSI$mw3`i7GG
+zN}YZF-6ZStt-deN_6d?x<-Tqs%?l*!>jizEp?R}p`%U}!QL;YYw`2V-Io02B$}c4A
+z^Xnv;qxPr2GitwSf0q4Xb3qXUqGH11!XhgNTRw7Gy4H<8ZqmH1{QQGYNP4Jd1qSvX
+zIyg8muyXaP{<Zxw#G17-M8B$zu};<M673fSvybU;fjh0VT`Vu~A1V_f<AVC7SN_vQ
+z?=pAuzglMOGx(pbikG?5|JgKSuj$v4<GO5_J9}G;jD0v=P%m>AZ)uRRhqqm5FLO8l
+z)GA|NnXbZ@xudr>$=FNg>+@yqCUct%SO3!mGIpB2DP;$l3-@L2^zCgj_LJ$Fewn*@
+zYZIqloUZowmQI{n46t9lPcNSs79JZH6_a4uuk08)I5cKJf)yMTEf;y@;(%6Ij9d{h
+zHZE{jRD?A^%WbP2Yeh#6O;3T5L*<f_R!m%QU~tsX!E%{MD_Sm!7Z@BC6f+=H%Oav8
+z`<XHs*xU&Tk9Dda92FB86rm%<1q}$bWak8j21ZB4hsH$p?{9GhKy$c-m_Fi$1#<X>
+zght3W^lTS}jED+~ORu)g{mt5B-lOStff=t_n0Z_Nua+72OR(d065rC1b9Kh0|G#-;
+zuFtqUTST{o?zGI~zokLO9^P`X#f+y;rv~;j>OXBEIq?QZC)ge`wns{!T=sBK`V+%H
+zcE%+{->gVbXi&fKz@dZV!v}{121iHBE~}c}O{~*HT_2$Oh}7dKC?Y5(GQFkK$;>|c
+z^y8Kj>7f2Gp`qyuvC-_uiX0?C!QpWU>GdH|>4!tCH7GJPQetpes0^*wc(hL@By?D~
+zJgCD5hsUKanfWB7GqRoG91bY^EHj-Jv?3-nD8#n1I<Blodf(bh`tyQJF(iCgEqzus
+zTQXdt9PajOwc3vVP-!Dan|-(p59MgN)TVr|T<hZHsXR2pkh+Ry?+zWDVgEWk-1NZ^
+z8ExAlu|dN^1MOQ>F2or(G&V3UN_(|pZDYNeN2U{g`UKObZ||sIf?gapeGT6BoMT@&
+zeV5Bdu%FJ~@*u1Brn6|dm}qDqXG&dV+y3PQ=(t@Yqe9Y`%6P;Ml9QZlAoKW$wf+w&
+CTw?A3
+
+diff --git a/drivers/amlogic/power/aml_pmu_of_common.c b/drivers/amlogic/power/aml_pmu_of_common.c
+index 656f7a4911ef..c6bbf83f9f10 100755
+--- a/drivers/amlogic/power/aml_pmu_of_common.c
++++ b/drivers/amlogic/power/aml_pmu_of_common.c
+@@ -19,8 +19,8 @@
+ #include <linux/pinctrl/consumer.h>
+ #include <mach/am_regs.h>
+ #include <linux/delay.h>
+-//#include <mach/gpio_data.h>
+ #include <linux/amlogic/battery_parameter.h>
++#include <linux/amlogic/aml_pmu_common.h>
+ 
+ #define AML_I2C_BUS_AO     0
+ #define AML_I2C_BUS_A       1
+@@ -54,6 +54,177 @@
+             prop_name, value);                                          \
+     }
+ 
++/*
++ * common API for callback and drivers
++ */
++static void    *pmu_callback_mutex     = NULL;
++static struct aml_pmu_driver *g_driver = NULL;
++static struct aml_pmu_api *g_aml_pmu_api = NULL;
++
++struct pmu_callback_group {
++    char                        name[20];
++    void                       *private;
++    pmu_callback                callback;
++    struct pmu_callback_group *next;
++};
++
++static struct pmu_callback_group *g_callbacks = NULL;
++
++int aml_pmu_register_callback(pmu_callback callback, void *pdata, char *name)
++{
++    struct pmu_callback_group *cg = NULL, *cn;
++
++    if (!pmu_callback_mutex) {
++        pmu_callback_mutex = pmu_alloc_mutex();
++        if (!pmu_callback_mutex) {
++            printk("%s, allocate mutex failed\n", __func__);
++            return -ENOMEM;
++        }
++    }
++    pmu_mutex_lock(pmu_callback_mutex);
++    cg = kzalloc(sizeof(*cg), GFP_KERNEL);
++    if (!cg) {
++        printk("%s, allocate callback failed\n", __func__);
++        pmu_mutex_unlock(pmu_callback_mutex);
++        return -ENOMEM; 
++    }
++    cg->callback = callback;
++    cg->private  = pdata;
++    strcpy(cg->name, name);
++    if (!g_callbacks) {                                                 // add first callback
++        g_callbacks = cg;
++        printk("callback %s registed, cg:%p\n", cg->name, cg);
++        pmu_mutex_unlock(pmu_callback_mutex);
++        return 0;
++    }
++    for (cn = g_callbacks; cn->next; cn = cn->next) {
++        if (name && !strcmp(cn->name, name)) {
++            printk("%s, callback %s is already exist\n", __func__, name);
++            pmu_mutex_unlock(pmu_callback_mutex);
++            return -EINVAL;
++        }
++    }
++    cn->next = cg;
++    printk("callback %s registed, cg:%p\n", cg->name, cg);
++    pmu_mutex_unlock(pmu_callback_mutex);
++    return 0;
++}
++EXPORT_SYMBOL(aml_pmu_register_callback);
++
++int aml_pmu_unregister_callback(char *name)
++{
++    struct pmu_callback_group *cn, *tmp = g_callbacks;
++    int find = 0;
++    pmu_mutex_lock(pmu_callback_mutex);
++    if (name && !strcmp(tmp->name, name)) {                             // first node is target
++        g_callbacks = g_callbacks->next;    
++        kfree(tmp);
++        printk("%s, callback %s unregisted\n", __func__, name);
++        find = 1;
++    }
++    if (g_callbacks) {
++        for (cn = g_callbacks->next; cn; cn = cn->next) {
++            if (name && !strcmp(cn->name, name)) {
++                tmp->next = cn->next;
++                kfree(cn);
++                printk("%s, callback %s unregisted\n", __func__, name);
++                find = 1;
++                break;
++            }
++            tmp = tmp->next;
++        }
++    }
++    pmu_mutex_unlock(pmu_callback_mutex);
++    if (!find) {
++        printk("%s, callback %s not find\n", __func__, name);
++        return -1;
++    }
++    return 0;
++}
++EXPORT_SYMBOL(aml_pmu_unregister_callback);
++
++void aml_pmu_do_callbacks(struct aml_charger *charger)
++{
++    struct pmu_callback_group *cn;
++
++    if (g_callbacks) {
++        pmu_mutex_lock(pmu_callback_mutex);
++        for (cn = g_callbacks; cn; cn = cn->next) {
++            if (cn->callback) {
++                cn->callback(charger, cn->private);    
++            }
++        }
++        pmu_mutex_unlock(pmu_callback_mutex);
++    }
++}
++EXPORT_SYMBOL(aml_pmu_do_callbacks);
++
++int aml_pmu_register_api(struct aml_pmu_api *api)
++{
++    if (!api || g_aml_pmu_api) {
++        printk("%s, invalid input, api:%p\n", __func__, g_aml_pmu_api);    
++        return -EINVAL;
++    }
++    g_aml_pmu_api = api;
++    return 0;
++}
++EXPORT_SYMBOL(aml_pmu_register_api);
++
++void aml_pmu_clear_api(void)
++{
++    g_aml_pmu_api = NULL;    
++}
++EXPORT_SYMBOL(aml_pmu_clear_api);
++
++struct aml_pmu_api *aml_pmu_get_api(void)
++{
++    return g_aml_pmu_api;    
++}
++EXPORT_SYMBOL(aml_pmu_get_api);
++
++/*
++ * register PMU operater for this lib
++ * @driver: amlogic PMU driver to be registed
++ */
++int aml_pmu_register_driver(struct aml_pmu_driver *driver)
++{
++    if (driver == NULL) {
++        printk("%s, ERROR:NULL driver\n", __func__);    
++        return -1;
++    }
++    if (g_driver != NULL) {
++        printk("%s, ERROR:driver %s has alread registed\n", __func__, driver->name);
++        return -1;
++    }
++    if (!driver->pmu_get_coulomb || !driver->pmu_update_status) {
++        printk("%s, lost important functions\n", __func__);
++        return -1;
++    }
++    g_driver = driver;
++
++    return 0;
++}
++EXPORT_SYMBOL(aml_pmu_register_driver);
++
++/*
++ * clear pmu drivers which already registered;
++ */
++void aml_pmu_clear_driver(void) 
++{
++    g_driver = NULL;
++}
++EXPORT_SYMBOL(aml_pmu_clear_driver);
++
++/*
++ * return registed pmu driver
++ */
++struct aml_pmu_driver* aml_pmu_get_driver(void)
++{
++    return g_driver;
++}
++EXPORT_SYMBOL(aml_pmu_get_driver);
++
++
+ /*
+  * common API of parse battery parameters for each PMU
+  */
+@@ -125,7 +296,7 @@ parse_next4:
+ parse_failed:
+     return -EINVAL;
+ }
+-EXPORT_SYMBOL_GPL(parse_battery_parameters);
++EXPORT_SYMBOL(parse_battery_parameters);
+ 
+ static int aml_pmus_probe(struct platform_device *pdev)
+ {
+diff --git a/drivers/amlogic/power/axp_power/Kconfig b/drivers/amlogic/power/axp_power/Kconfig
+index 6a60c2155f18..669a87bc9be0 100755
+--- a/drivers/amlogic/power/axp_power/Kconfig
++++ b/drivers/amlogic/power/axp_power/Kconfig
+@@ -25,7 +25,6 @@ config AW_AXP19
+ 
+ config AW_AXP20
+ 	bool "AXP20 driver"
+-    select AML_PMU_ALGORITHM_SUPPORT
+ 	---help---
+ 	  AXP20 driver
+ 
+diff --git a/drivers/amlogic/power/axp_power/axp20-sply.c b/drivers/amlogic/power/axp_power/axp20-sply.c
+index 94daca95b8a4..6703a8316a8b 100755
+--- a/drivers/amlogic/power/axp_power/axp20-sply.c
++++ b/drivers/amlogic/power/axp_power/axp20-sply.c
+@@ -1148,10 +1148,14 @@ static ssize_t dbg_info_show(struct device *dev, struct device_attribute *attr,
+     struct axp20_supply *supply  = container_of(battery, struct axp20_supply, batt);
+     int    size;
+     struct aml_charger  *charger = &supply->aml_charger;
++    struct aml_pmu_api  *api;
+     
+-    size = aml_pmu_format_dbg_buffer(charger, buf);
+-
+-    return size;
++    api = aml_pmu_get_api();
++    if (api && api->pmu_format_dbg_buffer) {
++        return api->pmu_format_dbg_buffer(charger, buf);
++    } else {
++        return sprintf("api not found, please insert pmu.ko\n"); 
++    }
+ }
+ 
+ static ssize_t dbg_info_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+@@ -1194,19 +1198,29 @@ static ssize_t battery_para_store(struct device *dev, struct device_attribute *a
+ 
+ static ssize_t report_delay_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "report_delay = %d\n", aml_pmu_get_report_delay()); 
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    if (api && api->pmu_get_report_delay) {
++        return sprintf(buf, "report_delay = %d\n", api->pmu_get_report_delay()); 
++    } else {
++        return sprintf(buf, "error, api not found\n");
++    }
+ }
+ 
+ static ssize_t report_delay_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+ {
++    struct aml_pmu_api *api = aml_pmu_get_api();
+     uint32_t tmp = simple_strtoul(buf, NULL, 10);
+ 
+     if (tmp > 200) {
+         AXP_PMU_DBG("input too large, failed to set report_delay\n");    
+-        return 0;
++        return count;
+     }
+-    aml_pmu_set_report_delay(tmp);
+-    return 0;
++    if (api && api->pmu_set_report_delay) {
++        api->pmu_set_report_delay(tmp);
++    } else {
++        AXP_PMU_DBG("API not found\n");
++    }
++    return count;
+ }
+ 
+ static ssize_t driver_version_show (struct device *dev, struct device_attribute *attr, char *buf)
+@@ -1579,14 +1593,26 @@ static void axp_charging_monitor(struct work_struct *work)
+     struct aml_charger  *charger;
+     int32_t pre_rest_cap;
+     uint8_t pre_chg_status;
+-
++    struct aml_pmu_api *api;
++    static bool api_flag = false;
+ 
+     supply  = container_of(work, struct axp20_supply, work.work);
+     charger = &supply->aml_charger;
++    api     = aml_pmu_get_api();
++    if (!api) {
++        schedule_delayed_work(&supply->work, supply->interval);
++        return ;                                                // KO is not ready
++    }
++    if (api && !api_flag) {
++        api_flag = true;
++        if (api->probe_process) {
++            api->probe_process(charger, axp_pmu_battery);    
++        }
++    } 
+     pre_chg_status = charger->ext_valid;
+     pre_rest_cap   = charger->rest_vol;
+ 
+-    aml_pmu_update_battery_capacity(charger, axp_pmu_battery);
++    api->pmu_update_battery_capacity(charger, axp_pmu_battery);
+ 
+     if(!charger->ext_valid){                                    // clear charge LED when extern power is removed
+         axp_clr_bits(supply->master, POWER20_OFF_CTL, 0x38);
+@@ -1825,7 +1851,6 @@ static int axp_battery_probe(struct platform_device *pdev)
+     aml_pmu_register_callback(axp_call_back2, "callback2...",  "demo 2");
+ #endif /* AML_PMU_CALL_BACK_DEMO*/
+ 
+-    aml_pmu_probe_process(charger, axp_pmu_battery);
+ 
+     return ret;
+ 
+@@ -1867,6 +1892,7 @@ static int axp20_suspend(struct platform_device *dev, pm_message_t state)
+ {
+     struct axp20_supply *supply  = platform_get_drvdata(dev);
+     struct aml_charger  *charger = &supply->aml_charger;
++    struct aml_pmu_api  *api;
+     uint8_t irq_w[9];
+     uint8_t tmp;
+ 	cancel_delayed_work_sync(&supply->work);
+@@ -1890,17 +1916,25 @@ static int axp20_suspend(struct platform_device *dev, pm_message_t state)
+     if (extern_led_ctrl) {
+     	axp_clr_bits(supply->master, POWER20_OFF_CTL, 0x08);
+     }
+-    aml_pmu_suspend_process(charger);
++
++    api = aml_pmu_get_api();
++    if (api && api->pmu_suspend_process) {
++        api->pmu_suspend_process(charger);
++    }
+ 	
+     return 0;
+ }
+ 
+ static int axp20_resume(struct platform_device *dev)
+ {
+-    struct  axp20_supply *supply = platform_get_drvdata(dev);
+-    struct  aml_charger *charger = &supply->aml_charger;
++    struct axp20_supply *supply = platform_get_drvdata(dev);
++    struct aml_charger  *charger = &supply->aml_charger;
++    struct aml_pmu_api  *api;
+ 
+-    aml_pmu_resume_process(charger, axp_pmu_battery);
++    api = aml_pmu_get_api();
++    if (api && api->pmu_resume_process) {
++        api->pmu_resume_process(charger, axp_pmu_battery);
++    }
+ 
+ 	axp_set_charge_current(axp_pmu_battery->pmu_resume_chgcur);	//set charging current
+ 
+diff --git a/drivers/amlogic/power/pmu_mutex.c b/drivers/amlogic/power/pmu_mutex.c
+index 735685d9807f..d3a50bca05df 100755
+--- a/drivers/amlogic/power/pmu_mutex.c
++++ b/drivers/amlogic/power/pmu_mutex.c
+@@ -36,19 +36,19 @@ void *pmu_alloc_mutex(void)
+     __mutex_init(pmutex, mutex_name, key);
+     return (void *)pmutex;
+ }
+-EXPORT_SYMBOL_GPL(pmu_alloc_mutex);
++EXPORT_SYMBOL(pmu_alloc_mutex);
+ 
+ void pmu_mutex_lock(void *mutex)
+ {
+     mutex_lock((struct mutex *)mutex);    
+ }
+-EXPORT_SYMBOL_GPL(pmu_mutex_lock);
++EXPORT_SYMBOL(pmu_mutex_lock);
+ 
+ void pmu_mutex_unlock(void *mutex)
+ {
+     mutex_unlock((struct mutex *)mutex);    
+ }
+-EXPORT_SYMBOL_GPL(pmu_mutex_unlock);
++EXPORT_SYMBOL(pmu_mutex_unlock);
+ 
+ int pmu_rtc_device_init(void)
+ {
+@@ -62,7 +62,7 @@ int pmu_rtc_device_init(void)
+     }
+     return 0;
+ }
+-EXPORT_SYMBOL_GPL(pmu_rtc_device_init);
++EXPORT_SYMBOL(pmu_rtc_device_init);
+ 
+ int pmu_rtc_set_alarm(unsigned long seconds) 
+ {
+@@ -84,7 +84,7 @@ int pmu_rtc_set_alarm(unsigned long seconds)
+     time += seconds;
+     rtc_time_to_tm(time, &tmp.time);
+     ret = rtc_set_alarm(rtc_dev, &tmp);
+-    printk("%s, set wake up alarm in %d seconds, ret:%d\n", __func__, seconds, ret);
++    printk("%s, set wake up alarm in %ld seconds, ret:%d\n", __func__, seconds, ret);
+     return ret;
+ }
+-EXPORT_SYMBOL_GPL(pmu_rtc_set_alarm);
++EXPORT_SYMBOL(pmu_rtc_set_alarm);
+diff --git a/drivers/amlogic/power/ricoh/Kconfig b/drivers/amlogic/power/ricoh/Kconfig
+index 5d5cd841ca47..117f04776577 100755
+--- a/drivers/amlogic/power/ricoh/Kconfig
++++ b/drivers/amlogic/power/ricoh/Kconfig
+@@ -13,7 +13,6 @@ choice
+     default RN5T618 
+ config RN5T618 
+     bool "RN5T618 driver"
+-    select AML_PMU_ALGORITHM_SUPPORT
+     ---help---
+         drivers for RN5T618 
+ 
+diff --git a/drivers/amlogic/power/ricoh/rn5t618-sply.c b/drivers/amlogic/power/ricoh/rn5t618-sply.c
+index b0772ada3486..dcf30affde74 100755
+--- a/drivers/amlogic/power/ricoh/rn5t618-sply.c
++++ b/drivers/amlogic/power/ricoh/rn5t618-sply.c
+@@ -1037,11 +1037,14 @@ static ssize_t dbg_info_show(struct device *dev, struct device_attribute *attr,
+ {
+     struct power_supply   *battery = dev_get_drvdata(dev);
+     struct rn5t618_supply *supply = container_of(battery, struct rn5t618_supply, batt); 
+-    int size;
+-
+-    size = aml_pmu_format_dbg_buffer(&supply->aml_charger, buf);
++    struct aml_pmu_api  *api;
+ 
+-    return size;
++    api = aml_pmu_get_api();
++    if (api && api->pmu_format_dbg_buffer) {
++        return api->pmu_format_dbg_buffer(&supply->aml_charger, buf);
++    } else {
++        return sprintf(buf, "api not found, please insert pmu.ko\n");
++    }
+ }
+ 
+ static ssize_t dbg_info_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+@@ -1087,18 +1090,28 @@ static ssize_t battery_para_store(struct device *dev, struct device_attribute *a
+ 
+ static ssize_t report_delay_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-    return sprintf(buf, "report_delay = %d\n", aml_pmu_get_report_delay()); 
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    if (api && api->pmu_get_report_delay) {
++        return sprintf(buf, "report_delay = %d\n", api->pmu_get_report_delay());
++    } else {
++        return sprintf(buf, "error, api not found\n");
++    }
+ }
+ 
+ static ssize_t report_delay_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+ {
+-    uint32_t tmp = simple_strtoul(buf, NULL, 10);
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    uint32_t tmp = simple_strtoul(buf, NULL, 10); 
+ 
+     if (tmp > 200) {
+-        RICOH_DBG("input too large, failed to set report_delay\n");    
++        RICOH_DBG("input too large, failed to set report_delay\n");
+         return count;
+-    }
+-    aml_pmu_set_report_delay(tmp);
++    }    
++    if (api && api->pmu_set_report_delay) {
++        api->pmu_set_report_delay(tmp);
++    } else {
++        RICOH_DBG("API not found\n");
++    }    
+     return count;
+ }
+ 
+@@ -1301,6 +1314,8 @@ static void rn5t618_charging_monitor(struct work_struct *work)
+     int32_t  pre_rest_cap;
+     uint8_t  pre_chg_status;
+     uint8_t  pre_pwr_status;
++    struct aml_pmu_api *api = aml_pmu_get_api();
++    static bool api_flag = false;
+ 
+     supply  = container_of(work, struct rn5t618_supply, work.work);
+     charger = &supply->aml_charger;
+@@ -1315,7 +1330,17 @@ static void rn5t618_charging_monitor(struct work_struct *work)
+      * 4. if battery capacity is larger than 429496 mAh, will cause over flow
+      */
+     if (rn5t618_battery) {
+-        aml_pmu_update_battery_capacity(charger, rn5t618_battery);
++        if (!api) {
++            schedule_delayed_work(&supply->work, supply->interval);
++            return ;                                                // KO is not ready
++        }
++        if (api && !api_flag) {
++            api_flag = true;
++            if (api->pmu_probe_process) {
++                api->pmu_probe_process(charger, rn5t618_battery);
++            }
++        }
++        api->pmu_update_battery_capacity(charger, rn5t618_battery);
+     } else {
+         rn5t618_update_state(charger);
+     }
+@@ -1585,7 +1610,6 @@ static int rn5t618_battery_probe(struct platform_device *pdev)
+     wake_lock_init(&rn5t618_lock, WAKE_LOCK_SUSPEND, "rn5t618");
+ #endif
+     if (rn5t618_battery) {
+-        aml_pmu_probe_process(charger, rn5t618_battery);
+         power_supply_changed(&supply->batt);                    // update battery status
+     }
+     
+@@ -1639,11 +1663,15 @@ static int rn5t618_battery_remove(struct platform_device *dev)
+ static int rn5t618_suspend(struct platform_device *dev, pm_message_t state)
+ {
+     struct rn5t618_supply *supply = platform_get_drvdata(dev);
++    struct aml_pmu_api    *api;
+ 
+     cancel_delayed_work_sync(&supply->work);
+     if (rn5t618_battery) {
+         rn5t618_set_charge_current(rn5t618_battery->pmu_suspend_chgcur);
+-        aml_pmu_suspend_process(&supply->aml_charger);
++        api = aml_pmu_get_api();
++        if (api && api->pmu_suspend_process) {
++            api->pmu_suspend_process(&supply->aml_charger);
++        } 
+     }
+ #ifdef CONFIG_HAS_EARLYSUSPEND
+     if (early_power_status != supply->aml_charger.ext_valid) {
+@@ -1661,10 +1689,14 @@ static int rn5t618_suspend(struct platform_device *dev, pm_message_t state)
+ 
+ static int rn5t618_resume(struct platform_device *dev)
+ {
+-    struct   rn5t618_supply *supply = platform_get_drvdata(dev);
++    struct rn5t618_supply *supply = platform_get_drvdata(dev);
++    struct aml_pmu_api    *api;
+ 
+     if (rn5t618_battery) {
+-        aml_pmu_resume_process(&supply->aml_charger, rn5t618_battery);
++        api = aml_pmu_get_api();
++        if (api && api->pmu_resume_process) {
++            api->pmu_resume_process(&supply->aml_charger, rn5t618_battery);
++        }
+         rn5t618_set_charge_current(rn5t618_battery->pmu_resume_chgcur);
+     }
+     schedule_work(&supply->work.work);
+diff --git a/drivers/amlogic/rtc/aml_rtc.c b/drivers/amlogic/rtc/aml_rtc.c
+index f4cabba80025..f2f3908adefb 100755
+--- a/drivers/amlogic/rtc/aml_rtc.c
++++ b/drivers/amlogic/rtc/aml_rtc.c
+@@ -759,6 +759,7 @@ unsigned int aml_read_rtc_mem_reg(unsigned char reg_id)
+ 		return 0;
+ 	return  ser_access_read(reg_array[reg_id]);
+ }
++EXPORT_SYMBOL(aml_read_rtc_mem_reg);
+ 
+ int aml_write_rtc_mem_reg(unsigned char reg_id, unsigned int data)
+ {
+@@ -772,6 +773,7 @@ int aml_write_rtc_mem_reg(unsigned char reg_id, unsigned int data)
+ 		return 0;
+ 	return  ser_access_write(reg_array[reg_id], data);
+ }
++EXPORT_SYMBOL(aml_write_rtc_mem_reg);
+ 
+ unsigned int aml_get_rtc_counter(void)
+ {
+@@ -779,6 +781,7 @@ unsigned int aml_get_rtc_counter(void)
+     val = ser_access_read(RTC_COUNTER_ADDR);
+     return val;
+ }
++EXPORT_SYMBOL(aml_get_rtc_counter);
+ 
+ static void reset_gpo_work(struct work_struct *work)
+ {
+diff --git a/include/linux/amlogic/aml_pmu_common.h b/include/linux/amlogic/aml_pmu_common.h
+index 18a0944c4f23..764f5bfd8429 100755
+--- a/include/linux/amlogic/aml_pmu_common.h
++++ b/include/linux/amlogic/aml_pmu_common.h
+@@ -74,27 +74,28 @@ extern void pmu_mutex_unlock(void *mutex);
+ extern int  pmu_rtc_device_init(void);
+ extern int  pmu_rtc_set_alarm(unsigned long seconds);
+    
++struct aml_pmu_api {
++    int     (*pmu_get_ocv_filter)(void);
++    int     (*pmu_get_report_delay)(void);
++    int     (*pmu_set_report_delay)(int);
++    void    (*pmu_update_battery_capacity)(struct aml_charger *, struct battery_parameter *);
++    void    (*pmu_probe_process)(struct aml_charger *, struct battery_parameter *);
++    void    (*pmu_suspend_process)(struct aml_charger *);
++    void    (*pmu_resume_process)(struct aml_charger *, struct battery_parameter *);
++    void    (*pmu_update_battery_by_ocv)(struct aml_charger *, struct battery_parameter *);
++    void    (*pmu_calibrate_probe_process)(struct aml_charger *);
++    ssize_t (*pmu_format_dbg_buffer)(struct aml_charger *, char *);
++};
++
+ extern int    aml_pmu_register_callback(pmu_callback callback, void *pdata, char *name);
+ extern int    aml_pmu_unregister_callback(char *name);
+ extern int    aml_pmu_register_driver(struct aml_pmu_driver *driver);
++extern int    aml_pmu_register_api(struct aml_pmu_api *);
++extern void   aml_pmu_clear_api(void);
++extern struct aml_pmu_api *aml_pmu_get_api(void);
+ extern void   aml_pmu_clear_driver(void);
++extern void   aml_pmu_do_callbacks(struct aml_charger *charger);
+ extern struct aml_pmu_driver* aml_pmu_get_driver(void);
+ 
+-extern void aml_pmu_update_coulomb(struct aml_charger *charger, 
+-                                   struct battery_parameter *axp_pmu_battery);
+-extern void aml_pmu_update_battery_capacity(struct aml_charger *charger, 
+-                                            struct battery_parameter *axp_pmu_battery);
+-extern void aml_pmu_probe_process(struct aml_charger *charger, 
+-                                  struct battery_parameter *pmu_battery);
+-extern void aml_pmu_suspend_process(struct aml_charger * charger);
+-extern void aml_pmu_resume_process(struct aml_charger *charger, 
+-                                   struct battery_parameter *pmu_battery);
+-extern void aml_pmu_update_battery_by_ocv(struct aml_charger *charger, 
+-                                          struct battery_parameter *pmu_battery);
+-extern ssize_t aml_pmu_format_dbg_buffer(struct aml_charger *charger, char *buf);
+-extern void aml_pmu_calibrate_probe_process(struct aml_charger *charger);
+-extern int  aml_pmu_get_ocv_filter(void);
+-
+-extern int aml_pmu_get_report_delay(void);
+-extern int aml_pmu_set_report_delay(int delay);
++extern struct aml_pmu_api *aml_pmu_get_api(void);
+ #endif /* __AML_PMU_COMMON_H__ */
+-- 
+2.19.0
+

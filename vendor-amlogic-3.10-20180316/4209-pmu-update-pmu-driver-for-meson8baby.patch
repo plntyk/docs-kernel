@@ -1,0 +1,146 @@
+From 2c0892ab0424680cab87d385c88c9e8b00101a48 Mon Sep 17 00:00:00 2001
+From: "tao.zeng" <tao.zeng@amlogic.com>
+Date: Mon, 26 May 2014 16:24:18 +0800
+Subject: [PATCH 4209/5965] pmu: update pmu driver for meson8baby
+
+1. set charge end rate to 20%;
+2. set dcdc current limit according dcin status;
+3. fix bug of get dcdc voltage
+---
+ arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd |  2 +-
+ arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd   |  2 +-
+ drivers/amlogic/power/aml_pmu/aml1216-rw.c      |  8 +++++---
+ drivers/amlogic/power/aml_pmu/aml1216-sply.c    |  6 ++++++
+ drivers/amlogic/power/aml_pmu/aml1218-rw.c      | 10 ++++++----
+ drivers/amlogic/power/aml_pmu/aml1218-sply.c    |  3 +++
+ 6 files changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+index 2df6a42e6ecb..78a30fe06878 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m101_512M.dtd
+@@ -790,7 +790,7 @@ void root_func(){
+         pmu_battery_technology = <4>;       /** POWER_SUPPLY_TECHNOLOGY_LiFe         */
+         pmu_battery_name = "PTI PL336078";  /** battery name                         */
+         pmu_init_chgvol = <4200000>;        /** target charge voltage                */
+-        pmu_init_chgend_rate = <10>;        /** set initial charing end current rate */
++        pmu_init_chgend_rate = <20>;        /** set initial charing end current rate */
+         pmu_init_chg_enabled = <1>;         /** set initial charing enabled          */
+         pmu_init_adc_freq = <25>;           /** set initial adc frequency            */
+         pmu_init_adc_freqc = <100>;         /** set initial coulomb adc coufrequency */
+diff --git a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+index 3bcb718c5f55..4f6ba0ea2bb8 100755
+--- a/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8b_m102_1G.dtd
+@@ -769,7 +769,7 @@ void root_func(){
+         pmu_battery_technology = <4>;       /** POWER_SUPPLY_TECHNOLOGY_LiFe         */
+         pmu_battery_name = "PTI PL336078";  /** battery name                         */
+         pmu_init_chgvol = <4200000>;        /** target charge voltage                */
+-        pmu_init_chgend_rate = <10>;        /** set initial charing end current rate */
++        pmu_init_chgend_rate = <20>;        /** set initial charing end current rate */
+         pmu_init_chg_enabled = <1>;         /** set initial charing enabled          */
+         pmu_init_adc_freq = <25>;           /** set initial adc frequency            */
+         pmu_init_adc_freqc = <100>;         /** set initial coulomb adc coufrequency */
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-rw.c b/drivers/amlogic/power/aml_pmu/aml1216-rw.c
+index 1280fdb2c7cb..630c312734dd 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-rw.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-rw.c
+@@ -311,6 +311,7 @@ int aml1216_get_dcdc_voltage(int dcdc, uint32_t *uV)
+     int addr;
+     uint8_t val;
+     int ret;
++    int start;
+ 
+     if (dcdc > 3 || dcdc < 0) {
+         return -EINVAL;    
+@@ -322,14 +323,15 @@ int aml1216_get_dcdc_voltage(int dcdc, uint32_t *uV)
+     if (ret) {
+         return ret;    
+     }
++    val &= 0xfc;
++    val >>= 2;
+     if (dcdc == 3)
+     {
+-        *uV = (1450 * 1000 + val * 50000); //step: 50 mv
+-       
++        *uV = (3600000 - val * 50000); //step: 50 mv
+     }
+     else
+     {
+-        *uV = (680 * 1000 + val * 20000); //step: 20 mv
++        *uV = (1881300 - val * 18750); //step: 20 mv
+     }
+     
+     return 0;
+diff --git a/drivers/amlogic/power/aml_pmu/aml1216-sply.c b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+index de13245a38ff..57b5feeeaf2a 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1216-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1216-sply.c
+@@ -1236,11 +1236,17 @@ static int aml1216_update_state(struct aml_charger *charger)
+ 
+     if (vsys_voltage >= 4350)
+     {
++        aml1216_set_bits(0x0035, 0x00, 0x07);
++        aml1216_set_bits(0x003e, 0x00, 0x07);
++        aml1216_set_bits(0x0047, 0x00, 0x07);
+         aml1216_set_bits(0x004f, 0x08, 0x08);
+     }
+     else
+     {
+         aml1216_set_bits(0x004f, 0x00, 0x08);
++        aml1216_set_bits(0x0035, 0x04, 0x07);
++        aml1216_set_bits(0x003e, 0x04, 0x07);
++        aml1216_set_bits(0x0047, 0x04, 0x07);
+     } 
+     charger->vbat = aml1216_get_battery_voltage();
+     charger->ocv  = aml1216_cal_ocv(charger->ibat, charger->vbat, charger->charge_status);
+diff --git a/drivers/amlogic/power/aml_pmu/aml1218-rw.c b/drivers/amlogic/power/aml_pmu/aml1218-rw.c
+index 86872b58ee14..89d68b10060f 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1218-rw.c
++++ b/drivers/amlogic/power/aml_pmu/aml1218-rw.c
+@@ -363,7 +363,8 @@ int aml1218_get_dcdc_voltage(int dcdc, uint32_t *uV)
+     int addr;
+     uint8_t val;
+     int ret;
+-
++    int start;
++	
+     if (dcdc == 4) {
+         ret = aml1218_read(addr, &val);
+         if (ret) {
+@@ -381,14 +382,15 @@ int aml1218_get_dcdc_voltage(int dcdc, uint32_t *uV)
+     if (ret) {
+         return ret;    
+     }
++    val &= 0x7e;
++    val >>= 1;
+     if (dcdc == 3)
+     {
+-        *uV = (1450 * 1000 + val * 50000); //step: 50 mv
+-       
++        *uV = (3600000 - val * 50000); //step: 50 mv
+     }
+     else
+     {
+-        *uV = (680 * 1000 + val * 20000); //step: 20 mv
++        *uV = (1881300 - val * 18750); //step: 20 mv
+     }
+     
+     return 0;
+diff --git a/drivers/amlogic/power/aml_pmu/aml1218-sply.c b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+index 9d367efef240..668ef1786dd5 100755
+--- a/drivers/amlogic/power/aml_pmu/aml1218-sply.c
++++ b/drivers/amlogic/power/aml_pmu/aml1218-sply.c
+@@ -1232,6 +1232,9 @@ static int aml1218_update_state(struct aml_charger *charger)
+     /*
+      * limit duty cycle of DC3 according CHG_GAT_BAT_LV bit
+      */
++    aml1218_set_bits(0x0035, (chg_status & 0x02000000) ? 0x00 : 0x04, 0x07);
++    aml1218_set_bits(0x003e, (chg_status & 0x02000000) ? 0x00 : 0x04, 0x07);
++    aml1218_set_bits(0x0047, (chg_status & 0x02000000) ? 0x00 : 0x04, 0x07);
+     aml1218_set_bits(0x004f, (chg_status & 0x02000000) >> 22, 0x08);
+ 
+     charger->vbat = aml1218_get_battery_voltage();
+-- 
+2.19.0
+

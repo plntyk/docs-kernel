@@ -1,0 +1,123 @@
+From a0af07496f18cc42b2495c6a32463d96af7cf636 Mon Sep 17 00:00:00 2001
+From: Jianxin Pan <jianxin.pan@amlogic.com>
+Date: Fri, 28 Aug 2015 17:54:27 +0800
+Subject: [PATCH 5810/5965] PD#111896: cpufreq: add cpufreq_governor_lock &
+ governor_enabled
+
+Change-Id: Ib7a07afe4cc54f8b69298d5154a4d9d9489e7a6a
+---
+ drivers/cpufreq/cpufreq.c          | 22 ++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_governor.c |  7 ++++++-
+ drivers/cpufreq/cpufreq_governor.h |  1 +
+ include/linux/cpufreq.h            |  1 +
+ 4 files changed, 30 insertions(+), 1 deletion(-)
+ mode change 100755 => 100644 drivers/cpufreq/cpufreq.c
+ mode change 100755 => 100644 drivers/cpufreq/cpufreq_governor.c
+ mode change 100755 => 100644 drivers/cpufreq/cpufreq_governor.h
+ mode change 100755 => 100644 include/linux/cpufreq.h
+
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+old mode 100755
+new mode 100644
+index 4a67e2213fbb..de30d9045032
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -40,6 +40,7 @@
+  */
+ static struct cpufreq_driver *cpufreq_driver;
+ static DEFINE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_data);
++DEFINE_MUTEX(cpufreq_governor_lock);
+ #ifdef CONFIG_HOTPLUG_CPU
+ /* This one keeps track of the previously set governor of a removed CPU */
+ static DEFINE_PER_CPU(char[CPUFREQ_NAME_LEN], cpufreq_cpu_governor);
+@@ -1585,6 +1586,19 @@ static int __cpufreq_governor(struct cpufreq_policy *policy,
+ 
+ 	pr_debug("__cpufreq_governor for CPU %u, event %u\n",
+ 						policy->cpu, event);
++	mutex_lock(&cpufreq_governor_lock);
++	if ((policy->governor_enabled && event == CPUFREQ_GOV_START)
++	    || (!policy->governor_enabled
++	    && (event == CPUFREQ_GOV_LIMITS || event == CPUFREQ_GOV_STOP))) {
++		mutex_unlock(&cpufreq_governor_lock);
++		return -EBUSY;
++	}
++	if (event == CPUFREQ_GOV_STOP)
++		policy->governor_enabled = false;
++	else if (event == CPUFREQ_GOV_START)
++		policy->governor_enabled = true;
++
++	mutex_unlock(&cpufreq_governor_lock);
+ 	ret = policy->governor->governor(policy, event);
+ 
+ 	if (!ret) {
+@@ -1592,6 +1606,14 @@ static int __cpufreq_governor(struct cpufreq_policy *policy,
+ 			policy->governor->initialized++;
+ 		else if (event == CPUFREQ_GOV_POLICY_EXIT)
+ 			policy->governor->initialized--;
++	} else {
++		/* Restore original values */
++		mutex_lock(&cpufreq_governor_lock);
++		if (event == CPUFREQ_GOV_STOP)
++			policy->governor_enabled = true;
++		else if (event == CPUFREQ_GOV_START)
++			policy->governor_enabled = false;
++		mutex_unlock(&cpufreq_governor_lock);
+ 	}
+ 
+ 	/* we keep one module reference alive for
+diff --git a/drivers/cpufreq/cpufreq_governor.c b/drivers/cpufreq/cpufreq_governor.c
+old mode 100755
+new mode 100644
+index 47f296c4f1ea..72e50206df63
+--- a/drivers/cpufreq/cpufreq_governor.c
++++ b/drivers/cpufreq/cpufreq_governor.c
+@@ -194,12 +194,17 @@ void gov_queue_work(struct dbs_data *dbs_data, struct cpufreq_policy *policy,
+ {
+ 	int i;
+ 
++	mutex_lock(&cpufreq_governor_lock);
++	if (!policy->governor_enabled)
++		goto out_unlock;
+ 	if (!all_cpus) {
+-		__gov_queue_work(policy->cpu, dbs_data, delay);
++		__gov_queue_work(raw_smp_processor_id(), dbs_data, delay);
+ 	} else {
+ 		for_each_cpu(i, policy->cpus)
+ 			__gov_queue_work(i, dbs_data, delay);
+ 	}
++out_unlock:
++	mutex_unlock(&cpufreq_governor_lock);
+ }
+ EXPORT_SYMBOL_GPL(gov_queue_work);
+ 
+diff --git a/drivers/cpufreq/cpufreq_governor.h b/drivers/cpufreq/cpufreq_governor.h
+old mode 100755
+new mode 100644
+index fe7a3d815abb..1fde83c96bfa
+--- a/drivers/cpufreq/cpufreq_governor.h
++++ b/drivers/cpufreq/cpufreq_governor.h
+@@ -302,6 +302,7 @@ static ssize_t show_sampling_rate_min_gov_pol				\
+ 	return sprintf(buf, "%u\n", dbs_data->min_sampling_rate);	\
+ }
+ 
++extern struct mutex cpufreq_governor_lock;
+ u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
+ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu);
+ bool need_load_eval(struct cpu_dbs_common_info *cdbs,
+diff --git a/include/linux/cpufreq.h b/include/linux/cpufreq.h
+old mode 100755
+new mode 100644
+index 922461006f58..a2437c99ac0b
+--- a/include/linux/cpufreq.h
++++ b/include/linux/cpufreq.h
+@@ -108,6 +108,7 @@ struct cpufreq_policy {
+ 	unsigned int		policy; /* see above */
+ 	struct cpufreq_governor	*governor; /* see below */
+ 	void			*governor_data;
++	bool			governor_enabled; /* governor start/stop flag */
+ 
+ 	struct work_struct	update; /* if update_policy() needs to be
+ 					 * called, but you're in IRQ context */
+-- 
+2.19.0
+

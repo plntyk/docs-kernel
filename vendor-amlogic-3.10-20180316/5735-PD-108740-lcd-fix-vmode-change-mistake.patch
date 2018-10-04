@@ -1,0 +1,136 @@
+From 6b5ff66aa0ff2a321b25367c233a42fb8abd0cbf Mon Sep 17 00:00:00 2001
+From: Evoke Zhang <evoke.zhang@amlogic.com>
+Date: Wed, 29 Jul 2015 16:04:42 +0800
+Subject: [PATCH 5735/5965] PD#108740: lcd: fix vmode change mistake
+
+Change-Id: Ib86ccbbd9977e21a4461c8534a76d408de28dbd6
+---
+ drivers/amlogic/display/lcd/aml_lcd_tv.c      | 30 +++++++++++--------
+ .../display/lcd/aml_tv_lcd_port/lcd_common.c  | 13 ++++----
+ 2 files changed, 25 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/amlogic/display/lcd/aml_lcd_tv.c b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+index a07b19ef5348..3cb352eaf40e 100644
+--- a/drivers/amlogic/display/lcd/aml_lcd_tv.c
++++ b/drivers/amlogic/display/lcd/aml_lcd_tv.c
+@@ -174,6 +174,18 @@ static const vinfo_t lcd_info[] =
+ 	},
+ };
+ 
++static int get_lcd_vmode(vmode_t mode)
++{
++	int i, count = ARRAY_SIZE(lcd_info);
++
++	for (i = 0; i < count; i++) {
++		if (mode == lcd_info[i].mode)
++			break;
++	}
++	printk("%s: %d\n", __func__, i);
++	return i;
++}
++
+ static int lcd_vmode_is_mached(int index)
+ {
+ 	if ((pDev->pConf->lcd_basic.h_active == lcd_info[index].width) &&
+@@ -195,7 +207,6 @@ static const vinfo_t *get_valid_vinfo(char *mode)
+ 			if ((vinfo == NULL) || (strlen(lcd_info[i].name) > mode_name_len)) {
+ 				ret = lcd_vmode_is_mached(i);
+ 				if (ret == 0) {
+-					lcd_output_mode = i;
+ 					vinfo = &lcd_info[i];
+ 					mode_name_len = strlen(lcd_info[i].name);
+ 				}
+@@ -514,28 +525,22 @@ static inline void _init_display_driver(struct aml_lcd *pDev)
+ }
+ 
+ /* change clock(frame_rate) for different vmode */
+-#if 0
+ static int lcd_vmode_change(int index)
+ {
+ 	unsigned int pclk;
++	unsigned int h_period = pDev->pConf->lcd_basic.h_period;
++	unsigned int v_period = pDev->pConf->lcd_basic.v_period;
+ 
+-	pclk = (lcd_config_dft.lcd_basic.h_period * lcd_config_dft.lcd_basic.v_period *
+-		lcd_info[index].sync_duration_num) / lcd_info[index].sync_duration_den;
++	pclk = (h_period * v_period * lcd_info[index].sync_duration_num) / lcd_info[index].sync_duration_den;
+ 
+-	lcd_config_dft.lcd_timing.lcd_clk = pclk;
+-
+-	/* function to change pll & clock tree register value, to match pclk.
+-	maybe we can save pclk into lcd_config, and deal that in specific lcd driver,
+-	such as set_pll_lvds for lvds driver*/
+-	//to do
++	pDev->pConf->lcd_timing.lcd_clk = pclk;
+ 
+ 	return 0;
+ }
+-#endif
+ 
+ static void _lcd_module_enable(void)
+ {
+-	//lcd_vmode_change(lcd_output_mode);
++	lcd_vmode_change(lcd_output_mode);
+ 	_init_display_driver(pDev);
+ }
+ 
+@@ -569,6 +574,7 @@ static int lcd_set_current_vmode(vmode_t mode)
+ 		case VMODE_4K2K_50HZ_Y420:
+ 		case VMODE_4K2K_60HZ:
+ 		case VMODE_4K2K_50HZ:
++			lcd_output_mode = get_lcd_vmode(mode & VMODE_MODE_BIT_MASK);
+ 			_lcd_module_enable();
+ 			break;
+ 		default:
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+index d6c4ea380e92..7541f57cfd99 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd_port/lcd_common.c
+@@ -42,11 +42,11 @@ static int check_pll(struct pll_para_s *pll, unsigned int pll_fout)
+ 				pll->m = m;
+ 				pll->n = n;
+ 				pll->frac = pll_frac;
+-				printk("od1_sel=%d, od2_sel=%d, od3_sel=%d, pll_fvco=%d",
++/*				printk("od1_sel=%d, od2_sel=%d, od3_sel=%d, pll_fvco=%d",
+ 									(od1_sel - 1), (od2_sel - 1),
+ 									(od3_sel - 1),	pll_fvco);
+ 				printk(" pll_m=%d, pll_n=%d, pll_frac=%d\n",pll->m, pll->n, pll_frac);
+-				done = 1;
++*/				done = 1;
+ 			}
+ 		}
+ 	}
+@@ -173,6 +173,7 @@ void generate_clk_parameter(Lcd_Config_t *pconf)
+ 	pll.od2_sel = 0;
+ 	pll.od3_sel = 0;
+ 
++	printk("lcd_clk = %dHz\n", pconf->lcd_timing.lcd_clk);
+ 	fout = pconf->lcd_timing.lcd_clk / 1000; /* kHz */
+ 
+ 	if (fout > ENCL_MAX_CLK_IN)
+@@ -192,10 +193,10 @@ void generate_clk_parameter(Lcd_Config_t *pconf)
+ 			goto generate_clk_done;
+ 
+ 		ret = check_pll(&pll, fout_pll);
+-printk("fout_pll=%d , clk_div_sel=%d clk_div_out=%d\n", fout_pll,clk_div_sel,clk_div_out);
+-printk("od1_sel=%x od2_sel=%x od3_sel=%x n=%x m=%x  \n",
++/* printk("fout_pll=%d , clk_div_sel=%d clk_div_out=%d\n", fout_pll,clk_div_sel,clk_div_out); */
++/* printk("od1_sel=%x od2_sel=%x od3_sel=%x n=%x m=%x  \n",
+ 		pll.od1_sel,pll.od2_sel,pll.od3_sel,pll.n,pll.m);
+-
++ */
+ 		if (ret)
+ 			goto generate_clk_done;
+ 		break;
+@@ -338,7 +339,7 @@ void lcd_set_clk_div(unsigned long vid_div_reg)
+ static void lcd_set_vclk_crt(unsigned int clk_ctrl_reg)
+ {
+ 	unsigned int xd;
+-	printk("%s\n", __func__);
++/*	printk("%s\n", __func__); */
+ 
+ 	xd = (clk_ctrl_reg >> CLK_CTRL_XD) & 0xff;
+ 	/* setup the XD divider value */
+-- 
+2.19.0
+

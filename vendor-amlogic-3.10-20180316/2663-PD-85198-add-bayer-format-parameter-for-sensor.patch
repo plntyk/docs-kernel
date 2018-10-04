@@ -1,0 +1,524 @@
+From d52108a6afb7a42d5f7f27fd369aa83883ebc3ed Mon Sep 17 00:00:00 2001
+From: "zhenfei.li" <zhenfei.li@amlogic>
+Date: Thu, 26 Dec 2013 15:58:11 +0800
+Subject: [PATCH 2663/5965] PD #85198: add bayer format parameter for sensor.
+
+---
+ arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd |  3 +-
+ drivers/amlogic/camera/ar0543.c              | 10 +++--
+ drivers/amlogic/camera/ar0833.c              | 10 +++--
+ drivers/amlogic/camera/common/cam_prober.c   | 29 ++++++++++++++
+ drivers/amlogic/camera/ov5647.c              | 35 ++++++++++------
+ drivers/amlogic/tvin/isp/isp_drv.c           |  3 +-
+ drivers/amlogic/tvin/isp/isp_drv.h           |  3 +-
+ drivers/amlogic/tvin/isp/isp_hw.c            | 27 ++++++++-----
+ drivers/amlogic/tvin/isp/isp_hw.h            |  2 +-
+ drivers/amlogic/tvin/isp/isp_regs.h          | 42 ++++++--------------
+ drivers/amlogic/tvin/tvin_global.c           | 12 ++++++
+ include/linux/amlogic/camera/aml_cam_info.h  |  3 ++
+ include/linux/amlogic/tvin/tvin.h            |  4 ++
+ 13 files changed, 118 insertions(+), 65 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
+index fe60826a9682..3bac99978a2e 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
+@@ -1470,9 +1470,10 @@ sdio{
+ 			i2c_bus = "i2c_bus_d";
+ 			gpio_pwdn = "GPIOH_5";
+ 			gpio_rst = "GPIOH_4";
+-			mirror_flip = <0>;
++			mirror_flip = <1>;
+ 			vertical_flip = <0>;	
+ 			config_path = "/system/etc/camera_isp_cfg/ov5647_k100";
++			vcm_mode = <1>;
+ 			bt_path = "gpio";
+ 			status = "okay";
+ 		};
+diff --git a/drivers/amlogic/camera/ar0543.c b/drivers/amlogic/camera/ar0543.c
+index 818d8dd066b3..0c0791fd1f27 100755
+--- a/drivers/amlogic/camera/ar0543.c
++++ b/drivers/amlogic/camera/ar0543.c
+@@ -2111,11 +2111,11 @@ static int set_flip(struct ar0543_device *dev)
+     temp &= 0xfc;
+     temp |= dev->cam_info.m_flip << 0;
+     temp |= dev->cam_info.v_flip << 1;
+-    //printk("dst temp is 0x%x\n", temp);
+-    /*if((i2c_put_byte(client, 0x0101, temp)) < 0) {
++    printk("dst temp is 0x%x\n", temp);
++    if((i2c_put_byte(client, 0x0101, temp)) < 0) {
+         printk("fail in setting sensor orientation \n");
+         return -1;
+-    }*/
++    }
+ }
+ 
+ 
+@@ -2222,6 +2222,7 @@ static void set_resolution_param(struct ar0543_device *dev, resolution_param_t*
+         	msleep(5);
+ 		i++;
+ 	}
++	set_flip(dev);
+ 	#if 0
+     int default_sensor_data[4] = {0x00000100,0x000001a0,0x000001ff,0x00000108};
+ 	int *sensor_data;
+@@ -2242,6 +2243,7 @@ static void set_resolution_param(struct ar0543_device *dev, resolution_param_t*
+ 	ar0543_h_active = res_param->active_frmsize.width;
+ 	ar0543_v_active = res_param->active_frmsize.height;
+ 	AR0543_set_new_format((void *)&dev->camera_priv_data,ar0543_h_active,ar0543_v_active,current_fr);// should set new para
++	
+ }    /* AR0543_set_resolution */
+ 
+ static int set_focus_zone(struct ar0543_device *dev, int value)
+@@ -3006,7 +3008,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	para.vsync_phase  = 1;
+ 	para.hs_bp = 0;
+ 	para.vs_bp = 2;
+-	para.cfmt = TVIN_YUV422;
++	para.cfmt = dev->cam_info.bayer_fmt;
+ 	para.dfmt = TVIN_NV21;
+ 	para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+ 	para.bt_path = dev->cam_info.bt_path;
+diff --git a/drivers/amlogic/camera/ar0833.c b/drivers/amlogic/camera/ar0833.c
+index 81b4eb4e1575..c95f07538755 100755
+--- a/drivers/amlogic/camera/ar0833.c
++++ b/drivers/amlogic/camera/ar0833.c
+@@ -4221,11 +4221,11 @@ static int set_flip(struct ar0833_device *dev)
+     temp &= 0xfc;
+     temp |= dev->cam_info.m_flip << 0;
+     temp |= dev->cam_info.v_flip << 1;
+-    //printk("dst temp is 0x%x\n", temp);
+-    /*if((i2c_put_byte(client, 0x0101, temp)) < 0) {
++    printk("dst temp is 0x%x\n", temp);
++    if((i2c_put_byte(client, 0x0101, temp)) < 0) {
+         printk("fail in setting sensor orientation \n");
+         return -1;
+-    }*/
++    }
+ }
+ 
+ 
+@@ -4332,6 +4332,8 @@ static void set_resolution_param(struct ar0833_device *dev, resolution_param_t*
+         	msleep(5);
+         i++;
+     }
++    set_flip(dev);
++    
+     ar0833_frmintervals_active.numerator = 1;
+     ar0833_frmintervals_active.denominator = res_param->active_fps;
+     ar0833_h_active = res_param->frmsize.width;
+@@ -5102,7 +5104,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+ 	para.vsync_phase  = 1;
+ 	para.hs_bp = 0;
+ 	para.vs_bp = 2;
+-	para.cfmt = TVIN_YUV422;
++	para.cfmt = dev->cam_info.bayer_fmt;
+ 	para.dfmt = TVIN_NV21;
+ 	para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+ 	para.bt_path = dev->cam_info.bt_path;
+diff --git a/drivers/amlogic/camera/common/cam_prober.c b/drivers/amlogic/camera/common/cam_prober.c
+index 6fe55ee77aa9..8b2c601af029 100755
+--- a/drivers/amlogic/camera/common/cam_prober.c
++++ b/drivers/amlogic/camera/common/cam_prober.c
+@@ -21,6 +21,7 @@
+ #include <linux/delay.h>
+ #include <mach/gpio.h>
+ //#include <mach/gpio_data.h>
++#include <linux/amlogic/tvin/tvin.h>
+ 
+ #include <linux/amlogic/camera/aml_cam_info.h>
+ #include <linux/amlogic/aml_gpio_consumer.h>
+@@ -882,6 +883,7 @@ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+ 	aml_cam_dev_info_t* cam_info = NULL;
+ 	struct i2c_adapter *adapter;
+ 	unsigned mclk = 0;
++	unsigned vcm_mode = 0;
+ 	
+ 	if (!p_node || !cam_dev)
+ 		return -1;
+@@ -997,6 +999,14 @@ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+ 		cam_dev->mclk = mclk;
+ 	}
+ 	
++	ret = of_property_read_u32(p_node, "vcm_mode", &vcm_mode);
++	if (ret) {
++		cam_dev->vcm_mode = 0;
++	} else {
++		cam_dev->vcm_mode = vcm_mode;
++	}
++	printk("vcm mode is %d\n", cam_dev->vcm_mode);
++	
+ 	ret = of_property_read_string(p_node, "flash_support", &str);
+ 	if (ret) {
+ 		printk("failed to read camera flash_support\n");
+@@ -1041,6 +1051,25 @@ static int fill_cam_dev(struct device_node* p_node, aml_cam_info_t* cam_dev)
+                 if ( ret < 0 )
+                         goto err_out;
+         }
++        
++        ret = of_property_read_string(p_node, "bayer_fmt", &str);
++	if (ret) {
++		printk("failed to read camera bayer fmt \n");
++		cam_dev->bayer_fmt = TVIN_GBRG;
++	} else {
++		printk("color format:%s\n", str);
++		if (strncmp("BGGR", str, 4) == 0){
++                        cam_dev->bayer_fmt = TVIN_BGGR;
++                } else if (strncmp("RGGB", str, 4) == 0){
++                        cam_dev->bayer_fmt = TVIN_RGGB;
++                } else if (strncmp("GBRG", str, 4) == 0){
++                        cam_dev->bayer_fmt = TVIN_GBRG;
++                } else if (strncmp("GRBG", str, 4) == 0){
++                        cam_dev->bayer_fmt = TVIN_GRBG;
++                } else {
++                	cam_dev->bayer_fmt = TVIN_GBRG;
++                }
++	}
+ 
+ 	ret = of_property_read_string(p_node, "config_path", &cam_dev->config);
+ 	// cam_dev->config = "/system/etc/myconfig";
+diff --git a/drivers/amlogic/camera/ov5647.c b/drivers/amlogic/camera/ov5647.c
+index a84c5f1196c9..ced7821ab559 100755
+--- a/drivers/amlogic/camera/ov5647.c
++++ b/drivers/amlogic/camera/ov5647.c
+@@ -2858,17 +2858,24 @@ static int OV5647_AutoFocus(struct ov5647_device *dev, int focus_mode)
+ 
+ static int set_flip(struct ov5647_device *dev)
+ {
+-    struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
+-    unsigned char temp;
+-    temp = i2c_get_byte(client, 0x0101);
+-    temp &= 0xfc;
+-    temp |= dev->cam_info.m_flip << 0;
+-    temp |= dev->cam_info.v_flip << 1;
+-    //printk("dst temp is 0x%x\n", temp);
+-    if((i2c_put_byte(client, 0x0101, temp)) < 0) {
+-        printk("fail in setting sensor orientation \n");
+-        return -1;
+-    }
++	struct i2c_client *client = v4l2_get_subdevdata(&dev->sd);
++	unsigned char temp;
++	temp = i2c_get_byte(client, 0x3821);
++	temp &= 0xf9;
++	temp |= dev->cam_info.m_flip << 1 | dev->cam_info.m_flip << 2;
++	if((i2c_put_byte(client, 0x3821, temp)) < 0) {
++		printk("fail in setting sensor orientation\n");
++		return -1;
++        }
++	temp = i2c_get_byte(client, 0x3820);
++	temp &= 0xf9;
++	temp |= dev->cam_info.v_flip << 1 | dev->cam_info.v_flip << 2;
++	if((i2c_put_byte(client, 0x3820, temp)) < 0) {
++		printk("fail in setting sensor orientation\n");
++		return -1;
++        }
++        
++        return 0;
+ }
+ 
+ static resulution_size_t get_size_type(int width, int height)
+@@ -2977,6 +2984,8 @@ void set_resolution_param(struct ov5647_device *dev, resolution_param_t* res_par
+         	msleep(5);
+         i++;
+     }
++    
++    set_flip(dev);
+ 
+     int default_sensor_data[4] = {0x00000668,0x00000400,0x00000400,0x00000878};
+     int *sensor_data;
+@@ -3785,7 +3794,7 @@ static int vidioc_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+     para.vsync_phase  = 1;
+     para.hs_bp = 0;
+     para.vs_bp = 2;
+-    para.cfmt = TVIN_YUV422;
++    para.cfmt = dev->cam_info.bayer_fmt;
+     para.dfmt = TVIN_NV21;
+     para.scan_mode = TVIN_SCAN_MODE_PROGRESSIVE;
+     para.bt_path = dev->cam_info.bt_path;
+@@ -4167,7 +4176,7 @@ static int ov5647_open(struct file *file)
+     dev->ae_on = false;
+     OV5647_init_regs(dev);
+     msleep(40);
+-    dw9714_init(1);
++    dw9714_init(dev->cam_info.vcm_mode);
+     mutex_lock(&dev->mutex);
+     dev->users++;
+     if (dev->users > 1) {
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.c b/drivers/amlogic/tvin/isp/isp_drv.c
+index 070742b2badd..f26c2f395f61 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.c
++++ b/drivers/amlogic/tvin/isp/isp_drv.c
+@@ -818,6 +818,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 	isp_info_t *info = &devp->info;
+ 
+ 	info->fe_port = parm->isp_fe_port;
++	info->bayer_fmt = parm->cfmt;
+ 	info->dfmt = parm->dfmt;
+ 	info->h_active = parm->h_active;
+ 	info->v_active = parm->v_active;
+@@ -849,7 +850,7 @@ static int isp_fe_open(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ 		devp->capture_parm = devp->cam_param->xml_capture;
+ 		devp->wave = devp->cam_param->xml_wave;
+ 		isp_hw_enable(false);
+-		isp_set_def_config(devp->cam_param->xml_regs_map,info->fe_port,info->h_active,info->v_active);
++		isp_set_def_config(devp->cam_param->xml_regs_map,info->fe_port,info->bayer_fmt,info->h_active,info->v_active);
+ 		isp_set_manual_wb(devp->cam_param->xml_wb_manual);
+ 		/*test for wb test disable gamma & lens*/
+ 		if(devp->flag & ISP_FLAG_TEST_WB)
+diff --git a/drivers/amlogic/tvin/isp/isp_drv.h b/drivers/amlogic/tvin/isp/isp_drv.h
+index 67651fbb84ba..4536cf4961e3 100755
+--- a/drivers/amlogic/tvin/isp/isp_drv.h
++++ b/drivers/amlogic/tvin/isp/isp_drv.h
+@@ -28,7 +28,7 @@
+ #include "isp_hw.h"
+ #include "../tvin_frontend.h"
+ 
+-#define ISP_VER					"2013.12.19b"
++#define ISP_VER					"2013.12.24a"
+ #define ISP_NUM					1
+ #define DEVICE_NAME 			        "isp"
+ 
+@@ -63,6 +63,7 @@ typedef enum bayer_fmt_e {
+ } bayer_fmt_t;
+ typedef struct isp_info_s {
+ 	tvin_port_t fe_port;
++	tvin_color_fmt_t bayer_fmt;
+ 	tvin_color_fmt_t dfmt;
+ 	unsigned int h_active;
+ 	unsigned int v_active;
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.c b/drivers/amlogic/tvin/isp/isp_hw.c
+index 5bc3c96918f5..179ab6f3f3e5 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.c
++++ b/drivers/amlogic/tvin/isp/isp_hw.c
+@@ -241,9 +241,7 @@ void isp_set_test_pattern(xml_tp_t *tp)
+ 	if(tp){
+ 		for(i=0;i<XML_TP;i++)
+ 			WR(ISP_PAT_GEN_CTRL+i,tp->reg_map[i]);
+-	} else {
+-
+-	}
++	} 
+ 	return;
+ }
+ /*
+@@ -305,9 +303,6 @@ void isp_set_demosaicing(xml_dm_t *dms)
+ 		for(i=0;i<XML_DM;i++)
+ 		        WR(ISP_DMS_CTRL0+i, dms->reg_map[i]);
+ 	}
+-	//GBRG defaulty
+-	WR_BITS(ISP_DMS_CTRL0,1,DMS_XPHASE_OFST_BIT,DMS_XPHASE_OFST_WID);
+-	WR_BITS(ISP_DMS_CTRL0,0,DMS_YPHASE_OFST_BIT,DMS_YPHASE_OFST_WID);
+ }
+ /*
+ *reg 0x42~0x4a
+@@ -625,13 +620,22 @@ void isp_bypass_all()
+ 	WR_BITS(ISP_PKNR_ENABLE,0,ISP_NR_EN_BIT,ISP_NR_EN_WID);
+ 	WR_BITS(ISP_PKNR_ENABLE,0,ISP_PK_EN_BIT,ISP_PK_EN_WID);	
+ }
++static void isp_set_bayer_fmt(tvin_color_fmt_t bfmt)
++{
++	unsigned int tmp = bfmt - TVIN_BGGR;
++	WR_BITS(ISP_PAT_GEN_CTRL,tmp,PAT_BAYER_FMT_BIT,PAT_BAYER_FMT_WID);
++	WR_BITS(ISP_CLAMPGAIN_CTRL,tmp,CLP_BAYER_FMT_BIT,CLP_BAYER_FMT_WID);
++	WR_BITS(ISP_LNS_CTRL,tmp,LNS_BAYER_FMT_BIT,LNS_BAYER_FMT_WID);
++	WR_BITS(ISP_GMR0_CTRL,tmp,GMR_BAYER_FMT_BIT,GMR_BAYER_FMT_WID);
++	WR_BITS(ISP_DFT_CTRL,tmp,DFT_BAYER_FMT_BIT,DFT_BAYER_FMT_WID);
++	WR_BITS(ISP_DMS_CTRL0,tmp,DMS_BAYER_FMT_BIT,DMS_BAYER_FMT_BIT);
++}
+ /*
+-*
++*load isp config according to config file
+ */
+-void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned int w,unsigned int h)
++void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,tvin_color_fmt_t bfmt,unsigned int w,unsigned int h)
+ {
+ 	unsigned int mux = 0;
+-
+ 	
+ 	switch(fe_port){
+ 		case TVIN_PORT_CAMERA:
+@@ -664,10 +668,13 @@ void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned in
+ 	isp_set_lnsd(&regs->lnsd);
+ 	//isp_set_lnsd_test(w,h);
+ 	isp_set_gamma_table(&regs->lut_gc);
++	/*config bayer fmt*/
++	if(TVIN_BGGR<=bfmt && bfmt<=TVIN_GRBG)
++		isp_set_bayer_fmt(bfmt);
+ 	//enable isp
+ 	WR_BITS(ISP_FRM_SOFT_RST,0,0,1);
+ 	WR_BITS(ISP_TIMING_MODE,0,5,1);
+-	pr_info("[%s..]%s: init ok(w:%d,h:%d).\n",DEVICE_NAME,__func__,w,h);
++	pr_info("[%s..]%s: init ok(w:%d,h:%d) bayer fmt %s.\n",DEVICE_NAME,__func__,w,h,tvin_color_fmt_str(bfmt));
+ }
+ 
+ void isp_hw_enable(bool flag)
+diff --git a/drivers/amlogic/tvin/isp/isp_hw.h b/drivers/amlogic/tvin/isp/isp_hw.h
+index 9c96d2511d78..0316bc4e594d 100755
+--- a/drivers/amlogic/tvin/isp/isp_hw.h
++++ b/drivers/amlogic/tvin/isp/isp_hw.h
+@@ -93,7 +93,7 @@ extern void isp_set_af_scan_stat(unsigned int x0,unsigned int y0,unsigned int x1
+ extern void isp_set_blenr_stat(unsigned int x0,unsigned int y0,unsigned int x1,unsigned int y1);
+ extern void isp_set_dbg(xml_dbg_t *dbg);
+ extern void isp_set_lnsd_mode(unsigned int mode);
+-extern void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,unsigned int w,unsigned int h);
++extern void isp_set_def_config(xml_default_regs_t *regs,tvin_port_t fe_port,tvin_color_fmt_t bfmt,unsigned int w,unsigned int h);
+ extern void isp_load_def_setting(unsigned int hsize,unsigned int vsize,unsigned char bayer_fmt);
+ extern void isp_test_pattern(unsigned int hsize,unsigned int vsize,unsigned int htotal,unsigned int vtotal);
+ extern void isp_set_manual_wb(xml_wb_manual_t *wb);
+diff --git a/drivers/amlogic/tvin/isp/isp_regs.h b/drivers/amlogic/tvin/isp/isp_regs.h
+index 114e9a50e4f7..b76291bbcd61 100755
+--- a/drivers/amlogic/tvin/isp/isp_regs.h
++++ b/drivers/amlogic/tvin/isp/isp_regs.h
+@@ -115,11 +115,8 @@
+ #define ISP_PAT_YINVT_BIT		    26
+ #define ISP_PAT_YINVT_WID		    1
+ //Bit    26, reg_isp_pat_yinvt              invert the pattern in vertical direction,   0- no invert; 1- invert; default=0 
+-#define ISP_PAT_XPHASE_OFST_BIT		    25
+-#define ISP_PAT_XPHASE_OFST_WID		    1
+-//Bit    25, reg_isp_pat_xphase_ofst        bayer pattern xphase offset in pattern generator, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define ISP_PAT_YPHASE_OFST_BIT		    24
+-#define ISP_PAT_YPHASE_OFST_WID		    1
++#define PAT_BAYER_FMT_BIT		    24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define PAT_BAYER_FMT_WID		    2
+ //Bit    24, reg_isp_pat_yphase_ofst        bayer pattern yphase offset in pattern generator, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0
+ //Bit    23, reserved
+ #define ISP_PAT_XMODE_BIT	            20
+@@ -411,11 +408,8 @@
+ 
+ #define ISP_CLAMPGAIN_CTRL                  0x2d20  
+ //Bit 31:26, reserved
+-#define CLP_XPHASE_OFST_BIT		    25
+-#define CLP_XPHASE_OFST_WID		    1
+-//Bit    25, reg_isp_clp_xphase_ofst        bayer pattern xphase offset in clamp gain, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define CLP_YPHASE_OFST_BIT		    24
+-#define CLP_YPHASE_OFST_WID		    1
++#define CLP_BAYER_FMT_BIT		    24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define CLP_BAYER_FMT_WID		    2
+ //Bit    24, reg_isp_clp_yphase_ofst        bayer pattern yphase offset in clamp gain, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0 
+ //Bit 23:22, reserved
+ #define AECRAW_LPF_SEL_BIT		    20
+@@ -492,11 +486,8 @@
+ #define LNS_CMOP_ENABLE_WID		    1
+ //Bit    28, reg_isp_lns_cmop_enable    lens shading compensation enable. 0: no compensation; 1: compensation enable;  default= 0
+ //Bit 27:26, reserved
+-#define LNS_XPHASE_OFST_BIT		    25
+-#define LNS_XPHASE_OFST_WID		    1
+-//Bit    25, reg_isp_lns_xphase_ofst    bayer pattern xphase offset in lens shading correction, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define LNS_YPHASE_OFST_BIT		    24
+-#define LNS_YPHASE_OFST_WID		    1
++#define LNS_BAYER_FMT_BIT		    24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define LNS_BAYER_FMT_WID		    2
+ //Bit    24, reg_isp_lns_yphase_ofst    bayer pattern yphase offset in lens shading correction, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0 
+ #define LNS_GAINNORM_GRBG0_BIT		    22
+ #define LNS_GAINNORM_GRBG0_WID		    2
+@@ -579,11 +570,8 @@
+ #define GMR_CORRECT_ENABLE_WID		    1
+ //Bit    28, reg_isp_gmr_correct_enable     raw data gammar correction enable;    default= 0;
+ //Bit 27:26, reserved
+-#define GMR_XPHASE_OFST_BIT		    25
+-#define GMR_XPHASE_OFST_WID		    1
+-//Bit    25, reg_isp_gmr_xphase_ofst        bayer pattern xphase offset in gammar correction, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define GMR_YPHASE_OFST_BIT		    24
+-#define GMR_YPHASE_OFST_WID		    1
++#define GMR_BAYER_FMT_BIT		    24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define GMR_BAYER_FMT_WID		    2
+ //Bit    24, reg_isp_gmr_yphase_ofst        bayer pattern yphase offset in gammar correction, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0 
+ //Bit 23: 1, reserved 
+ #define GCLUT_ACCMODE_BIT		    0
+@@ -600,11 +588,8 @@
+ #define ISP_DFT_ENABLE_WID		    1
+ //Bit    28, reg_isp_dft_enable             defect pixel detection block operation enable, reg_isp_dft_detect_mode decides the detection mode; 0: no defect_detection; 1: detection logic on;    default= 1;
+ //Bit 27:26, reserved
+-#define DFT_XPHASE_OFST_BIT		    25
+-#define DFT_XPHASE_OFST_WID		    1
+-//Bit    25, reg_isp_dft_xphase_ofst        bayer pattern xphase offset in defect pixel correction, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define DFT_YPHASE_OFST_BIT		    24
+-#define DFT_YPHASE_OFST_WID		    1
++#define DFT_BAYER_FMT_BIT		    24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define DFT_BAYER_FMT_WID		    2
+ //Bit    24, reg_isp_dft_yphase_ofst        bayer pattern yphase offset in defect pixel correction, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0 
+ //Bit 23:20, reserved
+ #define DFTMAP_WRITETO_LUT_STLINE_BIT	    16
+@@ -778,11 +763,8 @@
+ #define ISP_DMS_BYPASS_WID		   3
+ //Bit 30:28, reg_isp_dms_bypass             bypass of demosaicing module. 0: no bypass; 1: replace (n-2) line dms result to current line; 2: (n-1) line to current; 3: (n+1) line to current; 4: (n+2) lines to current; 5~6: (n)line tocurrent; 7: bypass dms and put bayer data to RGB channels as repeat; default =0;
+ //Bit 27:26, reserved
+-#define DMS_XPHASE_OFST_BIT		   25
+-#define DMS_XPHASE_OFST_WID		   1
+-//Bit    25, reg_isp_dms_xphase_ofst        bayer pattern xphase offset in demosaicing, 0- horizontally start from G(R)/B(G); 1- horizontally start from R(G)/G(B); default=0
+-#define DMS_YPHASE_OFST_BIT		   24
+-#define DMS_YPHASE_OFST_WID		   1
++#define DMS_BAYER_FMT_BIT		   24//bayer fmt 0:BGGR 1:RGGB 2:GBRG 3:GRBG
++#define DMS_BAYER_FMT_WID		   2
+ //Bit    24, reg_isp_dms_yphase_ofst        bayer pattern yphase offset in demosaicing, 0- vertically start from G(B)/R(G); 1- vertially start from B(G)/G(R); default=0
+ //Bit 23:22, reserved                       
+ #define DMS_L28_SIMPLE_BIT		   20
+diff --git a/drivers/amlogic/tvin/tvin_global.c b/drivers/amlogic/tvin/tvin_global.c
+index 04a8d9e02655..833472eee99f 100755
+--- a/drivers/amlogic/tvin/tvin_global.c
++++ b/drivers/amlogic/tvin/tvin_global.c
+@@ -48,6 +48,18 @@ const char *tvin_color_fmt_str(enum tvin_color_fmt_e color_fmt)
+                 case TVIN_NV21:
+                         return "COLOR_FMT_TVIN_NV21";
+                         break;
++		case TVIN_BGGR:
++			return "COLOR_FMT_TVIN_BGGR";
++			break;
++		case TVIN_RGGB:
++			return "COLOR_FMT_TVIN_RGGB";
++			break;
++		case TVIN_GBRG:
++			return "COLOR_FMT_TVIN_GBRG";
++			break;
++        	case TVIN_GRBG:
++			return "COLOR_FMT_TVIN_GRBG";
++			break;
+                 default:
+                         return "COLOR_FMT_NULL";
+                         break;
+diff --git a/include/linux/amlogic/camera/aml_cam_info.h b/include/linux/amlogic/camera/aml_cam_info.h
+index eedc24b0e8d6..3b94f031f063 100755
+--- a/include/linux/amlogic/camera/aml_cam_info.h
++++ b/include/linux/amlogic/camera/aml_cam_info.h
+@@ -5,6 +5,7 @@
+ #include <linux/i2c-aml.h>
+ #include <mach/gpio.h>
+ #include <linux/amlogic/tvin/tvin_v4l2.h>
++#include <linux/amlogic/tvin/tvin.h>
+ #include <linux/amlogic/camera/flashlight.h>
+ 
+ //#define AML_I2C_BUS_A 0
+@@ -76,6 +77,7 @@ typedef struct {
+ 	unsigned mclk;
+ 	unsigned flash_support;
+ 	unsigned flash_ctrl_level;
++	unsigned vcm_mode;
+ 	bt_path_t bt_path;
+ 	cam_interface_t         interface;
+ 	clk_channel_t           clk_channel;
+@@ -83,6 +85,7 @@ typedef struct {
+ 	gpio_t rst_pin;
+ 	gpio_t flash_ctrl_pin;
+ 	resulution_size_t max_cap_size;
++	tvin_color_fmt_t bayer_fmt;
+ 	char* config;
+ }aml_cam_info_t;
+ 
+diff --git a/include/linux/amlogic/tvin/tvin.h b/include/linux/amlogic/tvin/tvin.h
+index 018cbc1ab0a6..c5c0b022abfd 100755
+--- a/include/linux/amlogic/tvin/tvin.h
++++ b/include/linux/amlogic/tvin/tvin.h
+@@ -414,6 +414,10 @@ typedef enum tvin_color_fmt_e {
+         TVIN_VYUY422,// 6
+         TVIN_NV12,   // 7
+         TVIN_NV21,   // 8
++        TVIN_BGGR,   // 9  raw data
++        TVIN_RGGB,   // 10 raw data
++        TVIN_GBRG,   // 11 raw data
++        TVIN_GRBG,   // 12 raw data
+         TVIN_COLOR_FMT_MAX,
+ }tvin_color_fmt_t;
+ 
+-- 
+2.19.0
+

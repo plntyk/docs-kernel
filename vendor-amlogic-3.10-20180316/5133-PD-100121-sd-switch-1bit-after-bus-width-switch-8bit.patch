@@ -1,0 +1,111 @@
+From e474e56834e650fc63c802d2e59d4b4b2eda48fb Mon Sep 17 00:00:00 2001
+From: "long.yu" <long.yu@amlogic.com>
+Date: Wed, 26 Nov 2014 19:55:19 +0800
+Subject: [PATCH 5133/5965] PD#100121:sd switch 1bit after bus width switch
+ 8bit and emmc the setting procedure of High Speed mode after switch hs200
+ mode
+
+Change-Id: I316b5b39226c5538063bb50b04f40b4ab06c2366
+---
+ drivers/amlogic/mmc/amlsd_of.c |  3 +++
+ drivers/mmc/core/mmc.c         | 49 ++++++++++++++++++++--------------
+ 2 files changed, 32 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/amlogic/mmc/amlsd_of.c b/drivers/amlogic/mmc/amlsd_of.c
+index ef8b76b48cba..6634d44573ed 100755
+--- a/drivers/amlogic/mmc/amlsd_of.c
++++ b/drivers/amlogic/mmc/amlsd_of.c
+@@ -56,6 +56,9 @@ static int amlsd_get_host_caps(struct device_node* of_node,
+                 caps |= host_caps[i].caps;
+         }
+     };
++	if(caps & MMC_CAP_8_BIT_DATA){
++		caps |= MMC_CAP_4_BIT_DATA;
++	}
+     pdata->caps = caps;
+     printk("pdata->caps %x\n", pdata->caps);
+ 	return 0;
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index 4f6ddaaba7cc..f5829a261fce 100755
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -859,7 +859,7 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
+ 	struct mmc_card *oldcard)
+ {
+ 	struct mmc_card *card;
+-	int err, ddr = 0;
++	int err, ddr = 0,flag = 0;
+ 	u32 cid[4];
+ 	unsigned int max_dtr;
+ 	u32 rocr;
+@@ -1056,32 +1056,40 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
+ 	/*
+ 	 * Activate high speed (if supported)
+ 	 */
++	printk("Activate high speed\n");
+ 	if (card->ext_csd.hs_max_dtr != 0) {
+ 		err = 0;
+ 		if (card->ext_csd.hs_max_dtr > 52000000 &&
+-		    host->caps2 & MMC_CAP2_HS200)
++		    host->caps2 & MMC_CAP2_HS200){
+ 			err = mmc_select_hs200(card);
+-		else if	(host->caps & MMC_CAP_MMC_HIGHSPEED)
++			//printk("mmc_select_card err=%d\n",err);
++			//err = -EBADMSG;
++			if (err && err != -EBADMSG)
++				goto free_card;
++			if (err){
++				pr_warning("%s: switch to hS200 failed\n",mmc_hostname(card->host));
++				err = 0;
++				flag=1;
++			}else{
++				mmc_card_set_hs200(card);
++				mmc_set_timing(card->host,MMC_TIMING_MMC_HS200);
++			}
++		}else
++			flag=1;
++		
++		if(flag && host->caps & MMC_CAP_MMC_HIGHSPEED){
+ 			err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+ 					 EXT_CSD_HS_TIMING, 1,
+ 					 card->ext_csd.generic_cmd6_time);
+-
+-		if (err && err != -EBADMSG)
+-			goto free_card;
+-
+-		if (err) {
+-			pr_warning("%s: switch to highspeed failed\n",
+-			       mmc_hostname(card->host));
+-			err = 0;
+-		} else {
+-			if (card->ext_csd.hs_max_dtr > 52000000 &&
+-			    host->caps2 & MMC_CAP2_HS200) {
+-				mmc_card_set_hs200(card);
+-				mmc_set_timing(card->host,
+-					       MMC_TIMING_MMC_HS200);
+-			} else {
+-				mmc_card_set_highspeed(card);
+-				mmc_set_timing(card->host, MMC_TIMING_MMC_HS);
++			if (err && err != -EBADMSG)
++				goto free_card;
++			if (err) {
++				pr_warning("%s: switch to highspeed failed\n",
++				       mmc_hostname(card->host));
++				err = 0;
++			} else{
++					mmc_card_set_highspeed(card);
++					mmc_set_timing(card->host, MMC_TIMING_MMC_HS);
+ 			}
+ 		}
+ 	}
+@@ -1599,6 +1607,7 @@ int mmc_attach_mmc(struct mmc_host *host)
+ 	/*
+ 	 * Detect and init the card.
+ 	 */
++	printk("mmc_init_card\n");
+ 	err = mmc_init_card(host, host->ocr, NULL);
+ 	if (err)
+ 		goto err;
+-- 
+2.19.0
+

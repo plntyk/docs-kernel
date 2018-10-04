@@ -1,0 +1,504 @@
+From bdb911f72576a0ef13e49aa0a820800e38c70683 Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Tue, 20 May 2014 20:11:49 +0800
+Subject: [PATCH 4157/5965] m8baby:move some thermal to mach menu and enable
+ m8baby thermal driver
+
+---
+ arch/arm/mach-meson8/Makefile                |  2 +
+ arch/arm/mach-meson8/include/mach/thermal.h  |  7 ++
+ arch/arm/mach-meson8/thermal.c               | 74 ++++++++++++++++
+ arch/arm/mach-meson8b/Makefile               |  1 +
+ arch/arm/mach-meson8b/include/mach/thermal.h |  8 ++
+ arch/arm/mach-meson8b/thermal.c              | 67 ++++++++++++++
+ drivers/amlogic/input/saradc/saradc.c        | 92 +++-----------------
+ drivers/amlogic/input/saradc/saradc_reg.h    |  4 +-
+ drivers/amlogic/thermal/amlogic_thermal.c    | 29 +++---
+ include/linux/amlogic/efuse.h                |  2 +-
+ include/linux/amlogic/saradc.h               |  8 +-
+ include/linux/thermal.h                      | 13 +++
+ 12 files changed, 206 insertions(+), 101 deletions(-)
+ create mode 100644 arch/arm/mach-meson8/include/mach/thermal.h
+ create mode 100644 arch/arm/mach-meson8/thermal.c
+ create mode 100644 arch/arm/mach-meson8b/include/mach/thermal.h
+ create mode 100644 arch/arm/mach-meson8b/thermal.c
+
+diff --git a/arch/arm/mach-meson8/Makefile b/arch/arm/mach-meson8/Makefile
+index 4162b7b1429f..53bb2b9beede 100755
+--- a/arch/arm/mach-meson8/Makefile
++++ b/arch/arm/mach-meson8/Makefile
+@@ -39,6 +39,8 @@ obj-$(CONFIG_MESON_SUSPEND) += power_suspend.o
+ #obj-$(CONFIG_SUSPEND) += sleep.o
+ #endif
+ 
++obj-$(CONFIG_AMLOGIC_THERMAL) += thermal.o
++
+ obj-$(CONFIG_AML_HDMI_TX) +=  hdmi_tx_hw/
+ 
+ # ARM Trustzone
+diff --git a/arch/arm/mach-meson8/include/mach/thermal.h b/arch/arm/mach-meson8/include/mach/thermal.h
+new file mode 100644
+index 000000000000..4313ce01bacf
+--- /dev/null
++++ b/arch/arm/mach-meson8/include/mach/thermal.h
+@@ -0,0 +1,7 @@
++#ifndef ARCH__THERMAL_H__
++#define ARCH__THERMAL_H__
++extern int thermal_firmware_init(void);
++extern int get_cpu_temp(void);
++
++#endif
++
+diff --git a/arch/arm/mach-meson8/thermal.c b/arch/arm/mach-meson8/thermal.c
+new file mode 100644
+index 000000000000..af48e7b5c6bd
+--- /dev/null
++++ b/arch/arm/mach-meson8/thermal.c
+@@ -0,0 +1,74 @@
++#include <linux/amlogic/efuse.h>
++#include <linux/amlogic/saradc.h>
++#include <mach/thermal.h>
++#include <linux/slab.h>
++
++
++#define  NOT_WRITE_EFUSE 0x0
++#define EFUSE_MIGHT_WRONG 0x8
++#define EFUEE_MUST_RIGHT 0x4
++#define EFUSE_FIXED 0xa
++struct temp_sensor{
++	int flag;
++	int trimming;
++	int adc_efuse;
++	int efuse_flag;
++};
++struct temp_sensor *temps;
++int thermal_firmware_init()
++{
++	int err;
++	char buf[4]={0};
++	int temp=-1,TS_C=-1,flag=0;
++	err=efuse_read_intlItem("temper_cvbs",buf,4);
++	if(err>=0){
++		printk("buf[0]=%x,buf[1]=%x,err=%d\n",buf[0],buf[1],err);
++		temps=kzalloc(sizeof(*temps),GFP_KERNEL);
++		temp=0;TS_C=0;
++		temp=buf[1];
++		temp=(temp<<8)|buf[0];
++		TS_C=temp&0xf;
++		flag=0;
++		flag=(temp&0x8000)>>15;
++		temp=(temp&0x7fff)>>4;
++		printk("adc=%d,TS_C=%d,flag=%d\n",temp,TS_C,flag);
++		temps->flag=flag;
++		temps->trimming=TS_C;
++		temps->adc_efuse=temp;
++		temps->efuse_flag=buf[3]>>4;
++		printk("efuse_flag=%x\n",temps->efuse_flag);
++		if(temps->efuse_flag==EFUEE_MUST_RIGHT ||temps->efuse_flag==EFUSE_FIXED){
++			if(temps->flag){
++				temps->flag=1;
++			}
++		}else{
++			temps->flag=0;
++		}
++	}
++	else{
++		temps->flag=flag;
++		temps->trimming=TS_C;
++		temps->adc_efuse=temp;
++		temps->efuse_flag=-1;
++	}
++	if(temps->flag){
++		temp_sensor_adc_init(temps->trimming);
++		return 0;
++	}
++	else
++		return -1;
++	
++}
++int get_cpu_temp(void)
++{
++	int ret=-1,tempa;
++	if(temps->flag){
++		ret=get_adc_sample(6);
++		if(ret>=0){
++			tempa=(18*(ret-temps->adc_efuse)*10000)/1024/10/85+27;
++			ret=tempa;
++		}
++	}
++	return ret;
++}
++
+diff --git a/arch/arm/mach-meson8b/Makefile b/arch/arm/mach-meson8b/Makefile
+index b332e101f7b7..96aa0f77f97b 100755
+--- a/arch/arm/mach-meson8b/Makefile
++++ b/arch/arm/mach-meson8b/Makefile
+@@ -38,6 +38,7 @@ obj-$(CONFIG_MESON_SUSPEND) += power_suspend.o
+ #ifneq ($(CONFIG_MESON_SUSPEND),y)
+ #obj-$(CONFIG_SUSPEND) += sleep.o
+ #endif
++obj-$(CONFIG_AMLOGIC_THERMAL) += thermal.o
+ 
+ obj-$(CONFIG_AML_HDMI_TX) +=  hdmi_tx_hw/
+ 
+diff --git a/arch/arm/mach-meson8b/include/mach/thermal.h b/arch/arm/mach-meson8b/include/mach/thermal.h
+new file mode 100644
+index 000000000000..4c7be15fbd45
+--- /dev/null
++++ b/arch/arm/mach-meson8b/include/mach/thermal.h
+@@ -0,0 +1,8 @@
++#ifndef ARCH__THERMAL_H__
++#define ARCH__THERMAL_H__
++
++extern int thermal_firmware_init();
++extern int get_cpu_temp(void);
++
++#endif
++
+diff --git a/arch/arm/mach-meson8b/thermal.c b/arch/arm/mach-meson8b/thermal.c
+new file mode 100644
+index 000000000000..2afd895a0697
+--- /dev/null
++++ b/arch/arm/mach-meson8b/thermal.c
+@@ -0,0 +1,67 @@
++
++#include <linux/amlogic/efuse.h>
++#include <linux/amlogic/saradc.h>
++#include <mach/thermal.h>
++#include <linux/slab.h>
++
++#define  NOT_WRITE_EFUSE 0x0
++#define EFUSE_MIGHT_WRONG 0x8
++#define EFUEE_MUST_RIGHT 0x4
++#define EFUSE_FIXED 0xa
++struct temp_sensor{
++	int flag;
++	int trimming;
++	int adc_efuse;
++	int efuse_flag;
++};
++struct temp_sensor *temps;
++int thermal_firmware_init()
++{
++	int err;
++	char buf[4]={0};
++	int temp=-1,TS_C=-1,flag=0;
++	err=efuse_read_intlItem("temper_cvbs",buf,4);
++	if(err>=0){
++		printk("buf[0]=%x,buf[1]=%x,err=%d\n",buf[0],buf[1],err);
++		temps=kzalloc(sizeof(*temps),GFP_KERNEL);
++		temp=0;TS_C=0;
++		temp=buf[1];
++		temp=(temp<<8)|buf[0];
++		TS_C=temp&0x1f;
++		flag=0;
++		flag=(temp&0x8000)>>15;
++		temp=(temp&0x7fff)>>5;
++		printk("adc=%d,TS_C=%d,flag=%d\n",temp,TS_C,flag);
++		temps->flag=flag;
++		temps->trimming=TS_C;
++		temps->adc_efuse=temp;
++		temps->efuse_flag=buf[3]>>4;
++		printk("efuse_flag=%x\n",temps->efuse_flag);
++	}
++	else{
++		temps->flag=flag;
++		temps->trimming=TS_C;
++		temps->adc_efuse=temp;
++		temps->efuse_flag=-1;
++	}
++	if(temps->flag){
++		temp_sensor_adc_init(temps->trimming);
++		return 0;
++	}
++	else
++		return -1;
++	
++}
++int get_cpu_temp(void)
++{
++	int ret=-1,tempa;
++	if(temps->flag){
++		ret=get_adc_sample(6);
++		if(ret>=0){
++			tempa=(10*(ret-temps->adc_efuse))/32+27;
++			ret=tempa;
++		}
++	}
++	return ret;
++}
++
+diff --git a/drivers/amlogic/input/saradc/saradc.c b/drivers/amlogic/input/saradc/saradc.c
+index cc00829944e6..477a8ffef92b 100755
+--- a/drivers/amlogic/input/saradc/saradc.c
++++ b/drivers/amlogic/input/saradc/saradc.c
+@@ -9,7 +9,7 @@
+ #ifdef CONFIG_MESON_CPU_TEMP_SENSOR
+ #include <mach/cpu.h>
+ #endif
+-#include <linux/amlogic/efuse.h>
++
+ #define ENABLE_CALIBRATION
+ #ifndef CONFIG_OF
+ #define CONFIG_OF
+@@ -21,12 +21,7 @@ struct saradc {
+ 	int ref_nominal;
+ 	int coef;
+ #endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	int flag;
+-	int trimming;
+-	int adc_efuse;
+-	int efuse_flag;
+-#endif
++
+ };
+ 
+ static struct saradc *gp_saradc;
+@@ -142,7 +137,18 @@ static int saradc_get_cal_value(struct saradc *saradc, int val)
+ #endif
+ 
+ static u8 print_flag = 0; //(1<<CHAN_4)
+-
++#ifdef CONFIG_AMLOGIC_THERMAL
++void temp_sensor_adc_init(int triming)
++{
++	select_temp();
++	set_trimming(triming&0xf);
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++	set_trimming1(triming>>4);
++#endif
++	enable_temp();
++	enable_temp__();
++}
++#endif
+ int get_adc_sample(int chan)
+ {
+ 	int count;
+@@ -417,38 +423,7 @@ static struct class saradc_class = {
+     .name = "saradc",
+     .class_attrs = saradc_class_attrs,
+ };
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-int read_efuse_flag()
+-{
+-	if(gp_saradc)
+-		return gp_saradc->efuse_flag;
+-	else 
+-		return -2;
+-}
+-#else
+-int read_efuse_flag()
+-{
+-	printk("read_efuse_flag() function is not implement! \n");
+-	return -2;
+-}
+-#endif
+ 
+-int get_cpu_temp(void)
+-{
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	int ret=-1,tempa;
+-	if(gp_saradc->flag){
+-		ret=get_adc_sample(6);
+-		if(ret>=0){
+-			tempa=(18*(ret-gp_saradc->adc_efuse)*10000)/1024/10/85+27;
+-			ret=tempa;
+-		}
+-	}
+-	return ret;
+-#else
+-	return NOT_WRITE_EFUSE;
+-#endif
+-}
+ static int saradc_probe(struct platform_device *pdev)
+ {
+ 	int err;
+@@ -465,45 +440,6 @@ static int saradc_probe(struct platform_device *pdev)
+ #ifdef ENABLE_CALIBRATION
+ 	saradc->coef = 0;
+   saradc_internal_cal(saradc);
+-#endif
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-	char buf[4]={0};
+-	int temp=-1,TS_C=-1,flag=0;
+-	err=efuse_read_intlItem("temper_cvbs",buf,4);
+-	if(err>=0){
+-		printk("buf[0]=%x,buf[1]=%x,err=%d\n",buf[0],buf[1],err);
+-		temp=0;TS_C=0;
+-		temp=buf[1];
+-		temp=(temp<<8)|buf[0];
+-		TS_C=temp&0xf;
+-		flag=0;
+-		flag=(temp&0x8000)>>15;
+-		temp=(temp&0x7fff)>>4;
+-		printk("adc=%d,TS_C=%d,flag=%d\n",temp,TS_C,flag);
+-		saradc->flag=flag;
+-		saradc->trimming=TS_C;
+-		saradc->adc_efuse=temp;
+-		saradc->efuse_flag=buf[3]>>4;
+-		if(saradc->efuse_flag==EFUEE_MUST_RIGHT ||saradc->efuse_flag==EFUSE_FIXED){
+-			if(saradc->flag){
+-				saradc->flag=1;
+-			}
+-		}else{
+-			saradc->flag=0;
+-		}
+-	}
+-	else{
+-		saradc->flag=flag;
+-		saradc->trimming=TS_C;
+-		saradc->adc_efuse=temp;
+-		saradc->efuse_flag=-1;
+-	}
+-	if(gp_saradc->flag){
+-		select_temp();
+-		set_trimming(gp_saradc->trimming);
+-		enable_temp();
+-		enable_temp__();
+-	}
+ #endif
+ 	set_cal_voltage(7);
+ 	spin_lock_init(&saradc->lock);	
+diff --git a/drivers/amlogic/input/saradc/saradc_reg.h b/drivers/amlogic/input/saradc/saradc_reg.h
+index 1c0460d59407..d4a9fe37236a 100755
+--- a/drivers/amlogic/input/saradc/saradc_reg.h
++++ b/drivers/amlogic/input/saradc/saradc_reg.h
+@@ -204,7 +204,9 @@ enum {
+ #define select_temp()       set_bits(SAR_ADC_DELTA_10, 1, 27, 1)
+ #define unselect_temp()     set_bits(SAR_ADC_DELTA_10, 0, 27, 1)
+ #endif
+-
++#if MESON_CPU_TYPE == MESON_CPU_TYPE_MESON8B
++#define set_trimming1(x)     set_bits(HHI_DPLL_TOP_0, x, 9, 1)
++#endif
+ #define XN_OFF		(0<<0)
+ #define XN_ON		(1<<0)
+ #define YN_OFF		(0<<1)
+diff --git a/drivers/amlogic/thermal/amlogic_thermal.c b/drivers/amlogic/thermal/amlogic_thermal.c
+index 2837bd47b4be..91f31cfed477 100755
+--- a/drivers/amlogic/thermal/amlogic_thermal.c
++++ b/drivers/amlogic/thermal/amlogic_thermal.c
+@@ -73,6 +73,7 @@ struct amlogic_thermal_platform_data {
+ 	struct thermal_cooling_device *cpu_cool_dev;
+ 	struct thermal_cooling_device *gpu_cool_dev;
+ 	struct thermal_cooling_device *cpucore_cool_dev;
++	struct thermal_cooling_device *gpucore_cool_dev;
+ 	enum thermal_device_mode mode;
+ 	struct mutex lock;
+ };
+@@ -122,8 +123,15 @@ static int amlogic_set_mode(struct thermal_zone_device *thermal,
+ 	
+ 	if (mode == THERMAL_DEVICE_ENABLED)
+ 		pdata->therm_dev->polling_delay = pdata->idle_interval;
+-	else
++	else{
+ 		pdata->therm_dev->polling_delay = 0;
++		if(pdata->cpucore_cool_dev){	
++			pdata->cpucore_cool_dev->ops->set_cur_state(pdata->cpucore_cool_dev,0);
++		}
++		if(pdata->gpucore_cool_dev){	
++			pdata->gpucore_cool_dev->ops->set_cur_state(pdata->gpucore_cool_dev,0);
++		}
++	}
+ 
+ 	//mutex_unlock(&pdata->therm_dev->lock);
+ 
+@@ -248,6 +256,7 @@ static int amlogic_bind(struct thermal_zone_device *thermal,
+ 				goto out;
+ 			}
+ 		}
++		pdata->gpu_cool_dev=gpufreq_dev->cool_dev;
+ 		pr_info("%s bind %s okay !\n",thermal->type,cdev->type);
+ 	}
+ 
+@@ -303,6 +312,7 @@ static int amlogic_bind(struct thermal_zone_device *thermal,
+ 				goto out;
+ 			}
+ 		}
++		pdata->gpucore_cool_dev=gpucore_dev->cool_dev;
+ 		pr_info("%s bind %s okay !\n",thermal->type,cdev->type);
+ 	}
+ 	return ret;
+@@ -607,20 +617,9 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct amlogic_thermal_platform_data *pdata=NULL;
+ 	//pdata = amlogic_get_driver_data(pdev);
+-	ret=read_efuse_flag();
+-	printk("thermal efuse version 0x%x\n",ret);
+-	if(ret<0){
+-		printk("read efuse error or adc error ret=%d\n",ret);
+-		return -1;
+-	}
+-	if(NOT_WRITE_EFUSE==ret){
+-		printk("this chip do not write efuse  so do not enable  thermal driver\n");
+-		return -1;
+-	}
+-	if(EFUSE_MIGHT_WRONG==ret){
+-		printk("this chip efuse data might wrong  so do not enable  thermal driver\n");
+-		return -1;
+-	}
++	ret=thermal_firmware_init();
++	if(ret<0)
++		return ret;
+ 	
+ 	dev_info(&pdev->dev, "amlogic thermal probe start\n");
+ 	pdata = amlogic_thermal_initialize(pdev);
+diff --git a/include/linux/amlogic/efuse.h b/include/linux/amlogic/efuse.h
+index a4298dafad43..b09b5c7f2b12 100755
+--- a/include/linux/amlogic/efuse.h
++++ b/include/linux/amlogic/efuse.h
+@@ -3,7 +3,7 @@
+ 
+ #include <linux/ioctl.h>
+ #include <mach/efuse.h>
+-
++#include <linux/types.h>
+ #define EFUSE_ENCRYPT_DISABLE   _IO('f', 0x10)
+ #define EFUSE_ENCRYPT_ENABLE    _IO('f', 0x20)
+ #define EFUSE_ENCRYPT_RESET     _IO('f', 0x30)
+diff --git a/include/linux/amlogic/saradc.h b/include/linux/amlogic/saradc.h
+index 30c3a8813c25..dacf49f601bc 100755
+--- a/include/linux/amlogic/saradc.h
++++ b/include/linux/amlogic/saradc.h
+@@ -33,13 +33,9 @@ enum {
+ 	CMD_SET_PENIRQ,
+ 	CMD_CLEAR_PENIRQ,
+ };
+-#define  NOT_WRITE_EFUSE 0x0
+-#define EFUSE_MIGHT_WRONG 0x8
+-#define EFUEE_MUST_RIGHT 0x4
+-#define EFUSE_FIXED 0xa
++
+ 
+ extern int get_adc_sample(int chan);
+ extern int saradc_ts_service(int cmd);
+-extern int  get_cpu_temp(void);
+-extern int  read_efuse_flag();
++extern void  temp_sensor_adc_init(int triming);
+ #endif
+diff --git a/include/linux/thermal.h b/include/linux/thermal.h
+index a386a1cbb6e1..ccc75f6605d2 100644
+--- a/include/linux/thermal.h
++++ b/include/linux/thermal.h
+@@ -259,4 +259,17 @@ static inline int thermal_generate_netlink_event(struct thermal_zone_device *tz,
+ }
+ #endif
+ 
++#ifdef CONFIG_AMLOGIC_THERMAL
++#include <mach/thermal.h>
++#else 
++int thermal_firmware_init()
++{
++	return -1;
++}
++int get_cpu_temp(void)
++{
++	return -1;
++}
++
++#endif
+ #endif /* __THERMAL_H__ */
+-- 
+2.19.0
+

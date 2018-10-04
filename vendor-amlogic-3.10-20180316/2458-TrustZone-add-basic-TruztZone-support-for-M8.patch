@@ -1,0 +1,4045 @@
+From 51d7729545c1228cbd6153cbc43933c5018f4b10 Mon Sep 17 00:00:00 2001
+From: Peifu Jiang <peifu.jiang@amlogic.com>
+Date: Wed, 11 Dec 2013 16:45:55 +0800
+Subject: [PATCH 2458/5965] TrustZone: add basic TruztZone support for M8.
+
+---
+ .../boot/dts/amlogic/meson8_k200_v1_tee.dtd   | 1402 +++++++++++++++++
+ arch/arm/configs/meson8_tee_defconfig         |  394 +++++
+ arch/arm/mach-meson8/Makefile                 |    7 +
+ arch/arm/mach-meson8/clock.c                  |   26 +
+ .../mach-meson8/include/mach/meson-secure.h   |  107 ++
+ arch/arm/mach-meson8/meson-secure.c           |  126 ++
+ arch/arm/mach-meson8/meson-smc.S              |  134 ++
+ arch/arm/mach-meson8/smp.c                    |    2 +
+ arch/arm/mm/cache-l2x0.c                      |  126 +-
+ drivers/amlogic/Kconfig                       |    9 +-
+ drivers/amlogic/Makefile                      |    2 +
+ drivers/amlogic/trustzone/Kconfig             |    7 +
+ drivers/amlogic/trustzone/Makefile            |   22 +
+ drivers/amlogic/trustzone/otz_client_main.z   |  Bin 0 -> 147584 bytes
+ 14 files changed, 2361 insertions(+), 3 deletions(-)
+ create mode 100755 arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
+ create mode 100755 arch/arm/configs/meson8_tee_defconfig
+ create mode 100755 arch/arm/mach-meson8/include/mach/meson-secure.h
+ create mode 100755 arch/arm/mach-meson8/meson-secure.c
+ create mode 100755 arch/arm/mach-meson8/meson-smc.S
+ create mode 100644 drivers/amlogic/trustzone/Kconfig
+ create mode 100644 drivers/amlogic/trustzone/Makefile
+ create mode 100644 drivers/amlogic/trustzone/otz_client_main.z
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
+new file mode 100755
+index 000000000000..33ae6a4a0460
+--- /dev/null
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_v1_tee.dtd
+@@ -0,0 +1,1402 @@
++/dts-v1/;
++/// ***************************************************************************************\n
++//$$ PROJECT="meson8"
++//$$ REMOVE 1
++void root_func(){
++//$$ ADD /{
++	compatible = "AMLOGIC,8726_M8";
++	model = "AMLOGIC";
++	interrupt-parent = <&gic>;
++	#address-cells = <1>;
++	#size-cells = <1>;
++	
++/// ***************************************************************************************
++///	-	CPU
++//$$ MODULE="CPU"
++    cpus {
++        #address-cells = <1>;
++        #size-cells = <0>;
++//$$ DEVICE="cpu0"
++        cpu@0 {
++        	device_type = "cpu";
++        	compatible = "arm,cortex-a9";
++        	reg = <0x200>;
++        };
++//$$ DEVICE="cpu1"
++        cpu@1 {
++        	device_type = "cpu";
++        	compatible = "arm,cortex-a9";
++        	reg = <0x1>;
++        };
++//$$ DEVICE="cpu2"
++        cpu@2 {
++        	device_type = "cpu";
++        	compatible = "arm,cortex-a9";
++        	reg = <0x2>;
++        };
++//$$ DEVICE="cpu3"
++        cpu@3 {
++        	device_type = "cpu";
++        	compatible = "arm,cortex-a9";
++        	reg = <0x3>;
++        };
++    };
++
++/// ***************************************************************************************
++///	-	Cache
++//$$ MODULE="Cache"
++//$$ DEVICE="cache"
++    cache-controller {
++          compatible = "arm,meson-pl310-cache";
++          reg = <0xc4200000 0x1000>;
++          arm,data-latency = <3 3 3>;
++          arm,tag-latency = <2 2 2>;
++          cache-unified;
++          cache-level = <2>;
++          aux-instruction_prefetch;
++          aux-data_prefetch;
++          aux-ns_lockdown;
++          aux-force_no_write_alloc;
++          aux-cache_replace_policy_round_robin;
++          aux-early_write_response;
++          aux-full_line_of_zero;
++          aux-ns_int_ctrl;
++          aux-share_override;
++          prefetch-double_line_fill;
++          prefetch-prefetch_drop;
++          prefetch-prefetch_offset = <7>;
++    };
++
++/// ***************************************************************************************
++///	-	Memory
++//$$ MODULE="Memory"
++//$$ DEVICE="memory"
++//$$ L2 PROP_U32 = "aml_reserved_start"
++//$$ L2 PROP_U32 = "aml_reserved_end"
++//$$ L2 PROP_U32 6 = "linux,usable-memory"
++	memory{
++		device_type = "memory";
++		aml_reserved_start = <0x05000000>; /**reserved memory start */
++		aml_reserved_end = <0x1e3fffff>;/**reserved memory end */
++		linux,usable-memory = <0x00000000 0x04000000 0x1e400000 0x1dc00000 0x40000000 0x40000000>;
++	};
++/// ***************************************************************************************
++///	-	GIC
++//$$ MODULE="GIC"
++//$$ DEVICE="gic"	
++	gic:interrupt-controller{
++        compatible = "arm,cortex-a9-gic";
++        reg = <0xc4301000 0x1000
++               0xc4300100 0x0100>;
++        interrupt-controller;
++        #interrupt-cells = <3>;
++        #address-cells = <0>;
++    };
++    
++/// ***************************************************************************************
++///	-	VPU
++//$$ MODULE="VPU"
++//$$ DEVICE="vpu"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "clk_level"
++    vpu{
++		compatible = "amlogic,vpu";
++		dev_name = "vpu";	
++		status = "ok";
++		clk_level = <7>;
++		/**    	0: 106.25M		1: 127.5M		2: 159.375M
++				3: 182.15M		4: 212.5M		5: 255M
++		    	6: 318.75M		7: 364.3M					 */
++	};
++	
++/// ***************************************************************************************
++///	-	ION
++//$$ MODULE="ION"
++//$$ DEVICE="ion_dev"
++//$$ L2 PROP_STR = "status"
++    ion_dev{
++        compatible = "amlogic,ion_dev";
++        dev_name = "ion_dev";
++        status = "ok";
++        reg = <0x08500000 0x03000000>;
++    };
++/// **************************************************************************************	
++/// -   DISP&MM-FB
++//$$ MODULE = "DISP&MM-FB"	
++//$$ DEVICE = "mesonfb"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 4 ="reg"
++//$$ L2 PROP_U32 = "vmode"
++//$$ L2 PROP_U32 5 = "display_size_default"
++	mesonfb{
++		compatible = "amlogic,mesonfb";
++		dev_name = "mesonfb";
++		status = "okay";
++		reg = <0x05100000 0x01000000
++	   	 		0x06100000 0x00100000>;
++        vmode = <3>; /**0:VMODE_720P 1:VMODE_LCD  2:VMODE_LVDS_1080P 3:VMODE_1080P*/
++ 		display_size_default = <1920 1080 1920 2160 32>;
++	};
++	
++//$$ DEVICE="deinterlace"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "reg"
++    	deinterlace{
++		compatible = "amlogic,deinterlace";
++		dev_name = "deinterlace";
++		status = "ok";
++		reg = <0x06200000 0x02300000>;
++	};
++
++/// ***************************************************************************************
++///	-	DISP&MM-A/V stream
++//$$ MODULE = "DISP&MM-A/V stream"
++//$$ DEVICE="mesonstream"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 4 ="reg"
++	mesonstream{
++		compatible = "amlogic,mesonstream";
++		dev_name = "mesonstream.0";
++		status = "okay";
++		reg = <0x0c400000 0x10000000
++			   0x1c400000 0x02000000>;
++	};
++
++
++/// ***************************************************************************************
++///	-	DISP&MM-PostProcess
++//$$ MODULE="DISP&MM-PostProcess"
++//$$ DEVICE="ppmgr"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++    ppmgr{
++		compatible = "amlogic,ppmgr";
++		dev_name = "ppmgr";
++		status = "okay";
++		reg = <0x08500000 0x03000000>;		
++	};
++
++/// ***************************************************************************************
++///	-	DISP&MM-AVC Video Encoder
++//$$ MODULE = "DISP&MM-AVC Video Encoder"
++//$$ DEVICE="amvenc_avc"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++    amvenc_avc{
++		compatible = "amlogic,amvenc_avc";
++		dev_name = "amvenc_avc.0";
++		status = "okay";
++		reg = <0x0b500000 0x00f00000>;
++	};
++	
++/// ***************************************************************************************
++///	-	DISP&MM-BT656
++//$$ MODULE = "DISP&MM-BT656"
++//$$ DEVICE="amvdec_656in"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "reg"
++//    amvdec_656in{
++//		compatible = "amlogic,amvdec_656in";
++//		dev_name = "amvdec_656in";
++//		status = "ok";
++//		reg = <0x1e400000 0x00100000>;
++//	};
++//	
++/// ***************************************************************************************
++///	-	DISP&MM-VDIN
++//$$ MODULE = "DISP&MM-VDIN"	
++//$$ DEVICE="vdin1"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "reg"
++//$$ L2 PROP_U32 = "irq"
++//$$ L2 PROP_U32 = "vdin_id"
++//    vdin1{
++//        compatible = "amlogic,vdin";
++//        dev_name = "vdin1";
++//        status = "ok";
++//        reg = <0x1e400000 0x04000000>;
++//        irq = <117>;
++//        vdin_id = <1>;
++//	};
++
++/// ***************************************************************************************
++///	-	DISP&MM-AMLVIDEO2
++//$$ MODULE = "DISP&MM-AMLVIDEO2"
++//$$ DEVICE="amlvideo2"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++//    amlvideo2{
++//		compatible = "amlogic,amlvideo2";
++//		dev_name = "amlvideo2.0";
++//		status = "okay";
++//		reg = <0x22400000 0x01800000>;
++//	};
++
++/// ***************************************************************************************
++///	-	DISP&MM-Vout
++//$$ MODULE = "DISP&MM-Vout"
++//$$ DEVICE = "mesonvout"
++//$$ L2 PROP_STR = "status"
++	mesonvout{
++		compatible = "amlogic,mesonvout";
++		dev_name = "mesonvout";
++		status = "okay";
++	};
++
++/// ***************************************************************************************
++///	-	RTC
++//$$ MODULE="RTC"
++//$$ DEVICE="Rtc"
++//$$ L2 PROP_STR = "status"
++    rtc{
++		compatible = "amlogic,aml_rtc";
++		status = "okay";
++	};
++
++/// ***************************************************************************************
++///	-	UART
++//$$ MODULE="UART"
++//$$ DEVICE="uart_ao"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L3 PROP_CHOICE "uart_ao_pin_match" = "pinctrl-0"
++	uart_ao{
++		compatible = "amlogic,aml_uart";
++		port_name = "uart_ao";
++		status = "okay";
++		dev_name = "uart_ao";
++		pinctrl-names = "default";
++		pinctrl-0 = <&ao_uart_pins>;
++	};
++	
++//$$ DEVICE="uart_0"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L3 PROP_CHOICE "uart_0_pin_match" = "pinctrl-0"
++	uart_0{
++		compatible = "amlogic,aml_uart";
++		port_name = "uart_a";
++		status = "okay";
++		dev_name = "uart_0";
++    	pinctrl-names = "default";
++    	pinctrl-0 = <&a_uart_pins>;
++	};
++	
++//$$ DEVICE="uart_1"
++//$$ L2 PROP_STR = "status"
++	uart_1{
++		compatible = "amlogic,aml_uart";
++		port_name = "uart_b";
++		status = "disabled";
++		dev_name = "uart_1";
++	};
++	
++//$$ DEVICE="uart_2"
++//$$ L2 PROP_STR = "status"
++	uart_2{
++		compatible = "amlogic,aml_uart";
++		port_name = "uart_c";
++		status = "disabled";
++		dev_name = "uart_2";
++	};
++	
++//$$ DEVICE="uart_3"
++//$$ L2 PROP_STR = "status"	
++	uart_3{
++		compatible = "amlogic,aml_uart";
++		port_name = "uart_d";
++		status = "ok";
++		dev_name = "uart_3";
++	};
++
++/// ***************************************************************************************
++///	-	Bluetooth
++//$$ MODULE="Bluetooth"
++//$$ DEVICE="bt-dev"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR = "gpio_reset"
++    bt-dev{
++        compatible = "amlogic,bt-dev";
++        dev_name = "bt-dev";
++        status = "ok";
++        gpio_reset = "GPIOX_20";
++    };
++
++/// ***************************************************************************************
++///	-	WiFi
++//$$ MODULE="WiFi"
++//$$ DEVICE="aml_broadcm_wifi"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR = "interrupt_pin"
++//$$ L2 PROP_U32 = "irq_num"
++//$$ L2 PROP_STR = "irq_trigger_type"
++//$$ L2 PROP_STR = "power_on_pin"
++//$$ L2 PROP_STR = "clock_32k_pin"
++    wifi{
++		compatible = "amlogic,aml_broadcm_wifi";
++		dev_name = "aml_broadcm_wifi";
++		status = "okay";
++		interrupt_pin = "GPIOX_21";
++		irq_num = <4>;
++		irq_trigger_type = "GPIO_IRQ_HIGH";
++		power_on_pin = "GPIOAO_6";
++		clock_32k_pin = "GPIOX_10";
++	};
++	
++//$$ DEVICE="wifi_power"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_STR = "power_gpio"
++	wifi_power{
++            compatible = "amlogic,wifi_power";
++            dev_name = "wifi_power";
++            status = "okay";
++            power_gpio = "GPIOAO_6";
++	}; 
++
++/// ***************************************************************************************
++///	-	MMC
++//$$ MODULE="MMC"
++//$$ DEVICE="aml_sdio"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++//$$ L2 PROP_STR 7 = "pinctrl-names"
++//$$ L2 PROP_CHOICE "sdio_pin_0_match" = "pinctrl-0"
++//$$ L2 PROP_CHOICE "sdio_pin_1_match" = "pinctrl-1"
++//$$ L2 PROP_CHOICE "sdio_pin_2_match" = "pinctrl-2"
++//$$ L2 PROP_CHOICE "sdio_pin_3_match" = "pinctrl-3"
++//$$ L2 PROP_CHOICE "sdio_pin_4_match" = "pinctrl-4"
++//$$ L2 PROP_CHOICE "sdio_pin_5_match" = "pinctrl-5"
++//$$ L2 PROP_CHOICE "sdio_pin_6_match" = "pinctrl-6"
++sdio{
++        compatible = "amlogic,aml_sdio";
++        dev_name = "aml_sdio.0";
++        status = "okay";
++        reg = <0xc1108c20 0x20>;
++        pinctrl-names = "sd_clk_cmd_pins", "sd_all_pins", "emmc_clk_cmd_pins", "emmc_all_pins", "sdio_clk_cmd_pins", "sdio_all_pins","sd_1bit_pins"; // "jtag_pin", "uartao_default";
++        pinctrl-0 = <&sd_clk_cmd_pins>;
++        pinctrl-1 = <&sd_all_pins>;
++        pinctrl-2 = <&emmc_clk_cmd_pins>;
++        pinctrl-3 = <&emmc_all_pins>;
++        pinctrl-4 = <&sdio_clk_cmd_pins>;
++        pinctrl-5 = <&sdio_all_pins>;
++        pinctrl-6 = <&sd_1bit_pins>;
++
++//$$ DEVICE="sd"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 = "port"
++//$$ L2 PROP_STR = "pinname"
++//$$ L3 PROP_U32 = "ocr_avail"
++//$$ L2 PROP_STR 3 = "caps"
++//$$ L3 PROP_U32 = "f_min"
++//$$ L3 PROP_U32 = "f_max"
++//$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_STR = "gpio_dat3"
++//$$ L2 PROP_STR = "jtag_pin"
++//$$ L2 PROP_STR = "gpio_cd"
++//$$ L2 PROP_STR = "gpio_ro"
++//$$ L2 PROP_U32 = "irq_in"
++//$$ L2 PROP_U32 = "irq_out"
++//$$ L2 PROP_U32 = "card_type"
++        sd{
++            status = "okay";
++            port = <1>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++            pinname = "sd";
++            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED";
++            f_min = <300000>;
++            f_max = <50000000>;
++            max_req_size = <0x20000>;          /**128KB*/
++            gpio_dat3 = "CARD_4";
++            jtag_pin = "CARD_0";
++            gpio_cd = "CARD_6";
++            gpio_ro = "GPIOZ_0";
++            irq_in = <3>;
++            irq_out = <5>;
++            card_type = <5>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++        };
++
++//$$ DEVICE="emmc"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 = "port"
++//$$ L2 PROP_STR = "pinname"
++//$$ L3 PROP_U32 = "ocr_avail"
++//$$ L2 PROP_STR 4 = "caps"
++//$$ L3 PROP_U32 = "f_min"
++//$$ L3 PROP_U32 = "f_max"
++//$$ L3 PROP_U32 = "f_max_w"
++//$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_STR = "gpio_dat3"
++//$$ L2 PROP_U32 = "card_type"
++        emmc{
++            status = "ok";
++            port = <2>;          /**0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++            pinname = "emmc";
++            ocr_avail = <0x200000>;          /**VDD voltage 3.3 ~ 3.4 */
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE"; // MMC_CAP_NEEDS_POLL -- for detect, MMC_CAP_NONREMOVABLE -- for eMMC/TSD
++            f_min = <300000>;
++            f_max = <50000000>;
++            f_max_w = <50000000>;
++            max_req_size = <0x20000>;          /**128KB*/
++            gpio_dat3 = "BOOT_3";
++            card_type = <1>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++        };
++    };
++
++/// ***************************************************************************************
++///	-	I2C
++//$$ MODULE="I2C"
++//$$ DEVICE="I2C_AO"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++//$$ L3 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "I2C_AO_pin_match" = "pinctrl-0"	
++	i2c@c8100500{ /*I2C-AO*/
++		compatible = "amlogic,aml_i2c";
++		dev_name = "i2c-AO";
++		status = "ok";
++		reg = <0xc8100500 0x1d>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		device_id = <0>;
++		pinctrl-names="default";
++		pinctrl-0=<&ao_i2c_master>;
++	};
++
++//$$ DEVICE = "I2C_A"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++//$$ L3 PROP_STR = "pinctrl-names"
++    i2c@c1108500{ /*I2C-A*/
++		compatible = "amlogic,aml_i2c";
++		dev_name = "i2c-A";
++		status = "ok";
++		reg = <0xc1108500 0x20>;
++		device_id = <1>;
++		pinctrl-names="default";
++//		pinctrl-0=<&a_i2c_master>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++	
++//$$ DEVICE="I2C_B"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2="reg"
++//$$ L3 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "I2C_B_pin_match" = "pinctrl-0"	
++	i2c@c11087c0{ /*I2C-B*/
++		compatible = "amlogic,aml_i2c";
++		dev_name = "i2c-B";
++		status = "ok";
++		reg = <0xc11087c0 0x20>;
++		device_id = <2>;
++		pinctrl-names="default";
++		pinctrl-0=<&b_i2c_master>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++ 	};
++
++//$$ DEVICE="I2C_C"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2="reg"
++//$$ L3 PROP_STR = "pinctrl-names"	
++    i2c@c11087e0{ /*I2C-C*/
++		compatible = "amlogic,aml_i2c";
++		dev_name = "i2c-C";
++		status = "ok";
++		reg = <0xc11087e0 0x20>;
++		device_id = <3>;
++		pinctrl-names="default";
++//		pinctrl-0=<&c_i2c_master>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++//$$ DEVICE="I2C_D"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2="reg"
++//$$ L3 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "I2C_D_pin_match" = "pinctrl-0"	
++	i2c@c1108d20{ /*I2C-D*/
++		compatible = "amlogic,aml_i2c";
++		dev_name = "i2c-D";
++		status = "ok";
++		reg = <0xc1108d20 0x20>;
++		device_id = <4>;
++		pinctrl-names="default";
++		pinctrl-0=<&d_i2c_master>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++/// ***************************************************************************************
++///	-	Power
++//$$ MODULE="Power"
++//$$ DEVICE="dvfs"
++//$$ L2 PROP_STR = "status"
++    dvfs {
++        compatible = "amlogic, amlogic-dvfs";                   /** fixed for driver, don't change       */
++        #address-cells = <1>;
++        #size-cells = <0>;
++        status = "ok";
++
++//$$ L2 PROP_U32 = "dvfs_id"
++//$$ L2 PROP_U32 = "table_count"
++//$$ L2 PROP_U32 16*3 = "dvfs_table"
++        vcck_dvfs {
++            dvfs_id     = <1>;                                  /** must be value of (1 << n)            */
++            table_count = <14>;                                 /** must be correct count for dvfs_table */
++            dvfs_table  = <
++            /* NOTE: frequent in this table must be ascending order */
++            /* frequent(Khz)    min_uV      max_uV                  */
++                  96000         825000      825000
++                 192000         825000      825000
++                 312000         825000      825000
++                 408000         825000      825000
++                 504000         825000      825000
++                 600000         850000      850000
++                 720000         850000      850000
++                 816000         875000      875000
++                1008000         925000      925000
++                1200000         975000      975000
++                1416000        1025000     1025000
++                1608000        1100000     1100000
++                1800000        1125000     1125000
++                1992000        1150000     1150000
++            >;
++        };
++    };
++
++//$$ DEVICE="arm_pmu"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 4*3 = "interrupts"
++    arm_pmu {
++        compatible = "arm,cortex-a9-pmu";
++        status = "ok";
++        interrupts = <0     137     0x04
++                      0     138     0x04
++                      0     153     0x04
++                      0     154     0x04>;
++    };
++
++    pmu {
++        compatible = "amlogic, aml_pmu_prober";                 /* fixed for pmu driver, don't change   */
++        #address-cells = <1>;
++        #size-cells = <0>;
++//$$ DEVICE = "Pmu_axp202"
++//$$ L2 PROP_STR = "sub_type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 = "reg"
++//$$ L2 PROP_U32 = "soft_limit_to99"
++//$$ L2 PROP_U32 = "ddr_voltage"
++//$$ L2 PROP_U32 = "vddao_voltage"
++//$$ L2 PROP_STR = "status"
++        axp202 { /* PMU for AXP */
++            compatible = "axp_mfd";                             /* for driver probe, must have          */
++            sub_type = "axp20_mfd";                             /** sub type of pmu family, must have    */
++            i2c_bus = "i2c_bus_ao";                             /** attached i2c bus, must have          */
++            reg = <0x34>;                                       /** device i2c address, must have        */
++            soft_limit_to99 = <0>;                              /** optional                             */
++            ddr_voltage   = <1500000>;                          /** default voltage for DDR, optional    */
++            vddao_voltage = <1200000>;                          /** default voltage for AO, optional     */
++            status = "disable";                                 /** status of pmu, only one should be OK */
++        };
++//$$ DEVICE = "Pmu_aml1212"
++//$$ L2 PROP_STR = "sub_type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 = "reg"
++//$$ L2 PROP_U32 = "soft_limit_to99"
++//$$ L2 PROP_U32 = "ddr_voltage"
++//$$ L2 PROP_U32 = "vddao_voltage"
++//$$ L2 PROP_STR = "status"
++        aml1212{                                                /* PMU for AML1212, see comment above   */
++            compatible = "aml_pmu";                             /* for driver probe, must have          */
++            sub_type = "aml1212";                               /** sub type of pmu family, must have    */
++            i2c_bus = "i2c_bus_ao";                             /** attached i2c bus, must have          */
++            reg = <0x35>;                                       /** device i2c address, must have        */
++            soft_limit_to99 = <0>;                              /** optional                             */
++            ddr_voltage   = <1500000>;                          /** default voltage for DDR, optional    */
++            vddao_voltage = <1200000>;                          /** default voltage for AO, optional     */
++            status = "disable";                                 /** status of pmu, only one should be OK */
++        };
++//$$ DEVICE = "Pmu_rn5t618"
++//$$ L2 PROP_STR = "sub_type"
++//$$ L2 PROP_STR = "i2c_bus"
++//$$ L2 PROP_U32 = "reg"
++//$$ L2 PROP_U32 = "soft_limit_to99"
++//$$ L2 PROP_U32 = "ddr_voltage"
++//$$ L2 PROP_U32 = "vddao_voltage"
++//$$ L2 PROP_STR = "status"
++        rn5t618{                                                /* PMU for RN5T618, see comment above   */
++            compatible = "ricoh_pmu";                           /* for driver probe, must have          */
++            sub_type = "rn5t618";                               /** sub type of pmu family, must have    */
++            i2c_bus = "i2c_bus_ao";                             /** attached i2c bus, must have          */
++            reg = <0x32>;                                       /** device i2c address, must have        */
++            soft_limit_to99 = <0>;                              /** optional                             */
++            ddr_voltage   = <1500000>;                          /** default voltage for DDR, optional    */
++            vddao_voltage = <1200000>;                          /** default voltage for AO, optional     */
++            status = "okay";                                    /** status of pmu, only one should be OK */
++        };
++    };
++
++/// ***************************************************************************************
++///	-	USB Controller
++//$$ MODULE="USB Controller"
++    usb_con {
++		lm-compatible = "logicmodule-bus";
++
++//$$ DEVICE="usb_b"
++//$$ L2 PROP_U32 = "lm-periph-id" 
++//$$ L2 PROP_STR = "clock-src"
++//$$ L2 PROP_U32 = "port-id"
++//$$ L2 PROP_U32 = "port-type"
++//$$ L2 PROP_U32 = "port-speed"
++//$$ L2 PROP_U32 = "port-config"
++//$$ L2 PROP_U32 = "port-dma"
++//$$ L2 PROP_U32 = "port-id-mode"
++//$$ L2 PROP_STR = "status"
++        	usb_b{
++			lm-compatible = "amlogic,usb";
++			lm-periph-id = <1>; /** lm name */
++			clock-src = "usb1"; /** clock src */
++			port-id = <1>;   /** ref to mach/usb.h */
++			port-type = <1>;	/** 0: otg, 1: host, 2: slave */
++			port-speed = <0>; /** 0: default, 1: high, 2: full */
++			port-config = <0>; /** 0: default */
++			port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
++			port-id-mode = <1>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
++			status = "okay";
++		};
++		
++//$$ DEVICE="usb_a"
++//$$ L2 PROP_U32 = "lm-periph-id"
++//$$ L2 PROP_STR = "clock-src"
++//$$ L2 PROP_U32 = "port-id"
++//$$ L2 PROP_U32 = "port-type"
++//$$ L2 PROP_U32 = "port-speed"
++//$$ L2 PROP_U32 = "port-config"
++//$$ L2 PROP_U32 = "port-dma"
++//$$ L2 PROP_U32 = "port-id-mode"
++//$$ L2 PROP_STR = "gpio-vbus-power"
++//$$ L2 PROP_U32 = "gpio-work-mask"
++//$$ L2 PROP_STR = "status"
++		usb_a{
++			lm-compatible = "amlogic,usb";
++			lm-periph-id = <0>; /** lm name */
++			clock-src = "usb0"; /** clock src */
++			port-id = <0>;  /** ref to mach/usb.h */
++			port-type = <0>;	/** 0: otg, 1: host, 2: slave */
++			port-speed = <0>; /** 0: default, high, 1: full */
++			port-config = <0>; /** 0: default */
++			port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
++			port-id-mode = <0>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
++			gpio-vbus-power = "GPIOZ_1";
++			gpio-work-mask	= <1>; /**0: work on pulldown,1:work on pullup*/
++			status = "okay";
++		};
++	};
++
++
++
++
++/// ***************************************************************************************
++///	-	Spi
++//$$ MODULE="Spi"
++//$$ DEVICE="spi"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "reg"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "Spi_pin_0_match" = "pinctrl-0"
++//$$ L2 PROP_U32 = "nr-parts"
++//$$ L2 PROP_CHOICE "Spi_nr-part-0_match" = "nr-part-0"
++//$$ L2 PROP_CHOICE "Spi_nr-part-1_match" = "nr-part-1"
++    spi@cc000000{
++		compatible = "amlogic,apollo_spi_nor";
++		status = "ok";
++		reg = <0xcc000000 0x04000000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&aml_spi_nor_pins>;
++
++		nr-parts = <2>;
++		nr-part-0 = <&bootloader>;
++		nr-part-1 = <&ubootenv>;
++
++//$$ MATCH "Spi_nr-part-0_match" = <&bootloader>
++//$$ L2 PROP_STR = "name"
++//$$ L2 PROP_U32 = "offset"
++//$$ L2 PROP_U32 = "size"
++		bootloader:bootloader{
++			name = "bootloader";
++			offset = <0>;
++			size = <0x60000>;
++		};
++
++//$$ MATCH "Spi_nr-part-1_match" = <&ubootenv>
++//$$ L2 PROP_STR = "name"
++//$$ L2 PROP_U32 = "offset"
++//$$ L2 PROP_U32 = "size"
++		ubootenv:ubootenv{
++			name = "ubootenv";
++		      offset = <0x100000>;
++		      size = <0x10000>;
++		};
++	};
++
++// ***************************************************************************************
++///	-	Nand
++//$$ MODULE="Nand"
++//$$ DEVICE="aml_nand"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 2 ="reg"
++//$$ L2 PROP_STR 2 = "pinctrl-names"
++//$$ L2 PROP_CHOICE 3 "Nand_pin_0_match" = "pinctrl-0"
++//$$ L2 PROP_CHOICE 3 "Nand_pin_1_match" = "pinctrl-1"
++//$$ L3 PROP_STR ="plat-names"
++//$$ L2 PROP_U32 = "plat-num"
++//$$ L2 PROP_CHOICE "plat-part-0_match" = "plat-part-0"
++	nand{
++		compatible = "amlogic,aml_nand";
++		dev_name = "nand";
++		status = "ok";
++		reg = <0xd0048600 0x24>;
++		pinctrl-names = "nand_rb_mod","nand_norb_mod";
++		pinctrl-0 = <&nand_input_state &conf_nand_state &nand_base>;
++		pinctrl-1 = <&nand_input_state &conf_nand_state &nand_base>;
++		device_id = <0>;
++		plat-names = "nandnormal";
++		plat-num = <1>;
++		plat-part-0 = <&normal>;
++
++//$$ MATCH "plat-part-0_match" = <&normal>
++//$$ L2 PROP_STR 4 = "enable_pad"
++//$$ L2 PROP_STR = "busy_pad"
++		normal: normal{
++			enable_pad ="ce0","ce1","ce2","ce3";
++			busy_pad = "rb0";
++		};
++	};
++
++/// ***************************************************************************************
++///	-	Efuse
++//$$ MODULE="Efuse"
++//$$ DEVICE="efuse"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 2 = "plat-pos"
++//$$ L2 PROP_U32 = "plat-count"
++//$$ L2 PROP_U32 = "usid-min"
++//$$ L2 PROP_U32 = "usid-max"
++    efuse{
++		compatible = "amlogic,efuse";
++		dev_name = "efuse";
++		status = "okay";
++		plat-pos = <0 454>;
++		plat-count = <58>;
++		usid-min = <8>; /*reserved*/
++		usid-max = <31>; /*reserved*/
++	};
++
++/// ***************************************************************************************
++/// -   Audio
++//$$ MODULE="Audio"
++//$$ DEVICE="audio_i2s"
++//$$ L2 PROP_STR = "status"
++    audio_platform{
++        compatible = "amlogic,aml-i2s";
++        dev_name = "aml-i2s.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="audio_i2s_dai"
++//$$ L2 PROP_STR = "status"
++    audio_dai{
++        compatible = "amlogic,aml-i2s-dai";
++        dev_name = "aml-i2s-dai.0";
++        status = "okay";
++    };
++    audio_spdif_dai{
++        compatible = "amlogic,aml-spdif-dai";
++        dev_name = "aml-spdif-dai.0";
++        status = "okay";
++    };
++
++    audio_spdif_codec{
++        compatible = "amlogic,aml-spdif-codec";
++        dev_name = "spdif-dit.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="audio_pcm2BT_codec"
++//$$ L2 PROP_STR = "status"
++    audio_pcm2BT_codec{
++        compatible = "amlogic,pcm2BT-codec";
++        dev_name = "pcm2bt.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="audio_pcm_dai"
++//$$ L2 PROP_STR = "status"
++    audio_pcm_dai{
++        compatible = "amlogic,aml-pcm-dai";
++        dev_name = "aml-pcm-dai.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="audio_pcm"
++//$$ L2 PROP_STR = "status"
++    audio_pcm{
++        compatible = "amlogic,aml-pcm";
++        dev_name = "aml-pcm.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="audio_m8_audio"
++//$$ L2 PROP_STR = "status"
++    audio_m8_audio{
++        compatible = "amlogic,m8_audio_codec";
++        dev_name = "aml_m8_codec.0";
++        status = "okay";
++    };
++
++//$$ DEVICE="aml_m8_sound_card"
++//$$ L2 PROP_STR = "aml,sound_card"
++//$$ L2 PROP_STR = "aml,codec_dai"
++//$$ L2 PROP_STR 6*2 = "aml,audio-routing"
++//$$ L2 PROP_STR = "mute_gpio"
++//$$ L2 PROP_U32 5 = "hp_paraments"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "Audio_pin_0_match" = "pinctrl-0"
++//$$ L2 PROP_STR = "status"
++    aml_m8_sound_card{
++        compatible = "sound_card, aml_snd_m8";
++        aml,sound_card = "AML-M8AUDIO";
++        aml,codec_dai = "AML-M8","dit-hifi";
++        aml,audio-routing =
++            "Ext Spk","LINEOUTL",
++            "Ext Spk","LINEOUTR",
++            "HP","HP_L",
++            "HP","HP_R",
++            "MICBIAS","MAIN MIC",
++            "LINPUT1","MICBIAS";
++
++        mute_gpio = "GPIO_BSD_EN";
++        hp_paraments = <800 300 0 5 1>;
++        pinctrl-names = "aml_snd_m8";
++        pinctrl-0 = <&audio_pins>;
++        status = "okay";
++        
++    };
++
++/// ***************************************************************************************
++///	-	Input
++//$$ MODULE="Input"
++//$$ DEVICE="gpio_keypad"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "scan_period"
++//$$ L2 PROP_U32 = "key_num"
++//$$ L2 PROP_STR = "key_name"
++//$$ L2 PROP_U32 = "key_code"
++//$$ L2 PROP_STR = "key_pin"
++//$$ L2 PROP_U32 = "irq_keyup"
++//$$ L2 PROP_U32 = "irq_keydown"
++    gpio_keypad{
++		compatible = "amlogic,gpio_keypad";
++		status = "okay";
++		scan_period = <20>;
++		key_num = <1>;
++        key_name = "power";
++		key_code = <116>;
++		key_pin = "GPIOAO_3";
++        irq_keyup = <6>;
++        irq_keydown = <7>;
++	};
++//$$ DEVICE="saradc"
++//$$ L2 PROP_STR = "status"
++	saradc{
++		compatible = "amlogic,saradc";
++		status = "okay";
++	};
++	
++//$$ DEVICE="meson-remote"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_U32 = "ao_baseaddr"
++//$$ L2 PROP_STR = "pinctrl-names"
++//$$ L2 PROP_CHOICE "remote_pin_0_match" = "pinctrl-0"
++    meson-remote{
++		compatible = "amlogic,aml_remote";
++		dev_name = "meson-remote";
++		status = "ok";
++		ao_baseaddr = <0xf3100480>;
++		pinctrl-names="default";
++		pinctrl-0=<&remote_pins>;
++	};
++	
++/// ***************************************************************************************
++///	-	Securitykey
++//$$ MODULE="Securitykey"
++//$$ DEVICE="securitykey"
++//$$ L2 PROP_STR = "status"
++    securitykey{
++		compatible = "amlogic,aml_keys";
++		status = "ok";
++	};
++
++/// ***************************************************************************************
++///	-	Unifykey
++//$$ MODULE="Unifykey"
++//$$ DEVICE="securitykey"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 ="unifykey-num"
++//$$ L2 PROP_CHOICE "Unifykey_0_match" = "unifykey-index-0"
++//$$ L2 PROP_CHOICE "Unifykey_1_match" = "unifykey-index-1"
++//$$ L2 PROP_CHOICE "Unifykey_2_match" = "unifykey-index-2"
++    	unifykey{
++		compatible = "amlogic,unifykey";
++		status = "ok";
++
++		/*efuse-version = <0>;*/ /*m6 efuse version 2,m3 efuse version 1, not config efuse version in default*/
++		unifykey-num = <3>;
++		unifykey-index-0 = <&keysn_0>;
++		unifykey-index-1 = <&keysn_1>;
++		unifykey-index-2 = <&keysn_2>;
++
++
++//$$ MATCH "Unifykey_0_match" = <&keysn_0>
++//$$ L2 PROP_STR = "key-name"
++//$$ L2 PROP_STR = "key-device"
++//$$ L2 PROP_STR = "key-dataformat"
++//$$ L2 PROP_STR 3 = "key-permit"
++		keysn_0: key_0{
++			key-name = "key0";
++			key-device = "nandkey";
++			key-dataformat = "hexdata";
++			key-permit = "read","write","del";
++		};
++		
++//$$ MATCH "Unifykey_1_match" = <&keysn_1>
++//$$ L2 PROP_STR = "key-name"
++//$$ L2 PROP_STR = "key-device"
++//$$ L2 PROP_STR = "key-dataformat"
++//$$ L2 PROP_STR 3 = "key-permit"
++		keysn_1:key_1{
++			key-name = "key1";
++			key-device = "nandkey";
++			key-dataformat = "hexdata";
++			key-permit = "read","write","del";
++		};
++		
++//$$ MATCH "Unifykey_2_match" = <&keysn_2>
++//$$ L2 PROP_STR = "key-name"
++//$$ L2 PROP_STR = "key-device"
++//$$ L2 PROP_STR = "key-dataformat"
++//$$ L2 PROP_STR 3 = "key-permit"
++		keysn_2:key_2{
++			key-name = "key2";
++			key-device = "nandkey";
++			key-dataformat = "hexdata";
++			key-permit = "read","write","del";
++		};
++	};
++	
++/// ***************************************************************************************
++///	-	HDMI
++//$$ MODULE="HDMI"
++//$$ DEVICE="amhdmitx"
++//$$ L2 PROP_STR = "status"
++//$$ L2 PROP_CHOICE "HDMI_vend-data_match" = "vend-data"
++//$$ L2 PROP_CHOICE "HDMI_pwr-ctrl_match" = "pwr-ctrl"
++    amhdmitx{
++		compatible = "amlogic,amhdmitx";
++		dev_name = "amhdmitx";
++		status = "ok";
++        vend-data = <&vend_data>;
++        pwr-ctrl = <&pwr_ctrl>;
++        
++//$$ MATCH "HDMI_vend-data_match" = <&vend_data>
++//$$ L2 PROP_STR = "vendor_name"
++//$$ L2 PROP_U32 = "vendor_id"
++//$$ L2 PROP_STR = "product_desc"
++//$$ L2 PROP_STR = "cec_osd_string"        
++        vend_data: vend_data{
++            vendor_name = "Amlogic";           /* Max Chars: 8     */
++            vendor_id = <0x000000>;                 /* Refer to http://standards.ieee.org/develop/regauth/oui/oui.txt   */
++            product_desc = "M8 MBox SKTv1";        /* Max Chars: 16    */
++            cec_osd_string = "Amlogic MBox";        /* Max Chars: 14    */
++        };
++        
++//$$ MATCH "HDMI_pwr-ctrl_match" = <&pwr_ctrl>
++//$$ L2 PROP_STR = "pwr_5v_on"
++//$$ L2 PROP_STR = "pwr_5v_off"
++//$$ L2 PROP_STR = "pwr_3v3_on"
++//$$ L2 PROP_STR = "pwr_3v3_off"
++//$$ L2 PROP_STR = "pwr_hpll_vdd_on"
++//$$ L2 PROP_STR = "pwr_hpll_vdd_off"
++        pwr_ctrl: pwr_ctrl{
++            pwr_5v_on = "";
++            pwr_5v_off = "";
++            pwr_3v3_on = "";
++            pwr_3v3_off = "";
++            pwr_hpll_vdd_on = "";
++            pwr_hpll_vdd_off = "";
++        };
++	};
++
++/// ***************************************************************************************
++///	-	PowerManager
++//$$ MODULE="PowerManager"
++//$$ DEVICE="amvenc_avc"
++//$$ L2 PROP_STR = "status"
++    aml_pm{
++		compatible = "amlogic,pm-m8";
++		dev_name = "aml_pm_m8";
++		status = "okay";
++	};
++
++/// ***************************************************************************************
++///	-	Cpufreq
++//$$ MODULE="Cpufreq"
++//$$ DEVICE="cpufreq-meson"
++//$$ L2 PROP_STR = "status"
++    cpufreq-meson{
++        compatible = "amlogic,cpufreq-meson";
++        status = "okay";
++    };
++
++    crypto_device{
++       compatible = "amlogic,crypto-device";
++       dev_name = "crypto_device";
++    };
++
++/// **************************************************************************************
++/// -   GPIO
++//$$ MODULE="GPIO"
++//$$ DEVICE="m8-gpio"
++	gpio:gpio{
++		compatible = "amlogic,m8-gpio";
++		dev_name = "gpio";
++		#gpio-cells=<2>;
++	};
++
++/// **************************************************************************************
++/// -   Pinmux
++//$$ MODULE="Pinmux"
++//$$ DEVICE="pinmux-m8"
++    pinmux{ 
++		compatible = "amlogic,pinmux-m8";
++		dev_name = "pinmux";
++		#pinmux-cells=<2>;    
++    
++//$$ MATCH "uart_ao_pin_match" = "&ao_uart_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"
++        ao_uart_pins:ao_uart{
++			amlogic,setmask=<10 0x1800>;
++			amlogic,pins="GPIOAO_0", "GPIOAO_1";
++		};
++		
++//$$ MATCH "uart_0_pin_match" = "&a_uart_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_STR 4 = "amlogic,pins"
++		a_uart_pins:a_uart{
++			amlogic,setmask=<4 0x3c00>;
++			amlogic,pins="GPIOX_12", "GPIOX_13", "GPIOX_14", "GPIOX_15";
++		};
++		
++//$$ MATCH "Nand_pin_0_match" = "&nand_input_state"
++//$$ MATCH "Nand_pin_1_match" = "&nand_input_state"
++//$$ L2 PROP_STR 18 = "amlogic,pins"
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++		nand_input_state:nand_input{
++			amlogic,pins = "BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_4",
++						"BOOT_5","BOOT_6","BOOT_7","BOOT_12","BOOT_13",
++						"BOOT_8","BOOT_9","BOOT_10","BOOT_11",
++						"BOOT_14","BOOT_15","BOOT_16","BOOT_17";
++			amlogic,enable-output=<1>;
++		};
++		
++//$$ MATCH "Nand_pin_0_match" = "&conf_nand_state"
++//$$ MATCH "Nand_pin_1_match" = "&conf_nand_state"
++//$$ L2 PROP_STR 9 = "amlogic,pins"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++		conf_nand_state: conf_nand{
++			amlogic,pins = "BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_4",
++						"BOOT_5","BOOT_6","BOOT_7","BOOT_15";
++			amlogic,pullup=<0>;
++		};
++		
++//$$ MATCH "Nand_pin_0_match" = "&nand_base"
++//$$ MATCH "Nand_pin_1_match" = "&nand_base"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 17 = "amlogic,pins"
++		nand_base: nand{
++			amlogic,setmask=<2 0x7fe0000>;
++			amlogic,clrmask=<	5 0xe
++							6 0x3f000000
++							4 0x7c000000>;
++			amlogic,pins = "BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_4",
++						"BOOT_5","BOOT_6","BOOT_7","BOOT_8","BOOT_9",
++						"BOOT_10","BOOT_12","BOOT_13",
++						"BOOT_14","BOOT_15","BOOT_16","BOOT_17";
++		};
++		
++//$$ MATCH "Card_pin_0_match" = "&sdhc_b_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 4 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++		sdhc_b_pins:sdhc_b_pin{
++			amlogic,setmask=<2 0xfc00>;
++			amlogic,clrmask=<2 0xf0 8 0x600>;
++			amlogic,pins="CARD_0","CARD_1","CARD_2","CARD_3","CARD_4","CARD_5";
++		};
++
++//$$ MATCH "Card_pin_1_match" = "&sdhc_c_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 4 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++		sdhc_c_pins:sdhc_c_pin{
++			amlogic,setmask=<6 0x3f000000>;
++			amlogic,clrmask=<4 0x6c000000 2 0x4c00000>;
++			amlogic,pins="BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_10","BOOT_11";
++		};
++
++//$$ MATCH "Card_pin_2_match" = "&sdhc_a_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"		
++		sdhc_a_pins:sdhc_a_pin{
++			amlogic,setmask=<8 0x3f>;
++			amlogic,clrmask=<5 0x6c00 >;
++			amlogic,pins="GPIOX_0","GPIOX_1","GPIOX_2","GPIOX_3","GPIOX_8","GPIOX_9";
++		};
++
++//$$ MATCH "sdio_pin_5_match" = "&sdio_all_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"	
++        sdio_all_pins:sdio_all_pins{
++            amlogic,setmask=<8 0x0000003f>;         /*sdio a*/
++            amlogic,clrmask=<6 0x3f000000           /*sdio c*/
++                                2 0x0000fc00        /*sdio b*/
++                                5 0x00006c00>;      /*sdhc a*/
++            amlogic,pins = "GPIOX_0","GPIOX_1","GPIOX_2","GPIOX_3","GPIOX_8","GPIOX_9";
++            amlogic,enable-output=<1>; /** 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++        
++//$$ MATCH "sdio_pin_4_match" = "&sdio_clk_cmd_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"
++        sdio_clk_cmd_pins:sdio_clk_cmd_pins{
++            amlogic,setmask=<8 0x00000003>;         /*sdio a*/
++            amlogic,clrmask=<6 0x3f000000           /*sdio c*/
++                                2 0x0000fc00        /*sdio b*/
++                                5 0x00006c00>;      /*sdhc a*/
++            amlogic,pins = "GPIOX_8","GPIOX_9"; /** GPIOX_8:CLK, GPIOX_9:CMD */
++            amlogic,enable-output=<1>; /** 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++
++//$$ MATCH "sdio_pin_1_match" = "&sd_all_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"
++        sd_all_pins:sd_all_pins{
++            amlogic,setmask=<2 0x0000fc00>;         /*sdio b*/
++            amlogic,clrmask=<6 0x3f000000           /*sdio c*/
++                                8 0x0000063f        /*sdio a, UART*/
++                                2 0x000000f0>;      /*sdhc b*/
++            amlogic,pins = "CARD_0","CARD_1","CARD_2","CARD_3","CARD_4","CARD_5";
++            amlogic,enable-output=<1>; /* 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++        
++//$$ MATCH "sdio_pin_6_match" = "&sd_1bit_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"
++        sd_1bit_pins:sd_1bit_pins{
++            amlogic,setmask=<2 0x00008c00>;         /*sdio b*/
++            amlogic,clrmask=<6 0x3f000000           /*sdio c*/
++                                8 0x0000003f        /*sdio a*/
++                                2 0x000000f0>;      /*sdhc b*/
++            amlogic,pins = "CARD_0","CARD_1","CARD_2","CARD_3","CARD_4","CARD_5";
++            amlogic,enable-output=<1>; /* 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++        
++//$$ MATCH "sdio_pin_0_match" = "&sd_clk_cmd_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"
++        sd_clk_cmd_pins:sd_clk_cmd_pins{
++            amlogic,setmask=<2 0x00000c00>;         /*sdio b*/
++            amlogic,clrmask=<6 0x3f000000           /*sdio c*/
++                                8 0x0000003f        /*sdio a*/
++                                2 0x000000f0>;      /*sdhc b*/
++            amlogic,pins = "CARD_2","CARD_3"; /** CARD_2:CLK, CARD_3:CMD */
++            amlogic,enable-output=<1>; /** 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++        
++//$$ MATCH "sdio_pin_3_match" = "&emmc_all_pins"  
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"      
++        emmc_all_pins:emmc_all_pins{
++            amlogic,setmask=<6 0x3f000000>;         /*sdio c*/
++            amlogic,clrmask=<2 0x04c0fc00           /*sdio b & nand*/
++                                8 0x0000003f        /*sdio a*/
++                                4 0x6c000000>;        /*sdhc c*/
++            amlogic,pins = "BOOT_0","BOOT_1","BOOT_2","BOOT_3","BOOT_16","BOOT_17";
++            amlogic,enable-output=<1>; /** 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++        
++//$$ MATCH "sdio_pin_2_match" = "&emmc_clk_cmd_pins" 
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 3*2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"	
++//$$ L2 PROP_U32 = "amlogic,enable-output"
++//$$ L2 PROP_U32 = "amlogic,pullup"
++//$$ L2 PROP_U32 = "amlogic,pullupen"
++        emmc_clk_cmd_pins:emmc_clk_cmd_pins{
++            amlogic,setmask=<6 0x03000000>;         /*bit[24-25] */
++            amlogic,clrmask=<2 0x04c0fc00           /*sdio b & nand*/
++                                8 0x0000003f        /*sdio a*/
++                                4 0x6c000000>;        /*sdhc c*/
++            amlogic,pins = "BOOT_16","BOOT_17"; /** BOOT_16:CMD, BOOT_17:CLK */
++            amlogic,enable-output=<1>; /** 0:output, 1:input */
++            amlogic,pullup=<1>;
++            amlogic,pullupen=<1>;
++        };
++
++//$$ MATCH "I2C_AO_pin_match" = "&ao_i2c_master"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"
++		ao_i2c_master:ao_i2c{
++			amlogic,setmask=<10 0x60>;
++			amlogic,clrmask=<10 0x1800006>;
++			amlogic,pins="GPIOAO_4","GPIOAO_5";
++		};
++		
++// MATCH "I2C_A_pin_match" = "&a_i2c_master"
++// L2 PROP_U32 2 = "amlogic,setmask"
++// L2 PROP_U32 2 = "amlogic,clrmask"
++// L2 PROP_STR 2 = "amlogic,pins"
++//		a_i2c_master:a_i2c{
++//			amlogic,setmask=<5 0xc0000000>;
++//			amlogic,clrmask=<9 0x58000 7 3000000>;
++//			amlogic,pins="GPIOZ_0","GPIOZ_1";
++
++//			amlogic,setmask=<5 0x300>;
++//			amlogic,clrmask=<6 0x900 8 11000>;
++//			amlogic,pins="GPIOZ_9","GPIOZ_10";
++
++//			amlogic,setmask=<5 0xc0>;
++//			amlogic,clrmask=<6 0xc0 8 0xc000>;
++//			amlogic,pins="GPIOZ_11","GPIOZ_12";
++//		};
++		
++//$$ MATCH "I2C_B_pin_match" = "&b_i2c_master"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"
++		b_i2c_master:b_i2c{
++			amlogic,setmask=<5 0xc000000>;
++			amlogic,pins="GPIOZ_2","GPIOZ_3";
++		};
++
++// MATCH "I2C_C_pin_match" = "&c_i2c_master"
++// L2 PROP_U32 2 = "amlogic,setmask"
++// L2 PROP_U32 2 = "amlogic,clrmask"
++// L2 PROP_STR 2 = "amlogic,pins"		
++//		c_i2c_master:c_i2c{
++//			amlogic,setmask=<5 0x3000000>;
++//			amlogic,clrmask=<6 0xc000>;
++//			amlogic,pins="GPIOZ_4","GPIOZ_5";
++
++//			amlogic,setmask=<1 0xc000>;
++//			amlogic,clrmask=<1 0xc0400 3 0x6 9 0x300>;
++//			amlogic,pins="GPIOY_0","GPIOY_1";
++//		};
++
++//$$ MATCH "I2C_D_pin_match" = "&d_i2c_master"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_STR 2 = "amlogic,pins"
++		d_i2c_master:d_i2c{
++			amlogic,setmask=<4 0xc>;
++			amlogic,pins="GPIOH_7","GPIOH_8";
++		};
++
++//$$ MATCH "remote_pin_0_match" = "&remote_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_STR = "amlogic,pins"
++        	remote_pins:remote_pin{
++			amlogic,setmask=<10 0x1>;
++			amlogic,pins="GPIOAO_7";
++		};
++
++//$$ MATCH "Audio_pin_0_match" = "&audio_pins"
++//$$ L2 PROP_U32 4 = "amlogic,setmask"
++//$$ L2 PROP_U32 10 = "amlogic,clrmask"
++//$$ L2 PROP_STR 6 = "amlogic,pins"
++        audio_pins:audio_pin{
++            amlogic,setmask=<1 0x80
++                             1 0x75>;
++            amlogic,clrmask=<1 0x10000
++                             1 0x0a
++                             3 0x389
++                             4 0x3c00000
++                             9 0xd>;
++            amlogic,pins = "GPIOY_3","GPIOY_4","GPIOY_5","GPIOY_6","GPIOY_7","GPIOY_8";
++        };
++
++//$$ MATCH "Spi_pin_0_match" = "&aml_spi_nor_pins"
++//$$ L2 PROP_U32 2 = "amlogic,setmask"
++//$$ L2 PROP_U32 2 = "amlogic,clrmask"
++//$$ L2 PROP_STR 4 = "amlogic,pins"
++		aml_spi_nor_pins: aml_spi_nor_pins{
++			amlogic,setmask=<5 0xf>;
++			amlogic,clrmask=<2 0x380000>;
++			amlogic,pins = "BOOT_11","BOOT_12","BOOT_13","BOOT_18";
++		};
++
++	};
++/// ***************************************************************************************
++///	-	Ethernet
++//$$ MODULE="Ethernet"
++//$$ DEVICE="meson-eth"
++//$$ L2 PROP_STR = "status"
++    meson-eth{
++		compatible = "amlogic,meson-eth";
++		dev_name = "meson-eth";
++		status = "okay";
++		ethbaseaddr = <0xfe0c0000>;
++		interruptnum = <40>;
++	};
++
++}; /* end of / */
+diff --git a/arch/arm/configs/meson8_tee_defconfig b/arch/arm/configs/meson8_tee_defconfig
+new file mode 100755
+index 000000000000..d4ad28477852
+--- /dev/null
++++ b/arch/arm/configs/meson8_tee_defconfig
+@@ -0,0 +1,394 @@
++CONFIG_KERNEL_LZO=y
++CONFIG_SYSVIPC=y
++CONFIG_NO_HZ=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_BSD_PROCESS_ACCT=y
++CONFIG_IKCONFIG=y
++CONFIG_IKCONFIG_PROC=n
++CONFIG_BLK_DEV_INITRD=y
++CONFIG_RD_BZIP2=y
++CONFIG_RD_LZMA=y
++CONFIG_RD_XZ=y
++CONFIG_RD_LZO=y
++CONFIG_KALLSYMS_ALL=y
++CONFIG_EMBEDDED=y
++CONFIG_MODULES=y
++CONFIG_MODULE_UNLOAD=y
++CONFIG_MESON_SUSPEND=y
++CONFIG_MESON_LEGACY_REGISTER_API=y
++CONFIG_ARM_ERRATA_751472=y
++CONFIG_ARM_ERRATA_754322=y
++CONFIG_ARM_ERRATA_764369=y
++CONFIG_ARCH_MESON8=y
++CONFIG_SMP=y
++CONFIG_PREEMPT=y
++CONFIG_AEABI=y
++CONFIG_HIGHMEM=y
++# CONFIG_COMPACTION is not set
++CONFIG_VFP=y
++CONFIG_NEON=y
++CONFIG_BINFMT_MISC=y
++CONFIG_NET=y
++CONFIG_PACKET=y
++CONFIG_PACKET_DIAG=y
++CONFIG_UNIX=y
++CONFIG_UNIX_DIAG=y
++CONFIG_NET_KEY=y
++CONFIG_INET=y
++CONFIG_IP_ADVANCED_ROUTER=y
++CONFIG_IP_MULTIPLE_TABLES=y
++CONFIG_INET_ESP=y
++CONFIG_IPV6=y
++CONFIG_IPV6_PRIVACY=y
++CONFIG_IPV6_ROUTER_PREF=y
++CONFIG_IPV6_OPTIMISTIC_DAD=y
++CONFIG_INET6_AH=y
++CONFIG_INET6_ESP=y
++CONFIG_INET6_IPCOMP=y
++CONFIG_IPV6_MIP6=y
++CONFIG_IPV6_TUNNEL=y
++CONFIG_IPV6_MULTIPLE_TABLES=y
++CONFIG_NETFILTER=y
++CONFIG_NF_CONNTRACK=y
++CONFIG_NF_CONNTRACK_EVENTS=y
++CONFIG_NF_CT_PROTO_DCCP=y
++CONFIG_NF_CT_PROTO_SCTP=y
++CONFIG_NF_CT_PROTO_UDPLITE=y
++CONFIG_NF_CONNTRACK_AMANDA=y
++CONFIG_NF_CONNTRACK_FTP=y
++CONFIG_NF_CONNTRACK_H323=y
++CONFIG_NF_CONNTRACK_IRC=y
++CONFIG_NF_CONNTRACK_NETBIOS_NS=y
++CONFIG_NF_CONNTRACK_PPTP=y
++CONFIG_NF_CONNTRACK_SANE=y
++CONFIG_NF_CONNTRACK_TFTP=y
++CONFIG_NF_CT_NETLINK=y
++CONFIG_NETFILTER_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_CLASSIFY=y
++CONFIG_NETFILTER_XT_TARGET_CONNMARK=y
++CONFIG_NETFILTER_XT_TARGET_MARK=y
++CONFIG_NETFILTER_XT_TARGET_NFLOG=y
++CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
++CONFIG_NETFILTER_XT_TARGET_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_TRACE=y
++CONFIG_NETFILTER_XT_MATCH_COMMENT=y
++CONFIG_NETFILTER_XT_MATCH_CONNBYTES=y
++CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_CONNMARK=y
++CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
++CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_HELPER=y
++CONFIG_NETFILTER_XT_MATCH_IPRANGE=y
++CONFIG_NETFILTER_XT_MATCH_LENGTH=y
++CONFIG_NETFILTER_XT_MATCH_LIMIT=y
++CONFIG_NETFILTER_XT_MATCH_MAC=y
++CONFIG_NETFILTER_XT_MATCH_MARK=y
++CONFIG_NETFILTER_XT_MATCH_POLICY=y
++CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
++CONFIG_NETFILTER_XT_MATCH_QTAGUID=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA2=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA2_LOG=y
++CONFIG_NETFILTER_XT_MATCH_SOCKET=y
++CONFIG_NETFILTER_XT_MATCH_STATE=y
++CONFIG_NETFILTER_XT_MATCH_STATISTIC=y
++CONFIG_NETFILTER_XT_MATCH_STRING=y
++CONFIG_NETFILTER_XT_MATCH_TIME=y
++CONFIG_NETFILTER_XT_MATCH_U32=y
++CONFIG_NF_CONNTRACK_IPV4=y
++CONFIG_IP_NF_IPTABLES=y
++CONFIG_IP_NF_MATCH_AH=y
++CONFIG_IP_NF_MATCH_ECN=y
++CONFIG_IP_NF_MATCH_TTL=y
++CONFIG_IP_NF_FILTER=y
++CONFIG_IP_NF_TARGET_REJECT=y
++CONFIG_IP_NF_TARGET_REJECT_SKERR=y
++CONFIG_NF_NAT_IPV4=y
++CONFIG_IP_NF_TARGET_MASQUERADE=y
++CONFIG_IP_NF_TARGET_NETMAP=y
++CONFIG_IP_NF_TARGET_REDIRECT=y
++CONFIG_IP_NF_MANGLE=y
++CONFIG_IP_NF_RAW=y
++CONFIG_IP_NF_ARPTABLES=y
++CONFIG_IP_NF_ARPFILTER=y
++CONFIG_IP_NF_ARP_MANGLE=y
++CONFIG_NF_CONNTRACK_IPV6=y
++CONFIG_IP6_NF_IPTABLES=y
++CONFIG_IP6_NF_FILTER=y
++CONFIG_IP6_NF_TARGET_REJECT=y
++CONFIG_IP6_NF_TARGET_REJECT_SKERR=y
++CONFIG_IP6_NF_MANGLE=y
++CONFIG_IP6_NF_RAW=y
++CONFIG_NF_NAT_IPV6=y
++CONFIG_IP6_NF_TARGET_MASQUERADE=y
++CONFIG_IP6_NF_TARGET_NPT=y
++CONFIG_BRIDGE=y
++# CONFIG_BRIDGE_IGMP_SNOOPING is not set
++CONFIG_PHONET=y
++CONFIG_NET_SCHED=y
++CONFIG_NET_SCH_HTB=y
++CONFIG_NET_SCH_INGRESS=y
++CONFIG_NET_CLS_U32=y
++CONFIG_NET_EMATCH=y
++CONFIG_NET_EMATCH_U32=y
++CONFIG_NET_CLS_ACT=y
++CONFIG_NET_ACT_POLICE=y
++CONFIG_NET_ACT_GACT=y
++CONFIG_NET_ACT_MIRRED=y
++
++CONFIG_WIRELESS=y
++CONFIG_CFG80211=y
++CONFIG_CFG80211_DEFAULT_PS=y
++CONFIG_MAC80211=y
++CONFIG_MAC80211_HAS_RC=y
++CONFIG_MAC80211_RC_MINSTREL=y
++CONFIG_MAC80211_RC_MINSTREL_HT=y
++CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y
++CONFIG_MAC80211_RC_DEFAULT="minstrel_ht"
++CONFIG_WAKELOCK=y
++CONFIG_SUSPEND=y
++CONFIG_I2C_AML=y
++CONFIG_SARADC_AM=y
++# CONFIG_MESON_INPUT_REMOTE is not set
++CONFIG_NEW_AM_REMOTE=y
++CONFIG_NEW_AM_IR_TX=y
++CONFIG_ADC_KEYPADS_AM=y
++CONFIG_MESON_INPUT_TOUCHSCREEN=y
++CONFIG_FOCALTECH_CAPACITIVE_TOUCHSCREEN=y
++CONFIG_GOODIX_GT81XX_CAPACITIVE_TOUCHSCREEN=y
++CONFIG_GSLX680_CAPACITIVE_TOUCHSCREEN=y
++CONFIG_GOODIX_GT9XX_CAPACITIVE_TOUCHSCREEN=y
++CONFIG_TOUCHSCREEN_CT36X=y
++CONFIG_AML_GPIO_KEY=y
++CONFIG_AML_PMU_ALGORITHM_SUPPORT=y
++CONFIG_RICOH_PMU=y
++CONFIG_RN5T618=y
++CONFIG_EFUSE=y
++CONFIG_AMLOGIC_USB=y
++CONFIG_MMC_AML=y
++# CONFIG_MMC_AML_DEBUG is not set
++CONFIG_AMLOGIC_SPI_NOR=y
++CONFIG_AML_NEXT_GEN_NAND=y
++CONFIG_AM_ETHERNET=y
++CONFIG_AM_WIFI=y
++CONFIG_AM_WIFI_SD_MMC=y
++CONFIG_BCMDHD_POWER_OFF_IN_SUSPEND=y
++CONFIG_SDIO_DHD_CDC_WIFI_40181_MODULE=m
++CONFIG_BCMDHD_OOB=y
++CONFIG_AM_WIFI_USB=y
++CONFIG_RTL8188EU=m
++CONFIG_RTL8188EU_MP=m
++CONFIG_AM_ETHERNET_DEBUG_LEVEL=1
++CONFIG_VSYNC_RDMA=y
++CONFIG_AM_VIDEO=y
++CONFIG_AM_ENCODER=y
++CONFIG_AM_TV_OUTPUT2=y
++CONFIG_V4L_AMLOGIC_VIDEO=y
++CONFIG_AM_HDMI_ONLY=y
++CONFIG_FB_AM=y
++CONFIG_FB_OSD2_CURSOR=y
++CONFIG_FB_OSD2_DEFAULT_WIDTH=32
++CONFIG_FB_OSD2_DEFAULT_HEIGHT=32
++CONFIG_FB_OSD2_DEFAULT_WIDTH_VIRTUAL=32
++CONFIG_FB_OSD2_DEFAULT_HEIGHT_VIRTUAL=32
++CONFIG_AM_FB_EXT=y
++CONFIG_AMLOGIC_BACKLIGHT=y
++CONFIG_AM_GE2D=y
++CONFIG_AM_LOGO=y
++CONFIG_TVIN=y
++CONFIG_TVIN_VDIN=y
++CONFIG_VIUIN=y
++CONFIG_TVIN_ISP=y
++CONFIG_POST_PROCESS_MANAGER=y
++CONFIG_POST_PROCESS_MANAGER_PPSCALER=y
++CONFIG_V4L_AMLOGIC_VIDEO=y
++CONFIG_V4L_AMLOGIC_VIDEO2=y
++CONFIG_DEINTERLACE=y
++CONFIG_MESON_TRUSTZONE=y
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_MTD=y
++CONFIG_MTD_BLOCK=y
++CONFIG_PROC_DEVICETREE=y
++CONFIG_OF_SELFTEST=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_SCSI=y
++CONFIG_BLK_DEV_SD=y
++CONFIG_BLK_DEV_SR=y
++CONFIG_SCSI_MULTI_LUN=y
++CONFIG_NETDEVICES=y
++CONFIG_TUN=y
++CONFIG_PHYLIB=y
++CONFIG_PPP=y
++CONFIG_PPP_BSDCOMP=y
++CONFIG_PPP_DEFLATE=y
++CONFIG_PPP_FILTER=y
++CONFIG_PPP_MPPE=y
++CONFIG_PPP_MULTILINK=y
++CONFIG_PPPOLAC=y
++CONFIG_PPPOPNS=y
++CONFIG_PPP_ASYNC=y
++CONFIG_PPP_SYNC_TTY=y
++CONFIG_USB_USBNET=y
++CONFIG_INPUT_POLLDEV=y
++CONFIG_INPUT_EVDEV=y
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_UINPUT=y
++CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
++CONFIG_MEDIA_SUPPORT=y
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_USB_SUPPORT=y
++CONFIG_USB_VIDEO_CLASS=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_SPI=y
++CONFIG_MEDIA_SUPPORT=y
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_SOC=y
++CONFIG_SND_AML_SOC=y
++CONFIG_SND_AML_M_DUMMY_CODEC=y
++CONFIG_SND_AML_M8=y
++CONFIG_SND_AML_M8_RT5616=y
++CONFIG_SND_AML_M8_PCM=y
++CONFIG_UHID=y
++CONFIG_SND_USB=y
++CONFIG_SND_USB_AUDIO=y
++CONFIG_USB=y
++CONFIG_USB_ACM=y
++CONFIG_USB_STORAGE=y
++CONFIG_USB_SERIAL=y
++CONFIG_USB_SERIAL_OPTION=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DWC_OTG=y
++CONFIG_USB_G_ANDROID=y
++CONFIG_MMC_DEBUG=y
++CONFIG_UIO=y
++CONFIG_UIO_PDRV=y
++CONFIG_UIO_PDRV_GENIRQ=y
++CONFIG_STAGING=y
++CONFIG_ANDROID=y
++CONFIG_ANDROID_BINDER_IPC=y
++CONFIG_ASHMEM=y
++CONFIG_ANDROID_LOGGER=y
++CONFIG_ANDROID_LOW_MEMORY_KILLER=y
++CONFIG_ANDROID_INTF_ALARM_DEV=y
++CONFIG_SYNC=y
++CONFIG_EXT2_FS=y
++CONFIG_EXT3_FS=y
++CONFIG_EXT3_FS_POSIX_ACL=y
++CONFIG_EXT3_FS_SECURITY=y
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_POSIX_ACL=y
++CONFIG_EXT4_FS_SECURITY=y
++CONFIG_EXT4_DEBUG=y
++CONFIG_QUOTA=y
++CONFIG_QFMT_V2=y
++CONFIG_FUSE_FS=y
++CONFIG_ISO9660_FS=y
++CONFIG_JOLIET=y
++CONFIG_ZISOFS=y
++CONFIG_UDF_FS=y
++CONFIG_MSDOS_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_TMPFS=y
++CONFIG_CRAMFS=y
++CONFIG_CIFS=y
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_PRINTK_TIME=y
++CONFIG_NLS_UTF8=y
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_READABLE_ASM=y
++CONFIG_DEBUG_SECTION_MISMATCH=y
++CONFIG_SCHEDSTATS=y
++CONFIG_TIMER_STATS=y
++CONFIG_DEBUG_INFO=y
++CONFIG_CRYPTO_AUTHENC=y
++CONFIG_CRYPTO_CBC=y
++CONFIG_CRYPTO_ECB=y
++CONFIG_CRYPTO_HMAC=y
++CONFIG_CRYPTO_MD5=y
++CONFIG_CRYPTO_SHA1=y
++CONFIG_CRYPTO_SHA256=y
++CONFIG_CRYPTO_AES=y
++CONFIG_CRYPTO_ARC4=y
++CONFIG_CRYPTO_DES=y
++CONFIG_CRYPTO_DEFLATE=y
++CONFIG_CRC_CCITT=y
++CONFIG_CRC16=y
++CONFIG_CRC_T10DIF=y
++CONFIG_CRC7=y
++CONFIG_LIBCRC32C=y
++CONFIG_AVERAGE=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE=y
++CONFIG_AMLOGIC_CAPTURE_FRAME_ROTATE=y
++CONFIG_AMLOGIC_VM_DISABLE_VIDEOLAYER=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_GC0308=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_GC0328=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_GC2035=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_GT2005=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_OV5640=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_OV5647=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_HI253=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_HM2057=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_AR0543=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_AR0833=y
++CONFIG_VIDEO_AMLOGIC_CAPTURE_SP0A19=y
++CONFIG_TVIN_ISP=y
++CONFIG_TVIN_CSI=y
++CONFIG_SENSOR_DEVICES=y
++CONFIG_GRAVITY_BMA250=y
++CONFIG_GRAVITY_BMA222=y
++CONFIG_GRAVITY_MMA7660=y
++CONFIG_GRAVITY_LIS3DH=y
++CONFIG_GRAVITY_MMA8452=y
++CONFIG_GRAVITY_MC32X0=y
++CONFIG_GRAVITY_DMARD06=y
++CONFIG_GRAVITY_MMA865X=y
++CONFIG_GRAVITY_STK8312=y
++CONFIG_GRAVITY_LSM303D=y
++CONFIG_GRAVITY_DMARD10=y
++CONFIG_GRAVITY_KXTJ9=y
++CONFIG_GRAVITY_MM3A310=y
++CONFIG_GRAVITY_MXC622X=y
++CONFIG_LIGHT_CM36283=y
++CONFIG_LIGHT_CM3232=y
++CONFIG_LIGHT_LTR501=y
++CONFIG_LIGHT_EPL6814=y
++CONFIG_LIGHT_STK220X=y
++CONFIG_LIGHT_LTR558=y
++CONFIG_LIGHT_ISL29023=y
++CONFIG_CMA=y
++CONFIG_CMA_SIZE_MBYTES=12
++CONFIG_CMA_SIZE_SEL_MBYTES=y
++CONFIG_CMA_ALIGNMENT=8
++CONFIG_CMA_AREAS=7
++CONFIG_SECURITYKEY=y
++CONFIG_AML_NAND_KEY=y
++CONFIG_NAND_KEY_BLOCK_NUM=8
++CONFIG_AML_EMMC_KEY=y
++CONFIG_BT=y
++CONFIG_BT_L2CAP=y
++CONFIG_BT_SCO=y
++CONFIG_BT_RFCOMM=y
++CONFIG_BT_RFCOMM_TTY=y
++CONFIG_BT_BNEP=y
++CONFIG_BT_BNEP_MC_FILTER=y
++CONFIG_BT_BNEP_PROTO_FILTER=y
++CONFIG_BT_HIDP=y
++CONFIG_BT_HCIUART=y
++CONFIG_BT_HCIUART_H4=y
++CONFIG_RFKILL=y
++CONFIG_BT_DEVICE=y
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
++CONFIG_AMLOGIC_MESON_CPUFREQ=y
++CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
++CONFIG_CPU_FREQ_GOV_ONDEMAND=y
++CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
++CONFIG_CPU_FREQ_GOV_INTERACTIVE=y
++CONFIG_AML_DVFS=y
++CONFIG_RTC_CLASS=y
++CONFIG_AML_RTC=y
++CONFIG_PM_RUNTIME=y
++CONFIG_AMLOGIC_IONVIDEO=y
+diff --git a/arch/arm/mach-meson8/Makefile b/arch/arm/mach-meson8/Makefile
+index dd6c69181148..86dd12195495 100755
+--- a/arch/arm/mach-meson8/Makefile
++++ b/arch/arm/mach-meson8/Makefile
+@@ -38,3 +38,10 @@ obj-$(CONFIG_MESON_SUSPEND) += power_suspend.o
+ #ifneq ($(CONFIG_MESON_SUSPEND),y)
+ #obj-$(CONFIG_SUSPEND) += sleep.o
+ #endif
++
++# ARM Trustzone
++obj-$(CONFIG_MESON_TRUSTZONE) += meson-smc.o meson-secure.o
++ifeq ($(CONFIG_MESON_TRUSTZONE),y)
++plus_sec                      := $(call as-instr,.arch_extension sec,+sec)
++AFLAGS_meson-smc.o            := -Wa,-march=armv7-a$(plus_sec)
++endif
+diff --git a/arch/arm/mach-meson8/clock.c b/arch/arm/mach-meson8/clock.c
+index ea5950a20709..68caa03085f6 100755
+--- a/arch/arm/mach-meson8/clock.c
++++ b/arch/arm/mach-meson8/clock.c
+@@ -44,6 +44,11 @@
+ //#include <mach/hardware.h>
+ //#include <mach/clk_set.h>
+ //#include <mach/power_gate.h>
++
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
++
+ static DEFINE_SPINLOCK(clockfw_lock);
+ static DEFINE_MUTEX(clock_ops_lock);
+ 
+@@ -872,14 +877,31 @@ void meson_set_cpu_power_ctrl(uint32_t cpu,int is_power_on)
+ void meson_set_cpu_ctrl_reg(int cpu,int is_on)
+ {
+ 	spin_lock(&clockfw_lock);
++
++#ifdef CONFIG_MESON_TRUSTZONE
++	uint32_t value = 0;
++	value = meson_read_corectrl();
++	value |= is_on << cpu;
++	value |= 1;
++	meson_modify_corectrl(value);
++#else
+ 	aml_set_reg32_bits(MESON_CPU_CONTROL_REG,is_on,cpu,1);
+ 	aml_set_reg32_bits(MESON_CPU_CONTROL_REG,1,0,1);
++#endif
++
+ 	spin_unlock(&clockfw_lock);
+ }
++
+ void meson_set_cpu_ctrl_addr(uint32_t cpu, const uint32_t addr)
+ {
+ 	spin_lock(&clockfw_lock);
++
++#ifdef CONFIG_MESON_TRUSTZONE
++	meson_auxcoreboot_addr(cpu, addr);
++#else
+ 	aml_write_reg32((MESON_CPU1_CONTROL_ADDR_REG + ((cpu-1) << 2)), addr);
++#endif
++
+ 	spin_unlock(&clockfw_lock);	
+ }
+ 
+@@ -909,7 +931,11 @@ static inline void meson_smp_init_transaction(void)
+ {
+     int cpu;
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++	meson_modify_corectrl(0);
++#else
+     aml_write_reg32(MESON_CPU_CONTROL_REG, 0);
++#endif
+ 
+     for_each_online_cpu(cpu) {
+         aml_write_reg32(MESON_CPU_STATUS_REG(cpu), 0);
+diff --git a/arch/arm/mach-meson8/include/mach/meson-secure.h b/arch/arm/mach-meson8/include/mach/meson-secure.h
+new file mode 100755
+index 000000000000..0a6343f57287
+--- /dev/null
++++ b/arch/arm/mach-meson8/include/mach/meson-secure.h
+@@ -0,0 +1,107 @@
++/*
++ *  Copyright (C) 2002 ARM Ltd.
++ *  All Rights Reserved
++ *  Copyright (c) 2010, Code Aurora Forum. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++/*
++ * Secure Definition
++ *
++ * Copyright (C) 2012 Amlogic, Inc.
++ *
++ * Author: Platform-SH@amlogic.com
++ *
++ */
++
++#ifndef MESON_ARCH_MESON_SECURE_H
++#define MESON_ARCH_MESON_SECURE_H
++
++/* Meson Secure Monitor/HAL APIs */
++#define CALL_TRUSTZONE_API                      0x1
++#define CALL_TRUSTZONE_MON                      0x4
++#define CALL_TRUSTZONE_HAL_API                  0x5
++
++/* Secure Monitor mode APIs */
++#define TRUSTZONE_MON_TYPE_MASK                 0xF00
++#define TRUSTZONE_MON_FUNC_MASK                 0x0FF
++#define TRUSTZONE_MON_L2X0                      0x100
++#define TRUSTZONE_MON_L2X0_CTRL_INDEX           0x101
++#define TRUSTZONE_MON_L2X0_AUXCTRL_INDEX        0x102
++#define TRUSTZONE_MON_L2X0_PREFETCH_INDEX       0x103
++#define TRUSTZONE_MON_L2X0_TAGLATENCY_INDEX     0x104
++#define TRUSTZONE_MON_L2X0_DATALATENCY_INDEX    0x105
++#define TRUSTZONE_MON_L2X0_FILTERSTART_INDEX    0x106
++#define TRUSTZONE_MON_L2X0_FILTEREND_INDEX      0x107
++#define TRUSTZONE_MON_L2X0_DEBUG_INDEX          0x108
++#define TRUSTZONE_MON_L2X0_POWER_INDEX          0x109
++
++#define TRUSTZONE_MON_CORE                      0x200
++#define TRUSTZONE_MON_CORE_RD_CTRL_INDEX        0x201
++#define TRUSTZONE_MON_CORE_WR_CTRL_INDEX        0x202
++#define TRUSTZONE_MON_CORE_RD_STATUS0_INDEX     0x203
++#define TRUSTZONE_MON_CORE_WR_STATUS0_INDEX     0x204
++#define TRUSTZONE_MON_CORE_RD_STATUS1_INDEX     0x205
++#define TRUSTZONE_MON_CORE_WR_STATUS1_INDEX     0x206
++#define TRUSTZONE_MON_CORE_BOOTADDR_INDEX       0x207
++#define TRUSTZONE_MON_CORE_DDR_INDEX            0x208
++
++#define TRUSTZONE_MON_SUSPNED_FIRMWARE          0x300
++#define TRUSTZONE_MON_SAVE_CPU_GIC              0x400
++
++#define TRUSTZONE_MON_RTC                       0x500
++#define TRUSTZONE_MON_RTC_RD_REG_INDEX          0x501
++#define TRUSTZONE_MON_RTC_WR_REG_INDEX          0x502
++
++/* Secure HAL APIs*/
++#define TRUSTZONE_HAL_API_EFUSE                 0x100
++#define TRUSTZONE_HAL_API_STORAGE               0x200
++#define TRUSTZONE_HAL_API_MEMCONFIG             0x300
++
++#ifndef __ASSEMBLER__
++extern void meson_smc1(u32 fn, u32 arg);
++extern int meson_smc_hal_api(u32 cmdidx, u32 arg);
++extern int meson_smc2(u32 arg);
++extern int meson_smc3(u32 arg1, u32 arg2);
++extern u32 meson_read_corectrl(void);
++extern u32 meson_modify_corectrl(u32 arg);
++extern u32 meson_read_corestatus(u32 cpu);
++extern u32 meson_modify_corestatus(u32 cpu, u32 arg);
++extern void meson_auxcoreboot_addr(u32 arg1, u32 arg2);
++extern void meson_suspend_firmware(void);
++
++// efuse HAL_API arg
++struct efuse_hal_api_arg{
++	unsigned int cmd;		// R/W
++	unsigned int offset;
++	unsigned int size;
++	unsigned int buffer_phy;
++	unsigned int retcnt_phy;	
++};
++#define EFUSE_HAL_API_READ	0
++#define EFUSE_HAL_API_WRITE 1
++extern int meson_trustzone_efuse(struct efuse_hal_api_arg* arg);
++
++
++//memconfig HAL_API arg
++struct memconfig{
++	unsigned char name[64];
++	unsigned int start_phy_addr;
++	unsigned int end_phy_addr;
++};
++struct memconfig_hal_api_arg{
++	unsigned int memconfigbuf_phy_addr;
++	unsigned int memconfigbuf_count;
++};
++#define MEMCONFIG_NUM	2
++extern int meson_trustzone_memconfig();
++extern unsigned int meson_trustzone_getmemsecure_size();
++extern int meson_trustzone_getmemconfig(unsigned char* name, unsigned int* startphyaddr, unsigned int* endphyaddr);
++
++#endif
++
++
++#endif
+diff --git a/arch/arm/mach-meson8/meson-secure.c b/arch/arm/mach-meson8/meson-secure.c
+new file mode 100755
+index 000000000000..a0aa9de0eaf9
+--- /dev/null
++++ b/arch/arm/mach-meson8/meson-secure.c
+@@ -0,0 +1,126 @@
++/*
++ * Meson secure APIs file.
++ *
++ *  Copyright (C) 2002 ARM Ltd.
++ *  All Rights Reserved
++ *  Copyright (c) 2010, Code Aurora Forum. All rights reserved.
++ *
++ * This program is free software,you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <plat/io.h>
++#include <plat/regops.h>
++#include <linux/printk.h>
++#include <linux/string.h>
++#include <asm/cacheflush.h>
++#include <asm/hardware/cache-l2x0.h>
++#include <linux/dma-mapping.h>
++#ifdef  CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
++#endif
++
++/*
++int meson_secure_memblock(unsigned startaddr, unsigned endaddr, struct secure_memblock_ctrl* pctrl)
++{
++	int ret;
++	struct secure_memblock_info memblock_info;
++	
++	if(!pctrl)
++		return -1;	
++	if(((startaddr & 0xffff) != 0) || ((endaddr&0xffff)!=0xffff)){
++		printk("secure memory block must be 16 bits align!\n");
++		return -1;
++	}
++	
++	memblock_info.startaddr = startaddr;
++	memblock_info.endaddr = endaddr;
++	memcpy(&(memblock_info.memblock_ctrl), pctrl, sizeof(memblock_info.memblock_ctrl));	
++	__cpuc_flush_dcache_area((void*)&memblock_info, sizeof(memblock_info));
++	outer_clean_range(__pa(&memblock_info), __pa(&memblock_info+1));
++	
++	ret = meson_smc_internal_api(INTERNAL_API_MEMBLOCK_CONFIG, __pa(&memblock_info));	
++	return ret;	
++}
++*/
++struct memconfig memsecure[MEMCONFIG_NUM]={0};
++int meson_trustzone_memconfig()
++{
++	int ret;
++	struct memconfig_hal_api_arg arg;
++	arg.memconfigbuf_phy_addr = __pa(memsecure);
++	arg.memconfigbuf_count = MEMCONFIG_NUM;
++	
++	__cpuc_flush_dcache_area(memsecure, sizeof(memsecure));
++	outer_clean_range(__pa(memsecure), (__pa(memsecure+MEMCONFIG_NUM)));
++	__cpuc_flush_dcache_area(&arg, sizeof(arg));
++	outer_clean_range(__pa(&arg), __pa(((struct memconfig_hal_api_arg*)&arg))+1);
++	
++	ret=meson_smc_hal_api(TRUSTZONE_HAL_API_MEMCONFIG, __pa(&arg));
++	
++	outer_inv_range(__pa(&arg), __pa(((struct memconfig_hal_api_arg*)&arg))+1);
++	dmac_unmap_area(&arg, sizeof(arg), DMA_FROM_DEVICE);
++	outer_inv_range(__pa(memsecure), __pa(memsecure+MEMCONFIG_NUM));
++	dmac_unmap_area(memsecure, sizeof(memsecure), DMA_FROM_DEVICE);
++	
++	return ret;
++}
++
++unsigned int meson_trustzone_getmemsecure_size()
++{
++	unsigned int size=0;
++	int i;
++	for(i=0; i<MEMCONFIG_NUM; i++){
++		if((memsecure[i].start_phy_addr!=0) && (memsecure[i].end_phy_addr!=0))
++			size += memsecure[i].end_phy_addr-memsecure[i].start_phy_addr+1;
++	}
++	return size;
++}
++
++int meson_trustzone_getmemconfig(unsigned char* name, unsigned int* startphyaddr, unsigned int* endphyaddr)
++{
++	unsigned int i;
++	for(i=0; i<MEMCONFIG_NUM; i++){
++		if(strcmp(name, memsecure[i].name) == 0)
++			break;
++	}
++	if(i==MEMCONFIG_NUM)
++		return -1;
++	if((memsecure[i].start_phy_addr == 0) || (memsecure[i].end_phy_addr == 0))
++		return -1;
++			
++	*startphyaddr = memsecure[i].start_phy_addr;
++	*endphyaddr = memsecure[i].end_phy_addr;
++	return 0;	
++}
++
++int meson_trustzone_efuse(struct efuse_hal_api_arg* arg)
++{
++	int ret;
++	if(!arg)
++		return -1;
++	
++	__cpuc_flush_dcache_area(__va(arg->buffer_phy), arg->size);
++	outer_clean_range((arg->buffer_phy), (arg->buffer_phy+arg->size));
++	
++	__cpuc_flush_dcache_area(__va(arg->retcnt_phy), sizeof(unsigned int));
++	outer_clean_range(arg->retcnt_phy, (arg->retcnt_phy+sizeof(unsigned int)));
++	
++	__cpuc_flush_dcache_area((void*)arg, sizeof(struct efuse_hal_api_arg));
++	outer_clean_range(__pa(arg), __pa(arg+1));
++	
++	ret=meson_smc_hal_api(TRUSTZONE_HAL_API_EFUSE, __pa(arg));
++
++	if(arg->cmd == EFUSE_HAL_API_READ){
++		outer_inv_range((arg->buffer_phy), (arg->buffer_phy+arg->size));		
++		dmac_unmap_area(__va(arg->buffer_phy), arg->size, DMA_FROM_DEVICE);
++	}
++	outer_inv_range((arg->retcnt_phy),(arg->retcnt_phy+sizeof(unsigned int)));
++	dmac_unmap_area(__va(arg->buffer_phy), arg->size, DMA_FROM_DEVICE);
++		
++	return ret;	
++}
+diff --git a/arch/arm/mach-meson8/meson-smc.S b/arch/arm/mach-meson8/meson-smc.S
+new file mode 100755
+index 000000000000..b97485993c24
+--- /dev/null
++++ b/arch/arm/mach-meson8/meson-smc.S
+@@ -0,0 +1,134 @@
++/*
++ * Meson secure APIs file.
++ *
++ *  Copyright (C) 2002 ARM Ltd.
++ *  All Rights Reserved
++ *  Copyright (c) 2010, Code Aurora Forum. All rights reserved.
++ *
++ * This program is free software,you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++/*
++ * Secure Definition
++ *
++ * Copyright (C) 2013 Amlogic, Inc.
++ *
++ * Author: Platform-BJ@amlogic.com
++ *
++ */
++
++#include <linux/linkage.h>
++#include <mach/meson-secure.h>
++
++/*
++ * This is common routine to manage secure monitor API
++ * used to modify the PL310 secure registers.
++ * 'r1' contains the value to be modified and 'r0' contains
++ * the monitor API number. It uses few CPU registers
++ * internally and hence they need be backed up including
++ * link register "lr".
++ * Function signature : void meson_smc1(u32 fn, u32 arg)
++ */
++
++ENTRY(meson_smc1)
++    stmfd sp!, {r2-r12, lr}
++    mov r2, r1
++    mov r1, r0
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_smc1)
++
++ENTRY(meson_smc_hal_api)
++	stmfd sp!, {r3-r12, lr}	
++	mov r2, r1
++	mov r1, r0
++	ldr r0, =CALL_TRUSTZONE_HAL_API
++	dsb
++	smc #0
++	ldmfd sp!, {r3-r12, pc}
++ENDPROC(meson_smc_hal_api)
++
++ENTRY(meson_smc2)
++    stmfd sp!, {r2-r12, lr}
++    mov r1, r0
++    ldr r0, =0x2
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_smc2)
++
++ENTRY(meson_smc3)
++    stmfd sp!, {r2-r12, lr}
++    mov r2, r1
++    mov r1, r0
++    ldr r0, =0x3
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_smc3)
++
++ENTRY(meson_read_corectrl)
++    stmfd sp!, {r2-r12, lr}
++    ldr r1, =TRUSTZONE_MON_CORE_RD_CTRL_INDEX
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_read_corectrl)
++
++ENTRY(meson_modify_corectrl)
++    stmfd sp!, {r2-r12, lr}
++    mov r2, r0
++    ldr r1, =TRUSTZONE_MON_CORE_WR_CTRL_INDEX
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_modify_corectrl)
++
++ENTRY(meson_read_corestatus)
++    stmfd sp!, {r2-r12, lr}
++    ldr r1, =TRUSTZONE_MON_CORE_RD_STATUS0_INDEX
++    add r1, r1, r0, lsl #1
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_read_corestatus)
++
++ENTRY(meson_modify_corestatus)
++    stmfd sp!, {r2-r12, lr}
++    mov r2, r1
++    ldr r1, =TRUSTZONE_MON_CORE_WR_STATUS0_INDEX
++    add r1, r1, r0, lsl #1
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_modify_corestatus)
++
++ENTRY(meson_auxcoreboot_addr)
++    stmfd sp!, {r2-r12, lr}
++    mov r3, r1
++    mov r2, r0
++    ldr r1, =TRUSTZONE_MON_CORE_BOOTADDR_INDEX
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_auxcoreboot_addr)
++
++ENTRY(meson_suspend_firmware)
++    stmfd sp!, {r2-r12, lr}
++    mov r2, r0
++    ldr r1, =TRUSTZONE_MON_SUSPNED_FIRMWARE
++    ldr r0, =CALL_TRUSTZONE_MON
++    dsb
++    smc #0
++    ldmfd sp!, {r2-r12, pc}
++ENDPROC(meson_suspend_firmware)
++
+diff --git a/arch/arm/mach-meson8/smp.c b/arch/arm/mach-meson8/smp.c
+index befeff2d65bf..3d23fbc988fc 100755
+--- a/arch/arm/mach-meson8/smp.c
++++ b/arch/arm/mach-meson8/smp.c
+@@ -130,8 +130,10 @@ int __cpuinit meson_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	printk("write pen_release: %d\n",cpu_logical_map(cpu));
+ 	write_pen_release(cpu_logical_map(cpu));
+ 
++#ifndef CONFIG_MESON_TRUSTZONE
+ 	check_and_rewrite_cpu_entry();
+ 	meson_set_cpu_power_ctrl(cpu, 1);
++#endif
+ 	meson_secondary_set(cpu);
+ 	dsb_sev();
+ 
+diff --git a/arch/arm/mm/cache-l2x0.c b/arch/arm/mm/cache-l2x0.c
+index 2fc372cd7231..9b5017902a0d 100755
+--- a/arch/arm/mm/cache-l2x0.c
++++ b/arch/arm/mm/cache-l2x0.c
+@@ -29,7 +29,11 @@
+ 
+ #ifdef CONFIG_PLAT_MESON
+ #include <mach/io.h>
++#ifdef CONFIG_MESON_TRUSTZONE
++#include <mach/meson-secure.h>
+ #endif
++#endif
++
+ 
+ #define CACHE_LINE_SIZE		32
+ 
+@@ -110,7 +114,11 @@ static inline void debug_writel(unsigned long val)
+ 
+ static void pl310_set_debug(unsigned long val)
+ {
++#ifdef CONFIG_MESON_TRUSTZONE
++	meson_smc1(TRUSTZONE_MON_L2X0_DEBUG_INDEX, val);
++#else
+ 	writel_relaxed(val, l2x0_base + L2X0_DEBUG_CTRL);
++#endif
+ }
+ #else
+ /* Optimised out for non-errata case */
+@@ -336,7 +344,12 @@ static void l2x0_disable(void)
+ 
+ 	raw_spin_lock_irqsave(&l2x0_lock, flags);
+ 	__l2x0_flush_all();
++
++#ifdef CONFIG_MESON_TRUSTZONE
++	meson_smc1(TRUSTZONE_MON_L2X0_CTRL_INDEX, 0);
++#else
+ 	writel_relaxed(0, l2x0_base + L2X0_CTRL);
++#endif
+ 	dsb();
+ 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+ }
+@@ -442,12 +455,21 @@ void __init l2x0_init(void __iomem *base, u32 aux_val, u32 aux_mask)
+ 		l2x0_unlock(l2x0_cache_id);
+ 
+ 		/* l2x0 controller is disabled */
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_AUXCTRL_INDEX, aux);
++#else
+ 		writel_relaxed(aux, l2x0_base + L2X0_AUX_CTRL);
++#endif
+ 
+ 		l2x0_inv_all();
+ 
+ 		/* enable L2X0 */
++
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_CTRL_INDEX, L2X0_CTRL_EN);
++#else
+ 		writel_relaxed(L2X0_CTRL_EN, l2x0_base + L2X0_CTRL);
++#endif
+ 	}
+ 
+ 	/* Re-read it in case some bits are reserved. */
+@@ -623,28 +645,53 @@ static void __init pl310_of_setup(const struct device_node *np,
+ 
+ 	of_property_read_u32_array(np, "arm,tag-latency", tag, ARRAY_SIZE(tag));
+ 	if (tag[0] && tag[1] && tag[2])
++
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_TAGLATENCY_INDEX,
++			((tag[0] - 1) << L2X0_LATENCY_CTRL_RD_SHIFT) |
++			((tag[1] - 1) << L2X0_LATENCY_CTRL_WR_SHIFT) |
++			((tag[2] - 1) << L2X0_LATENCY_CTRL_SETUP_SHIFT));
++#else
+ 		writel_relaxed(
+ 			((tag[0] - 1) << L2X0_LATENCY_CTRL_RD_SHIFT) |
+ 			((tag[1] - 1) << L2X0_LATENCY_CTRL_WR_SHIFT) |
+ 			((tag[2] - 1) << L2X0_LATENCY_CTRL_SETUP_SHIFT),
+ 			l2x0_base + L2X0_TAG_LATENCY_CTRL);
++#endif
+ 
+ 	of_property_read_u32_array(np, "arm,data-latency",
+ 				   data, ARRAY_SIZE(data));
+ 	if (data[0] && data[1] && data[2])
++
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_DATALATENCY_INDEX,
++			((data[0] - 1) << L2X0_LATENCY_CTRL_RD_SHIFT) |
++			((data[1] - 1) << L2X0_LATENCY_CTRL_WR_SHIFT) |
++			((data[2] - 1) << L2X0_LATENCY_CTRL_SETUP_SHIFT));
++#else
+ 		writel_relaxed(
+ 			((data[0] - 1) << L2X0_LATENCY_CTRL_RD_SHIFT) |
+ 			((data[1] - 1) << L2X0_LATENCY_CTRL_WR_SHIFT) |
+ 			((data[2] - 1) << L2X0_LATENCY_CTRL_SETUP_SHIFT),
+ 			l2x0_base + L2X0_DATA_LATENCY_CTRL);
++#endif
+ 
+ 	of_property_read_u32_array(np, "arm,filter-ranges",
+ 				   filter, ARRAY_SIZE(filter));
+ 	if (filter[1]) {
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_FILTEREND_INDEX, ALIGN(filter[0] + filter[1], SZ_1M));
++#else
+ 		writel_relaxed(ALIGN(filter[0] + filter[1], SZ_1M),
+ 			       l2x0_base + L2X0_ADDR_FILTER_END);
++#endif
++
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_FILTERSTART_INDEX, (filter[0] & ~(SZ_1M - 1)) | L2X0_ADDR_FILTER_EN);
++#else
+ 		writel_relaxed((filter[0] & ~(SZ_1M - 1)) | L2X0_ADDR_FILTER_EN,
+ 			       l2x0_base + L2X0_ADDR_FILTER_START);
++#endif
+ 	}
+ }
+ 
+@@ -689,12 +736,20 @@ static void l2x0_resume(void)
+ 		/* restore aux ctrl and enable l2 */
+ 		l2x0_unlock(readl_relaxed(l2x0_base + L2X0_CACHE_ID));
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_AUXCTRL_INDEX, l2x0_saved_regs.aux_ctrl);
++#else
+ 		writel_relaxed(l2x0_saved_regs.aux_ctrl, l2x0_base +
+ 			L2X0_AUX_CTRL);
++#endif
+ 
+ 		l2x0_inv_all();
+ 
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_CTRL_INDEX, L2X0_CTRL_EN);
++#else
+ 		writel_relaxed(L2X0_CTRL_EN, l2x0_base + L2X0_CTRL);
++#endif
+ 	}
+ }
+ 
+@@ -704,24 +759,48 @@ static void pl310_resume(void)
+ 
+ 	if (!(readl_relaxed(l2x0_base + L2X0_CTRL) & L2X0_CTRL_EN)) {
+ 		/* restore pl310 setup */
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_TAGLATENCY_INDEX, l2x0_saved_regs.tag_latency);
++#else
+ 		writel_relaxed(l2x0_saved_regs.tag_latency,
+ 			l2x0_base + L2X0_TAG_LATENCY_CTRL);
++#endif
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_DATALATENCY_INDEX, l2x0_saved_regs.data_latency);
++#else
+ 		writel_relaxed(l2x0_saved_regs.data_latency,
+ 			l2x0_base + L2X0_DATA_LATENCY_CTRL);
++#endif
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_FILTEREND_INDEX, l2x0_saved_regs.filter_end);
++#else
+ 		writel_relaxed(l2x0_saved_regs.filter_end,
+ 			l2x0_base + L2X0_ADDR_FILTER_END);
++#endif
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_FILTERSTART_INDEX, l2x0_saved_regs.filter_start);
++#else
+ 		writel_relaxed(l2x0_saved_regs.filter_start,
+ 			l2x0_base + L2X0_ADDR_FILTER_START);
++#endif
+ 
+ 		l2x0_revision = readl_relaxed(l2x0_base + L2X0_CACHE_ID) &
+ 			L2X0_CACHE_ID_RTL_MASK;
+ 
+ 		if (l2x0_revision >= L2X0_CACHE_ID_RTL_R2P0) {
++#ifdef CONFIG_MESON_TRUSTZONE
++			meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, l2x0_saved_regs.prefetch_ctrl);
++#else
+ 			writel_relaxed(l2x0_saved_regs.prefetch_ctrl,
+ 				l2x0_base + L2X0_PREFETCH_CTRL);
++#endif
+ 			if (l2x0_revision >= L2X0_CACHE_ID_RTL_R3P0)
++#ifdef CONFIG_MESON_TRUSTZONE
++				meson_smc1(TRUSTZONE_MON_L2X0_POWER_INDEX, l2x0_saved_regs.pwr_ctrl);
++#else
+ 				writel_relaxed(l2x0_saved_regs.pwr_ctrl,
+ 					l2x0_base + L2X0_POWER_CTRL);
++#endif
+ 		}
+ 	}
+ 
+@@ -731,9 +810,14 @@ static void pl310_resume(void)
+ static void aurora_resume(void)
+ {
+ 	if (!(readl(l2x0_base + L2X0_CTRL) & L2X0_CTRL_EN)) {
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_AUXCTRL_INDEX, l2x0_saved_regs.aux_ctrl);
++		meson_smc1(TRUSTZONE_MON_L2X0_CTRL_INDEX, l2x0_saved_regs.ctrl);
++#else
+ 		writel_relaxed(l2x0_saved_regs.aux_ctrl,
+ 				l2x0_base + L2X0_AUX_CTRL);
+ 		writel_relaxed(l2x0_saved_regs.ctrl, l2x0_base + L2X0_CTRL);
++#endif
+ 	}
+ }
+ 
+@@ -814,7 +898,11 @@ static void __init meson_of_setup(const struct device_node *np,
+ 		mask &= ~(1 << L2X0_AUX_CTRL_INSTR_PREFETCH_SHIFT);
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_INSTR_PREFETCH_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);		
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "aux-data_prefetch")){
+@@ -822,7 +910,11 @@ static void __init meson_of_setup(const struct device_node *np,
+ 		mask &= ~(1 << L2X0_AUX_CTRL_DATA_PREFETCH_SHIFT);		
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_DATA_PREFETCH_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);		
++#endif
+ 	}
+ 
+ 	if (of_property_read_bool(np, "aux-ns_lockdown")) {
+@@ -908,31 +1000,51 @@ static void __init meson_of_setup(const struct device_node *np,
+ 	if(of_property_read_bool(np, "prefetch-double_line_fill")){
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_DOUBLE_LINE_FILL_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "prefetch-double_line_fill_on_wrap_read_disable")){
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_DLF_ON_WRAP_DISABLE_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "prefetch-prefetch_drop")){
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_PREFETCH_DROP_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "prefetch-incr_double_line_fill")){
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_INCR_DLF_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "prefetch-not_same_id_excl_seq")){
+ 		prefetch_val = readl_relaxed(prefetch_reg);
+ 		prefetch_val |= (1 << L2X0_PREF_CTRL_NOT_SAME_ID_EXEL_SEQ_SHIFT);
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
+ 		writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 	}
+ 
+ 	if(!of_property_read_u32(np, "prefetch-prefetch_offset",&prefetch_offset)){
+@@ -944,7 +1056,11 @@ static void __init meson_of_setup(const struct device_node *np,
+ 			prefetch_val = readl_relaxed(prefetch_reg);
+ 			prefetch_val &= ~(L2X0_PREF_CTRL_PERFETCH_OFFSET_MASK);
+ 			prefetch_val |= (prefetch_offset << L2X0_PREF_CTRL_PERFETCH_OFFSET_SHIFT);
+-			writel_relaxed(prefetch_val,prefetch_reg);	
++#ifdef CONFIG_MESON_TRUSTZONE
++			meson_smc1(TRUSTZONE_MON_L2X0_PREFETCH_INDEX, prefetch_val);
++#else
++			writel_relaxed(prefetch_val,prefetch_reg);
++#endif
+ 		default:
+ 			break;
+ 		}
+@@ -954,13 +1070,21 @@ static void __init meson_of_setup(const struct device_node *np,
+ 	if(of_property_read_bool(np, "power-dynamic_clk_gating")){
+ 		power_val = readl_relaxed(power_reg);
+ 		power_val |= L2X0_DYNAMIC_CLK_GATING_EN;
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_POWER_INDEX, power_val);
++#else
+ 		writel_relaxed(power_val,power_reg);
++#endif
+ 	}
+ 
+ 	if(of_property_read_bool(np, "power-standby_mode")){
+ 		power_val = readl_relaxed(power_reg);
+ 		power_val |= L2X0_STNDBY_MODE_EN;
++#ifdef CONFIG_MESON_TRUSTZONE
++		meson_smc1(TRUSTZONE_MON_L2X0_POWER_INDEX, power_val);
++#else
+ 		writel_relaxed(power_val,power_reg);
++#endif
+ 	}
+ 
+ 	*aux_val = val;
+diff --git a/drivers/amlogic/Kconfig b/drivers/amlogic/Kconfig
+index da52095238f6..58b5c3483661 100755
+--- a/drivers/amlogic/Kconfig
++++ b/drivers/amlogic/Kconfig
+@@ -98,8 +98,8 @@ comment "GPU (ARM Mali)"
+ #isource "drivers/amlogic/ump/Kconfig"
+ #isource "drivers/amlogic/mali/Kconfig"
+ #comment "GPU (ARM Mali (external))"
+-source "../hardware/arm/gpu/ump/Kconfig"
+-source "../hardware/arm/gpu/mali/Kconfig"
++isource "../hardware/arm/gpu/ump/Kconfig"
++isource "../hardware/arm/gpu/mali/Kconfig"
+ source "drivers/amlogic/ion_dev/Kconfig"
+ 
+ #
+@@ -107,4 +107,9 @@ source "drivers/amlogic/ion_dev/Kconfig"
+ #
+ source "drivers/amlogic/crypto/Kconfig"
+ 
++#
++# TrustZone
++#
++source "drivers/amlogic/trustzone/Kconfig"
++
+ endmenu
+diff --git a/drivers/amlogic/Makefile b/drivers/amlogic/Makefile
+index 1abc50d68a7f..4aff184866e3 100755
+--- a/drivers/amlogic/Makefile
++++ b/drivers/amlogic/Makefile
+@@ -130,3 +130,5 @@ obj-$(CONFIG_MALI400) += ../../../hardware/arm/gpu/mali/
+ obj-$(CONFIG_AMLOGIC_ION) += ion_dev/
+ 
+ obj-y += crypto/
++
++obj-$(CONFIG_MESON_TRUSTZONE) += trustzone/
+diff --git a/drivers/amlogic/trustzone/Kconfig b/drivers/amlogic/trustzone/Kconfig
+new file mode 100644
+index 000000000000..1a2e6599d79d
+--- /dev/null
++++ b/drivers/amlogic/trustzone/Kconfig
+@@ -0,0 +1,7 @@
++menu "Amlogic TrustZone Support"
++
++config MESON_TRUSTZONE
++	bool "Support Arm TrustZone"
++	default n
++
++endmenu
+diff --git a/drivers/amlogic/trustzone/Makefile b/drivers/amlogic/trustzone/Makefile
+new file mode 100644
+index 000000000000..5107c7dc2428
+--- /dev/null
++++ b/drivers/amlogic/trustzone/Makefile
+@@ -0,0 +1,22 @@
++# Makefile for TRUSTZONE
++
++TARGET_ASMFLAGS = -DCONFIG_CORTEX_A9=1 -mcpu=cortex-a9
++EXTRA_CFLAGS = -g -Wall -nostdlib
++EXTRA_CFLAGS += -msoft-float -mno-thumb-interwork -marm -fno-short-enums $(TARGET_CCFLAGS)
++
++TRUSTZONE_LIB = y
++ifneq ($(KBUILD_SRC),)
++TOP_KBUILD_SRC := $(KBUILD_SRC)/
++endif
++
++ifeq ($(TRUSTZONE_LIB), y)
++$(obj)/otz_client_main :
++	@cp $(TOP_KBUILD_SRC)drivers/amlogic/trustzone/otz_client_main.z \
++    drivers/amlogic/trustzone/otz_client_main.o
++$(obj)/otz_client_main.o : $(obj)/otz_client_main FORCE
++else
++ccflags-y:= -I$(TOP_KBUILD_SRC)drivers/amlogic/trustzone/include
++endif
++
++trustzone-objs += otz_client_main.o
++obj-$(CONFIG_MESON_TRUSTZONE) += trustzone.o
+diff --git a/drivers/amlogic/trustzone/otz_client_main.z b/drivers/amlogic/trustzone/otz_client_main.z
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f228ebe206c5607d0587b541610a99e84a9fd4d
+GIT binary patch
+literal 147584
+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
+YXX^>!`Esr1E2k^z9X`+cmBIP`4>Fs`?EnA(
+
+literal 0
+HcmV?d00001
+
+-- 
+2.19.0
+

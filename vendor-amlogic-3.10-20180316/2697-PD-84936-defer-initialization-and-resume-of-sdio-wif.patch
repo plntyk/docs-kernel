@@ -1,0 +1,502 @@
+From 3bc326a05925cd768fe0ddcf11e36093cc1bb54d Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Wed, 25 Dec 2013 20:03:29 +0800
+Subject: [PATCH 2697/5965] PD #84936: defer initialization and resume of
+ sdio-wifi
+
+---
+ arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd  |  4 +-
+ arch/arm/boot/dts/amlogic/meson8_k200_1G.dtd  | 22 +++++++
+ arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd  | 22 +++++++
+ arch/arm/boot/dts/amlogic/meson8_k200b_1G.dtd |  6 +-
+ arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd |  6 +-
+ arch/arm/mach-meson8/include/mach/sd.h        |  3 +-
+ drivers/amlogic/mmc/aml_sdio.c                | 25 +++++---
+ drivers/amlogic/mmc/amlsd.c                   | 35 +++++-----
+ drivers/amlogic/mmc/amlsd.h                   |  4 +-
+ drivers/amlogic/wifi/wifi_power.c             | 13 +++-
+ drivers/mmc/core/core.c                       | 14 +++-
+ drivers/mmc/core/sdio.c                       | 64 +++++++++++++------
+ include/linux/mmc/host.h                      |  3 +-
+ 13 files changed, 161 insertions(+), 60 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
+index 3bac99978a2e..ccf74be30543 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k100_v1.dtd
+@@ -433,7 +433,7 @@ sdio{
+ //$$ L3 PROP_U32 = "f_max"
+ //$$ L3 PROP_U32 = "f_max_w"
+ //$$ L3 PROP_U32 = "max_req_size"
+-//$$ L2 PROP_STR = "gpio_dat3"       	
++//$$ L2 PROP_STR = "gpio_dat3"
+ //$$ L2 PROP_U32 = "card_type"
+         emmc{
+             status = "ok";
+@@ -457,7 +457,7 @@ sdio{
+ //$$ L2 PROP_STR 4 = "caps"
+ //$$ L3 PROP_U32 = "f_min"
+ //$$ L3 PROP_U32 = "f_max"
+-//$$ L3 PROP_U32 = "max_req_size"    
++//$$ L3 PROP_U32 = "max_req_size"
+ //$$ L2 PROP_U32 = "card_type"    
+         sdio{
+           status = "okay";
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_1G.dtd
+index 7c0c4ea4f479..7bec5575454c 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_1G.dtd
+@@ -439,6 +439,28 @@ sdio{
+             gpio_dat3 = "BOOT_3";
+             card_type = <1>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+         };
++
++//$$ DEVICE="sdio"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 = "port"
++//$$ L2 PROP_STR = "pinname"
++//$$ L3 PROP_U32 = "ocr_avail"
++//$$ L2 PROP_STR 4 = "caps"
++//$$ L3 PROP_U32 = "f_min"
++//$$ L3 PROP_U32 = "f_max"
++//$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_U32 = "card_type"    
++        sdio{
++            status = "ok";
++            port = <0>;          /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++            pinname = "sdio";
++            ocr_avail = <0x200000>;          /*VDD voltage 3.3 ~ 3.4 */
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE";
++            f_min = <300000>;
++            f_max = <50000000>;
++            max_req_size = <0x20000>;          /**128KB*/
++            card_type = <3>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++        };
+     };
+ 
+ /// ***************************************************************************************
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+index 2f31211ffd8d..a5c465516f8a 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200_v1.dtd
+@@ -438,6 +438,28 @@ sdio{
+             gpio_dat3 = "BOOT_3";
+             card_type = <1>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+         };
++
++//$$ DEVICE="sdio"
++//$$ L2 PROP_STR = "status"
++//$$ L3 PROP_U32 = "port"
++//$$ L2 PROP_STR = "pinname"
++//$$ L3 PROP_U32 = "ocr_avail"
++//$$ L2 PROP_STR 4 = "caps"
++//$$ L3 PROP_U32 = "f_min"
++//$$ L3 PROP_U32 = "f_max"
++//$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_U32 = "card_type"    
++        sdio{
++            status = "ok";
++            port = <0>;          /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
++            pinname = "sdio";
++            ocr_avail = <0x200000>;          /*VDD voltage 3.3 ~ 3.4 */
++            caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE";
++            f_min = <300000>;
++            f_max = <50000000>;
++            max_req_size = <0x20000>;          /**128KB*/
++            card_type = <3>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
++        };
+     };
+ 
+ /// ***************************************************************************************
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_1G.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_1G.dtd
+index 4c12f465c5db..78fea619108e 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_1G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_1G.dtd
+@@ -448,8 +448,8 @@ sdio{
+ //$$ L2 PROP_STR 4 = "caps"
+ //$$ L3 PROP_U32 = "f_min"
+ //$$ L3 PROP_U32 = "f_max"
+-//$$ L3 PROP_U32 = "f_max_w"
+ //$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_U32 = "card_type"    
+         sdio{
+             status = "ok";
+             port = <0>;          /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+@@ -458,8 +458,8 @@ sdio{
+             caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE";
+             f_min = <300000>;
+             f_max = <50000000>;
+-            f_max_w = <50000000>;
+-            max_req_size = <0x20000>;          /*128KB*/
++            max_req_size = <0x20000>;          /**128KB*/
++            card_type = <3>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+         };
+     };
+ 
+diff --git a/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd b/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
+index 776ee75a3547..5a0b1b4aaa4a 100755
+--- a/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
++++ b/arch/arm/boot/dts/amlogic/meson8_k200b_2G.dtd
+@@ -447,8 +447,8 @@ sdio{
+ //$$ L2 PROP_STR 4 = "caps"
+ //$$ L3 PROP_U32 = "f_min"
+ //$$ L3 PROP_U32 = "f_max"
+-//$$ L3 PROP_U32 = "f_max_w"
+ //$$ L3 PROP_U32 = "max_req_size"
++//$$ L2 PROP_U32 = "card_type"    
+         sdio{
+             status = "ok";
+             port = <0>;          /*0:sdio_a, 1:sdio_b, 2:sdio_c, 3:sdhc_a, 4:sdhc_b, 5:sdhc_c */
+@@ -457,8 +457,8 @@ sdio{
+             caps = "MMC_CAP_4_BIT_DATA","MMC_CAP_MMC_HIGHSPEED","MMC_CAP_SD_HIGHSPEED", "MMC_CAP_NONREMOVABLE";
+             f_min = <300000>;
+             f_max = <50000000>;
+-            f_max_w = <50000000>;
+-            max_req_size = <0x20000>;          /*128KB*/
++            max_req_size = <0x20000>;          /**128KB*/
++            card_type = <3>; /* 0:unknown, 1:mmc card(include eMMC), 2:sd card(include tSD), 3:sdio device(ie:sdio-wifi), 4:SD combo (IO+mem) card, 5:NON sdio device(means sd/mmc card), other:reserved */
+         };
+     };
+ 
+diff --git a/arch/arm/mach-meson8/include/mach/sd.h b/arch/arm/mach-meson8/include/mach/sd.h
+index 30105b535843..52980d0e0079 100755
+--- a/arch/arm/mach-meson8/include/mach/sd.h
++++ b/arch/arm/mach-meson8/include/mach/sd.h
+@@ -586,6 +586,7 @@ void aml_sdhc_request(struct mmc_host *mmc, struct mmc_request *mrq);
+ int aml_sdhc_get_cd(struct mmc_host *mmc);
+ extern void amlsd_init_debugfs(struct mmc_host *host);
+ 
++extern struct mmc_host *sdio_host;
+ 
+ #define     SPI_BOOT_FLAG                   0
+ #define     NAND_BOOT_FLAG                  1
+@@ -617,7 +618,7 @@ extern void amlsd_init_debugfs(struct mmc_host *host);
+ 
+ #define aml_jtag_sd() do{\
+     aml_clr_reg32_mask(P_AO_SECURE_REG1, ((1<<8) | (1<<1))); \
+-    aml_set_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \  
++    aml_set_reg32_mask(P_AO_SECURE_REG1, ((1<<5) | (1<<9))); \
+ }while(0)
+ 
+ #define aml_uart_pinctrl() do {\
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 33f2a788ae99..4b8688873cf7 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -35,6 +35,7 @@
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ #include <linux/amlogic/wifi_dt.h>
+ 
++struct mmc_host *sdio_host = NULL;
+ static struct mmc_claim aml_sdio_claim;
+ 
+ static void aml_sdio_soft_reset(struct amlsd_host* host)
+@@ -764,8 +765,6 @@ static void aml_sdio_set_clk_rate(struct amlsd_platform* pdata, u32 clk_ios)
+ 
+    if(aml_card_type_sdio(pdata) && (pdata->f_max > 50000000)) // if > 50MHz
+           clk_div = 0;
+-       
+-
+ 
+     conf->cmd_clk_divide = clk_div;
+     pdata->clkc = clk_div;
+@@ -898,9 +897,9 @@ static int aml_sdio_suspend(struct platform_device *pdev, pm_message_t state)
+             if (i < 0) {
+                 break;
+             }
+-            if(aml_card_type_sdio(pdata)) { // sdio_wifi
+-                wifi_setup_dt();
+-            }
++            // if(aml_card_type_sdio(pdata)) { // sdio_wifi
++                // wifi_setup_dt();
++            // }
+             mmc = pdata->mmc;
+             mmc_resume_host(mmc);
+         }
+@@ -920,9 +919,9 @@ static int aml_sdio_resume(struct platform_device *pdev)
+ 	printk("***Entered %s:%s\n", __FILE__,__func__);
+ 	list_for_each_entry(pdata, &host->sibling, sibling){
+         // if(pdata->port == MESON_SDIO_PORT_A) { // sdio_wifi
+-        if(aml_card_type_sdio(pdata)) {
+-            wifi_setup_dt();
+-        }
++        // if(aml_card_type_sdio(pdata)) {
++            // wifi_setup_dt();
++        // }
+ 
+         // detect if a card is insert or inset if it is removable
+         if (!(pdata->caps & MMC_CAP_NONREMOVABLE)) {
+@@ -1079,10 +1078,16 @@ static int aml_sdio_probe(struct platform_device *pdev)
+         aml_sduart_pre(pdata);
+ 
+ 		ret = mmc_add_host(mmc);
+-		if (ret) {
++		if (ret) { // error
+ 			sdhc_err("Failed to add mmc host.\n");
+ 			goto probe_free_host;
+-		}
++		} else { // ok
++            if (aml_card_type_sdio(pdata)) { // if sdio_wifi
++                sdio_host = mmc;
++                mmc->rescan_entered = 1; // do NOT run mmc_rescan for the first time
++            }
++        }
++
+ 		aml_sdio_init_debugfs(mmc);
+ 		/*Add each mmc host pdata to this controller host list*/
+ 		INIT_LIST_HEAD(&pdata->sibling);
+diff --git a/drivers/amlogic/mmc/amlsd.c b/drivers/amlogic/mmc/amlsd.c
+index 873c21b22fe3..51356f62f970 100755
+--- a/drivers/amlogic/mmc/amlsd.c
++++ b/drivers/amlogic/mmc/amlsd.c
+@@ -663,15 +663,18 @@ void of_amlsd_pwr_on(struct amlsd_platform* pdata)
+ {
+ 	if(pdata->gpio_power)
+ 		amlogic_set_value(pdata->gpio_power, pdata->power_level, MODULE_NAME);
+-	if(pdata->port == MESON_SDIO_PORT_A)
+-        extern_wifi_set_enable(1); //power on wifi
++	// if(pdata->port == MESON_SDIO_PORT_A) {
++        // extern_wifi_set_enable(1); //power on wifi
++    // }
+ }
++
+ void of_amlsd_pwr_off(struct amlsd_platform* pdata)
+ {
+ 	if(pdata->gpio_power)
+ 		amlogic_set_value(pdata->gpio_power, !pdata->power_level, MODULE_NAME);
+-	if(pdata->port == MESON_SDIO_PORT_A)
+-        extern_wifi_set_enable(0); //power off wifi
++	// if(pdata->port == MESON_SDIO_PORT_A){
++        // extern_wifi_set_enable(0); //power off wifi
++    // }
+ }
+ int of_amlsd_init(struct amlsd_platform* pdata)
+ {
+@@ -704,8 +707,8 @@ int of_amlsd_init(struct amlsd_platform* pdata)
+         }
+ 	}
+ 
+-	if(pdata->port == MESON_SDIO_PORT_A)
+-		wifi_setup_dt();
++	// if(pdata->port == MESON_SDIO_PORT_A)
++		// wifi_setup_dt();
+ 	return 0;
+ }
+ 
+@@ -1230,14 +1233,14 @@ int aml_dbg_verify_pinmux (struct amlsd_platform * pdata)
+ }
+ #endif // #ifdef      CONFIG_MMC_AML_DEBUG
+ 
+-#ifndef CONFIG_AM_WIFI_SD_MMC
+-int wifi_setup_dt()
+-{
+-	return 0;
+-}
+-void extern_wifi_set_enable(int is_on)
+-{
+-    return;
+-}
+-#endif
++// #ifndef CONFIG_AM_WIFI_SD_MMC
++// int wifi_setup_dt()
++// {
++	// return 0;
++// }
++// void extern_wifi_set_enable(int is_on)
++// {
++    // return;
++// }
++// #endif
+ 
+diff --git a/drivers/amlogic/mmc/amlsd.h b/drivers/amlogic/mmc/amlsd.h
+index 01b3b03621f8..126b514b3ca9 100755
+--- a/drivers/amlogic/mmc/amlsd.h
++++ b/drivers/amlogic/mmc/amlsd.h
+@@ -5,9 +5,9 @@
+ 
+ 
+ #define AML_MMC_MAJOR_VERSION   1
+-#define AML_MMC_MINOR_VERSION   01
++#define AML_MMC_MINOR_VERSION   03
+ #define AML_MMC_VERSION         ((AML_MMC_MAJOR_VERSION << 8) | AML_MMC_MINOR_VERSION)
+-#define AML_MMC_VER_MESSAGE     "2013-12-12: switch pinmux in the most save time way for sd/sdio"
++#define AML_MMC_VER_MESSAGE     "2013-12-20: defer init&resume of sdio-wifi"
+ 
+ extern unsigned sdhc_debug;
+ extern unsigned sdio_debug;
+diff --git a/drivers/amlogic/wifi/wifi_power.c b/drivers/amlogic/wifi/wifi_power.c
+index 0fa65f983f0f..b28a1beec739 100755
+--- a/drivers/amlogic/wifi/wifi_power.c
++++ b/drivers/amlogic/wifi/wifi_power.c
+@@ -80,6 +80,17 @@ static int  wifi_power_release(struct inode *inode,struct file *file)
+ 
+ static int wifi_power_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {	
++	struct wifi_power_platform_data *pdata = NULL;
++    
++        
++    pdata = (struct wifi_power_platform_data*)devp->platform_data;
++    if(pdata == NULL){
++        printk("%s platform data is required!\n",__FUNCTION__);
++        return -1;
++    }
++    
++    amlogic_gpio_request(pdata->power_gpio,WIFI_POWER_MODULE_NAME);
++    
+ 	switch (cmd) 
+ 	{
+     	case POWER_UP:
+@@ -294,7 +305,7 @@ static int wifi_power_probe(struct platform_device *pdev)
+ 	     }else{
+ 	        pdata->power_gpio = amlogic_gpio_name_map_num(str);
+ 	        printk("wifi_power power_gpio is %d\n",pdata->power_gpio);
+-	        ret = amlogic_gpio_request(pdata->power_gpio,WIFI_POWER_MODULE_NAME);
++	        //ret = amlogic_gpio_request(pdata->power_gpio,WIFI_POWER_MODULE_NAME);
+ 	        //mcli pdata->usb_set_power(0);    //power on   
+ 	     }
+ 	}
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index d4cc64c6b167..ea916f9abd4c 100755
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -1275,8 +1275,20 @@ int mmc_regulator_get_supply(struct mmc_host *mmc)
+ 	struct regulator *supply;
+ 	int ret;
+ 
++	supply = devm_regulator_get(dev, "vmmc");
++	mmc->supply.vmmc = supply;
++	mmc->supply.vqmmc = devm_regulator_get(dev, "vqmmc");
++
++	if (IS_ERR(supply))
++		return PTR_ERR(supply);
++
++	ret = mmc_regulator_get_ocrmask(supply);
++	if (ret > 0)
++		mmc->ocr_avail = ret;
++	else
+ 		dev_warn(mmc_dev(mmc), "Failed getting OCR mask: %d\n", ret);
+-	return -EINVAL;
++
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(mmc_regulator_get_supply);
+ 
+diff --git a/drivers/mmc/core/sdio.c b/drivers/mmc/core/sdio.c
+index 5aff3a298ba7..3b2d08c72966 100755
+--- a/drivers/mmc/core/sdio.c
++++ b/drivers/mmc/core/sdio.c
+@@ -20,6 +20,8 @@
+ #include <linux/mmc/sdio_func.h>
+ #include <linux/mmc/sdio_ids.h>
+ 
++#include <mach/sd.h>
++
+ #include "core.h"
+ #include "bus.h"
+ #include "sd.h"
+@@ -969,26 +971,26 @@ static int mmc_sdio_resume(struct mmc_host *host)
+ 	BUG_ON(!host->card);
+ 
+ 	/* Basic card reinitialization. */
+-	mmc_claim_host(host);
++	// mmc_claim_host(host);
+ 
+ 	/* No need to reinitialize powered-resumed nonremovable cards */
+-	if (mmc_card_is_removable(host) || !mmc_card_keep_power(host)) {
+-		// sdio_reset(host);
+-		mmc_go_idle(host);
+-		err = mmc_sdio_init_card(host, host->ocr, host->card,
+-					mmc_card_keep_power(host));
+-	} else if (mmc_card_keep_power(host) && mmc_card_wake_sdio_irq(host)) {
++	// if (mmc_card_is_removable(host) || !mmc_card_keep_power(host)) {
++        // sdio_reset(host);
++		// mmc_go_idle(host);
++		// err = mmc_sdio_init_card(host, host->ocr, host->card,
++					// mmc_card_keep_power(host));
++	// } else if (mmc_card_keep_power(host) && mmc_card_wake_sdio_irq(host)) {
+ 		/* We may have switched to 1-bit mode during suspend */
+-		err = sdio_enable_4bit_bus(host->card);
+-		if (err > 0) {
+-			mmc_set_bus_width(host, MMC_BUS_WIDTH_4);
+-			err = 0;
+-		}
+-	}
++		// err = sdio_enable_4bit_bus(host->card);
++		// if (err > 0) {
++			// mmc_set_bus_width(host, MMC_BUS_WIDTH_4);
++			// err = 0;
++		// }
++	// }
+ 
+-	if (!err && host->sdio_irqs)
+-		wake_up_process(host->sdio_irq_thread);
+-	mmc_release_host(host);
++	// if (!err && host->sdio_irqs)
++		// wake_up_process(host->sdio_irq_thread);
++	// mmc_release_host(host);
+ 
+ 	/*
+ 	 * If the card looked to be the same as before suspending, then
+@@ -1296,12 +1298,34 @@ err:
+ }
+ EXPORT_SYMBOL(sdio_reset_comm);
+ 
+-void sdio_reinit()
++static void sdio_rescan (struct mmc_host *host)
+ {
+-    if(comm_card){
+-       sdio_reset_comm(comm_card);
++    int ret;
++
++    host->rescan_entered = 0;
++    mmc_detect_change(host, 0); // start the delayed_work
++    ret = flush_work(&(host->detect.work)); // wait for the delayed_work to finish
++    if (!ret) {
++        printk("\033[0;47;33m [%s] Error: delayed_work mmc_rescan() already idle! \033[0m\n", __func__);
+     }
++    // else {
++        // printk("\033[0;40;32m [%s] delayed_work mmc_rescan() finish \033[0m\n", __FUNCTION__);
++    // }
+ }
+-EXPORT_SYMBOL(sdio_reinit);
+ 
++void sdio_reinit (void)
++{
++    if(comm_card) { // run sdio_rescan() already
++        sdio_reset_comm(comm_card);
++    } else {
++        // printk("\033[0;40;35m [%s] real init \033[0m\n", __func__);
++        if (sdio_host) {
++            sdio_rescan(sdio_host);
++        } else {
++            printk("\033[0;47;33m [%s] Error: sdio_host is NULL \033[0m\n", __func__);
++        }
++    }
++    printk("[%s] finish\n", __func__);
++}
++EXPORT_SYMBOL(sdio_reinit);
+ 
+diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
+index 6984bb8eb971..f49198343184 100644
+--- a/include/linux/mmc/host.h
++++ b/include/linux/mmc/host.h
+@@ -16,6 +16,7 @@
+ #include <linux/device.h>
+ #include <linux/fault-inject.h>
+ #include <linux/wakelock.h>
++// #include <linux/genhd.h>
+ 
+ #include <linux/mmc/core.h>
+ #include <linux/mmc/pm.h>
+@@ -329,7 +330,7 @@ struct mmc_host {
+ #endif
+ 	struct mmc_claim* alldev_claim;
+     int         is_emmc_port;
+-	int 		(*add_part)(struct gendisk * disk);
++	// int 		(*add_part)(struct gendisk *disk);
+ 
+ 	int			rescan_disable;	/* disable card detection */
+ 	int			rescan_entered;	/* used with nonremovable devices */
+-- 
+2.19.0
+

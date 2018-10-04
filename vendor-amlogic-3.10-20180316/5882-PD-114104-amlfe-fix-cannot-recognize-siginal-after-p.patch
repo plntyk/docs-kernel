@@ -1,0 +1,98 @@
+From 8c2a0eff1df6454b80d7645bd0385094964c1eb1 Mon Sep 17 00:00:00 2001
+From: Jian Chen <jian.chen@amlogic.com>
+Date: Mon, 19 Oct 2015 22:28:18 +0800
+Subject: [PATCH 5882/5965] PD#114104: amlfe: fix cannot recognize siginal
+ after pullout atv
+
+Change-Id: I5f2c67563efc8e993d8a24d828df64d79870ee55
+---
+ drivers/amlogic/dvb_tv/aml_fe.c | 44 +++++++++++++++++++++++++++++----
+ 1 file changed, 39 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index f2650e5f0d93..08794e7e9ed1 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -85,6 +85,9 @@ static struct aml_fe_man  fe_man;
+ static u32 aml_fe_suspended = 0;
+ #if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
+ static int afc_offset = 0;
++module_param( afc_offset, uint, 0644);
++MODULE_PARM_DESC( afc_offset, "\n afc_offset\n");
++static int no_sig_cnt = 0;
+ struct timer_list aml_timer;
+ #define AML_INTERVAL		(HZ/100)   //10ms, #define HZ 100
+ static unsigned int timer_init_state = 0;
+@@ -211,19 +214,30 @@ void aml_timer_hander(unsigned long arg)
+ 	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
+ 	int afc = 100;
+ 	struct aml_fe *fee;
++	aml_timer.expires = jiffies + AML_INTERVAL*10;//100ms timer
++	add_timer(&aml_timer);
+ 	if ((aml_timer_en == 0) || (FE_ANALOG != fe->ops.info.type)) {
+ 		return;
+ 	}
+-	aml_timer.expires = jiffies + AML_INTERVAL*10;//100ms timer
+-	add_timer(&aml_timer);
+-
+ 	fee = fe->demodulator_priv;
+ 	retrieve_frequency_offset(&afc);
+ 	afc = afc*488/1000;
+-	afc_offset += afc;
+-	if ((abs(afc_offset) >= 2000) || (abs(afc) < 50))
++	if (abs(afc) < 50)
++		return;
++	if (abs(afc_offset) >= 2000) {
++		no_sig_cnt++;
++		if (no_sig_cnt == 20) {
++			c->frequency -= afc_offset*1000;
++			if (fe->ops.tuner_ops.set_params) {
++				fe->ops.tuner_ops.set_params(fe);
++			}
++			afc_offset = 0;
++		}
+ 		return;
++	}
++	no_sig_cnt = 0;
+ 	c->frequency += afc*1000;
++	afc_offset += afc;
+ 	if (fe->ops.tuner_ops.set_params) {
+ 		fe->ops.tuner_ops.set_params(fe);
+ 	}
+@@ -288,6 +302,7 @@ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+ 		aml_timer.data = (ulong) fe;
+ 		aml_timer.expires = jiffies + AML_INTERVAL*500;//after 5s enable demod auto detect
+ 		afc_offset = 0;
++		no_sig_cnt = 0;
+ 		add_timer(&aml_timer);
+ 		timer_init_state = 1;
+ 	}
+@@ -642,6 +657,25 @@ static int aml_fe_afc_closer(struct dvb_frontend *fe,int minafcfreq,int maxafcfq
+ 			//fe->ops.set_frontend(fe);
+ 			if (fe->ops.tuner_ops.set_params) {
+ 				fe->ops.tuner_ops.set_params(fe);
++#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))//afc tune
++					if (aml_timer_en == 1) {
++						if (timer_init_state == 1) {
++							del_timer_sync(&aml_timer);
++							timer_init_state = 0;
++						}
++					}
++
++					if (aml_timer_en == 1) {
++						init_timer(&aml_timer);
++						aml_timer.function = aml_timer_hander;
++						aml_timer.data = (ulong) fe;
++						aml_timer.expires = jiffies + AML_INTERVAL*500;//after 5s enable demod auto detect
++						afc_offset = 0;
++						no_sig_cnt = 0;
++						add_timer(&aml_timer);
++						timer_init_state = 1;
++					}
++#endif
+ 			}
+ 			#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
+ 			//msleep(delay_afc);
+-- 
+2.19.0
+

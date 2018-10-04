@@ -1,0 +1,304 @@
+From 518bb8988e643db3e6654d18a96c27ba2aa73347 Mon Sep 17 00:00:00 2001
+From: "zhi.zhou" <zhi.zhou@amlogic.com>
+Date: Thu, 22 May 2014 13:01:55 +0800
+Subject: [PATCH 4208/5965] pd#92106 for 265 error not reset fast, and used
+ same define errors..
+
+---
+ drivers/amlogic/amports/vavs.c           |  7 +------
+ drivers/amlogic/amports/vh264.c          | 13 ++++---------
+ drivers/amlogic/amports/vh264_4k2k.c     | 13 ++++---------
+ drivers/amlogic/amports/vh265.c          | 11 +++--------
+ drivers/amlogic/amports/vmjpeg.c         |  7 +------
+ drivers/amlogic/amports/vmpeg12.c        |  7 +------
+ drivers/amlogic/amports/vmpeg4.c         |  7 +------
+ drivers/amlogic/amports/vreal.c          | 15 ++++-----------
+ drivers/amlogic/amports/vvc1.c           |  7 +------
+ include/linux/amlogic/amports/amstream.h | 19 ++++++++++++++++++-
+ 10 files changed, 38 insertions(+), 68 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vavs.c b/drivers/amlogic/amports/vavs.c
+index d4c3c72072d1..b4df747fec6c 100755
+--- a/drivers/amlogic/amports/vavs.c
++++ b/drivers/amlogic/amports/vavs.c
+@@ -82,12 +82,7 @@
+ 
+ #define INCPTR(p) ptr_atomic_wrap_inc(&p)
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ static int debug_flag = 0;
+ 
+diff --git a/drivers/amlogic/amports/vh264.c b/drivers/amlogic/amports/vh264.c
+index 5e4ef715488d..4f06e73fcbf7 100755
+--- a/drivers/amlogic/amports/vh264.c
++++ b/drivers/amlogic/amports/vh264.c
+@@ -102,12 +102,7 @@ static DEFINE_MUTEX(vh264_mutex);
+ #define PUT_INTERVAL        (HZ/100)
+ #define NO_DISP_WD_COUNT    (3 * HZ / PUT_INTERVAL)
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ #define DEC_CONTROL_FLAG_FORCE_2997_1080P_INTERLACE 0x0001
+ #define DEC_CONTROL_FLAG_FORCE_2500_576P_INTERLACE  0x0002
+@@ -1147,7 +1142,7 @@ static void vh264_isr(void)
+         WRITE_VREG(AV_SCRATCH_0, 0);
+     } else if ((cpu_cmd & 0xff) == 6) {
+         vh264_running = 0;
+-        fatal_error_flag = 0x10;
++        fatal_error_flag = DECODER_FATAL_ERROR_UNKNOW;
+         // this is fatal error, need restart
+         printk("fatal error happend\n");
+         if (!fatal_error_reset) {
+@@ -1157,12 +1152,12 @@ static void vh264_isr(void)
+         vh264_running = 0;
+         frame_width = (READ_VREG(AV_SCRATCH_1) + 1) * 16;
+         printk("Over decoder supported size, width = %d\n", frame_width);
+-        fatal_error_flag = 0x10;
++        fatal_error_flag = DECODER_FATAL_ERROR_SIZE_OVERFLOW;
+     } else if ((cpu_cmd & 0xff) == 8) {
+         vh264_running = 0;
+         frame_height = (READ_VREG(AV_SCRATCH_1) + 1) * 16;
+         printk("Over decoder supported size, height = %d\n", frame_height);
+-        fatal_error_flag = 0x10;
++        fatal_error_flag = DECODER_FATAL_ERROR_SIZE_OVERFLOW;
+     }
+ 
+ #ifdef HANDLE_H264_IRQ
+diff --git a/drivers/amlogic/amports/vh264_4k2k.c b/drivers/amlogic/amports/vh264_4k2k.c
+index ddadbda0ad20..bafc6077ce3c 100755
+--- a/drivers/amlogic/amports/vh264_4k2k.c
++++ b/drivers/amlogic/amports/vh264_4k2k.c
+@@ -56,12 +56,7 @@
+ #define PUT_INTERVAL        (HZ/100)
+ #define ERROR_RESET_COUNT   100
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ extern void amvenc_dos_top_reg_fix(void);
+ 
+@@ -810,13 +805,13 @@ static void vh264_4k2k_put_timer_func(unsigned long arg)
+         (READ_VREG(VDEC2_MS_ID) & 0x100)) {                   // with both decoder have started decoding
+         if (++error_watchdog_count == ERROR_RESET_COUNT) {    // and it lasts for a while
+             printk("H264 4k2k decoder fatal error watchdog.\n");
+-            fatal_error = 0x10;
++            fatal_error = DECODER_FATAL_ERROR_UNKNOW;
+         }
+     }
+ 
+     if (READ_VREG(FATAL_ERROR) != 0) {
+         printk("H264 4k2k decoder ucode fatal error.\n");
+-        fatal_error = 0x10;
++        fatal_error = DECODER_FATAL_ERROR_UNKNOW;
+         WRITE_VREG(FATAL_ERROR, 0);
+     }
+ 
+@@ -848,7 +843,7 @@ int vh264_4k2k_dec_status(struct vdec_status *vstatus)
+         vstatus->fps = -1;
+     }
+     vstatus->error_count = 0;
+-    vstatus->status = stat | (fatal_error << 16);
++    vstatus->status = stat | fatal_error;
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/amports/vh265.c b/drivers/amlogic/amports/vh265.c
+index 9bbbe3919bd9..37490393ff56 100755
+--- a/drivers/amlogic/amports/vh265.c
++++ b/drivers/amlogic/amports/vh265.c
+@@ -51,12 +51,7 @@
+ #define ERROR_LOCAL_RESET_COUNT   100
+ #define ERROR_SYSTEM_RESET_COUNT   200
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ static int  vh265_vf_states(vframe_states_t *states, void*);
+ static vframe_t *vh265_vf_peek(void*);
+@@ -2853,7 +2848,7 @@ static void vh265_put_timer_func(unsigned long arg)
+         else if (error_watchdog_count == ERROR_SYSTEM_RESET_COUNT) {    // and it lasts for a while
+             if((debug&H265_DEBUG_DIS_SYS_ERROR_PROC)==0){
+                 printk("H265 decoder fatal error watchdog.\n");
+-                fatal_error = 0x10;
++                fatal_error = DECODER_FATAL_ERROR_UNKNOW;
+             }
+             else{
+                 error_watchdog_count = 0;
+@@ -2881,7 +2876,7 @@ int vh265_dec_status(struct vdec_status *vstatus)
+         vstatus->fps = -1;
+     }
+     vstatus->error_count = 0;
+-    vstatus->status = stat | (fatal_error << 16);
++    vstatus->status = stat | fatal_error;
+     return 0;
+ }
+ 
+diff --git a/drivers/amlogic/amports/vmjpeg.c b/drivers/amlogic/amports/vmjpeg.c
+index 8735b67b943c..a80f13b1d7e6 100755
+--- a/drivers/amlogic/amports/vmjpeg.c
++++ b/drivers/amlogic/amports/vmjpeg.c
+@@ -78,12 +78,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
+ #define DECODE_BUFFER_NUM_MAX 4
+ #define PUT_INTERVAL        HZ/100
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6  
+ //#define NV21
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index a536a3ebddc5..2e3689b80bf0 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -89,12 +89,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
+ 
+ #define INCPTR(p) ptr_atomic_wrap_inc(&p)
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ #define DEC_CONTROL_FLAG_FORCE_2500_720_576_INTERLACE  0x0002
+ #define DEC_CONTROL_FLAG_FORCE_3000_704_480_INTERLACE  0x0004
+diff --git a/drivers/amlogic/amports/vmpeg4.c b/drivers/amlogic/amports/vmpeg4.c
+index 5ef6060adf91..aabb7cc49bcd 100755
+--- a/drivers/amlogic/amports/vmpeg4.c
++++ b/drivers/amlogic/amports/vmpeg4.c
+@@ -100,12 +100,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
+ #define DECODE_BUFFER_NUM_MAX 4
+ #define PUT_INTERVAL        HZ/100
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ #define RATE_DETECT_COUNT   5
+ #define DURATION_UNIT       96000
+diff --git a/drivers/amlogic/amports/vreal.c b/drivers/amlogic/amports/vreal.c
+index 525be1ae1279..d2abd4c7c079 100755
+--- a/drivers/amlogic/amports/vreal.c
++++ b/drivers/amlogic/amports/vreal.c
+@@ -63,9 +63,7 @@
+ #define RM_DEF_BUFFER_ADDR        0x01000000
+ /* protocol registers */
+ #define STATUS_AMRISC   AV_SCRATCH_4
+-#define PARSER_ERROR_WRONG_PACKAGE_SIZE 0x80
+-#define PARSER_ERROR_WRONG_HEAD_VER     0x40
+-#define DECODER_ERROR_VLC_DECODE_TBL    0x20
++
+ 
+ #define RV_PIC_INFO     AV_SCRATCH_5
+ #define VPTS_TR         AV_SCRATCH_6
+@@ -97,14 +95,9 @@
+ #define VF_BUF_NUM          4
+ #define PUT_INTERVAL        HZ/100
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
+ 
+-#define PARSER_FATAL_ERROR  0x10
++
++
+ 
+ static vframe_t *vreal_vf_peek(void*);
+ static vframe_t *vreal_vf_get(void*);
+@@ -474,7 +467,7 @@ int vreal_dec_status(struct vdec_status *vstatus)
+         vstatus->fps = 96000;
+     }
+     vstatus->error_count = real_err_count;
+-    vstatus->status = ((READ_VREG(STATUS_AMRISC) | fatal_flag)<< 16) | stat;
++    vstatus->status = ((READ_VREG(STATUS_AMRISC)<<16) | fatal_flag ) | stat;
+     //printk("vreal_dec_status 0x%x\n", vstatus->status);
+     return 0;
+ }
+diff --git a/drivers/amlogic/amports/vvc1.c b/drivers/amlogic/amports/vvc1.c
+index 81b3fe75e128..af2db4f80780 100755
+--- a/drivers/amlogic/amports/vvc1.c
++++ b/drivers/amlogic/amports/vvc1.c
+@@ -73,12 +73,7 @@
+ #define DECODE_BUFFER_NUM_MAX 4
+ #define PUT_INTERVAL        (HZ/100)
+ 
+-#define STAT_TIMER_INIT     0x01
+-#define STAT_MC_LOAD        0x02
+-#define STAT_ISR_REG        0x04
+-#define STAT_VF_HOOK        0x08
+-#define STAT_TIMER_ARM      0x10
+-#define STAT_VDEC_RUN       0x20
++
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6  
+ // TODO: move to register headers
+diff --git a/include/linux/amlogic/amports/amstream.h b/include/linux/amlogic/amports/amstream.h
+index 3f327b38a268..25d81b69a087 100755
+--- a/include/linux/amlogic/amports/amstream.h
++++ b/include/linux/amlogic/amports/amstream.h
+@@ -205,7 +205,24 @@ struct buf_status {
+         unsigned int write_pointer;
+ };
+ 
+-
++/*struct vdec_status.status*/
++#define STAT_TIMER_INIT     0x01
++#define STAT_MC_LOAD        0x02
++#define STAT_ISR_REG        0x04
++#define STAT_VF_HOOK        0x08
++#define STAT_TIMER_ARM      0x10
++#define STAT_VDEC_RUN       0x20
++//-/*struct vdec_status.status on error*/
++
++#define PARSER_FATAL_ERROR              (0x10<<16)
++#define DECODER_ERROR_VLC_DECODE_TBL    (0x20<<16)
++#define PARSER_ERROR_WRONG_HEAD_VER     (0x40<<16)
++#define PARSER_ERROR_WRONG_PACKAGE_SIZE (0x80<<16)
++#define DECODER_FATAL_ERROR_SIZE_OVERFLOW     (0x100<<16)
++#define DECODER_FATAL_ERROR_UNKNOW             (0x200<<16)
++#define DECODER_ERROR_MASK	(0xffff<<16)
++
++
+ struct vdec_status {
+         unsigned int width;
+         unsigned int height;
+-- 
+2.19.0
+

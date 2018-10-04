@@ -1,0 +1,616 @@
+From a42bd4388f97f26f60525c4cd09e70e533549998 Mon Sep 17 00:00:00 2001
+From: Bo Yang <bo.yang@amlogic.com>
+Date: Thu, 25 Jun 2015 14:13:01 +0800
+Subject: [PATCH 5669/5965] PD#108072: backlight: update to meet lcd power
+ sequence for g9tv
+
+The driver don't power on backlight when booting. that have been
+done in uboot when booting. The driver will power off backlight
+and notify lcd to power off when suspend. So the backlight
+register reboot notifier instead of lcd driver.
+
+Change-Id: I232fa1264ea2cef9f89668921f6f901afc81c534
+---
+ arch/arm/boot/dts/amlogic/mesong9bb_n303.dtd  |  10 +-
+ arch/arm/boot/dts/amlogic/mesong9tv_n301.dtd  |  10 +-
+ drivers/amlogic/display/backlight/aml_tv_bl.c | 236 +++++++++++++-----
+ drivers/amlogic/display/backlight/aml_tv_bl.h |  23 +-
+ drivers/amlogic/display/lcd/aml_tv_lcd.c      |  29 ++-
+ 5 files changed, 214 insertions(+), 94 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/mesong9bb_n303.dtd b/arch/arm/boot/dts/amlogic/mesong9bb_n303.dtd
+index 2029a6e01578..6a30cb50047c 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9bb_n303.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9bb_n303.dtd
+@@ -729,15 +729,19 @@
+ 			index = <0>;
+ 			name = "backlight_0";
+ 			bl_en_gpio = "GPIOY_6";
+-			bl_en_on = <0>; /** 1=output high, 0=output low **/
++			bl_en_gpio_on = <0>; /** 1=output high, 0=output low **/
+ 			bl_pwm_port = "PWM_B";
+ 			bl_pwm_positive = <0>; /* 1: positive 0: negative */
++			bl_pwm_gpio = "GPIOY_7";
++			bl_pwm_gpio_on = <0>; /** 1=output high, 0=output low **/
+ 
+ 			bl_level_default_uboot = <100>;
+ 			bl_level_default_kernel = <100>;
+ 			bl_level_max_min = <255 10>;
+-			bl_power_on_delay = <200>;  /* unit: ms */
+-			bl_power_off_delay = <200>; /* unit: ms */
++			bl_pwm_on_delay  = <200>; /* unit: ms */
++			bl_pwm_off_delay = <200>; /* unit: ms */
++			bl_power_on_delay  = <5>; /* unit: ms */
++			bl_power_off_delay = <5>; /* unit: ms */
+ 			bl_pwm_freq = <1000>;
+ 			bl_pwm_duty_max_min = <100 25>; /* 100% - 25%*/
+ 		};
+diff --git a/arch/arm/boot/dts/amlogic/mesong9tv_n301.dtd b/arch/arm/boot/dts/amlogic/mesong9tv_n301.dtd
+index a87261af236d..76feda4dae90 100644
+--- a/arch/arm/boot/dts/amlogic/mesong9tv_n301.dtd
++++ b/arch/arm/boot/dts/amlogic/mesong9tv_n301.dtd
+@@ -805,15 +805,19 @@
+ 			index = <0>;
+ 			name = "backlight_0";
+ 			bl_en_gpio = "GPIOY_6";
+-			bl_en_on = <0>; /** 1=output high, 0=output low **/
++			bl_en_gpio_on = <0>; /** 1=output high, 0=output low **/
+ 			bl_pwm_port = "PWM_B";
+ 			bl_pwm_positive = <0>; /* 1: positive 0: negative */
++			bl_pwm_gpio = "GPIOY_7";
++			bl_pwm_gpio_on = <0>; /** 1=output high, 0=output low **/
+ 
+ 			bl_level_default_uboot = <100>;
+ 			bl_level_default_kernel = <100>;
+ 			bl_level_max_min = <255 10>;
+-			bl_power_on_delay = <200>;  /* unit: ms */
+-			bl_power_off_delay = <200>; /* unit: ms */
++			bl_pwm_on_delay  = <200>; /* unit: ms */
++			bl_pwm_off_delay = <200>; /* unit: ms */
++			bl_power_on_delay  = <5>; /* unit: ms */
++			bl_power_off_delay = <5>; /* unit: ms */
+ 			bl_pwm_freq = <1000>;
+ 			bl_pwm_duty_max_min = <100 25>; /* 100% - 25%*/
+ 		};
+diff --git a/drivers/amlogic/display/backlight/aml_tv_bl.c b/drivers/amlogic/display/backlight/aml_tv_bl.c
+index c01ae2c0e1a6..f80b301cda25 100644
+--- a/drivers/amlogic/display/backlight/aml_tv_bl.c
++++ b/drivers/amlogic/display/backlight/aml_tv_bl.c
+@@ -1,6 +1,13 @@
+ /*
+  * drivers/amlogic/display/backlight/aml_tv_bl.c
+  *
++ * This driver don't power on backlight when booting. It has been done
++ * in uboot when booting. But this driver will power off backlight and
++ * notify lcd to power off.
++ *
++ * This driver also has be able to power on/off backlight on the fly.
++ *
++ *
+  * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+@@ -29,6 +36,7 @@
+ #include <linux/delay.h>
+ #include <linux/string.h>
+ #include <linux/printk.h>
++#include <linux/reboot.h>
+ 
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ #include <linux/amlogic/display/lcd.h>
+@@ -45,48 +53,20 @@
+ 	__FUNCTION__ , ## arg)
+ 
+ 
+-static int aml_bl_notifier_callback(struct notifier_block *self,
++static int aml_bl_reboot_notify_callback(struct notifier_block *self,
+ 				unsigned long event, void *data)
+ {
+ 	struct aml_bl *bdev;
+ 
+-	/* If we aren't interested in this event, skip it immediately */
+-	if (event != LCD_EVENT_POWERON && event != LCD_EVENT_POWEROFF)
+-		return 0;
+-
+-	bdev = container_of(self, struct aml_bl, lcd_notif);
++	bdev = container_of(self, struct aml_bl, reboot_nb);
+ 	mutex_lock(&bdev->bd->ops_lock);
+-	switch (event) {
+-	case LCD_EVENT_POWERON:
+-		bdev->bd->props.state |= AML_BL_STATE_POWERON;
+-		break;
+-	case LCD_EVENT_POWEROFF:
+-		bdev->bd->props.state &= ~AML_BL_STATE_POWERON;
+-		break;
+-	default:
+-		break;
+-	}
++	bdev->bd->props.state &= ~AML_BL_STATE_POWERON;
++	bdev->reboot = true;
+ 	backlight_update_status(bdev->bd);
+ 	mutex_unlock(&bdev->bd->ops_lock);
+-	return 0;
++	return NOTIFY_OK;
+ }
+ 
+-static int aml_bl_register_lcd(struct backlight_device *bd)
+-{
+-	struct aml_bl *bdev;
+-	bdev = bl_get_data(bd);
+-	memset(&bdev->lcd_notif, 0, sizeof(bdev->lcd_notif));
+-	bdev->lcd_notif.notifier_call = aml_bl_notifier_callback;
+-
+-	return lcd_register_client(&bdev->lcd_notif);
+-}
+-
+-static void aml_bl_unregister_lcd(struct backlight_device *bd)
+-{
+-	struct aml_bl *bdev;
+-	bdev = bl_get_data(bd);
+-	lcd_unregister_client(&bdev->lcd_notif);
+-}
+ 
+ static void aml_bl_pwm_init(struct backlight_device *bd)
+ {
+@@ -138,69 +118,149 @@ static void aml_bl_pwm_init(struct backlight_device *bd)
+ 	INFO("pwm select port %d ok\n", port);
+ }
+ 
+-static void aml_bl_pwm_on_off(struct backlight_device *bd, unsigned int en)
++
++static void aml_bl_pwm_on(struct backlight_device *bd)
+ {
+ 	unsigned int port;
+ 	struct aml_bl *bdev;
++	struct pinctrl_state *s;
++	int ret;
+ 
+ 	bdev = bl_get_data(bd);
+ 	port = bdev->d->pwm_port;
+-	en = en ? 1 : 0;
++
++	amlogic_gpio_free(bdev->d->pwm_gpio, AML_BL_NAME);
++
++	s = pinctrl_lookup_state(bdev->p, "default");
++	if (IS_ERR(s)) {
++		ERR("failed to pinctrl_lookup_state default\n");
++		devm_pinctrl_put(bdev->p);
++		return;
++	}
++
++	ret = pinctrl_select_state(bdev->p, s);
++	if (ret < 0) {
++		ERR("failed to pinctrl_select_state\n");
++		devm_pinctrl_put(bdev->p);
++		return;
++	}
+ 
+ 	switch (port) {
+ 	case AML_BL_PWM_A:
+ 		/* pwm_a_en bit[0] */
+-		aml_set_reg32_bits(P_PWM_MISC_REG_AB, en, 0, 1);
++		aml_set_reg32_bits(P_PWM_MISC_REG_AB, 1, 0, 1);
+ 		break;
+ 	case AML_BL_PWM_B:
+ 		/* pwm_b_en bit[1] */
+-		aml_set_reg32_bits(P_PWM_MISC_REG_AB, en, 1, 1);
++		aml_set_reg32_bits(P_PWM_MISC_REG_AB, 1, 1, 1);
+ 		break;
+ 	case AML_BL_PWM_C:
+ 		/* pwm_c_en bit[0] */
+-		aml_set_reg32_bits(P_PWM_MISC_REG_CD, en, 0, 1);
++		aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 0, 1);
+ 		break;
+ 	case AML_BL_PWM_D:
+ 		/* pwm_d_en bit[1] */
+-		aml_set_reg32_bits(P_PWM_MISC_REG_CD, en, 1, 1);
++		aml_set_reg32_bits(P_PWM_MISC_REG_CD, 1, 1, 1);
+ 		break;
+ 	default:
+ 		ERR("unsupport pwm port %u\n", port);
+ 		break;
+ 	}
+-	INFO("pwm port %d %s\n", port, (en ? "enable" : "disable"));
++	INFO("pwm on\n");
+ }
+ 
++
++static void aml_bl_pwm_off(struct backlight_device *bd)
++{
++	unsigned int port;
++	int low;
++	struct aml_bl *bdev;
++	struct pinctrl_state *s;
++	int ret;
++
++	bdev = bl_get_data(bd);
++	port = bdev->d->pwm_port;
++	low = bdev->d->pwm_gpio_on ? 0 : 1;
++
++	switch (port) {
++	case AML_BL_PWM_A:
++		/* pwm_a_en bit[0] */
++		aml_set_reg32_bits(P_PWM_MISC_REG_AB, 0, 0, 1);
++		break;
++	case AML_BL_PWM_B:
++		/* pwm_b_en bit[1] */
++		aml_set_reg32_bits(P_PWM_MISC_REG_AB, 0, 1, 1);
++		break;
++	case AML_BL_PWM_C:
++		/* pwm_c_en bit[0] */
++		aml_set_reg32_bits(P_PWM_MISC_REG_CD, 0, 0, 1);
++		break;
++	case AML_BL_PWM_D:
++		/* pwm_d_en bit[1] */
++		aml_set_reg32_bits(P_PWM_MISC_REG_CD, 0, 1, 1);
++		break;
++	default:
++		ERR("unsupport pwm port %u\n", port);
++		break;
++	}
++
++	s = pinctrl_lookup_state(bdev->p, "aml_tv_bl_dummy");
++	if (IS_ERR(s)) {
++		ERR("failed to pinctrl_lookup_state aml_tv_bl_dummy\n");
++		devm_pinctrl_put(bdev->p);
++	}
++
++	ret = pinctrl_select_state(bdev->p, s);
++	if (ret < 0) {
++		ERR("failed to pinctrl_select_state\n");
++		devm_pinctrl_put(bdev->p);
++	}
++	amlogic_gpio_request(bdev->d->pwm_gpio, AML_BL_NAME);
++	amlogic_gpio_direction_output(bdev->d->pwm_gpio, low, AML_BL_NAME);
++	INFO("pwm off\n");
++}
++
++
+ static void aml_bl_power_on(struct backlight_device *bd)
+ {
+ 	struct aml_bl *bdev;
+ 	int on;
+ 
+ 	bdev = bl_get_data(bd);
+-	on = bdev->d->bl_en_on;
++	on = bdev->d->bl_en_gpio_on;
+ 
+-	amlogic_gpio_direction_output(bdev->d->bl_en_gpio, on, AML_BL_NAME);
++	mutex_lock(&bdev->power_lock);
++	aml_bl_pwm_on(bd);
+ 	msleep(bdev->d->power_on_delay);
+-	aml_bl_pwm_on_off(bd, AML_BL_PWM_ON);
++	amlogic_gpio_direction_output(bdev->d->bl_en_gpio, on, AML_BL_NAME);
+ 
+ 	/* set state flag */
+ 	bdev->bd->props.state |= AML_BL_FLAG_POWERON;
+-	INFO("power on\n");
++	mutex_unlock(&bdev->power_lock);
++	INFO("power on");
+ }
+ 
++
+ static void aml_bl_power_off(struct backlight_device *bd)
+ {
+ 	struct aml_bl *bdev;
+ 	int off;
+ 
+ 	bdev = bl_get_data(bd);
+-	off = bdev->d->bl_en_on ? 0 : 1;
++	off = bdev->d->bl_en_gpio_on ? 0 : 1;
+ 
+-	aml_bl_pwm_on_off(bd, AML_BL_PWM_OFF);
+-	msleep(bdev->d->power_off_delay);
++	mutex_lock(&bdev->power_lock);
+ 	amlogic_gpio_direction_output(bdev->d->bl_en_gpio, off, AML_BL_NAME);
+-
++	msleep(bdev->d->power_off_delay);
++	aml_bl_pwm_off(bd);
+ 	bdev->bd->props.state &= ~AML_BL_FLAG_POWERON;
++	/* notify lcd to power off if reboot */
++	if (bdev->reboot) {
++		//aml_bl_reboot_notify_delay_work(bdev->bd);
++		mdelay(bdev->d->pwm_off_delay);
++		lcd_notifier_call_chain(LCD_EVENT_POWEROFF, bdev);
++	}
++	mutex_unlock(&bdev->power_lock);
+ 	INFO("power off\n");
+ }
+ 
+@@ -335,8 +395,8 @@ static int aml_bl_register_backlight(struct platform_device *pdev)
+ 
+ 	props.type = BACKLIGHT_RAW;
+ 	props.power = FB_BLANK_UNBLANK;
+-	props.state &= ~AML_BL_FLAG_POWERON;
+ 	props.state |= AML_BL_STATE_POWERON;
++	props.state |= AML_BL_FLAG_POWERON;
+ 
+ 	bdev->bd = backlight_device_register(AML_BL_NAME, &pdev->dev, bdev,
+ 					&aml_bl_ops, &props);
+@@ -389,7 +449,7 @@ static void aml_bl_pwm_param_init(struct platform_device *pdev)
+ static struct aml_bl_dt aml_bl_dt_def = {
+ 	.level_def = AML_BL_LEVEL_DEF,
+ 	.pwm_positive = 1,
+-	.bl_en_on = 0,
++	.bl_en_gpio_on = 0,
+ 	//...
+ };
+ 
+@@ -432,7 +492,7 @@ static int aml_bl_dt_parse(struct platform_device *pdev)
+ 	}
+ 	INFO("child %s\n", aml_bl_sel);
+ 
+-	/* BL_EN */
++	/* BL_EN_GPIO */
+ 	ret = of_property_read_string(child, "bl_en_gpio", &str);
+ 	if (ret) {
+ 		ERR("faild to get bl_en_gpio\n");
+@@ -447,16 +507,15 @@ static int aml_bl_dt_parse(struct platform_device *pdev)
+ 	}
+ 	INFO("bl_en_gpio = %s(%u)\n", str, bdev->d->bl_en_gpio);
+ 
+-
+-	/* BL_EN */
+-	ret = of_property_read_u32(child, "bl_en_on", &val);
++	/* BL_EN_GPIO_ON */
++	ret = of_property_read_u32(child, "bl_en_gpio_on", &val);
+ 	if (ret) {
+-		ERR("faild to get bl_en_gpio\n");
++		ERR("faild to get bl_en_gpio_on\n");
+ 	}
+ 	else {
+-		bdev->d->bl_en_on = val;
++		bdev->d->bl_en_gpio_on = val;
+ 	}
+-	INFO("bl_en_on = %u\n", bdev->d->bl_en_on);
++	INFO("bl_en_gpio_on = %u\n", bdev->d->bl_en_gpio_on);
+ 
+ 	/* BL_PWM PORT */
+ 	ret = of_property_read_string(child, "bl_pwm_port", &str);
+@@ -478,7 +537,7 @@ static int aml_bl_dt_parse(struct platform_device *pdev)
+ 	}
+ 	INFO("bl_pwm_port = %u\n", bdev->d->pwm_port);
+ 
+-	/* PWM POSITIVE */
++	/* BL_PWM POSITIVE */
+ 	ret = of_property_read_u32(child, "bl_pwm_positive", &val);
+ 	if (ret) {
+ 		ERR("faild to get bl_pwm_positive\n");
+@@ -501,10 +560,51 @@ static int aml_bl_dt_parse(struct platform_device *pdev)
+ 		bdev->d->pwm_freq = val;
+ 	INFO("bl_pwm_freq = %u\n",  bdev->d->pwm_freq);
+ 
++	/* BL_PWM_GPIO */
++	ret = of_property_read_string(child, "bl_pwm_gpio", &str);
++	if (ret) {
++		ERR("faild to get bl_pwm_gpio\n");
++		bdev->d->pwm_gpio = GPIOY_7;
++	}
++	else {
++		bdev->d->pwm_gpio = amlogic_gpio_name_map_num(str);
++	}
++	INFO("bl_pwm_gpio = %s(%u)\n", str, bdev->d->pwm_gpio);
++
++	/* BL_PWM_GPIO_ON */
++	ret = of_property_read_u32(child, "bl_pwm_gpio_on", &val);
++	if (ret) {
++		ERR("faild to get bl_pwm_gpio_on\n");
++	}
++	else {
++		bdev->d->pwm_gpio_on = val;
++	}
++	INFO("bl_pwm_gpio_on = %u\n", bdev->d->pwm_gpio_on);
++
++	ret = of_property_read_u32(child, "bl_pwm_on_delay", &val);
++	if (ret) {
++		ERR("faild to get bl_pwm_on_delay\n");
++		bdev->d->pwm_on_delay = AML_BL_PWM_DEALY_DEF;
++	}
++	else {
++		bdev->d->pwm_on_delay = val & 0xffff;
++	}
++	INFO("bl_pwm_on_delay = %u\n", bdev->d->pwm_on_delay);
++
++	ret = of_property_read_u32(child, "bl_pwm_off_delay", &val);
++	if (ret) {
++		ERR("faild to get bl_pwm_off_delay\n");
++		bdev->d->pwm_off_delay = AML_BL_PWM_DEALY_DEF;
++	}
++	else {
++		bdev->d->pwm_off_delay = val & 0xffff;
++	}
++	INFO("bl_pwm_off_delay = %u\n", bdev->d->pwm_off_delay);
++
+ 	ret = of_property_read_u32(child, "bl_power_on_delay", &val);
+ 	if (ret) {
+ 		ERR("faild to get bl_power_on_delay\n");
+-		bdev->d->power_on_delay = AML_BL_DEALY_DEF;
++		bdev->d->power_on_delay = AML_BL_PWR_DEALY_DEF;
+ 	}
+ 	else {
+ 		bdev->d->power_on_delay = val & 0xffff;
+@@ -514,7 +614,7 @@ static int aml_bl_dt_parse(struct platform_device *pdev)
+ 	ret = of_property_read_u32(child, "bl_power_off_delay", &val);
+ 	if (ret) {
+ 		ERR("faild to get bl_power_off_delay\n");
+-		bdev->d->power_off_delay = AML_BL_DEALY_DEF;
++		bdev->d->power_off_delay = AML_BL_PWR_DEALY_DEF;
+ 	}
+ 	else {
+ 		bdev->d->power_off_delay = val & 0xffff;
+@@ -591,21 +691,27 @@ static int aml_bl_probe(struct platform_device *pdev)
+ 		return ret;
+ 	aml_bl_pwm_param_init(pdev);
+ 
++
+ 	/* setup pinmux */
+-	bdev->p = devm_pinctrl_get_select_default(&pdev->dev);
++	bdev->p = devm_pinctrl_get(&pdev->dev);
+ 	if (IS_ERR(bdev->p))
+-		ERR("failed to setup pinmux\n");
++		ERR("failed to get pinmux\n");
++
++	mutex_init(&bdev->power_lock);
+ 
+ 	ret = aml_bl_register_backlight(pdev);
+ 	if (ret < 0) {
+ 		kfree(bdev);
+ 		return ret;
+ 	}
+-	aml_bl_register_lcd(bdev->bd);
+ 
+ 	/* pwm init */
+ 	aml_bl_pwm_init(bdev->bd);
+-	aml_bl_update_status(bdev->bd);
++
++	/* register rebot notify */
++	bdev->reboot = false;
++	bdev->reboot_nb.notifier_call = aml_bl_reboot_notify_callback;
++	ret = register_reboot_notifier(&bdev->reboot_nb);
+ 
+ 	INFO("module probed ok\n");
+ 	return 0;
+@@ -615,8 +721,8 @@ static int __exit aml_bl_remove(struct platform_device *pdev)
+ {
+ 	struct aml_bl *bdev = platform_get_drvdata(pdev);
+ 
++	register_reboot_notifier(&bdev->reboot_nb);
+ 	amlogic_gpio_free(bdev->d->bl_en_gpio, AML_BL_NAME);
+-	aml_bl_unregister_lcd(bdev->bd);
+ 	backlight_device_unregister(bdev->bd);
+ 	platform_set_drvdata(pdev, NULL);
+ 	kfree(bdev);
+diff --git a/drivers/amlogic/display/backlight/aml_tv_bl.h b/drivers/amlogic/display/backlight/aml_tv_bl.h
+index d30971e4405a..031798283579 100644
+--- a/drivers/amlogic/display/backlight/aml_tv_bl.h
++++ b/drivers/amlogic/display/backlight/aml_tv_bl.h
+@@ -30,7 +30,9 @@
+ 
+ #define AML_BL_DUTY_MAX			100	/* unit: % */
+ #define AML_BL_DUTY_MIN			20
+-#define AML_BL_DEALY_DEF		100	/* unit: s */
++
++#define AML_BL_PWM_DEALY_DEF		100	/* unit: s */
++#define AML_BL_PWR_DEALY_DEF		5	/* unit: s */
+ 
+ typedef enum {
+ 	AML_BL_PWM_A = 0,
+@@ -53,8 +55,10 @@ enum {
+ 
+ struct aml_bl_dt {
+ 	unsigned int bl_en_gpio; /* bl_en gpio */
+-	unsigned int bl_en_on;
++	unsigned int bl_en_gpio_on;
+ 	unsigned int pwm_port;
++	unsigned int pwm_gpio;
++	unsigned int pwm_gpio_on;
+ 
+ 	unsigned int level_def;
+ 	unsigned int level_mid;
+@@ -62,6 +66,8 @@ struct aml_bl_dt {
+ 	unsigned int level_min;
+ 	unsigned int level_max;
+ 	unsigned int level_off;
++	unsigned int pwm_on_delay; /* unit: ms */
++	unsigned int pwm_off_delay; /* unit: ms */
+ 	unsigned int power_on_delay; /* unit: ms */
+ 	unsigned int power_off_delay; /* unit: ms */
+ 
+@@ -69,29 +75,24 @@ struct aml_bl_dt {
+ 	unsigned int pwm_duty_min;
+ 	unsigned int pwm_duty_max;
+ 	unsigned int pwm_positive; /* 1: positive 0: negative */
+-
+ };
+ 
+ struct aml_bl {
+-
+-	void (*power_on)(void);
+-	void (*power_off)(void);
+-	unsigned (*get_level)(void);
+-	void (*set_level)(unsigned);
+-
+ 	struct aml_bl_dt *d;
+ 	struct pinctrl *p;
+ 	struct backlight_device *bd;
+ 	struct platform_device *pdev;
+-	struct notifier_block lcd_notif;
+ 
+ 	unsigned int pwm_cnt;
+ 	unsigned int pwm_clk_div;
+ 	unsigned int pwm_max;
+ 	unsigned int pwm_min;
+ 
+-
+ 	int curr_brightness;
++
++	struct mutex power_lock;
++	struct notifier_block reboot_nb;
++	bool reboot; /* true: notify reboot, false: other */
+ };
+ 
+ #endif
+diff --git a/drivers/amlogic/display/lcd/aml_tv_lcd.c b/drivers/amlogic/display/lcd/aml_tv_lcd.c
+index b515073a9781..76f1abee8f6f 100644
+--- a/drivers/amlogic/display/lcd/aml_tv_lcd.c
++++ b/drivers/amlogic/display/lcd/aml_tv_lcd.c
+@@ -475,20 +475,25 @@ static void _init_vout(struct platform_device *pdev)
+ 	vout_register_server(&lcd_vout_server);
+ }
+ 
+-static int lcd_reboot_notifier(struct notifier_block *nb, unsigned long state, void *cmd)
++static int lcd_power_notifier(struct notifier_block *nb, unsigned long event, void *cmd)
+  {
+-	TV_LCD_INFO("state=%lu\n",state);
+-//	if (pDev->pConf->lcd_misc_ctrl.lcd_status == 0)
+-//		return NOTIFY_DONE;
+-	lcd_notifier_call_chain(LCD_EVENT_POWEROFF, NULL);
+-	_disable_display_driver();
+-	panel_power_ctrl(OFF);
++	TV_LCD_INFO("event = %lu\n", event);
++
++	/* If we aren't interested in this event, skip it immediately */
++	if (event != LCD_EVENT_POWERON && event != LCD_EVENT_POWEROFF)
++		return 0;
++
++	if (event == LCD_EVENT_POWEROFF) {
++		_disable_display_driver();
++		panel_power_ctrl(OFF);
++	}
+ 
+ 	return NOTIFY_OK;
+ }
+ 
+ 
+-static struct notifier_block lcd_reboot_nb;
++static struct notifier_block lcd_power_nb;
++
+ static int lcd_probe(struct platform_device *pdev)
+ {
+ 	unsigned int ret = 0;
+@@ -526,10 +531,10 @@ static int lcd_probe(struct platform_device *pdev)
+ 	//lcd_set_current_vmode(VMODE_LCD);
+ 	//lcd_notifier_call_chain(LCD_EVENT_POWERON, NULL);
+ 
+-	lcd_reboot_nb.notifier_call = lcd_reboot_notifier;
+-	ret = register_reboot_notifier(&lcd_reboot_nb);
++	lcd_power_nb.notifier_call = lcd_power_notifier;
++	ret = lcd_register_client(&lcd_power_nb);
+ 	if (ret) {
+-		TV_LCD_ERR("notifier register lcd_reboot_notifier fail!\n");
++		TV_LCD_ERR("lcd_register_client fail!\n");
+ 	}
+ 
+ 	TV_LCD_INFO("LCD probe ok\n");
+@@ -541,7 +546,7 @@ static int lcd_remove(struct platform_device *pdev)
+ {
+ 	struct aml_lcd *pDev = platform_get_drvdata(pdev);
+ 
+-	unregister_reboot_notifier(&lcd_reboot_nb);
++	lcd_unregister_client(&lcd_power_nb);
+ 	platform_set_drvdata(pdev, NULL);
+ 	if (pDev)
+ 		kfree(pDev);
+-- 
+2.19.0
+

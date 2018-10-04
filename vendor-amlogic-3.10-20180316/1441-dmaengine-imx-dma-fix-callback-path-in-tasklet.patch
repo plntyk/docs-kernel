@@ -1,0 +1,54 @@
+From 8dac1d15489d284a4ffadaef25650272c4b44bfe Mon Sep 17 00:00:00 2001
+From: Michael Grzeschik <m.grzeschik@pengutronix.de>
+Date: Tue, 17 Sep 2013 15:56:08 +0200
+Subject: [PATCH 1441/5965] dmaengine: imx-dma: fix callback path in tasklet
+
+commit fcaaba6c7136fe47e5a13352f99a64b019b6d2c5 upstream.
+
+We need to free the ld_active list head before jumping into the callback
+routine. Otherwise the callback could run into issue_pending and change
+our ld_active list head we just going to free. This will run the channel
+list into an currupted and undefined state.
+
+Signed-off-by: Michael Grzeschik <m.grzeschik@pengutronix.de>
+Signed-off-by: Vinod Koul <vinod.koul@intel.com>
+Cc: Jonghwan Choi <jhbird.choi@samsung.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/dma/imx-dma.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/dma/imx-dma.c b/drivers/dma/imx-dma.c
+index 6d29d7de4dcb..231d6e8e29f8 100644
+--- a/drivers/dma/imx-dma.c
++++ b/drivers/dma/imx-dma.c
+@@ -604,13 +604,11 @@ static void imxdma_tasklet(unsigned long data)
+ 
+ 	if (list_empty(&imxdmac->ld_active)) {
+ 		/* Someone might have called terminate all */
+-		goto out;
++		spin_unlock_irqrestore(&imxdma->lock, flags);
++		return;
+ 	}
+ 	desc = list_first_entry(&imxdmac->ld_active, struct imxdma_desc, node);
+ 
+-	if (desc->desc.callback)
+-		desc->desc.callback(desc->desc.callback_param);
+-
+ 	/* If we are dealing with a cyclic descriptor, keep it on ld_active
+ 	 * and dont mark the descriptor as complete.
+ 	 * Only in non-cyclic cases it would be marked as complete
+@@ -638,6 +636,10 @@ static void imxdma_tasklet(unsigned long data)
+ 	}
+ out:
+ 	spin_unlock_irqrestore(&imxdma->lock, flags);
++
++	if (desc->desc.callback)
++		desc->desc.callback(desc->desc.callback_param);
++
+ }
+ 
+ static int imxdma_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
+-- 
+2.19.0
+

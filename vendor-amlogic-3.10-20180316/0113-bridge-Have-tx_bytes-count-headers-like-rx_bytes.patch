@@ -1,0 +1,52 @@
+From 19d2b31c931e7fc8c33ee4d455005bb8e8790274 Mon Sep 17 00:00:00 2001
+From: Ashish Sharma <ashishsharma@google.com>
+Date: Fri, 7 Oct 2011 17:54:16 -0700
+Subject: [PATCH 0113/5965] bridge: Have tx_bytes count headers like rx_bytes.
+
+Since rx_bytes accounting does not include Ethernet Headers in
+br_input.c, excluding ETH_HLEN on the transmit path for consistent
+measurement of packet length on both the Tx and Rx chains.
+
+The clean way would be for Rx to include the eth header, but the
+skb len has already been adjusted by the time the br code sees the skb.
+This is only a temporary workaround until we can completely ignore or
+cleanly fix the skb->len handling.
+
+Change-Id: I910de95a4686b2119da7f1f326e2154ef31f9972
+Signed-off-by: Ashish Sharma <ashishsharma@google.com>
+---
+ net/bridge/br_device.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/net/bridge/br_device.c b/net/bridge/br_device.c
+index 967312803e41..239e0e84f9e6 100644
+--- a/net/bridge/br_device.c
++++ b/net/bridge/br_device.c
+@@ -41,11 +41,6 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	}
+ #endif
+ 
+-	u64_stats_update_begin(&brstats->syncp);
+-	brstats->tx_packets++;
+-	brstats->tx_bytes += skb->len;
+-	u64_stats_update_end(&brstats->syncp);
+-
+ 	if (!br_allowed_ingress(br, br_get_vlan_info(br), skb, &vid))
+ 		goto out;
+ 
+@@ -54,6 +49,12 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	skb_reset_mac_header(skb);
+ 	skb_pull(skb, ETH_HLEN);
+ 
++	u64_stats_update_begin(&brstats->syncp);
++	brstats->tx_packets++;
++	/* Exclude ETH_HLEN from byte stats for consistency with Rx chain */
++	brstats->tx_bytes += skb->len;
++	u64_stats_update_end(&brstats->syncp);
++
+ 	if (is_broadcast_ether_addr(dest))
+ 		br_flood_deliver(br, skb);
+ 	else if (is_multicast_ether_addr(dest)) {
+-- 
+2.19.0
+

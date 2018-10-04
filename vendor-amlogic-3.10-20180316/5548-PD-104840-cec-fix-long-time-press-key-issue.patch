@@ -1,0 +1,276 @@
+From d738c9c7fb56f27d1fb5b53b5e6836e0757563ac Mon Sep 17 00:00:00 2001
+From: Yu Zheng <yu.zheng@amlogic.com>
+Date: Fri, 3 Apr 2015 09:18:41 +0800
+Subject: [PATCH 5548/5965] PD#104840: cec: fix long time press key issue
+
+Long time press key ok on S812/S802/S805 boards for part of
+LG and SONY TV.
+
+Change-Id: Ia22573d08575416e5ed5f801b53af15b8e406797
+---
+ .../mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c   | 34 ++++++++----------
+ .../mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c  | 35 ++++++++-----------
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c    | 21 +++++++----
+ include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h   |  2 +-
+ 4 files changed, 45 insertions(+), 47 deletions(-)
+
+diff --git a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 97850ca234e4..50f57fbbcc8e 100755
+--- a/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -66,15 +66,16 @@ void cec_hw_reset(void)
+ 
+ }
+ 
+-void cec_rx_buf_check(void)
++int cec_rx_buf_check(void)
+ {
+     if (0xf == aocec_rd_reg(CEC_RX_NUM_MSG))
+     {
+         aocec_wr_reg(CEC_RX_CLEAR_BUF, 0x1);
+         aocec_wr_reg(CEC_RX_CLEAR_BUF, 0x0);
++        hdmi_print(INF, CEC "rx buf clean\n");
++        return 1;
+     }
+-    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
++    return 0;
+ }
+ 
+ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+@@ -83,19 +84,12 @@ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+     int ret = -1;
+     int pos;
+ 
+-    if (1 != aocec_rd_reg(CEC_RX_NUM_MSG))
+-    {
+-        //cec_rx_buf_check();
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
+-        return ret;
+-    }
+-
+-    if (RX_DONE != aocec_rd_reg(CEC_RX_MSG_STATUS))
++    if ((RX_DONE != aocec_rd_reg(CEC_RX_MSG_STATUS)) || (1 != aocec_rd_reg(CEC_RX_NUM_MSG)))
+     {
+         //cec_rx_buf_check();
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
++        aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
++        aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
++        aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
+         return ret;
+     }
+ 
+@@ -103,13 +97,11 @@ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+ 
+     for (i = 0; i < (*len) && i < MAX_MSG; i++)
+     {
+-        *msg++= aocec_rd_reg(CEC_RX_MSG_0_HEADER +i);
++        msg[i]= aocec_rd_reg(CEC_RX_MSG_0_HEADER +i);
+     }
+ 
+     ret = aocec_rd_reg(CEC_RX_MSG_STATUS);
+ 
+-    aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
+-
+     if (cec_msg_dbg_en  == 1)
+     {
+         pos = 0;
+@@ -122,9 +114,13 @@ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+         msg_log_buf[pos] = '\0';
+         hdmi_print(INF, CEC "%s", msg_log_buf);
+     }
++
+     //cec_rx_buf_check();
+-    //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-    //aocec_wr_reg(CEC_RX_MSG_CMD, RX_NO_OP);
++    aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
++    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
++    aocec_wr_reg(CEC_RX_MSG_CMD, RX_NO_OP);
++    //aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
++
+     return ret;
+ }
+ 
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index bb1dd10bbbd9..dfe091623539 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -91,15 +91,16 @@ void cec_hw_reset(void)
+ 
+ }
+ 
+-void cec_rx_buf_check(void)
++int cec_rx_buf_check(void)
+ {
+     if (0xf == aocec_rd_reg(CEC_RX_NUM_MSG))
+     {
+         aocec_wr_reg(CEC_RX_CLEAR_BUF, 0x1);
+         aocec_wr_reg(CEC_RX_CLEAR_BUF, 0x0);
++        hdmi_print(INF, CEC "rx buf clean\n");
++        return 1;
+     }
+-    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
++    return 0;
+ }
+ 
+ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+@@ -108,33 +109,24 @@ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+     int ret = -1;
+     int pos;
+ 
+-    if (1 != aocec_rd_reg(CEC_RX_NUM_MSG))
++    if ((RX_DONE != aocec_rd_reg(CEC_RX_MSG_STATUS)) || (1 != aocec_rd_reg(CEC_RX_NUM_MSG)))
+     {
+         //cec_rx_buf_check();
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
+-        return ret;
+-    }
+-
+-    if (RX_DONE != aocec_rd_reg(CEC_RX_MSG_STATUS))
+-    {
+-        //cec_rx_buf_check();
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-        //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
++        aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
++        aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
++        aocec_wr_reg(CEC_RX_MSG_CMD,  RX_NO_OP);
+         return ret;
+     }
+ 
+     *len = aocec_rd_reg(CEC_RX_MSG_LENGTH) + 1;
+-
++printk("--------------rx start::\n");
+     for (i = 0; i < (*len) && i < MAX_MSG; i++)
+     {
+-        *msg++= aocec_rd_reg(CEC_RX_MSG_0_HEADER +i);
++        msg[i]= aocec_rd_reg(CEC_RX_MSG_0_HEADER +i);
+     }
+ 
+     ret = aocec_rd_reg(CEC_RX_MSG_STATUS);
+ 
+-    aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
+-
+     if (cec_msg_dbg_en  == 1)
+     {
+         pos = 0;
+@@ -147,9 +139,12 @@ int cec_ll_rx( unsigned char *msg, unsigned char *len)
+         msg_log_buf[pos] = '\0';
+         hdmi_print(INF, CEC "%s", msg_log_buf);
+     }
++
+     //cec_rx_buf_check();
+-    //aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
+-    //aocec_wr_reg(CEC_RX_MSG_CMD, RX_NO_OP);
++    aml_write_reg32(P_AO_CEC_INTR_CLR, aml_read_reg32(P_AO_CEC_INTR_CLR) | (1 << 2));
++    aocec_wr_reg(CEC_RX_MSG_CMD,  RX_ACK_CURRENT);
++    aocec_wr_reg(CEC_RX_MSG_CMD, RX_NO_OP);
++
+     return ret;
+ }
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index 1367a98e5392..2b57ad5fcb6e 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -69,7 +69,7 @@ static unsigned char gbl_msg[MAX_MSG];
+ cec_global_info_t cec_global_info;
+ unsigned char rc_long_press_pwr_key = 0;
+ EXPORT_SYMBOL(rc_long_press_pwr_key);
+-bool cec_msg_dbg_en = 0;
++bool cec_msg_dbg_en = 1;
+ 
+ ssize_t cec_lang_config_state(struct switch_dev *sdev, char *buf)
+ {
+@@ -136,6 +136,7 @@ static void hdmitx_cec_early_suspend(struct early_suspend *h)
+ static void hdmitx_cec_late_resume(struct early_suspend *h)
+ {
+     cec_enable_irq();
++    cec_rx_buf_check();
+     hdmitx_device->hpd_state = hdmitx_device->HWOp.CntlMisc(hdmitx_device, MISC_HPD_GPI_ST, 0);
+     if (!hdmitx_device->hpd_state)
+     { //if none HDMI out,no CEC features.
+@@ -155,6 +156,7 @@ static void hdmitx_cec_late_resume(struct early_suspend *h)
+         //msleep(100);
+         //cec_menu_status_smp(DEVICE_MENU_ACTIVE);
+     }
++
+     hdmi_print(INF, CEC "late resume\n");
+ }
+ 
+@@ -377,6 +379,7 @@ void cec_node_uninit(hdmitx_dev_t* hdmitx_device)
+ 
+ static int cec_task(void *data)
+ {
++    unsigned int i;
+     extern void dump_hdmi_cec_reg(void);
+     hdmitx_dev_t* hdmitx_device = (hdmitx_dev_t*) data;
+     cec_global_info.cec_flag.cec_init_flag = 1;
+@@ -403,11 +406,18 @@ static int cec_task(void *data)
+     }
+     while (1)
+     {
+-        //cec_rx_buf_check();
++        i = 30;
++        do {
++            msleep_interruptible(10);
++            if (cec_rx_buf_check()) {
++                break;
++            }
++        } while (i--);
+         if (kthread_should_stop())
+         {
+             break;
+         }
++
+         wait_event_interruptible(hdmitx_device->cec_wait_rx,
+         cec_global_info.cec_rx_msg_buf.rx_read_pos != cec_global_info.cec_rx_msg_buf.rx_write_pos);
+         cec_isr_post_process();
+@@ -458,11 +468,8 @@ void register_cec_tx_msg(unsigned char *msg, unsigned char len )
+ 
+ void cec_do_tasklet(unsigned long data)
+ {
+-    //cec_rx_buf_check();
+     register_cec_rx_msg(rx_msg, rx_len);
+-    //udelay(1000);
+     wake_up(&hdmitx_device->cec_wait_rx);
+-    //cec_rx_buf_check();
+ }
+ 
+ void cec_input_handle_message(void)
+@@ -737,14 +744,14 @@ static irqreturn_t cec_isr_handler(int irq, void *dev_instance)
+     if ((-1) == cec_ll_rx(rx_msg, &rx_len))
+     {
+         //cec_enable_irq();
+-        cec_rx_buf_check();
++        //cec_rx_buf_check();
+         return IRQ_HANDLED;
+     }
+ 
+     //register_cec_rx_msg(rx_msg, rx_len);
+     //wake_up(&hdmitx_device->cec_wait_rx);
+     tasklet_schedule(&cec_tasklet);
+-    cec_rx_buf_check();
++    //cec_rx_buf_check();
+ 
+     //cec_enable_irq();
+ 
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
+index 462723c39131..5cb9ab24f44e 100755
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_cec.h
+@@ -534,7 +534,7 @@ void cec_node_uninit(hdmitx_dev_t* hdmitx_device);
+ void dumpaocecreg(void);
+ void raocec(unsigned int addr);
+ void waocec(unsigned int addr, unsigned int value);
+-void cec_rx_buf_check(void);
++int cec_rx_buf_check(void);
+ void cec_hw_reset(void);
+ 
+ unsigned int dispatch_buffer_parse(const char *buf, const char *string,  char *param, size_t count);
+-- 
+2.19.0
+

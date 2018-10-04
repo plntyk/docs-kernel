@@ -1,0 +1,189 @@
+From 16f3d813ac06f12415d6fe60ed79e8c96ab8b087 Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Wed, 2 Jul 2014 15:26:14 -0700
+Subject: [PATCH 4467/5965] M8M2 Set 4K2K single core speed to 638M. Add safe
+ clock switching for the HW improvement since M8 baby.
+
+---
+ drivers/amlogic/amports/m8b/vdec_clk.c  | 26 ++++++++++++++---
+ drivers/amlogic/amports/m8m2/vdec_clk.c | 39 +++++++++++++++----------
+ drivers/amlogic/amports/vdec.c          |  8 +++++
+ drivers/amlogic/amports/vdec_clk.h      |  4 +++
+ 4 files changed, 58 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/amlogic/amports/m8b/vdec_clk.c b/drivers/amlogic/amports/m8b/vdec_clk.c
+index e1fbc7a0bd1c..f204fcb2411b 100644
+--- a/drivers/amlogic/amports/m8b/vdec_clk.c
++++ b/drivers/amlogic/amports/m8b/vdec_clk.c
+@@ -72,15 +72,23 @@ HHI_VDEC_CLK_CNTL
+ #define VDEC2_364M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (3 << 9) | (0))
+ 
+ #define VDEC1_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 8, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 15, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 8, 1); \
+                            WRITE_VREG_BITS(DOS_GCLK_EN0, 0x3ff,0,10)
+-
+ #define VDEC2_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 8, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 31, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 24, 1); \
+                            WRITE_VREG(DOS_GCLK_EN1, 0x3ff)
+-
+-#define HCODEC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 24, 1); \
++#define HCODEC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  1, 24, 1); \
+                            WRITE_VREG_BITS(DOS_GCLK_EN0, 0x7fff, 12, 15)
+-#define HEVC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 24, 1); \
++#define HEVC_CLOCK_ON()    WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 24, 1); \
+                            WRITE_VREG(DOS_GCLK_EN3, 0xffffffff)
++#define VDEC1_SAFE_CLOCK() WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, READ_MPEG_REG(HHI_VDEC_CLK_CNTL) & 0x7f, 0, 7); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 8, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 15, 1);
++#define VDEC2_SAFE_CLOCK() WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, (READ_MPEG_REG(HHI_VDEC_CLK_CNTL) >> 16) & 0x7f, 16, 7); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 24, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 31, 1);
+ #define VDEC1_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 8, 1)
+ #define VDEC2_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 0, 8, 1)
+ #define HCODEC_CLOCK_OFF() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 0, 24, 1)
+@@ -174,6 +182,16 @@ void hevc_clock_off(void)
+     HEVC_CLOCK_OFF();
+ }
+ 
++void vdec_clock_prepare_switch(void)
++{
++    VDEC1_SAFE_CLOCK();
++}
++
++void vdec2_clock_prepare_switch(void)
++{
++    VDEC2_SAFE_CLOCK();
++}
++
+ int vdec_clock_level(vdec_type_t core)
+ {
+     if (core < VDEC_MAX)
+diff --git a/drivers/amlogic/amports/m8m2/vdec_clk.c b/drivers/amlogic/amports/m8m2/vdec_clk.c
+index bef3cfa15007..255fd6e68db5 100644
+--- a/drivers/amlogic/amports/m8m2/vdec_clk.c
++++ b/drivers/amlogic/amports/m8m2/vdec_clk.c
+@@ -48,41 +48,45 @@ HHI_VDEC_CLK_CNTL
+ 
+ //182.14M <-- (2550/7)/2
+ #define VDEC1_182M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (3 << 9) | (1), 0, 16)
+-#define VDEC2_182M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (3 << 9) | (1))
+ 
+ //212.50M <-- (2550/3)/4
+ #define VDEC1_212M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (1 << 9) | (3), 0, 16)
+-#define VDEC2_212M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (1 << 9) | (3))
+ 
+ //255.00M <-- (2550/5)/2
+ #define VDEC1_255M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (2 << 9) | (1), 0, 16)
+-#define VDEC2_255M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (2 << 9) | (1))
+ #define HCODEC_255M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, (2 << 9) | (1), 16, 16)
+ #define HEVC_255M()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, (2 << 9) | (1), 16, 16)
++
+ //283.33M <-- (2550/3)/3
+ #define VDEC1_283M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (1 << 9) | (2), 0, 16)
+-#define VDEC2_283M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (1 << 9) | (2));
+ 
+ //318.75M <-- (2550/4)/2
+ #define VDEC1_319M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (0 << 9) | (1), 0, 16)
+-#define VDEC2_319M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (0 << 9) | (1))
+ 
+-//364.29M <-- (2550/7)/1 -- over limit, do not use
++//364.29M <-- (2550/7)/1
+ #define VDEC1_364M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (3 << 9) | (0), 0, 16)
+-#define VDEC2_364M() WRITE_MPEG_REG(HHI_VDEC2_CLK_CNTL, (3 << 9) | (0))
+ 
+-#define VDEC1_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 8, 1); \
+-                           WRITE_VREG_BITS(DOS_GCLK_EN0, 0x3ff,0,10)
++//425.00M <-- (2550/3)/2
++#define VDEC1_425M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (1 << 9) | (2), 0, 16)
+ 
+-#define VDEC2_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 8, 1); \
+-                           WRITE_VREG(DOS_GCLK_EN1, 0x3ff)
++//510.00M <-- (2550/5)/1
++#define VDEC1_510M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (2 << 9) | (0), 0, 16)
+ 
+-#define HCODEC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 24, 1); \
++//637.50M <-- (2550/4)/1
++#define VDEC1_638M() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  (0 << 9) | (0), 0, 16)
++
++#define VDEC1_CLOCK_ON()   WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 1, 8, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 15, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 0, 8, 1); \
++                           WRITE_VREG_BITS(DOS_GCLK_EN0, 0x3ff,0,10)
++#define HCODEC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  1, 24, 1); \
+                            WRITE_VREG_BITS(DOS_GCLK_EN0, 0x7fff, 12, 15)
+-#define HEVC_CLOCK_ON()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 24, 1); \
++#define HEVC_CLOCK_ON()    WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 1, 24, 1); \
+                            WRITE_VREG(DOS_GCLK_EN3, 0xffffffff)
++#define VDEC1_SAFE_CLOCK() WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, READ_MPEG_REG(HHI_VDEC_CLK_CNTL) & 0x7f, 0, 7); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 8, 1); \
++                           WRITE_MPEG_REG_BITS(HHI_VDEC3_CLK_CNTL, 1, 15, 1);
+ #define VDEC1_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL,  0, 8, 1)
+-#define VDEC2_CLOCK_OFF()  WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 0, 8, 1)
+ #define HCODEC_CLOCK_OFF() WRITE_MPEG_REG_BITS(HHI_VDEC_CLK_CNTL, 0, 24, 1)
+ #define HEVC_CLOCK_OFF()   WRITE_MPEG_REG_BITS(HHI_VDEC2_CLK_CNTL, 0, 24, 1)
+ 
+@@ -99,7 +103,7 @@ void vdec_clock_enable(void)
+ void vdec_clock_hi_enable(void)
+ {
+     VDEC1_CLOCK_OFF();
+-    VDEC1_364M();
++    VDEC1_638M();
+     VDEC1_CLOCK_ON();
+     clock_level[VDEC_1] = 1;
+ }
+@@ -148,6 +152,11 @@ void hevc_clock_off(void)
+     HEVC_CLOCK_OFF();
+ }
+ 
++void vdec_clock_prepare_switch(void)
++{
++    VDEC1_SAFE_CLOCK();
++}
++
+ int vdec_clock_level(vdec_type_t core)
+ {
+     if (core < VDEC_MAX)
+diff --git a/drivers/amlogic/amports/vdec.c b/drivers/amlogic/amports/vdec.c
+index d97ece855824..1b1edad5ca43 100644
+--- a/drivers/amlogic/amports/vdec.c
++++ b/drivers/amlogic/amports/vdec.c
+@@ -437,6 +437,10 @@ void vdec_power_mode(int level)
+     raw_local_save_flags(fiq_flag);
+     local_fiq_disable();
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    vdec_clock_prepare_switch();
++#endif
++
+     if (level == 0) {
+         vdec_clock_enable();
+     } else {
+@@ -462,6 +466,10 @@ void vdec2_power_mode(int level)
+     raw_local_save_flags(fiq_flag);
+     local_fiq_disable();
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++    vdec_clock_prepare_switch();
++#endif
++
+     if (level == 0) {
+         vdec2_clock_enable();
+     } else {
+diff --git a/drivers/amlogic/amports/vdec_clk.h b/drivers/amlogic/amports/vdec_clk.h
+index 3d4da833c6cd..ce45cc3413be 100755
+--- a/drivers/amlogic/amports/vdec_clk.h
++++ b/drivers/amlogic/amports/vdec_clk.h
+@@ -45,4 +45,8 @@ extern void hevc_clock_off(void);
+ extern int vdec_clock_level(vdec_type_t core);
+ #endif
+ 
++#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8B
++extern void vdec_clock_prepare_switch(void);
++#endif
++
+ #endif /* VDEC_CLK_H */
+-- 
+2.19.0
+

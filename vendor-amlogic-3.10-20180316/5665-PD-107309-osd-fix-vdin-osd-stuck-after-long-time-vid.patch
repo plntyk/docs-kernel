@@ -1,0 +1,595 @@
+From 41ceadb6108bff35d6fb995075f518bafd02c1e4 Mon Sep 17 00:00:00 2001
+From: Jianfeng Wang <jianfeng.wang@amlogic.com>
+Date: Tue, 23 Jun 2015 12:26:03 +0800
+Subject: [PATCH 5665/5965] PD#107309: osd: fix vdin osd stuck after long time
+ video playback
+
+Change-Id: I8df4fb14ea79856a0bc5b4c37e666232fece7b81
+---
+ drivers/amlogic/display/osd/osd_hw.c     |  11 +-
+ drivers/amlogic/display/osd/osd_hw_def.h |   7 +
+ drivers/amlogic/display/osd/osd_rdma.c   | 279 ++++++++++++++++-------
+ drivers/amlogic/display/osd/osd_rdma.h   |  67 ++++--
+ 4 files changed, 252 insertions(+), 112 deletions(-)
+
+diff --git a/drivers/amlogic/display/osd/osd_hw.c b/drivers/amlogic/display/osd/osd_hw.c
+index e35cf6df44d7..19f44caa7cb7 100644
+--- a/drivers/amlogic/display/osd/osd_hw.c
++++ b/drivers/amlogic/display/osd/osd_hw.c
+@@ -65,13 +65,6 @@
+ #define  FIQ_VSYNC
+ #endif
+ 
+-
+-#ifdef CONFIG_VSYNC_RDMA
+-int reset_rdma(void);
+-int osd_rdma_enable(u32  enable);
+-int read_rdma_table(void);
+-#endif
+-
+ static DEFINE_MUTEX(osd_mutex);
+ static DEFINE_SPINLOCK(osd_onoff_lock);
+ static DECLARE_WAIT_QUEUE_HEAD(osd_vsync_wq);
+@@ -451,7 +444,8 @@ static irqreturn_t osd_rdma_isr(int irq, void *dev_id)
+ 	unsigned  int  odd_or_even_line;
+ 	unsigned  int  scan_line_number = 0;
+ 	unsigned  char output_type = 0;
+-
++	char is_init = 0;
++	osd_rdma_update_config(is_init);
+ 	reset_rdma();
+ 	read_rdma_table();
+ 	output_type = aml_read_reg32(P_VPU_VIU_VENC_MUX_CTRL) & 0x3;
+@@ -526,7 +520,6 @@ static irqreturn_t osd_rdma_isr(int irq, void *dev_id)
+ 		wait_vsync_wakeup();
+ #endif
+ 	}
+-	aml_write_reg32(P_RDMA_CTRL, 1 << 24);
+ 
+ 	return IRQ_HANDLED;
+ }
+diff --git a/drivers/amlogic/display/osd/osd_hw_def.h b/drivers/amlogic/display/osd/osd_hw_def.h
+index 28fdc3979e20..6d3b21be8f8a 100755
+--- a/drivers/amlogic/display/osd/osd_hw_def.h
++++ b/drivers/amlogic/display/osd/osd_hw_def.h
+@@ -186,4 +186,11 @@ static update_func_t hw_func_array[HW_OSD_COUNT][HW_REG_INDEX_MAX]={
+ #define remove_from_update_list(osd_idx,cmd_idx)
+ #endif
+ 
++#ifdef CONFIG_VSYNC_RDMA
++int reset_rdma(void);
++int osd_rdma_enable(u32  enable);
++int read_rdma_table(void);
++int osd_rdma_update_config(char is_init);
++#endif
++
+ #endif
+diff --git a/drivers/amlogic/display/osd/osd_rdma.c b/drivers/amlogic/display/osd/osd_rdma.c
+index f0c9f44cf94c..5e235b9d462b 100644
+--- a/drivers/amlogic/display/osd/osd_rdma.c
++++ b/drivers/amlogic/display/osd/osd_rdma.c
+@@ -36,7 +36,7 @@ static u32		   table_paddr = 0;
+ static u32		   rdma_enable = 0;
+ static u32		   item_count = 0;
+ static u32 		   rdma_debug = 0;
+-
++static char		   *info;
+ static bool		osd_rdma_init_flat = false;
+ static int ctrl_ahb_rd_burst_size = 3;
+ static int ctrl_ahb_wr_burst_size = 3;
+@@ -44,31 +44,104 @@ static int ctrl_ahb_wr_burst_size = 3;
+ static int  osd_rdma_init(void);
+ void osd_rdma_start(void);
+ 
+-#define OSD_RDMA_UPDATE_RETRY_COUNT 100
++#define OSD_RDMA_UPDATE_RETRY_COUNT 500
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-#define Wr(adr,val) WRITE_VCBUS_REG(adr, val)
+-#define Rd(adr)    READ_VCBUS_REG(adr)
+-#define Wr_reg_bits(adr, val, start, len)  WRITE_VCBUS_REG_BITS(adr, val, start, len)
+-#define Wr_set_reg_bits_mask(adr, _mask)	 SET_VCBUS_REG_MASK(adr, _mask)
+-#define Wr_clr_reg_bits_mask(adr, _mask)	 CLEAR_VCBUS_REG_MASK(adr, _mask)
++#define osd_rdma_write(adr, val) WRITE_VCBUS_REG(adr, val)
++#define osd_rdma_read(adr)    READ_VCBUS_REG(adr)
++#define osd_rdma_write_reg_bits(adr, val, start, len)  \
++		WRITE_VCBUS_REG_BITS(adr, val, start, len)
++#define osd_rdma_write_set_reg_bits_mask(adr, _mask) \
++		SET_VCBUS_REG_MASK(adr, _mask)
++#define osd_rdma_write_clr_reg_bits_mask(adr, _mask) \
++		CLEAR_VCBUS_REG_MASK(adr, _mask)
+ #else
+-#define Wr(adr,val) WRITE_MPEG_REG(adr, val)
+-#define Rd(adr)    READ_MPEG_REG(adr)
+-#define Wr_reg_bits(adr, val, start, len)  WRITE_MPEG_REG_BITS(adr, val, start, len)
+-#define Wr_set_reg_bits_mask(adr, _mask)	 SET_MPEG_REG_MASK(adr, _mask)
+-#define Wr_clr_reg_bits_mask(adr, _mask)	 CLEAR_MPEG_REG_MASK(adr, _mask)
++#define osd_rdma_write(adr, val) WRITE_MPEG_REG(adr, val)
++#define osd_rdma_read(adr)    READ_MPEG_REG(adr)
++#define osd_rdma_write_reg_bits(adr, val, start, len) \
++		WRITE_MPEG_REG_BITS(adr, val, start, len)
++#define osd_rdma_write_set_reg_bits_mask(adr, _mask) \
++		SET_MPEG_REG_MASK(adr, _mask)
++#define osd_rdma_write_clr_reg_bits_mask(adr, _mask) \
++		CLEAR_MPEG_REG_MASK(adr, _mask)
+ #endif
+ 
++#define osd_rdma_mem_cpy(dst, src, len) \
++	asm volatile( \
++		"	stmfd sp!,{r5-r7}\n" \
++		"@can be remove ?\n" \
++		"	cmp %2,#8\n" \
++		"@8 means eight byte\n" \
++		"	bne	1f\n" \
++		"	ldmia %0,{r7,r8}\n" \
++		"@load src into regs\n" \
++		"	stmia %1,{r7,r8}\n" \
++		"@store dst from regs\n" \
++		"	b 2f\n" \
++		"1:	ldmia %0,{r5-r8}\n" \
++		"@16 bytes\n" \
++		"	stmia %1,{r5-r8}\n" \
++		"2:	nop\n" \
++		"	ldmfd sp!,{r5-r7}\n" \
++		"@can be remove?\n" \
++		: \
++		: "r" (src), "r" (dst), "r" (len) \
++		: "r5", "r6", "r7", "r8")
++
++/*once init, will update config in every osd rdma interrupt*/
++int osd_rdma_update_config(char is_init)
++{
++	static u32 config;
++
++	if (is_init) {
++		config  = 0;
++		config |= 1                         << 6;   /* [31: 6] Rsrv.*/
++		config |= ctrl_ahb_wr_burst_size    <<
++			4;
++		/* [ 5: 4] ctrl_ahb_wr_burst_size. 0=16; 1=24; 2=32; 3=48.*/
++		config |= ctrl_ahb_rd_burst_size    <<
++			2;
++		/* [ 3: 2] ctrl_ahb_rd_burst_size. 0=16; 1=24; 2=32; 3=48.*/
++		config |= 0                         << 1;
++		/* [    1] ctrl_sw_reset.*/
++		config |= 0                         << 0;
++		/* [    0] ctrl_free_clk_enable.*/
++		osd_rdma_write(RDMA_CTRL, config);
++	} else {
++		osd_rdma_write(RDMA_CTRL, (1<<24)|config);
++	}
++	return 0;
++
++}
++EXPORT_SYMBOL(osd_rdma_update_config);
+ static void inline reset_rdma_table(void)
+ {
+ 	unsigned long flags;
+-
++	rdma_table_item_t reset_item[2] = {
++		{
++			.addr = OSD_RDMA_FLAG_REG,
++			.val = OSD_RDMA_STATUS_MARK_TBL_RST,
++		},
++		{
++			.addr = OSD_RDMA_FLAG_REG,
++			.val = OSD_RDMA_STATUS_MARK_COMPLETE,
++		}
++	};
+ 	spin_lock_irqsave(&rdma_lock, flags);
+-	aml_write_reg32(END_ADDR, table_paddr - 1);
+-	rdma_table[0].addr = OSD_RDMA_FLAG_REG;
+-	rdma_table[0].val = OSD_RDMA_STATUS_MARK_TBL_RST;
+-	item_count = 1;
++	if (!OSD_RDMA_STAUS_IS_DIRTY) {
++		/*we reset rdma table only if table is clean.
++		if both two process want to reset table.and racing
++		here,double clean table is uncorrect.
++		1 clean table racing--------
++		2 the first one get spin lock ,do clean op
++		3 the first exit spin lock and adding one item
++		4 the second one get spin lock, clean table(!!wrong)*/
++		OSD_RDMA_STAUS_CLEAR_DONE;
++		osd_rdma_write(END_ADDR, table_paddr - 1);
++		osd_rdma_mem_cpy(rdma_table, &reset_item[0], 16);
++		/*memcpy(rdma_table,&reset_item[0],16);	*/
++		item_count = 1;
++	}
+ 	spin_unlock_irqrestore(&rdma_lock, flags);
+ }
+ 
+@@ -76,36 +149,72 @@ static int update_table_item(u32 addr, u32 val)
+ {
+ 	unsigned long flags;
+ 	int retry_count = OSD_RDMA_UPDATE_RETRY_COUNT;
++	rdma_table_item_t request_item;
++	if (item_count > 500) {
++		/*rdma table is full*/
++		return -1;
++	}
++	if (info)
++		sprintf(info, "item_count : %d\n"
++				"reg_ctrl : %x\n"
++				"reg_status : %x\n"
++				"reg_auto :0x%x\n"
++				"reg_flag :0x%x\n",
++				item_count, osd_rdma_read(RDMA_CTRL),
++				osd_rdma_read(RDMA_STATUS),
++				osd_rdma_read(RDMA_ACCESS_AUTO),
++				osd_rdma_read(OSD_RDMA_FLAG_REG));
++
+ retry:
+-	//in reject region then we wait for hw rdma operation complete.
+-	if (OSD_RDMA_STATUS_IS_REJECT && (retry_count > 0)) {
+-		retry_count--;
+-		goto retry;
++	if (0 == (retry_count--)) {
++		pr_info("OSD RDMA stuck .....%d,0x%x\n", retry_count,
++					osd_rdma_read(RDMA_STATUS));
++		return -1;
+ 	}
+-	if (!OSD_RDMA_STAUS_IS_DIRTY) { //since last HW op,no new wirte request. rdma HW op will clear DIRTY flag.
+-		//reset all pointer. set table start margin.
++	if (!OSD_RDMA_STAUS_IS_DIRTY) {
++		/*since last HW op,no new wirte request.
++		rdma HW op will clear DIRTY flag.
++		reset all pointer. set table start margin.*/
+ 		reset_rdma_table();
+ 	}
+-	//atom_lock_start:
+-	//set write op aotmic lock flag.
++	/*atom_lock_start:*/
++	/*set write op aotmic lock flag.*/
+ 	OSD_RDMA_STAUS_MARK_DIRTY;
+ 	spin_lock_irqsave(&rdma_lock, flags);
+ 	item_count++;
+-	rdma_table[item_count].addr = OSD_RDMA_FLAG_REG;
+-	rdma_table[item_count].val = OSD_RDMA_STATUS_MARK_COMPLETE;
+-	aml_write_reg32(END_ADDR, (table_paddr + item_count * 8 + 7));
+-	rdma_table[item_count - 1].addr = addr;
+-	rdma_table[item_count - 1].val = val;
+-	spin_unlock_irqrestore(&rdma_lock, flags);
+-	//if dirty flag is cleared, then RDMA hw write and cpu sw write is racing.
+-	//if reject flag is true,then hw RDMA hw write start when cpu write.
+-	//atom_lock_end:
++	request_item.addr = OSD_RDMA_FLAG_REG;
++	request_item.val = OSD_RDMA_STATUS_MARK_COMPLETE;
++	osd_rdma_mem_cpy(&rdma_table[item_count], &request_item, 8);
++	if ((osd_rdma_read(RDMA_STATUS)&0xffffff0f) == 0) {
++		osd_rdma_write(END_ADDR, (table_paddr + item_count * 8 + 7));
++	} else {
++		if (osd_rdma_read(RDMA_STATUS)&(1<<28)) {
++			osd_rdma_update_config((char)0);/*not init.*/
++			pr_info("rdma done detect +++++%d,0x%x\n",
++				retry_count, osd_rdma_read(RDMA_STATUS));
++		}
++		item_count--;
++		spin_unlock_irqrestore(&rdma_lock, flags);
++		goto retry;
++	}
++	request_item.addr = addr;
++	request_item.val = val;
++	osd_rdma_mem_cpy(&rdma_table[item_count-1], &request_item, 8);
++	/*memcpy(&rdma_table[item_count],&request_item,8);*/
++	/*if dirty flag is cleared, then RDMA hw write and
++				cpu sw write is racing.*/
++	/*if reject flag is true,then hw RDMA hw write
++				start when cpu write.*/
++	/*atom_lock_end:*/
+ 	if (!OSD_RDMA_STAUS_IS_DIRTY || OSD_RDMA_STATUS_IS_REJECT) {
+-		spin_lock_irqsave(&rdma_lock, flags);
++		/*spin_lock_irqsave(&rdma_lock, flags);*/
+ 		item_count--;
+ 		spin_unlock_irqrestore(&rdma_lock, flags);
++		pr_info("osd_rdma flag ++++++: %x\n",
++				osd_rdma_read(OSD_RDMA_FLAG_REG));
+ 		goto retry ;
+ 	}
++	spin_unlock_irqrestore(&rdma_lock, flags);
+ 	return 0;
+ }
+ 
+@@ -119,16 +228,16 @@ u32  VSYNCOSD_RD_MPEG_REG(unsigned long addr)
+ 				return rdma_table[i].val;
+ 		}
+ 	}
+-	return Rd(addr);
++	return osd_rdma_read(addr);
+ }
+ EXPORT_SYMBOL(VSYNCOSD_RD_MPEG_REG);
+ 
+ int VSYNCOSD_WR_MPEG_REG(unsigned long addr, unsigned long val)
+ {
+ 	if (rdma_enable)
+-		update_table_item(addr, val);
++		return update_table_item(addr, val);
+ 	else
+-		Wr(addr, val);
++		osd_rdma_write(addr, val);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(VSYNCOSD_WR_MPEG_REG);
+@@ -141,11 +250,11 @@ int VSYNCOSD_WR_MPEG_REG_BITS(unsigned long addr, unsigned long val,
+ 
+ 	if (rdma_enable) {
+ 		read_val = VSYNCOSD_RD_MPEG_REG(addr);
+-		write_val = (read_val & ~(((1L << (len)) - 1) << (start))) | ((unsigned int)(
+-					val) << (start));
++		write_val = (read_val & ~(((1L << (len)) - 1) << (start)))|
++			((unsigned int)(val) << (start));
+ 		update_table_item(addr, write_val);
+ 	} else
+-		Wr_reg_bits(addr, val, start, len);
++		osd_rdma_write_reg_bits(addr, val, start, len);
+ 
+ 	return 0;
+ }
+@@ -161,7 +270,7 @@ int VSYNCOSD_SET_MPEG_REG_MASK(unsigned long addr, unsigned long _mask)
+ 		write_val = read_val | _mask ;
+ 		update_table_item(addr, write_val);
+ 	} else
+-		Wr_set_reg_bits_mask(addr, _mask);
++		osd_rdma_write_set_reg_bits_mask(addr, _mask);
+ 
+ 	return 0;
+ }
+@@ -177,38 +286,35 @@ int VSYNCOSD_CLR_MPEG_REG_MASK(unsigned long addr, unsigned long _mask)
+ 		write_val = read_val & (~_mask) ;
+ 		update_table_item(addr, write_val);
+ 	} else
+-		Wr_clr_reg_bits_mask(addr, _mask);
++		osd_rdma_write_clr_reg_bits_mask(addr, _mask);
+ 
+ 	return 0;
+ }
+ EXPORT_SYMBOL(VSYNCOSD_CLR_MPEG_REG_MASK);
+-
+ static int start_osd_rdma(char channel)
+ {
+ 	char intr_bit = 8 * channel;
+ 	char rw_bit = 4 + channel;
+ 	char inc_bit = channel;
+ 	u32 data32;
++	char is_init = 1;
+ 
+-	data32  = 0;
+-	data32 |= 0                         << 6;   // [31: 6] Rsrv.
+-	data32 |= ctrl_ahb_wr_burst_size    <<
+-		  4;   // [ 5: 4] ctrl_ahb_wr_burst_size. 0=16; 1=24; 2=32; 3=48.
+-	data32 |= ctrl_ahb_rd_burst_size    <<
+-		  2;   // [ 3: 2] ctrl_ahb_rd_burst_size. 0=16; 1=24; 2=32; 3=48.
+-	data32 |= 0                         << 1;   // [    1] ctrl_sw_reset.
+-	data32 |= 0                         << 0;   // [    0] ctrl_free_clk_enable.
+-	aml_write_reg32(P_RDMA_CTRL, data32);
+-
+-	data32  = aml_read_reg32(P_RDMA_ACCESS_AUTO);
++	osd_rdma_update_config(is_init);
++	data32  = osd_rdma_read(RDMA_ACCESS_AUTO);
+ 	data32 |= 0x1 <<
+-		  intr_bit;   // [23: 16] interrupt inputs enable mask for auto-start 1: vsync int bit 0
++		  intr_bit;
++	/* [23: 16] interrupt inputs enable mask for auto-start
++						1: vsync int bit 0*/
+ 	data32 |= 1 <<
+-		  rw_bit;   // [    6] ctrl_cbus_write_1. 1=Register write; 0=Register read.
++		  rw_bit;
++	/* [    6] ctrl_cbus_write_1. 1=Register write;
++					0=Register read.*/
+ 	data32 &= ~(1 <<
+-		    inc_bit); // [    2] ctrl_cbus_addr_incr_1. 1=Incremental register access; 0=Non-incremental.
++		    inc_bit);
++	/* [    2] ctrl_cbus_addr_incr_1. 1=Incremental register access;
++						0=Non-incremental.*/
+ 
+-	aml_write_reg32(P_RDMA_ACCESS_AUTO, data32);
++	osd_rdma_write(RDMA_ACCESS_AUTO, data32);
+ 	return 1;
+ }
+ 
+@@ -217,21 +323,23 @@ static int stop_rdma(char channel)
+ 	char intr_bit = 8 * channel;
+ 	u32 data32 = 0x0;
+ 
+-	data32  = aml_read_reg32(P_RDMA_ACCESS_AUTO);
++	data32  = osd_rdma_read(RDMA_ACCESS_AUTO);
+ 	data32 &= ~(0x1 <<
+-		    intr_bit);   // [23: 16] interrupt inputs enable mask for auto-start 1: vsync int bit 0
+-	aml_write_reg32(P_RDMA_ACCESS_AUTO, data32);
++		    intr_bit);
++	/* [23: 16] interrupt inputs enable mask for auto-start
++						1: vsync int bit 0*/
++	osd_rdma_write(RDMA_ACCESS_AUTO, data32);
+ 	return 0;
+ }
+ 
+ int read_rdma_table(void)
+ {
+ 	int rdma_count = 0;
+-
+ 	if (rdma_debug) {
+ 		for (rdma_count = 0; rdma_count < item_count; rdma_count++)
+-			printk("rdma_table addr is 0x%x, value is 0x%x\n", rdma_table[rdma_count].addr,
+-			       rdma_table[rdma_count].val);
++			pr_info("rdma_table addr is 0x%x, value is 0x%x\n",
++					rdma_table[rdma_count].addr,
++					rdma_table[rdma_count].val);
+ 	}
+ 	return 0;
+ }
+@@ -239,12 +347,14 @@ EXPORT_SYMBOL(read_rdma_table);
+ 
+ int reset_rdma(void)
+ {
+-	//reset mechanism , to clear rdma status.
+-	if (OSD_RDMA_STAUS_IS_DONE) { //check if it is OSD rdma completed.
++	/*reset mechanism , to clear rdma status.*/
++	if (OSD_RDMA_STAUS_IS_DONE) { /*check if it is OSD rdma completed.*/
+ 		OSD_RDMA_STAUS_CLEAR_DONE;
+-		//check if no cpu write request since the latest hw rdma op.
+-		if (!OSD_RDMA_STAUS_IS_DIRTY) { //since last HW op,no new wirte request. rdma HW op will clear DIRTY flag.
+-			//reset all pointer. set table start margin.
++		/*check if no cpu write request since the latest hw rdma op.*/
++		if (!OSD_RDMA_STAUS_IS_DIRTY) {
++			/*since last HW op,no new wirte request.
++			rdma HW op will clear DIRTY flag.*/
++			/*reset all pointer. set table start margin.*/
+ 			reset_rdma_table();
+ 		}
+ 	}
+@@ -262,19 +372,22 @@ int osd_rdma_enable(u32  enable)
+ 		return 0;
+ 	}
+ 	rdma_enable = enable;
+-	while (aml_read_reg32(P_RDMA_STATUS) & 0x0fffff0f) {
+-		printk("rdma still work£¬ RDMA_STATUS: 0x%x\n",
+-				aml_read_reg32(P_RDMA_STATUS));
++	while (osd_rdma_read(RDMA_STATUS) & 0x0fffff0f) {
++		pr_info("rdma still work£¬ RDMA_STATUS: 0x%x\n",
++				osd_rdma_read(RDMA_STATUS));
+ 		msleep(10);
+ 	}
+ 	if (enable) {
+ 		reset_rdma_table();
+-		aml_write_reg32(START_ADDR, table_paddr);
+-		//enable then start it.
++		info = kmalloc(GFP_KERNEL, sizeof(char)*200);
++		osd_rdma_write(START_ADDR, table_paddr);
++		/*enable then start it.*/
+ 		OSD_RDMA_STATUS_CLEAR_ALL;
+ 		start_osd_rdma(RDMA_CHANNEL_INDEX);
+-	} else
++	} else{
+ 		stop_rdma(RDMA_CHANNEL_INDEX);
++		kfree(info);
++	}
+ 	mutex_unlock(&rdma_mutex);
+ 	return 1;
+ }
+@@ -282,21 +395,22 @@ EXPORT_SYMBOL(osd_rdma_enable);
+ 
+ static int osd_rdma_init(void)
+ {
+-	// alloc map table .
++	/* alloc map table .*/
+ 	static ulong table_vaddr = 0;
+ 	osd_rdma_init_flat = true;
+ 
+ 	table_vaddr = __get_free_pages(GFP_KERNEL, get_order(PAGE_SIZE));
+ 	if (!table_vaddr) {
+-		printk("%s: failed to alloc rmda_table\n", __func__);
++		pr_info("%s: failed to alloc rmda_table\n", __func__);
+ 		return -1;
+ 	}
+ 
+ 	table_paddr = virt_to_phys((u8 *)table_vaddr);
+-	//remap addr nocache.
+-	rdma_table = (rdma_table_item_t *) ioremap_nocache(table_paddr, PAGE_SIZE);
++	/*remap addr nocache.*/
++	rdma_table = (rdma_table_item_t *) ioremap_nocache(table_paddr,
++								PAGE_SIZE);
+ 	if (NULL == rdma_table) {
+-		printk("%s: failed to remap rmda_table_addr\n", __func__);
++		pr_info("%s: failed to remap rmda_table_addr\n", __func__);
+ 		return -1;
+ 	}
+ 
+@@ -305,7 +419,8 @@ static int osd_rdma_init(void)
+ 
+ MODULE_PARM_DESC(item_count, "\n item_count\n");
+ module_param(item_count, uint, 0664);
+-
++MODULE_PARM_DESC(info, "\n info\n");
++module_param(info, charp, S_IRUSR);
+ MODULE_PARM_DESC(table_paddr, "\n table_paddr\n");
+ module_param(table_paddr, uint, 0664);
+ 
+diff --git a/drivers/amlogic/display/osd/osd_rdma.h b/drivers/amlogic/display/osd/osd_rdma.h
+index 0dea0e779799..cebf3642be79 100644
+--- a/drivers/amlogic/display/osd/osd_rdma.h
++++ b/drivers/amlogic/display/osd/osd_rdma.h
+@@ -32,36 +32,61 @@ typedef  struct {
+ #define TABLE_SIZE	 PAGE_SIZE
+ #define MAX_TABLE_ITEM	 (TABLE_SIZE/sizeof(rdma_table_item_t))
+ #define RDMA_CHANNEL_INDEX	3  //auto  1,2,3   manual is 0
+-#define START_ADDR		(P_RDMA_AHB_START_ADDR_MAN+(RDMA_CHANNEL_INDEX<<3))
+-#define END_ADDR		(P_RDMA_AHB_END_ADDR_MAN+(RDMA_CHANNEL_INDEX<<3))
++#define START_ADDR		(RDMA_AHB_START_ADDR_MAN + \
++				(RDMA_CHANNEL_INDEX<<1))
++#define END_ADDR		(RDMA_AHB_END_ADDR_MAN+(RDMA_CHANNEL_INDEX<<1))
+ 
+ #define OSD_RDMA_FLAG_REG	VIU_OSD2_TCOLOR_AG3
+ #define P_OSD_RDMA_FLAG_REG	P_VIU_OSD2_TCOLOR_AG3
+ 
+-#define OSD_RDMA_FLAG_DONE	(1<<0) //hw rdma change it to 1 when rdma complete, rdma isr chagne it to 0 to reset it.
+-#define OSD_RDMA_FLAG_REJECT	(1<<1) //hw rdma own this flag, change it to zero when start rdma,change it to 0 when complete
+-#define	OSD_RDMA_FLAG_DIRTY	(1<<2) //hw rdma change it to 0 , cpu write change it to 1
++#define OSD_RDMA_FLAG_DONE	(1<<0)
++/*hw rdma change it to 1 when rdma complete,
++rdma isr chagne it to 0 to reset it.*/
++#define OSD_RDMA_FLAG_REJECT	(1<<1)
++/*hw rdma own this flag,
++change it to zero when start rdma,change it to 0 when complete*/
++#define	OSD_RDMA_FLAG_DIRTY	(1<<2)
++/*hw rdma change it to 0 , cpu write change it to 1*/
+ 
+-#define OSD_RDMA_FLAGS_ALL_ENABLE	(OSD_RDMA_FLAG_DONE|OSD_RDMA_FLAG_REJECT|OSD_RDMA_FLAG_DIRTY)
++#define OSD_RDMA_FLAGS_ALL_ENABLE	(OSD_RDMA_FLAG_DONE| \
++					OSD_RDMA_FLAG_REJECT| \
++					OSD_RDMA_FLAG_DIRTY)
+ 
+-#define  OSD_RDMA_STATUS		(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&(OSD_RDMA_FLAG_REJECT|OSD_RDMA_FLAG_DONE|OSD_RDMA_FLAG_DIRTY))
+-#define  OSD_RDMA_STATUS_IS_REJECT 	(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&OSD_RDMA_FLAG_REJECT)
+-#define  OSD_RDMA_STAUS_IS_DIRTY	(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&OSD_RDMA_FLAG_DIRTY)
+-#define  OSD_RDMA_STAUS_IS_DONE		(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&OSD_RDMA_FLAG_DONE)
++#define  OSD_RDMA_STATUS		(aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					(OSD_RDMA_FLAG_REJECT| \
++					OSD_RDMA_FLAG_DONE| \
++					OSD_RDMA_FLAG_DIRTY))
++#define  OSD_RDMA_STATUS_IS_REJECT	(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&\
++					OSD_RDMA_FLAG_REJECT)
++#define  OSD_RDMA_STAUS_IS_DIRTY	(aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					OSD_RDMA_FLAG_DIRTY)
++#define  OSD_RDMA_STAUS_IS_DONE		(aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					OSD_RDMA_FLAG_DONE)
+ 
+-//hw rdma op, set DONE && clear DIRTY && clear REJECT
+-#define  OSD_RDMA_STATUS_MARK_COMPLETE	((aml_read_reg32(P_OSD_RDMA_FLAG_REG)&~OSD_RDMA_FLAGS_ALL_ENABLE)|(OSD_RDMA_FLAG_DONE))
+-//hw rdma op,set REJECT && set DIRTY.
+-#define  OSD_RDMA_STATUS_MARK_TBL_RST	((aml_read_reg32(P_OSD_RDMA_FLAG_REG)&~OSD_RDMA_FLAGS_ALL_ENABLE)|(OSD_RDMA_FLAG_REJECT|OSD_RDMA_FLAG_DIRTY))
++/*hw rdma op, set DONE && clear DIRTY && clear REJECT*/
++#define  OSD_RDMA_STATUS_MARK_COMPLETE	((aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					~OSD_RDMA_FLAGS_ALL_ENABLE)| \
++					(OSD_RDMA_FLAG_DONE))
++/*hw rdma op,set REJECT && set DIRTY.*/
++#define  OSD_RDMA_STATUS_MARK_TBL_RST	((aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					~OSD_RDMA_FLAGS_ALL_ENABLE)| \
++					(OSD_RDMA_FLAG_REJECT| \
++					OSD_RDMA_FLAG_DIRTY))
+ 
+-//cpu op
+-#define  OSD_RDMA_STAUS_MARK_DIRTY	(aml_write_reg32(P_OSD_RDMA_FLAG_REG,aml_read_reg32(P_OSD_RDMA_FLAG_REG)|OSD_RDMA_FLAG_DIRTY))
+-//isr op
+-#define  OSD_RDMA_STAUS_CLEAR_DONE	(aml_write_reg32(P_OSD_RDMA_FLAG_REG,aml_read_reg32(P_OSD_RDMA_FLAG_REG)&~(OSD_RDMA_FLAG_DONE)))
+-//cpu reset op.
+-#define  OSD_RDMA_STATUS_CLEAR_ALL	(aml_write_reg32(P_OSD_RDMA_FLAG_REG,(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&~OSD_RDMA_FLAGS_ALL_ENABLE)))
++/*cpu op*/
++#define  OSD_RDMA_STAUS_MARK_DIRTY	(aml_write_reg32(P_OSD_RDMA_FLAG_REG, \
++					aml_read_reg32(P_OSD_RDMA_FLAG_REG)| \
++					OSD_RDMA_FLAG_DIRTY))
++/*isr op*/
++#define  OSD_RDMA_STAUS_CLEAR_DONE	(aml_write_reg32(P_OSD_RDMA_FLAG_REG, \
++					aml_read_reg32(P_OSD_RDMA_FLAG_REG)& \
++					~(OSD_RDMA_FLAG_DONE)))
++/*cpu reset op.*/
++#define  OSD_RDMA_STATUS_CLEAR_ALL	(aml_write_reg32(P_OSD_RDMA_FLAG_REG, \
++					(aml_read_reg32(P_OSD_RDMA_FLAG_REG)&~ \
++					OSD_RDMA_FLAGS_ALL_ENABLE)))
+ 
+-//time diagram:
++/*time diagram:*/
+ /*
+ ** CLEAR: from rdma hw op complete  to the next cpu write .
+ ** REJECT: from rdma hw op start to rdma hw op complete.
+-- 
+2.19.0
+

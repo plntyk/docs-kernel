@@ -1,0 +1,101 @@
+From 923527ba2163e25260b81de65f45f91578638bb6 Mon Sep 17 00:00:00 2001
+From: "yu.zheng" <yu.zheng@amlogic.com>
+Date: Tue, 25 Mar 2014 11:05:37 +0800
+Subject: [PATCH 3845/5965] PD #89032 :HDMI M8 CEC: cec thread optimization.
+
+---
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c     | 11 +++++++++--
+ drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c    |  2 +-
+ include/linux/amlogic/hdmi_tx/hdmi_tx_module.h |  3 +++
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+ mode change 100644 => 100755 include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+index d7c7252cfeff..460a3b49dc8b 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_cec.c
+@@ -353,7 +353,11 @@ static int cec_task(void *data)
+         cec_node_init(hdmitx_device);
+     }
+     while (1) {
+-        msleep(5);
++    	if (kthread_should_stop()){
++    		break;
++    	}
++    	wait_event_interruptible(hdmitx_device->cec_wait_rx,
++		cec_global_info.cec_rx_msg_buf.rx_read_pos != cec_global_info.cec_rx_msg_buf.rx_write_pos);
+         cec_isr_post_process();
+         //cec_usr_cmd_post_process();
+     }
+@@ -660,6 +664,7 @@ static irqreturn_t cec_isr_handler(int irq, void *dev_instance)
+     }
+ 
+     register_cec_rx_msg(rx_msg, rx_len);
++    wake_up(&hdmitx_device->cec_wait_rx);
+ 
+     //cec_enable_irq();
+ 
+@@ -1552,6 +1557,7 @@ static int __init cec_init(void)
+     extern __u16 cec_key_map[128];
+     extern hdmitx_dev_t * get_hdmitx_device(void);
+     hdmitx_device = get_hdmitx_device();
++    init_waitqueue_head(&hdmitx_device->cec_wait_rx);
+     cec_key_init();
+     hdmi_print(INF, CEC "CEC init\n");
+     cec_global_info.cec_flag.cec_key_flag = 0; 
+@@ -1572,7 +1578,7 @@ static int __init cec_init(void)
+     
+     cec_global_info.hdmitx_device = hdmitx_device;
+     
+-    kthread_run(cec_task, (void*)hdmitx_device, "kthread_cec");
++    hdmitx_device->task_cec = kthread_run(cec_task, (void*)hdmitx_device, "kthread_cec");
+ #ifdef CONFIG_ARCH_MESON6
+     if(request_irq(INT_HDMI_CEC, &cec_isr_handler,
+                 IRQF_SHARED, "amhdmitx-cec",
+@@ -1633,6 +1639,7 @@ static void __exit cec_uninit(void)
+ #ifdef CONFIG_ARCH_MESON8
+         free_irq(INT_AO_CEC, (void *)hdmitx_device);
+ #endif
++    	kthread_stop(hdmitx_device->task_cec);
+         cec_global_info.cec_flag.cec_init_flag = 0;
+     }
+ 
+diff --git a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
+index d8f336325298..09b49b27931a 100755
+--- a/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
++++ b/drivers/amlogic/hdmi/hdmi_tx/hdmi_tx_hdcp.c
+@@ -137,7 +137,7 @@ static int __init hdmitx_hdcp_init(void)
+ 
+     switch_dev_register(&hdcp_dev);
+ 
+-    hdmitx_device->task = kthread_run(hdmitx_hdcp_task, (void*)hdmitx_device, "kthread_hdcp");
++    hdmitx_device->task_hdcp = kthread_run(hdmitx_hdcp_task, (void*)hdmitx_device, "kthread_hdcp");
+ 
+     return 0;
+ }
+diff --git a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+old mode 100644
+new mode 100755
+index 8e092b624497..156db65477e2
+--- a/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
++++ b/include/linux/amlogic/hdmi_tx/hdmi_tx_module.h
+@@ -2,6 +2,7 @@
+ #define _HDMI_TX_MODULE_H
+ #include "hdmi_info_global.h"
+ #include <plat/hdmi_config.h>
++#include <linux/wait.h>
+ //#include <linux/amlogic/aml_gpio_consumer.h>
+ 
+ /*****************************
+@@ -64,6 +65,8 @@ typedef struct hdmi_tx_dev_s {
+     struct task_struct *task;
+     struct task_struct *task_monitor;
+     struct task_struct *task_hdcp;
++    struct task_struct *task_cec;
++    wait_queue_head_t cec_wait_rx;
+     struct {
+         void (*SetPacket)(int type, unsigned char* DB, unsigned char* HB);
+         void (*SetAudioInfoFrame)(unsigned char* AUD_DB, unsigned char* CHAN_STAT_BUF);
+-- 
+2.19.0
+

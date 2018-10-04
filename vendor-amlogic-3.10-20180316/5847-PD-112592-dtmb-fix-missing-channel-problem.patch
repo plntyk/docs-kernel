@@ -1,0 +1,84 @@
+From 9f948373fbfef3a7fa250be71eaf369221adfb74 Mon Sep 17 00:00:00 2001
+From: Shijie Rong <shijie.rong@amlogic.com>
+Date: Mon, 21 Sep 2015 21:28:15 +0800
+Subject: [PATCH 5847/5965] PD#112592: dtmb: fix missing channel problem
+
+Change-Id: I0ed9d4e79290ff971014b94d246a9db8f5e8c4d6
+---
+ drivers/amlogic/dvb_tv/amldemod/demod_func.c | 31 +++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/amlogic/dvb_tv/amldemod/demod_func.c b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+index 40a7ee914ebb..436e29eba942 100755
+--- a/drivers/amlogic/dvb_tv/amldemod/demod_func.c
++++ b/drivers/amlogic/dvb_tv/amldemod/demod_func.c
+@@ -1119,7 +1119,7 @@ void dtmb_all_reset(void)
+ {
+ 	dtmb_write_reg(0x010, 0x52);
+ 	dtmb_write_reg(0x047, 0x33202);  //20 bits, 1 - fpga. 0 - m6tvd
+-	dtmb_write_reg(0xd, 0x141a0320); // increase interleaver0 waiting time.
++	dtmb_write_reg(0xd, 0x141a0400); // increase interleaver0 waiting time. 20150921 modified by rsj  //0x141a0320
+ 	dtmb_write_reg(0xc, 0x41444400); // shorten che waiting time.
+ 	dtmb_write_reg(0x18,0x000a1316); // shorten mobile detect time.
+ 	dtmb_write_reg(0x15,0x0199999A); // shift -5M.
+@@ -1242,6 +1242,8 @@ static int mobile_times = 0;
+ static int time_eq_cnt = 0;
+ static int time_eq_lost_cnt = 0;
+ int dtmb_thread = 0;
++static int time_cnt_nr=0;
++
+ int dtmb_read_snr(struct dvb_frontend *fe){
+ 	int tmp,che_snr,snr,snr_avg,fec_lock;
+ 	int fsm_state,fec_ldpc_it_avg,local_state,fbe_in_num,SC_mode,time_eq;
+@@ -1359,6 +1361,28 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 				front_cci0_count=(dtmb_read_reg(0xe9) >> 22) & 0xff;
+ 					constell = (dtmb_read_reg(0xe5) >> 16) & 0x3;
+ 				pr_dbg("*************** local_state = %d ************ ,front_cci0_count is %d\n", local_state,front_cci0_count);
++				//for skyworth mxl tuner (mode 6 has bch add)
++				if (fec_lock == 1) {
++					fec_bch_add = dtmb_read_reg(0xdf);
++					pr_dbg("[debug]fec lock,fec_bch_add is %d\n",fec_bch_add);
++					msleep(100);
++					if (((dtmb_read_reg(0xdf))-fec_bch_add) >= 50) {
++						printk("[debug]fec lock,but bch add ,need reset\n");
++						dtmb_reset();
++						dtmb_all_reset();
++					}
++				}
++				//for 4qam-nr 20150921
++				if ((time_cnt_nr >= 1) && ((dtmb_read_reg(0xe5) >> 21) & 0x1) && (((dtmb_read_reg(0x0e3) >> 12) & 0x1) != 1)) {
++					dtmb_write_reg(0x46,0x1002000);
++					dtmb_write_reg(0xd, 0x141a0500); // increase interleaver0 waiting time for 4qam-nr.
++					pr_dbg("freeze spectrum for 4qam-nr \n");
++					time_cnt_nr=0;
++				}
++				if ((dtmb_read_reg(0xe5) >> 21) & 0x1) {
++					time_cnt_nr++;
++				}
++				//
+ 		            if ((front_cci0_count>0) && (SC_mode == 0) && (fec_ldpc_it_avg > 640) && (constell > 0)) {
+ 									pr_dbg("check cci wait 500ms\n");
+ 									msleep(500);
+@@ -1381,7 +1405,11 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 		{
+ 			local_state = AMLOGIC_DTMB_STEP9;
+ 			pr_dbg("*************** local_state = %d ************ \n", local_state);
++			#if (defined CONFIG_AM_R840)
+ 	//		dtmb_register_reset();
++		    #else
++			dtmb_register_reset();
++			#endif
+ 			dtmb_all_reset();
+ 	//				if((dtmb_read_reg(0xd7)==1)&&(dtmb_read_reg(0xd6)==0)&&(dtmb_read_reg(0xd5)==0)&&(dtmb_read_reg(0xd4)==0))//tuner error,need reset
+ 	//				{
+@@ -1390,6 +1418,7 @@ int dtmb_read_snr(struct dvb_frontend *fe){
+ 			time_eq_cnt = 0;
+ 			time_eq_lost_cnt = 0;
+ 			mobile_times= 0;
++			time_cnt_nr = 0;
+ 			pm_change = 0;
+ 			}
+ 		}
+-- 
+2.19.0
+

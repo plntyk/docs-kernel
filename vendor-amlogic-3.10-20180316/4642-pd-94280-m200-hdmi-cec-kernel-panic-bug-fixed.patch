@@ -1,0 +1,90 @@
+From af0328600b8cc14a4c5ff6ea6dd9721c51fb1d6b Mon Sep 17 00:00:00 2001
+From: "yu.zheng" <yu.zheng@amlogic.com>
+Date: Thu, 31 Jul 2014 10:53:19 +0800
+Subject: [PATCH 4642/5965] pd #94280 : m200 hdmi cec: kernel panic bug fixed.
+
+Change-Id: Ic14f4e0fc0c0cb66359ce182836a6e5b355fa70f
+---
+ .../mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c    |  6 ++++--
+ arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c  | 17 ++++++++++++++++-
+ 2 files changed, 20 insertions(+), 3 deletions(-)
+ mode change 100644 => 100755 arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c
+
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+index 641dd121a56b..cec79accf9f1 100755
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_cec_hw.c
+@@ -152,7 +152,7 @@ static int cec_ll_tx_once(const unsigned char *msg, unsigned char len)
+     unsigned int cnt = 30;
+     int pos;
+ 
+-    while(aocec_rd_reg(CEC_TX_MSG_STATUS) || aocec_rd_reg(CEC_RX_MSG_STATUS)){
++    while(aocec_rd_reg(CEC_TX_MSG_STATUS)){
+         msleep(5);
+         if(TX_ERROR == aocec_rd_reg(CEC_TX_MSG_STATUS)){
+             //aocec_wr_reg(CEC_TX_MSG_CMD, TX_ABORT);
+@@ -196,7 +196,7 @@ int cec_ll_tx_polling(const unsigned char *msg, unsigned char len)
+ 	unsigned int j = 30;
+     int pos;
+ 
+-    while( (aocec_rd_reg(CEC_TX_MSG_STATUS) || aocec_rd_reg(CEC_RX_MSG_STATUS)) && j){
++    while( aocec_rd_reg(CEC_TX_MSG_STATUS)){
+         if(TX_ERROR == aocec_rd_reg(CEC_TX_MSG_STATUS)){
+             //aocec_wr_reg(CEC_TX_MSG_CMD, TX_ABORT);
+             aocec_wr_reg(CEC_TX_MSG_CMD, TX_NO_OP);
+@@ -207,6 +207,7 @@ int cec_ll_tx_polling(const unsigned char *msg, unsigned char len)
+             hdmi_print(INF, CEC "tx busy time out.\n");
+             aocec_wr_reg(CEC_TX_MSG_CMD, TX_ABORT);
+             aocec_wr_reg(CEC_TX_MSG_CMD, TX_NO_OP);
++            break;
+         }
+         msleep(5);
+     }
+@@ -222,6 +223,7 @@ int cec_ll_tx_polling(const unsigned char *msg, unsigned char len)
+     j = 30;
+     while((TX_DONE != aocec_rd_reg(CEC_TX_MSG_STATUS)) && (j--)){
+         if(TX_ERROR == aocec_rd_reg(CEC_TX_MSG_STATUS))
++            break;
+ 		msleep(5);
+ 	}
+ 
+diff --git a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c
+old mode 100644
+new mode 100755
+index e3d965f01cd8..f66e2536e26c
+--- a/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c
++++ b/arch/arm/mach-meson8b/hdmi_tx_hw/hdmi_tx_reg.c
+@@ -31,6 +31,9 @@
+ #include <mach/am_regs.h>
+ 
+ #include <mach/hdmi_tx_reg.h>
++
++#include "linux/amlogic/hdmi_tx/hdmi_tx_module.h"
++
+ static DEFINE_SPINLOCK(reg_lock);
+ static DEFINE_SPINLOCK(reg_lock2);
+ // if the following bits are 0, then access HDMI IP Port will cause system hungup
+@@ -87,7 +90,19 @@ void hdmi_wr_reg(unsigned int addr, unsigned int data)
+ }
+ 
+ #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
+-#define waiting_aocec_free()    while(aml_read_reg32(P_AO_CEC_RW_REG) & (1<<23))
++#define waiting_aocec_free() \
++        do{\
++            unsigned long cnt = 0;\
++            while(aml_read_reg32(P_AO_CEC_RW_REG) & (1<<23))\
++            {\
++                if(5000 == cnt++)\
++                {\
++                    hdmi_print(INF, CEC "waiting aocec free time out.\n");\
++                    break;\
++                }\
++            }\
++        }while(0)
++        
+ unsigned long aocec_rd_reg (unsigned long addr)
+ {
+     unsigned long data32;
+-- 
+2.19.0
+

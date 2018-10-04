@@ -1,0 +1,228 @@
+From 68a7c1710145785c3c04cb9847a802f83b18feeb Mon Sep 17 00:00:00 2001
+From: timyao <tim.yao@amlogic.com>
+Date: Mon, 3 Mar 2014 18:15:52 -0800
+Subject: [PATCH 3702/5965] PD #87103. Add vld_partial reset for TVD to avoid
+ watchdog reset failure loop. Adjust reset threshold and do reset until all
+ decoded frames are consumed."
+
+---
+ arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd   | 26 ++++++-----
+ .../amports/m6/ucode/mpeg12/vmpeg12_mc.c      |  7 +--
+ .../amports/m6tv/ucode/mpeg12/vmpeg12_mc.c    |  6 +--
+ .../amports/m6tvd/ucode/mpeg12/vmpeg12_mc.c   |  4 +-
+ .../amports/m8/ucode/mpeg12/vmpeg12_mc.c      |  4 +-
+ drivers/amlogic/amports/vmpeg12.c             | 44 ++++++++++++-------
+ 6 files changed, 54 insertions(+), 37 deletions(-)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+index 30b0d0449ef4..a82d0e40199a 100755
+--- a/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
++++ b/arch/arm/boot/dts/amlogic/meson6tvd_ref.dtd
+@@ -59,6 +59,12 @@
+ 		aml_reserved_end = <0x84000000>;
+ 		phys_offset = <0x80000000>;
+ 		linux,total-memory = <0x40000000>;
++
++                mem_4k2k_decoder: region@1 {
++                        region_name = "cma_4k2k";
++                        linux,contiguous-region;
++                        reg = <0x00000000 0x0c000000>;
++                };
+ 	};
+ 
+ 	gic:interrupt-controller {
+@@ -151,23 +157,23 @@
+ 		compatible = "amlogic,mesonstream";
+ 		dev_name = "mesonstream.0";
+ 		status = "okay";
+-		reserve-memory = <0x04000000 0x00a00000>;
++		reserve-memory = <0x00a00000>;
+ 		reserve-iomap = "true";
+ 	};
+ 
+ /// ***************************************************************************************
+ ///     -       DISP&MM-A/V stream
+ //$$ MODULE = "DISP&MM-A/V video dec"
+-//$$ DEVICE = "vdec"
++//$$ DEVICE="vdec"
+ //$$ L2 PROP_STR = "status"
+-//$$ L3 PROP_U32 4 = "reg"
+-	vdec {
+-		compatible = "amlogic,vdec";
+-		dev_name = "vdec.0";
+-		status = "okay";
+-		reserve-memory = <0x04000000>; // 64M
+-//		reserve-iomap = "true";
+-	};
++//$$ L3 PROP_U32 4 ="reg"
++        vdec{
++                compatible = "amlogic,vdec";
++                dev_name = "vdec.0";
++                status = "okay";
++                reserve-memory = <0x04000000>; // 64M
++		linux,contiguous-region = <&mem_4k2k_decoder>;
++        };
+ 
+ /// ***************************************************************************************
+ ///	-	DISP&MM-PostProcess
+diff --git a/drivers/amlogic/amports/m6/ucode/mpeg12/vmpeg12_mc.c b/drivers/amlogic/amports/m6/ucode/mpeg12/vmpeg12_mc.c
+index d459f3daa681..0fd06d3e967f 100755
+--- a/drivers/amlogic/amports/m6/ucode/mpeg12/vmpeg12_mc.c
++++ b/drivers/amlogic/amports/m6/ucode/mpeg12/vmpeg12_mc.c
+@@ -155,8 +155,8 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x981f21f,0x60c001f,0x680001f,0x7c0021f,0x7c0025f,0x7c001df,0x7c0041f,0x7c0085f,
+ 	0x7c0089f,0x6803fe0,0x7c002a0,0x7c002e0,0x7c00320,0x7c003a0,0x68000a0,0x7c00660,
+ 	0x6800060,0x7c006a0,0x6800020,0x7c00720,0x68000e0,0x7c004e0,0x6804020,0x7c06020,
+-	0xcc00000,0x0000000,0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x78001de,
+-	0xa63801e,0x64c411e,0x64c4322,0x968c7a2,0xa40a8e2,0x40008e2,0x780165e,0x400179e,
++	0xcc00000,0x0000000,0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x649ce14,
++	0xa638014,0x64c411e,0x64c4322,0x968c7a2,0xa40a8de,0x40008de,0x780165e,0x400179e,
+ 	0x7c0165e,0xa61c21e,0x0000000,0x809cf01,0xc780000,0x0000000,0x680001e,0x7c0165e,
+ 	0xcc00000,0x0400000,0x649c828,0xaa48028,0xa20e028,0xc7803c0,0x7c00428,0xaa1c068,
+ 	0x6bfffa9,0xaa140a8,0x6bfff69,0xaa0c0e8,0x6bffee9,0x6bffde9,0x0800000,0x809ce00,
+@@ -273,4 +273,5 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x240a24a,0x91a624b,0x2009289,0x5406289,0x5402249,0x240a24a,0x90c624b,0x200b289,
+ 	0xb8052c8,0x24082c8,0x6800207,0xb4021c8,0xc780200,0x6800007,0x7c00847,0x7c00887,
+ 	0x6800008,0x7c061c8,0x7c06208,0x0000000,0xc7efd80,0xfc071c0,0x0000000
+-};
++	0xc7f5400,0xfc071c0,0x0000000
++};
+\ No newline at end of file
+diff --git a/drivers/amlogic/amports/m6tv/ucode/mpeg12/vmpeg12_mc.c b/drivers/amlogic/amports/m6tv/ucode/mpeg12/vmpeg12_mc.c
+index fc59463207db..2dcfe68afcaf 100755
+--- a/drivers/amlogic/amports/m6tv/ucode/mpeg12/vmpeg12_mc.c
++++ b/drivers/amlogic/amports/m6tv/ucode/mpeg12/vmpeg12_mc.c
+@@ -158,8 +158,8 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x680001f,0x7c0021f,0x7c0025f,0x7c001df,0x7c0041f,0x7c0085f,0x7c0089f,0x6803fe0,
+ 	0x7c002a0,0x7c002e0,0x7c00320,0x7c003a0,0x68000a0,0x7c00660,0x6800060,0x7c006a0,
+ 	0x6800020,0x7c00720,0x68000e0,0x7c004e0,0x6804020,0x7c06020,0xcc00000,0x0000000,
+-	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x78001de,0xa63801e,0x64c411e,
+-	0x64c4322,0x968c7a2,0xa40a8e2,0x40008e2,0x780165e,0x400179e,0x7c0165e,0xa61c21e,
++	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x649ce14,0xa638014,0x64c411e,
++	0x64c4322,0x968c7a2,0xa40a8de,0x40008de,0x780165e,0x400179e,0x7c0165e,0xa61c21e,
+ 	0x0000000,0x809cf01,0xc780000,0x0000000,0x680001e,0x7c0165e,0xcc00000,0x0400000,
+ 	0x649c828,0xaa48028,0xa20e028,0xc7803c0,0x7c00428,0xaa1c068,0x6bfffa9,0xaa140a8,
+ 	0x6bfff69,0xaa0c0e8,0x6bffee9,0x6bffde9,0x0800000,0x809ce00,0x7800268,0x2828a68,
+@@ -276,4 +276,4 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x2009289,0x5406289,0x5402249,0x240a24a,0x90c624b,0x200b289,0xb8052c8,0x24082c8,
+ 	0x6800207,0xb4021c8,0xc780200,0x6800007,0x7c00847,0x7c00887,0x6800008,0x7c061c8,
+ 	0x7c06208,0x0000000,0xc7efcc0,0xfc071c0,0x0000000
+-};
++};
+\ No newline at end of file
+diff --git a/drivers/amlogic/amports/m6tvd/ucode/mpeg12/vmpeg12_mc.c b/drivers/amlogic/amports/m6tvd/ucode/mpeg12/vmpeg12_mc.c
+index a15553aa865f..f8e731dfa700 100755
+--- a/drivers/amlogic/amports/m6tvd/ucode/mpeg12/vmpeg12_mc.c
++++ b/drivers/amlogic/amports/m6tvd/ucode/mpeg12/vmpeg12_mc.c
+@@ -163,8 +163,8 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x680001f,0x7c0021f,0x7c0025f,0x7c001df,0x7c0041f,0x7c0085f,0x7c0089f,0x6803fe0,
+ 	0x7c002a0,0x7c002e0,0x7c00320,0x7c003a0,0x68000a0,0x7c00660,0x6800060,0x7c006a0,
+ 	0x6800020,0x7c00720,0x68000e0,0x7c004e0,0x6804020,0x7c06020,0xcc00000,0x0000000,
+-	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x78001de,0xa63801e,0x64c411e,
+-	0x64c4322,0x968c7a2,0xa40a8e2,0x40008e2,0x780165e,0x400179e,0x7c0165e,0xa61cf1e,
++	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x649ce14,0xa638014,0x64c411e,
++	0x64c4322,0x968c7a2,0xa40a8de,0x40008de,0x780165e,0x400179e,0x7c0165e,0xa61c21e,
+ 	0x0000000,0x809cf01,0xc780000,0x0000000,0x680001e,0x7c0165e,0xcc00000,0x0400000,
+ 	0x649c828,0xaa48028,0xa20e028,0xc7803c0,0x7c00428,0xaa1c068,0x6bfffa9,0xaa140a8,
+ 	0x6bfff69,0xaa0c0e8,0x6bffee9,0x6bffde9,0x0800000,0x809ce00,0x7800268,0x2828a68,
+diff --git a/drivers/amlogic/amports/m8/ucode/mpeg12/vmpeg12_mc.c b/drivers/amlogic/amports/m8/ucode/mpeg12/vmpeg12_mc.c
+index 8deb655b09db..f8e731dfa700 100755
+--- a/drivers/amlogic/amports/m8/ucode/mpeg12/vmpeg12_mc.c
++++ b/drivers/amlogic/amports/m8/ucode/mpeg12/vmpeg12_mc.c
+@@ -163,8 +163,8 @@ const u32 vmpeg12_mc[] __attribute__((aligned(8))) = {
+ 	0x680001f,0x7c0021f,0x7c0025f,0x7c001df,0x7c0041f,0x7c0085f,0x7c0089f,0x6803fe0,
+ 	0x7c002a0,0x7c002e0,0x7c00320,0x7c003a0,0x68000a0,0x7c00660,0x6800060,0x7c006a0,
+ 	0x6800020,0x7c00720,0x68000e0,0x7c004e0,0x6804020,0x7c06020,0xcc00000,0x0000000,
+-	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x78001de,0xa63801e,0x64c411e,
+-	0x64c4322,0x968c7a2,0xa40a8e2,0x40008e2,0x780165e,0x400179e,0x7c0165e,0xa61c21e,
++	0xc7ff800,0x0000000,0x78003de,0x400179e,0x7c003de,0x649ce14,0xa638014,0x64c411e,
++	0x64c4322,0x968c7a2,0xa40a8de,0x40008de,0x780165e,0x400179e,0x7c0165e,0xa61c21e,
+ 	0x0000000,0x809cf01,0xc780000,0x0000000,0x680001e,0x7c0165e,0xcc00000,0x0400000,
+ 	0x649c828,0xaa48028,0xa20e028,0xc7803c0,0x7c00428,0xaa1c068,0x6bfffa9,0xaa140a8,
+ 	0x6bfff69,0xaa0c0e8,0x6bffee9,0x6bffde9,0x0800000,0x809ce00,0x7800268,0x2828a68,
+diff --git a/drivers/amlogic/amports/vmpeg12.c b/drivers/amlogic/amports/vmpeg12.c
+index 32a6128d02c2..05965dc0adc0 100755
+--- a/drivers/amlogic/amports/vmpeg12.c
++++ b/drivers/amlogic/amports/vmpeg12.c
+@@ -498,6 +498,7 @@ static void vmpeg12_ppmgr_reset(void)
+ static void vmpeg_put_timer_func(unsigned long arg)
+ {
+     struct timer_list *timer = (struct timer_list *)arg;
++    int fatal_reset = 0;
+ 
+     receviver_start_e state = RECEIVER_INACTIVE ;
+     if (vf_get_receiver(PROVIDER_NAME)){
+@@ -510,27 +511,36 @@ static void vmpeg_put_timer_func(unsigned long arg)
+          state  = RECEIVER_INACTIVE ;
+     }
+ 
+-    if (((READ_VREG(MREG_WAIT_BUFFER) != 0) &&
++    if (READ_VREG(MREG_FATAL_ERROR) == 1) {
++        fatal_reset = 1;
++    }
++
++    if ((READ_VREG(MREG_WAIT_BUFFER) != 0) &&
+          (vfq_empty(&recycle_q)) &&
+          (vfq_empty(&display_q)) &&
+-         (state == RECEIVER_INACTIVE)) ||
+-        (READ_VREG(MREG_FATAL_ERROR) == 1)) {
+-        printk("$$$$$$decoder is waiting for buffer or fatal reset.\n");
++         (state == RECEIVER_INACTIVE)) {
+         if (++wait_buffer_counter > 4) {
+-            amvdec_stop();
++            fatal_reset = 1;
++        }
++
++    } else {
++        wait_buffer_counter = 0;
++    }
++
++    if (fatal_reset && vfq_empty(&display_q)) {
++        printk("$$$$$$decoder is waiting for buffer or fatal reset.\n");
++
++        amvdec_stop();
+ 
+ #ifdef CONFIG_POST_PROCESS_MANAGER
+-            vmpeg12_ppmgr_reset();
++        vmpeg12_ppmgr_reset();
+ #else
+-            vf_light_unreg_provider(&vmpeg_vf_prov);
+-            vmpeg12_local_init();
+-            vf_reg_provider(&vmpeg_vf_prov);
++        vf_light_unreg_provider(&vmpeg_vf_prov);
++        vmpeg12_local_init();
++        vf_reg_provider(&vmpeg_vf_prov);
+ #endif
+-            vmpeg12_prot_init();
+-            amvdec_start();
+-        }
+-    } else {
+-        wait_buffer_counter = 0;
++        vmpeg12_prot_init();
++        amvdec_start();
+     }
+ 
+     while (!vfq_empty(&recycle_q) && (READ_VREG(MREG_BUFFERIN) == 0)) {
+@@ -653,7 +663,7 @@ static void vmpeg12_canvas_init(void)
+ 
+ static void vmpeg12_prot_init(void)
+ {
+-#if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8
++#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6TVD)
+     int save_reg = READ_VREG(POWER_CTL_VLD);
+ 
+     WRITE_VREG(DOS_SW_RESET0, (1<<7) | (1<<6) | (1<<4));
+@@ -664,8 +674,8 @@ static void vmpeg12_prot_init(void)
+ 
+     WRITE_VREG(POWER_CTL_VLD, save_reg);
+ 
+-#elif (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TVD)
+-    WRITE_VREG(DOS_SW_RESET0, (1<<7) | (1<<6));
++#elif (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6)
++    WRITE_VREG(DOS_SW_RESET0, (1<<7) | (1<<6) | (1<<4));
+     WRITE_VREG(DOS_SW_RESET0, 0);
+ #else
+     WRITE_MPEG_REG(RESET0_REGISTER, RESET_IQIDCT | RESET_MC);
+-- 
+2.19.0
+

@@ -1,0 +1,245 @@
+From 58e53bc5fef30136db62074ca47f4122dbb97800 Mon Sep 17 00:00:00 2001
+From: "yalong.liu" <yalong.liu@amlogic.com>
+Date: Wed, 16 Jul 2014 14:18:58 +0800
+Subject: [PATCH 4531/5965] PD#86911:support mass storage
+
+---
+ arch/arm/configs/meson8_defconfig   | 14 ++++++++++++++
+ arch/arm/configs/meson8b_defconfig  | 14 ++++++++++++++
+ drivers/usb/gadget/android.c        | 24 ++++++++++++++++++++----
+ drivers/usb/gadget/f_mass_storage.c | 27 ++++++++++++++++++---------
+ drivers/usb/gadget/storage_common.c | 22 ++++++++++++++++++++++
+ 5 files changed, 88 insertions(+), 13 deletions(-)
+ mode change 100644 => 100755 drivers/usb/gadget/f_mass_storage.c
+ mode change 100644 => 100755 drivers/usb/gadget/storage_common.c
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index f56c8cefdc6e..5a8c3d97d51f 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -368,3 +368,17 @@ CONFIG_CRYPTO_TWOFISH=y
+ CONFIG_CRC_T10DIF=y
+ CONFIG_CRC7=y
+ CONFIG_GPIO_TEST=y	
++CONFIG_MD=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_DEBUG=y
++CONFIG_DM_CRYPT=y
++CONFIG_DM_UEVENT=y
++CONFIG_CRYPTO_AEAD=y
++CONFIG_CRYPTO_AUTHENC=y
++CONFIG_CRYPTO_CBC=y
++CONFIG_CRYPTO_PCBC=y
++CONFIG_CRYPTO_HMAC=y
++CONFIG_CRYPTO_MD5=y
++CONFIG_CRYPTO_DES=y
++CONFIG_CRYPTO_TWOFISH=y
++CONFIG_CRYPTO_TWOFISH_COMMON=y
+diff --git a/arch/arm/configs/meson8b_defconfig b/arch/arm/configs/meson8b_defconfig
+index 75246d0541b7..2ce49cb660f3 100755
+--- a/arch/arm/configs/meson8b_defconfig
++++ b/arch/arm/configs/meson8b_defconfig
+@@ -362,3 +362,17 @@ CONFIG_TVIN_VDIN=y
+ CONFIG_VIUIN=y
+ CONFIG_V4L_AMLOGIC_VIDEO2=y
+ CONFIG_AM_ENCODER=y
++CONFIG_MD=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_DEBUG=y
++CONFIG_DM_CRYPT=y
++CONFIG_DM_UEVENT=y
++CONFIG_CRYPTO_AEAD=y
++CONFIG_CRYPTO_AUTHENC=y
++CONFIG_CRYPTO_CBC=y
++CONFIG_CRYPTO_PCBC=y
++CONFIG_CRYPTO_HMAC=y
++CONFIG_CRYPTO_MD5=y
++CONFIG_CRYPTO_DES=y
++CONFIG_CRYPTO_TWOFISH=y
++CONFIG_CRYPTO_TWOFISH_COMMON=y
+diff --git a/drivers/usb/gadget/android.c b/drivers/usb/gadget/android.c
+index 2efc241c9333..932130632aae 100755
+--- a/drivers/usb/gadget/android.c
++++ b/drivers/usb/gadget/android.c
+@@ -786,15 +786,18 @@ static int mass_storage_function_init(struct android_usb_function *f,
+ {
+ 	struct mass_storage_function_config *config;
+ 	struct fsg_common *common;
+-	int err;
++	int err, i;
+ 
+ 	config = kzalloc(sizeof(struct mass_storage_function_config),
+ 								GFP_KERNEL);
+ 	if (!config)
+ 		return -ENOMEM;
+ 
+-	config->fsg.nluns = 1;
+-	config->fsg.luns[0].removable = 1;
++	//config->fsg.nluns = 1;
++	//config->fsg.luns[0].removable = 1;
++	config->fsg.nluns = CONFIG_USB_G_ANDROID_FSG_NLUNS;
++	for (i=0; i<config->fsg.nluns; i++)
++		config->fsg.luns[i].removable = 1;
+ 
+ 	common = fsg_common_init(NULL, cdev, &config->fsg);
+ 	if (IS_ERR(common)) {
+@@ -802,13 +805,26 @@ static int mass_storage_function_init(struct android_usb_function *f,
+ 		return PTR_ERR(common);
+ 	}
+ 
++	/*
+ 	err = sysfs_create_link(&f->dev->kobj,
+ 				&common->luns[0].dev.kobj,
+ 				"lun");
+ 	if (err) {
+ 		kfree(config);
+ 		return err;
+-	}
++	}*/
++
++	for (i=0; i<config->fsg.nluns; i++) {
++		char linkname[5];
++		snprintf(linkname, sizeof(linkname), "lun%d", i);
++		err = sysfs_create_link(&f->dev->kobj,
++					&common->luns[i].dev.kobj,
++					linkname);
++		if (err) {
++			kfree(config);
++			return err;
++		}
++ 	}
+ 
+ 	config->common = common;
+ 	f->config = config;
+diff --git a/drivers/usb/gadget/f_mass_storage.c b/drivers/usb/gadget/f_mass_storage.c
+old mode 100644
+new mode 100755
+index c35a9ecc576b..2fa246e3b45a
+--- a/drivers/usb/gadget/f_mass_storage.c
++++ b/drivers/usb/gadget/f_mass_storage.c
+@@ -789,6 +789,8 @@ static int do_write(struct fsg_common *common)
+ 	}
+ 	spin_lock(&curlun->filp->f_lock);
+ 	curlun->filp->f_flags &= ~O_SYNC;	/* Default is not to wait */
++	if (curlun->force_sync)
++		curlun->filp->f_flags |= O_SYNC;
+ 	spin_unlock(&curlun->filp->f_lock);
+ 
+ 	/*
+@@ -2581,7 +2583,7 @@ static int fsg_main_thread(void *common_)
+ static DEVICE_ATTR(ro, 0644, fsg_show_ro, fsg_store_ro);
+ static DEVICE_ATTR(nofua, 0644, fsg_show_nofua, fsg_store_nofua);
+ static DEVICE_ATTR(file, 0644, fsg_show_file, fsg_store_file);
+-
++static DEVICE_ATTR(force_sync, 0644, fsg_show_force_sync, fsg_store_force_sync);
+ static struct device_attribute dev_attr_ro_cdrom =
+ 	__ATTR(ro, 0444, fsg_show_ro, NULL);
+ static struct device_attribute dev_attr_file_nonremovable =
+@@ -2710,6 +2712,9 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
+ 		if (rc)
+ 			goto error_luns;
+ 		rc = device_create_file(&curlun->dev, &dev_attr_nofua);
++		if (rc)
++			goto error_luns;
++		rc = device_create_file(&curlun->dev, &dev_attr_force_sync);
+ 		if (rc)
+ 			goto error_luns;
+ 
+@@ -2743,13 +2748,14 @@ buffhds_first_it:
+ 
+ 	/* Prepare inquiryString */
+ 	i = get_default_bcdDevice();
+-	snprintf(common->inquiry_string, sizeof common->inquiry_string,
+-		 "%-8s%-16s%04x", cfg->vendor_name ?: "Linux",
++	snprintf(common->inquiry_string, sizeof common->inquiry_string,"%s","ONDA");
++	//snprintf(common->inquiry_string, sizeof common->inquiry_string,
++	//	 "%-8s%-16s%04x", cfg->vendor_name ?: "Linux",
+ 		 /* Assume product name dependent on the first LUN */
+-		 cfg->product_name ?: (common->luns->cdrom
+-				     ? "File-Stor Gadget"
+-				     : "File-CD Gadget"),
+-		 i);
++	//	 cfg->product_name ?: (common->luns->cdrom
++	//			     ? "File-Stor Gadget"
++	//			     : "File-CD Gadget"),
++	//	 i);
+ 
+ 	/*
+ 	 * Some peripheral controllers are known not to be able to
+@@ -2838,6 +2844,7 @@ static void fsg_common_release(struct kref *ref)
+ 					   lun->removable
+ 					 ? &dev_attr_file
+ 					 : &dev_attr_file_nonremovable);
++			device_remove_file(&lun->dev, &dev_attr_force_sync);
+ 			fsg_lun_close(lun);
+ 			device_unregister(&lun->dev);
+ 		}
+@@ -2991,6 +2998,7 @@ struct fsg_module_parameters {
+ 	bool		removable[FSG_MAX_LUNS];
+ 	bool		cdrom[FSG_MAX_LUNS];
+ 	bool		nofua[FSG_MAX_LUNS];
++	int		force_sync[FSG_MAX_LUNS];
+ 
+ 	unsigned int	file_count, ro_count, removable_count, cdrom_count;
+ 	unsigned int	nofua_count;
+@@ -3023,8 +3031,9 @@ struct fsg_module_parameters {
+ 	_FSG_MODULE_PARAM(prefix, params, luns, uint,			\
+ 			  "number of LUNs");				\
+ 	_FSG_MODULE_PARAM(prefix, params, stall, bool,			\
+-			  "false to prevent bulk stalls")
+-
++			  "false to prevent bulk stalls")				\
++	_FSG_MODULE_PARAM_ARRAY(prefix, params, force_sync, bool,	\
++				"true to force sync when do write");
+ static void
+ fsg_config_from_params(struct fsg_config *cfg,
+ 		       const struct fsg_module_parameters *params)
+diff --git a/drivers/usb/gadget/storage_common.c b/drivers/usb/gadget/storage_common.c
+old mode 100644
+new mode 100755
+index dbce3a9074e6..0908f7a1f8b9
+--- a/drivers/usb/gadget/storage_common.c
++++ b/drivers/usb/gadget/storage_common.c
+@@ -133,6 +133,7 @@ struct fsg_lun {
+ 	unsigned int	registered:1;
+ 	unsigned int	info_valid:1;
+ 	unsigned int	nofua:1;
++	unsigned int	force_sync:1;
+ 
+ 	u32		sense_data;
+ 	u32		sense_data_info;
+@@ -592,6 +593,13 @@ static ssize_t fsg_show_file(struct device *dev, struct device_attribute *attr,
+ 	return rc;
+ }
+ 
++static ssize_t fsg_show_force_sync(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	struct fsg_lun	*curlun = fsg_lun_from_dev(dev);
++
++	return sprintf(buf, "%u\n", curlun->force_sync);
++}
+ 
+ static ssize_t fsg_store_ro(struct device *dev, struct device_attribute *attr,
+ 			    const char *buf, size_t count)
+@@ -675,3 +683,17 @@ static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
+ 	up_write(filesem);
+ 	return (rc < 0 ? rc : count);
+ }
++static ssize_t fsg_store_force_sync(struct device *dev,
++			       struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	struct fsg_lun	*curlun = fsg_lun_from_dev(dev);
++	unsigned long	force_sync;
++
++	if (strict_strtoul(buf, 2, &force_sync))
++		return -EINVAL;
++
++	curlun->force_sync = force_sync;
++
++	return count;
++}
+-- 
+2.19.0
+

@@ -1,0 +1,173 @@
+From ea471b38882f3965ae519cc71ec3d46218eb3681 Mon Sep 17 00:00:00 2001
+From: Rain Zhang <rain.zhang@amlogic.com>
+Date: Fri, 17 Jul 2015 17:17:52 -0700
+Subject: [PATCH 5791/5965] PD#110507: h265: fix right-bottom color problem
+
+for stream with 544 height
+
+Change-Id: I7beca791011fd1e3322b2b52e1cd570e30d9f32b
+---
+ drivers/amlogic/amports/vh265.c | 100 +++++++++++++++++++++++++++-----
+ 1 file changed, 84 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/amlogic/amports/vh265.c b/drivers/amlogic/amports/vh265.c
+index b90ac8108d75..5f7eea230f71 100755
+--- a/drivers/amlogic/amports/vh265.c
++++ b/drivers/amlogic/amports/vh265.c
+@@ -133,7 +133,7 @@ static u32 error_system_watchdog_count;
+ #define H265_DEBUG_NO_EOS_SEARCH_DONE     0x800000
+ 
+ extern const u32 h265_ucode_v;
+-const u32 h265_version = 201507131;
++const u32 h265_version = 201507171;
+ static u32 debug = 0;
+ #ifdef ERROR_HANDLE_DEBUG
+ static u32 dbg_nal_skip_flag = 0;   //bit[0], skip vps; bit[1], skip sps; bit[2], skip pps
+@@ -1113,23 +1113,34 @@ static void init_buf_list(hevc_stru_t* hevc)
+ {
+ 	int i;
+ 	int buf_size;
+- 	int mc_buffer_end = hevc->mc_buf->buf_start + hevc->mc_buf->buf_size;
++	int mc_buffer_end = hevc->mc_buf->buf_start + hevc->mc_buf->buf_size;
+ 	
+ 	if(buf_alloc_size>0){
+ 	    buf_size = buf_alloc_size;
+ 	    if(debug)printk("[Buffer Management] init_buf_list:\n");	
+ 	}
+ 	else{
+-    	int pic_width = buf_alloc_width?buf_alloc_width:hevc->pic_w;
+-    	int pic_height = buf_alloc_height?buf_alloc_height:hevc->pic_h;
+-    	int lcu_size = hevc->lcu_size ;
+-            int pic_width_lcu  = ( pic_width %lcu_size  ) ? pic_width /lcu_size  + 1 : pic_width /lcu_size; 
+-            int pic_height_lcu = ( pic_height %lcu_size ) ? pic_height/lcu_size + 1 : pic_height/lcu_size; 
+-            int lcu_total       =pic_width_lcu*pic_height_lcu;
+-    	int mc_buffer_size_u_v = lcu_total*lcu_size*lcu_size/2; 
+-    	int mc_buffer_size_u_v_h = (mc_buffer_size_u_v + 0xffff)>>16; //64k alignment
+-
+-      buf_size = (mc_buffer_size_u_v_h<<16)*3;
++	    int pic_width = buf_alloc_width?buf_alloc_width:hevc->pic_w;
++	    int pic_height = buf_alloc_height?buf_alloc_height:hevc->pic_h;
++	    int pic_width_64 = (pic_width + 63) & (~0x3f);
++	    int pic_height_32 = (pic_height + 31) & (~0x1f);
++	    int lcu_size = hevc->lcu_size ;
++#if 1
++	    int pic_width_lcu  = (pic_width_64 % lcu_size) ? pic_width_64 / lcu_size  + 1 : pic_width_64 / lcu_size;
++	    int pic_height_lcu = (pic_height_32 % lcu_size) ? pic_height_32 / lcu_size + 1 : pic_height_32 / lcu_size;
++	    //int pic_height_lcu_2 = (pic_height_lcu + 1) & (~0x1);
++	    int pic_height_lcu_2 = (lcu_size == 32) ? (pic_height_lcu + 1) & (~0x1): ((lcu_size == 16) ? (pic_height_lcu + 3) & (~0x3) :
++	                             pic_height_lcu);
++	    int lcu_total       = pic_width_lcu * pic_height_lcu_2;
++#else
++	    int pic_width_lcu  = (pic_width % lcu_size) ? pic_width / lcu_size  + 1 : pic_width /lcu_size;
++	    int pic_height_lcu = (pic_height % lcu_size) ? pic_height / lcu_size + 1 : pic_height/lcu_size;
++	    int lcu_total       = pic_width_lcu * pic_height_lcu;
++#endif
++	    int mc_buffer_size_u_v = lcu_total*lcu_size*lcu_size/2;
++	    int mc_buffer_size_u_v_h = (mc_buffer_size_u_v + 0xffff)>>16; //64k alignment
++
++	    buf_size = (mc_buffer_size_u_v_h<<16)*3;
+ 	    if(debug)printk("[Buffer Management] init_buf_list (width %d height %d):\n", pic_width, pic_height);	
+   }  
+ 
+@@ -1197,10 +1208,22 @@ static int config_pic(hevc_stru_t* hevc, PIC_t* pic)
+   int i;
+   int pic_width = hevc->pic_w;
+   int pic_height = hevc->pic_h;
++
++  int pic_width_64 = (pic_width + 63) & (~0x3f);
++  int pic_height_32 = (pic_height + 31) & (~0x1f);
++
+   int lcu_size = hevc->lcu_size ;
+-        int pic_width_lcu  = ( pic_width %lcu_size  ) ? pic_width /lcu_size  + 1 : pic_width /lcu_size; 
+-        int pic_height_lcu = ( pic_height %lcu_size ) ? pic_height/lcu_size + 1 : pic_height/lcu_size; 
+-        int lcu_total       =pic_width_lcu*pic_height_lcu;
++#if 1
++  int pic_width_lcu  = (pic_width_64 % lcu_size) ? pic_width_64 / lcu_size  + 1 : pic_width_64 / lcu_size;
++  int pic_height_lcu = (pic_height_32 % lcu_size) ? pic_height_32/ lcu_size + 1 : pic_height_32/ lcu_size;
++  //int pic_height_lcu_2 = (pic_height_lcu + 1) & (~0x1);
++  int pic_height_lcu_2 = (lcu_size == 32) ? (pic_height_lcu + 1) & (~0x1): ((lcu_size == 16) ? (pic_height_lcu + 3) & (~0x3) : pic_height_lcu);
++  int lcu_total       =pic_width_lcu*pic_height_lcu_2;
++#else
++  int pic_width_lcu  = (pic_width % lcu_size) ? pic_width / lcu_size  + 1 : pic_width / lcu_size;
++  int pic_height_lcu = (pic_height % lcu_size) ? pic_height / lcu_size + 1 : pic_height / lcu_size;
++  int lcu_total       = pic_width_lcu*pic_height_lcu;
++#endif
+         int lcu_size_log2 = hevc->lcu_size_log2;
+   //int MV_MEM_UNIT=lcu_size_log2==6 ? 0x100 : lcu_size_log2==5 ? 0x40 : 0x10;
+   int MV_MEM_UNIT=lcu_size_log2==6 ? 0x200 : lcu_size_log2==5 ? 0x80 : 0x20;
+@@ -2834,6 +2857,13 @@ static void flush_output(hevc_stru_t* hevc, PIC_t* pic)
+ static int hevc_slice_segment_header_process(hevc_stru_t* hevc, param_t* rpm_param, int decode_pic_begin)
+ {
+     int i;
++    int     pic_w_64;
++    int     pic_h_32;
++    int     lcu_x_num_64;
++    int     lcu_y_num_32;
++    int     lcu_y_num_32_2;
++    int     lcu_x_num_div_64;
++    int     lcu_y_num_div_32;
+     int     lcu_x_num_div;
+     int     lcu_y_num_div;
+     int     Col_ref         ;
+@@ -2894,12 +2924,30 @@ static int hevc_slice_segment_header_process(hevc_stru_t* hevc, param_t* rpm_par
+             return 3;
+         }
+         hevc->lcu_size_log2   =log2i(hevc->lcu_size);
++#if 1
++        pic_w_64 = (hevc->pic_w + 63) & (~0x3f);
++        pic_h_32 = (hevc->pic_h + 31) & (~0x1f);
++
++        lcu_x_num_div   = (hevc->pic_w / hevc->lcu_size);
++        lcu_y_num_div   = (hevc->pic_h / hevc->lcu_size);
++        hevc->lcu_x_num       = ((hevc->pic_w % hevc->lcu_size) == 0) ? lcu_x_num_div : lcu_x_num_div + 1;
++        hevc->lcu_y_num       = ((hevc->pic_h % hevc->lcu_size) == 0) ? lcu_y_num_div : lcu_y_num_div + 1;
++
++        lcu_x_num_div_64   =(pic_w_64/ hevc->lcu_size);
++        lcu_y_num_div_32   =(pic_h_32/ hevc->lcu_size);
++        lcu_x_num_64       =((pic_w_64 % hevc->lcu_size) == 0) ? lcu_x_num_div_64 : lcu_x_num_div_64 + 1;
++        lcu_y_num_32       =((pic_h_32 % hevc->lcu_size) == 0) ? lcu_y_num_div_32 : lcu_y_num_div_32 + 1;
++        //lcu_y_num_32_2     = (lcu_y_num_32 + 1) & (~0x1);
++        lcu_y_num_32_2     = (hevc->lcu_size == 32) ? (lcu_y_num_32 + 1) & (~0x1) : ((hevc->lcu_size == 16) ?  (lcu_y_num_32 + 4) & (~0x3) :
++                            lcu_y_num_32);
++        hevc->lcu_total       = lcu_x_num_64 * lcu_y_num_32_2;
++#else
+         lcu_x_num_div   =(hevc->pic_w/ hevc->lcu_size);
+         lcu_y_num_div   =(hevc->pic_h/ hevc->lcu_size);
+         hevc->lcu_x_num       =((hevc->pic_w% hevc->lcu_size) == 0) ? lcu_x_num_div : lcu_x_num_div+1;
+         hevc->lcu_y_num       =((hevc->pic_h% hevc->lcu_size) == 0) ? lcu_y_num_div : lcu_y_num_div+1;
+         hevc->lcu_total       =hevc->lcu_x_num*hevc->lcu_y_num;
+-    
++#endif
+     
+         if(hevc->m_nalUnitType == NAL_UNIT_CODED_SLICE_IDR || hevc->m_nalUnitType == NAL_UNIT_CODED_SLICE_IDR_N_LP){
+             hevc->curr_POC = 0;
+@@ -3211,6 +3259,26 @@ static int hevc_slice_segment_header_process(hevc_stru_t* hevc, param_t* rpm_par
+         //if(i_only_flag==1){
+         //     return 0xf;
+         //}
++        if (debug & H265_DEBUG_BUFMGR) {
++             printk("col_ref %d ColFromL0Flag %d Col_POC %d\n", Col_ref, hevc->ColFromL0Flag, hevc->Col_POC);
++         }
++        if (debug & H265_DEBUG_BUFMGR_MORE) {
++          int iii;
++          if (hevc->list_no == 0) {
++            printk("m_aiRefPOCList0 slice_idx %d:", hevc->cur_pic->slice_idx);
++            for (iii = 0; iii < hevc->RefNum_L0; iii++) {
++              printk("%d ", hevc->cur_pic->m_aiRefPOCList0[hevc->cur_pic->slice_idx][iii]);
++            }
++            printk("\r\n");
++          }
++          else{
++            printk("m_aiRefPOCList1 slice_idx %d:", hevc->cur_pic->slice_idx);
++            for (iii = 0; iii < hevc->RefNum_L1; iii++) {
++              printk("%d ", hevc->cur_pic->m_aiRefPOCList1[hevc->cur_pic->slice_idx][iii]);
++            }
++            printk("\r\n");
++          }
++        }
+ 
+         if(hevc->Col_POC != INVALID_POC){
+             hevc->col_pic = get_ref_pic_by_POC(hevc, hevc->Col_POC);
+-- 
+2.19.0
+

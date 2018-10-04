@@ -1,0 +1,337 @@
+From eee81df4f9660205646d70e02d84ff910695e9a3 Mon Sep 17 00:00:00 2001
+From: Bo Yang <bo.yang@amlogic.com>
+Date: Wed, 10 Jun 2015 20:36:24 +0800
+Subject: [PATCH 5643/5965] PD#107720: backlight: add support lcd power notify
+
+Add support lcd power notify for lcd power sequence.
+You can call the function in lcd driver to notify backlight:
+
+lcd_notifier_call_chain(LCD_EVENT_POWERON, NULL);
+or
+lcd_notifier_call_chain(LCD_EVENT_POWEROFF, NULL);
+
+Use the default node 'backlight_0' if no setting
+'panel_type' enverment parameter in uboot.
+
+Change-Id: I3286d6ba80eb33ae0f0723d66ddde211f1451089
+---
+ drivers/amlogic/display/backlight/aml_tv_bl.c | 65 +++++++++++++++++--
+ drivers/amlogic/display/backlight/aml_tv_bl.h |  8 ++-
+ drivers/amlogic/display/lcd/Makefile          |  1 +
+ drivers/amlogic/display/lcd/lcd_notify.c      | 52 +++++++++++++++
+ include/linux/amlogic/display/lcd.h           | 49 ++++++++++++++
+ 5 files changed, 169 insertions(+), 6 deletions(-)
+ mode change 100755 => 100644 drivers/amlogic/display/lcd/Makefile
+ create mode 100644 drivers/amlogic/display/lcd/lcd_notify.c
+ create mode 100644 include/linux/amlogic/display/lcd.h
+
+diff --git a/drivers/amlogic/display/backlight/aml_tv_bl.c b/drivers/amlogic/display/backlight/aml_tv_bl.c
+index 4197f12e3e31..c01ae2c0e1a6 100644
+--- a/drivers/amlogic/display/backlight/aml_tv_bl.c
++++ b/drivers/amlogic/display/backlight/aml_tv_bl.c
+@@ -31,6 +31,7 @@
+ #include <linux/printk.h>
+ 
+ #include <linux/amlogic/aml_gpio_consumer.h>
++#include <linux/amlogic/display/lcd.h>
+ #include <mach/register.h>
+ #include <mach/io.h>
+ #include <plat/io.h>
+@@ -44,6 +45,48 @@
+ 	__FUNCTION__ , ## arg)
+ 
+ 
++static int aml_bl_notifier_callback(struct notifier_block *self,
++				unsigned long event, void *data)
++{
++	struct aml_bl *bdev;
++
++	/* If we aren't interested in this event, skip it immediately */
++	if (event != LCD_EVENT_POWERON && event != LCD_EVENT_POWEROFF)
++		return 0;
++
++	bdev = container_of(self, struct aml_bl, lcd_notif);
++	mutex_lock(&bdev->bd->ops_lock);
++	switch (event) {
++	case LCD_EVENT_POWERON:
++		bdev->bd->props.state |= AML_BL_STATE_POWERON;
++		break;
++	case LCD_EVENT_POWEROFF:
++		bdev->bd->props.state &= ~AML_BL_STATE_POWERON;
++		break;
++	default:
++		break;
++	}
++	backlight_update_status(bdev->bd);
++	mutex_unlock(&bdev->bd->ops_lock);
++	return 0;
++}
++
++static int aml_bl_register_lcd(struct backlight_device *bd)
++{
++	struct aml_bl *bdev;
++	bdev = bl_get_data(bd);
++	memset(&bdev->lcd_notif, 0, sizeof(bdev->lcd_notif));
++	bdev->lcd_notif.notifier_call = aml_bl_notifier_callback;
++
++	return lcd_register_client(&bdev->lcd_notif);
++}
++
++static void aml_bl_unregister_lcd(struct backlight_device *bd)
++{
++	struct aml_bl *bdev;
++	bdev = bl_get_data(bd);
++	lcd_unregister_client(&bdev->lcd_notif);
++}
+ 
+ static void aml_bl_pwm_init(struct backlight_device *bd)
+ {
+@@ -193,6 +236,9 @@ static void aml_bl_set_level(struct backlight_device *bd, unsigned level)
+ 
+ 	INFO("input level %u\n", level);
+ 
++	if (bdev->curr_brightness == level)
++		return;
++
+ 	/* validate value */
+ 	if (level > bdev->d->level_max)
+ 		level = bdev->d->level_max;
+@@ -200,7 +246,7 @@ static void aml_bl_set_level(struct backlight_device *bd, unsigned level)
+ 		level = bdev->d->level_min;
+ 
+ 	/* save the validated level */
+-	bdev->curr_level = level;
++	bdev->curr_brightness = level;
+ 
+ 	pw = bdev->pwm_max - bdev->pwm_min;
+ 	lw = bdev->d->level_max - bdev->d->level_min;
+@@ -224,7 +270,7 @@ static void aml_bl_set_level(struct backlight_device *bd, unsigned level)
+ static int aml_bl_get_brightness(struct backlight_device *bd)
+ {
+ 	struct aml_bl *bdev = bl_get_data(bd);
+-	return bdev->curr_level;
++	return bdev->curr_brightness;
+ }
+ 
+ static int aml_bl_update_status(struct backlight_device *bd)
+@@ -241,9 +287,15 @@ static int aml_bl_update_status(struct backlight_device *bd)
+ 		brightness = 0;
+ 	}
+ 
+-	INFO("brightness = %d\n", brightness);
++	if (!(bd->props.state & AML_BL_STATE_POWERON)) {
++		INFO("!AML_BL_STATE_POWERON props.state = 0x%x\n", bd->props.state);
++		brightness = 0;
++	}
++
++	INFO("new brightness = %d\n", brightness);
+ 
+-	if (brightness == 0) {
++	/* backlight is disable */
++	if (!brightness) {
+ 		aml_bl_power_off(bd);
+ 		return 0;
+ 	}
+@@ -284,6 +336,7 @@ static int aml_bl_register_backlight(struct platform_device *pdev)
+ 	props.type = BACKLIGHT_RAW;
+ 	props.power = FB_BLANK_UNBLANK;
+ 	props.state &= ~AML_BL_FLAG_POWERON;
++	props.state |= AML_BL_STATE_POWERON;
+ 
+ 	bdev->bd = backlight_device_register(AML_BL_NAME, &pdev->dev, bdev,
+ 					&aml_bl_ops, &props);
+@@ -340,7 +393,7 @@ static struct aml_bl_dt aml_bl_dt_def = {
+ 	//...
+ };
+ 
+-static char aml_bl_sel[15];
++static char aml_bl_sel[15] = "backlight_0";
+ static int __init aml_bl_select_setup(char *s)
+ {
+ 	char *sel;
+@@ -548,6 +601,7 @@ static int aml_bl_probe(struct platform_device *pdev)
+ 		kfree(bdev);
+ 		return ret;
+ 	}
++	aml_bl_register_lcd(bdev->bd);
+ 
+ 	/* pwm init */
+ 	aml_bl_pwm_init(bdev->bd);
+@@ -562,6 +616,7 @@ static int __exit aml_bl_remove(struct platform_device *pdev)
+ 	struct aml_bl *bdev = platform_get_drvdata(pdev);
+ 
+ 	amlogic_gpio_free(bdev->d->bl_en_gpio, AML_BL_NAME);
++	aml_bl_unregister_lcd(bdev->bd);
+ 	backlight_device_unregister(bdev->bd);
+ 	platform_set_drvdata(pdev, NULL);
+ 	kfree(bdev);
+diff --git a/drivers/amlogic/display/backlight/aml_tv_bl.h b/drivers/amlogic/display/backlight/aml_tv_bl.h
+index 50c7fbc6e695..d30971e4405a 100644
+--- a/drivers/amlogic/display/backlight/aml_tv_bl.h
++++ b/drivers/amlogic/display/backlight/aml_tv_bl.h
+@@ -18,6 +18,9 @@
+ #ifndef __AML_TV_BL_H
+ #define __AML_TV_BL_H
+ 
++#include <linux/backlight.h>
++#include <linux/notifier.h>
++
+ #define AML_BL_FREQ_DEF			1000	/* unit: HZ */
+ 
+ #define AML_BL_LEVEL_DEF		128
+@@ -44,6 +47,8 @@ enum {
+ 
+ /* backlight properties state flag */
+ #define AML_BL_FLAG_POWERON		BL_CORE_DRIVER1 // (1 << 31)
++/* 1: power n 0: power off */
++#define AML_BL_STATE_POWERON		BL_CORE_DRIVER2 // (1 << 30)
+ 
+ 
+ struct aml_bl_dt {
+@@ -78,6 +83,7 @@ struct aml_bl {
+ 	struct pinctrl *p;
+ 	struct backlight_device *bd;
+ 	struct platform_device *pdev;
++	struct notifier_block lcd_notif;
+ 
+ 	unsigned int pwm_cnt;
+ 	unsigned int pwm_clk_div;
+@@ -85,7 +91,7 @@ struct aml_bl {
+ 	unsigned int pwm_min;
+ 
+ 
+-	int curr_level;
++	int curr_brightness;
+ };
+ 
+ #endif
+diff --git a/drivers/amlogic/display/lcd/Makefile b/drivers/amlogic/display/lcd/Makefile
+old mode 100755
+new mode 100644
+index 5db54153a157..8d3e7e033c0c
+--- a/drivers/amlogic/display/lcd/Makefile
++++ b/drivers/amlogic/display/lcd/Makefile
+@@ -2,6 +2,7 @@
+ # Makefile for Amlogic LCD Drivers
+ #
+ 
++obj-y							+= lcd_notify.o
+ obj-$(CONFIG_AML_TV_LCD)		+= aml_lcd.o
+ obj-$(CONFIG_AML_TV_LCD_V2)		+= aml_lcd_v2.o
+ 
+diff --git a/drivers/amlogic/display/lcd/lcd_notify.c b/drivers/amlogic/display/lcd/lcd_notify.c
+new file mode 100644
+index 000000000000..bd9a0057cdbd
+--- /dev/null
++++ b/drivers/amlogic/display/lcd/lcd_notify.c
+@@ -0,0 +1,52 @@
++/*
++ * drivers/amlogic/display/lcd/lcd_notifier.c
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#include <linux/amlogic/display/lcd.h>
++#include <linux/notifier.h>
++#include <linux/export.h>
++
++static BLOCKING_NOTIFIER_HEAD(lcd_notifier_list);
++
++/**
++ * lcd_register_client - register a client notifier
++ * @nb: notifier block to callback on events
++ */
++int lcd_register_client(struct notifier_block *nb)
++{
++	return blocking_notifier_chain_register(&lcd_notifier_list, nb);
++}
++EXPORT_SYMBOL(lcd_register_client);
++
++/**
++ * lcd_unregister_client - unregister a client notifier
++ * @nb: notifier block to callback on events
++ */
++int lcd_unregister_client(struct notifier_block *nb)
++{
++	return blocking_notifier_chain_unregister(&lcd_notifier_list, nb);
++}
++EXPORT_SYMBOL(lcd_unregister_client);
++
++/**
++ * lcd_notifier_call_chain - notify clients of lcd events
++ *
++ */
++int lcd_notifier_call_chain(unsigned long val, void *v)
++{
++	return blocking_notifier_call_chain(&lcd_notifier_list, val, v);
++}
++EXPORT_SYMBOL_GPL(lcd_notifier_call_chain);
+diff --git a/include/linux/amlogic/display/lcd.h b/include/linux/amlogic/display/lcd.h
+new file mode 100644
+index 000000000000..bd384a2d790f
+--- /dev/null
++++ b/include/linux/amlogic/display/lcd.h
+@@ -0,0 +1,49 @@
++/*
++ * include/linux/amlogic/display/lcd.h
++ *
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++*/
++
++#ifndef __AMLOGIC_DISPLAY_LCD_H
++#define __AMLOGIC_DISPLAY_LCD_H
++
++#include <linux/notifier.h>
++
++
++/* lcd display mode occurred */
++#define LCD_EVENT_MODE_CHANGE		0x01
++/* lcd suspend occurred */
++#define LCD_EVENT_SUSPEND		0x02
++/* lcd resume occurred */
++#define LCD_EVENT_RESUME		0x03
++/* lcd register occurred */
++#define LCD_EVENT_REGISTERED		0x04
++/* lcd unregister occurred */
++#define LCD_EVENT_UNREGISTERED		0x05
++/* lcd power on occurred */
++#define LCD_EVENT_POWERON		0x06
++/* lcd power off occurred */
++#define LCD_EVENT_POWEROFF		0x07
++/* lcd blank change occurred */
++#define LCD_EVENT_BLANK			0x06
++/* lcd unblank change occurred */
++#define LCD_EVENT_UNBLANK		0x07
++
++
++extern int lcd_register_client(struct notifier_block *nb);
++extern int lcd_unregister_client(struct notifier_block *nb);
++extern int lcd_notifier_call_chain(unsigned long val, void *v);
++
++
++#endif
+-- 
+2.19.0
+

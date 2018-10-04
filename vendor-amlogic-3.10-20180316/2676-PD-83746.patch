@@ -1,0 +1,438 @@
+From 49b675a8ae8e09d416a1b4e9c9ad53ed59e7faac Mon Sep 17 00:00:00 2001
+From: "baoqi.wang" <baoqi.wang@amlogic.com>
+Date: Wed, 18 Dec 2013 10:31:04 +0800
+Subject: [PATCH 2676/5965] PD#83746 : 1) add clockgate for ethernet driver 2)
+ add early suspend & late resume for ethernet driver 3) open Lan8720 & Ip101
+ in phylib 4) ip101phy not use interrupts, set phydev->irq to PHY_POLL, open
+ link status Not open ethernet, mac is clock gate,phy is power down, NIC
+ Saving mode
+
+PD#83746 fixed sometime ip101gr phy resume & supend not okay,add init ip101gr code
+---
+ arch/arm/configs/meson8_defconfig     |  3 +
+ drivers/amlogic/ethernet/am_mdio.c    |  4 +-
+ drivers/amlogic/ethernet/am_net8218.c | 96 +++++++++++++++++++--------
+ drivers/amlogic/ethernet/am_net8218.h |  1 +
+ drivers/net/phy/icplus.c              | 74 +++++++++++++++++++--
+ 5 files changed, 143 insertions(+), 35 deletions(-)
+
+diff --git a/arch/arm/configs/meson8_defconfig b/arch/arm/configs/meson8_defconfig
+index 14070216da8e..281ab8392a80 100755
+--- a/arch/arm/configs/meson8_defconfig
++++ b/arch/arm/configs/meson8_defconfig
+@@ -253,6 +253,9 @@ CONFIG_BLK_DEV_SR=y
+ CONFIG_SCSI_MULTI_LUN=y
+ CONFIG_NETDEVICES=y
+ CONFIG_TUN=y
++CONFIG_PHYLIB=y
++CONFIG_SMSC_PHY=y
++CONFIG_ICPLUS_PHY=y
+ CONFIG_PPP=y
+ CONFIG_PPP_BSDCOMP=y
+ CONFIG_PPP_DEFLATE=y
+diff --git a/drivers/amlogic/ethernet/am_mdio.c b/drivers/amlogic/ethernet/am_mdio.c
+index 06817e856ff1..31c8ba6a07cb 100644
+--- a/drivers/amlogic/ethernet/am_mdio.c
++++ b/drivers/amlogic/ethernet/am_mdio.c
+@@ -102,8 +102,8 @@ int aml_mdio_register(struct net_device *ndev)
+ 			priv->phydev = phydev;
+ 			if (priv->phy_addr == -1) {
+ 				priv->phy_addr = addr;
+-				phydev->irq = 0;
+-				irqlist[addr] = 0;
++				phydev->irq = PHY_POLL;
++				irqlist[addr] = PHY_POLL;
+ 			}
+ 			pr_info("%s: PHY ID %08x at %d IRQ %d (%s)%s\n",
+ 					ndev->name, phydev->phy_id, addr,
+diff --git a/drivers/amlogic/ethernet/am_net8218.c b/drivers/amlogic/ethernet/am_net8218.c
+index 0ebed0e10c34..e6e1c7ee6005 100755
+--- a/drivers/amlogic/ethernet/am_net8218.c
++++ b/drivers/amlogic/ethernet/am_net8218.c
+@@ -45,16 +45,20 @@
+ #include <linux/of_platform.h>
+ #include <linux/kthread.h> 
+ #include "am_net8218.h"
++#include <mach/mod_gate.h>
+ 
+ #define MODULE_NAME "ethernet"
+ #define DRIVER_NAME "ethernet"
+ 
+ #define DRV_NAME	DRIVER_NAME
+ #define DRV_VERSION	"v2.0.0"
+-
++#ifdef CONFIG_HAS_EARLYSUSPEND
++#include <linux/earlysuspend.h>
++static struct early_suspend early_suspend;
++#endif
+ MODULE_DESCRIPTION("Amlogic Ethernet Driver");
+ MODULE_AUTHOR("Platform-BJ@amlogic.com>");
+-MODULE_LICENSE("Amlogic");
++MODULE_LICENSE("GPL");
+ MODULE_VERSION(DRV_VERSION);
+ 
+ // >0 basic init and remove info;
+@@ -1010,8 +1014,8 @@ static int aml_phy_init(struct net_device *dev)
+         snprintf(bus_id, MII_BUS_ID_SIZE, "%x", 0);
+         snprintf(phy_id, MII_BUS_ID_SIZE + 3, PHY_ID_FMT, bus_id,
+                  priv->phy_addr);
+-        pr_debug("aml_phy_init:  trying to attach to %s\n", phy_id);
+-
++        printk("aml_phy_init:  trying to attach to %s\n", phy_id);
++	 priv->phydev->drv->resume(priv->phydev);
+         phydev = phy_connect(dev, phy_id, &aml_adjust_link, priv->phy_interface);
+ 
+         if (IS_ERR(phydev)) {
+@@ -1034,7 +1038,6 @@ static int aml_phy_init(struct net_device *dev)
+                " Link = %d\n", dev->name, phydev->phy_id, phydev->link);
+ 
+         priv->phydev = phydev;
+-
+ 	if (priv->phydev)
+ 		phy_start(priv->phydev);
+ 
+@@ -1093,7 +1096,8 @@ static int netdev_open(struct net_device *dev)
+ {
+ 	struct am_net_private *np = netdev_priv(dev);
+ 	unsigned long val;
+-
++	np->refcnt++;
++	switch_mod_gate_by_name("ethernet",1);
+ 	int res;
+ 	if (running) {
+ 		return 0;
+@@ -1149,6 +1153,7 @@ static int netdev_close(struct net_device *dev)
+ 	}
+ 
+ 	if (np->phydev) {
++		np->phydev->drv->suspend(np->phydev);
+ 		phy_stop(np->phydev);
+ 		phy_disconnect(np->phydev);
+ 	}
+@@ -1175,7 +1180,10 @@ static int netdev_close(struct net_device *dev)
+ 	if (g_debug > 0) {
+ 		printk(KERN_DEBUG "%s: closed\n", dev->name);
+ 	}
+-
++	np->refcnt--;
++	if(np->refcnt == 0){
++		switch_mod_gate_by_name("ethernet",0);
++	}
+ 	return 0;
+ }
+ 
+@@ -1589,7 +1597,11 @@ static void set_multicast_list(struct net_device *dev)
+ 		writel(tmp, np->base_addr + ETH_MAC_1_Frame_Filter);//hash muticast
+ 	}
+ }
++static void set_mac_addr_n(struct net_device *dev, void *p){
++	eth_mac_addr(dev,p);
++	write_mac_addr(dev, dev->dev_addr);
+ 
++}
+ 
+ static const struct net_device_ops am_netdev_ops = {
+ 	.ndo_open               = netdev_open,
+@@ -1600,7 +1612,7 @@ static const struct net_device_ops am_netdev_ops = {
+ 	.ndo_do_ioctl			= netdev_ioctl,
+ 	.ndo_get_stats          = get_stats,
+ 	.ndo_change_mtu         = eth_change_mtu,
+-	.ndo_set_mac_address    = eth_mac_addr,
++	.ndo_set_mac_address    = set_mac_addr_n,
+ 	.ndo_validate_addr      = eth_validate_addr,
+ };
+ 
+@@ -1659,6 +1671,7 @@ static int probe_init(struct net_device *ndev)
+ 	ndev->irq = ETH_INTERRUPT;
+ 	spin_lock_init(&priv->lock);
+ 	priv->base_addr = ndev->base_addr;
++	priv->refcnt = 0;
+ 	if (g_debug > 0) {
+ 		printk("ethernet base addr is %x\n", (unsigned int)ndev->base_addr);
+ 	}
+@@ -2310,6 +2323,26 @@ static int __init am_eth_class_init(void)
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_HAS_EARLYSUSPEND
++static int ethernet_early_suspend(struct early_suspend *dev)
++{
++	printk("ethernet_early_suspend!\n");
++	netdev_close(my_ndev);
++	switch_mod_gate_by_name("ethernet",0);
++	return 0;
++}
++static int ethernet_late_resume(struct early_suspend *dev)
++{
++	int res = 0;
++	printk("ethernet_late_resume()\n");
++	res = netdev_open(my_ndev);
++	if (res != 0) {
++		printk("nono, it can not be true!\n");
++	}
++	
++	return 0;
++}
++#endif
+ /* --------------------------------------------------------------------------*/
+ /**
+  * @brief ethernet_probe 
+@@ -2341,11 +2374,18 @@ static int ethernet_probe(struct platform_device *pdev)
+ 	}
+ #endif
+ 	printk(DRV_NAME "init(dbg[%p]=%d)\n", (&g_debug), g_debug);
++	switch_mod_gate_by_name("ethernet",1);
+ 	my_ndev = alloc_etherdev(sizeof(struct am_net_private));
+ 	if (my_ndev == NULL) {
+ 		printk(DRV_NAME "ndev alloc failed!!\n");
+ 		return -ENOMEM;
+ 	}
++#ifdef CONFIG_HAS_EARLYSUSPEND
++       early_suspend.level = EARLY_SUSPEND_LEVEL_STOP_DRAWING;
++       early_suspend.suspend = ethernet_early_suspend;
++       early_suspend.resume = ethernet_late_resume;
++       register_early_suspend(&early_suspend);
++#endif
+ 	res = probe_init(my_ndev);
+ 	if (res != 0) 
+ 		free_netdev(my_ndev);
+@@ -2353,17 +2393,14 @@ static int ethernet_probe(struct platform_device *pdev)
+ 		res = am_eth_class_init();
+ 
+ 	eth_pdata = (struct aml_eth_platdata *)pdev->dev.platform_data;
++	struct am_net_private *np = netdev_priv(my_ndev);
++	np->phydev->drv->suspend(np->phydev);
++	switch_mod_gate_by_name("ethernet",0);
+ 	if (!eth_pdata) {
+ 		printk("\nethernet pm ops resource undefined.\n");
+ 		return -EFAULT;
+ 	}
+ 
+-	if (eth_pdata->pinmux_setup)
+-		eth_pdata->pinmux_setup();
+-
+-	if (eth_pdata->clock_enable)
+-		eth_pdata->clock_enable();
+-
+ 	return 0;
+ }
+ 
+@@ -2379,6 +2416,10 @@ static int ethernet_probe(struct platform_device *pdev)
+ static int ethernet_remove(struct platform_device *pdev)
+ {
+ 	printk("ethernet_driver remove!\n");
++#ifdef CONFIG_HAS_EARLYSUSPEND
++	 unregister_early_suspend(&early_suspend);
++#endif
++	switch_mod_gate_by_name("ethernet",0);
+ 	return 0;
+ }
+ 
+@@ -2395,14 +2436,12 @@ static int ethernet_remove(struct platform_device *pdev)
+ static int ethernet_suspend(struct platform_device *dev, pm_message_t event)
+ {
+ 	printk("ethernet_suspend!\n");
+-
+-	netdev_close(my_ndev);
+-	if (eth_pdata && eth_pdata->clock_disable)
+-		eth_pdata->clock_disable();
+-
++	netdev_close(my_ndev);	
++	switch_mod_gate_by_name("ethernet",0);
+ 	return 0;
+ }
+ 
++
+ /* --------------------------------------------------------------------------*/
+ /**
+  * @brief ethernet_resume 
+@@ -2415,19 +2454,12 @@ static int ethernet_suspend(struct platform_device *dev, pm_message_t event)
+ static int ethernet_resume(struct platform_device *dev)
+ {
+ 	int res = 0;
+-
+ 	printk("ethernet_resume()\n");
+-	if (eth_pdata && eth_pdata->clock_enable)
+-		eth_pdata->clock_enable();
+-
+-	if (eth_pdata && eth_pdata->reset)
+-		eth_pdata->reset();
+-
+ 	res = netdev_open(my_ndev);
+ 	if (res != 0) {
+ 		printk("nono, it can not be true!\n");
+ 	}
+-
++	
+ 	return 0;
+ }
+ #ifdef CONFIG_OF
+@@ -2442,15 +2474,20 @@ static const struct of_device_id eth_dt_match[]={
+ 
+ static struct platform_driver ethernet_driver = {
+ 	.probe   = ethernet_probe,
+-	.remove  = ethernet_remove,
++	.remove  = ethernet_remove, 
++#ifdef  CONFIG_PM      
+ 	.suspend = ethernet_suspend,
+ 	.resume  = ethernet_resume,
++#endif
+ 	.driver  = {
+ 		.name = "meson-eth",
+ 		.of_match_table = eth_dt_match,
+ 	}
+ };
+ 
++
++ 
++
+ /* --------------------------------------------------------------------------*/
+ /**
+  * @brief  am_net_init 
+@@ -2460,7 +2497,6 @@ static struct platform_driver ethernet_driver = {
+ /* --------------------------------------------------------------------------*/
+ static int __init am_net_init(void)
+ {
+-
+ 	if (platform_driver_register(&ethernet_driver)) {
+ 		printk("failed to register ethernet_pm driver\n");
+ 		g_ethernet_registered = 0;
+@@ -2509,3 +2545,5 @@ static void __exit am_net_exit(void)
+ 
+ module_init(am_net_init);
+ module_exit(am_net_exit);
++
++
+diff --git a/drivers/amlogic/ethernet/am_net8218.h b/drivers/amlogic/ethernet/am_net8218.h
+index 23063ed37030..7708bfa2ef0a 100755
+--- a/drivers/amlogic/ethernet/am_net8218.h
++++ b/drivers/amlogic/ethernet/am_net8218.h
+@@ -183,6 +183,7 @@ struct am_net_private {
+ 	int oldlink;
+ 	int speed;
+ 	int oldduplex;
++	int refcnt;
+ 
+ 
+ };
+diff --git a/drivers/net/phy/icplus.c b/drivers/net/phy/icplus.c
+index b5ddd5077a80..87409bc7f647 100644
+--- a/drivers/net/phy/icplus.c
++++ b/drivers/net/phy/icplus.c
+@@ -45,11 +45,30 @@ MODULE_LICENSE("GPL");
+ #define	IP101A_G_IRQ_PIN_USED		(1<<15) /* INTR pin used */
+ #define	IP101A_G_IRQ_DEFAULT		IP101A_G_IRQ_PIN_USED
+ 
++#define IP101G_PAGE_SEL			0x14
++#define IP101G_PAGE_16			0x10
++#define IP101G_SPEC_CTRL_STATUS		0x10
++#define IP101G_ANALOG_OFF		0x0001
++#define IP101G_MMD_CTRL			0x0d
++#define IP101G_MMD_DATA			0x0e
++#define IP101G_DIO_PIN_DCR			0x1a
++#define OFF 1
++#define ON  0
++static void off_analog(struct phy_device *phydev, int off)
++{
++	int ana;
++
++	phy_write(phydev, IP101G_PAGE_SEL, IP101G_PAGE_16);
++	ana = phy_read(phydev, IP101G_SPEC_CTRL_STATUS);
++	if (off)
++		phy_write(phydev, IP101G_SPEC_CTRL_STATUS, (ana | IP101G_ANALOG_OFF));
++	else
++		phy_write(phydev, IP101G_SPEC_CTRL_STATUS, (ana & ~IP101G_ANALOG_OFF));
++}
+ static int ip175c_config_init(struct phy_device *phydev)
+ {
+ 	int err, i;
+ 	static int full_reset_performed = 0;
+-
+ 	if (full_reset_performed == 0) {
+ 
+ 		/* master reset */
+@@ -122,6 +141,37 @@ static int ip1xx_reset(struct phy_device *phydev)
+ 	return 0;
+ }
+ 
++static int ip101gr_reset(struct phy_device *phydev)
++{
++	int bmcr;
++
++	/* Software Reset PHY */
++	bmcr = phy_read(phydev, MII_BMCR);
++	if (bmcr < 0)
++		return bmcr;
++	bmcr |= BMCR_RESET;
++	bmcr = phy_write(phydev, MII_BMCR, bmcr);
++	if (bmcr < 0)
++		return bmcr;
++
++	do {
++		bmcr = phy_read(phydev, MII_BMCR);
++		if (bmcr < 0)
++			return bmcr;
++	} while (bmcr & BMCR_RESET);
++
++	phy_write(phydev, IP101G_MMD_CTRL, 0x7);
++
++	phy_write(phydev, IP101G_MMD_DATA, 0x3c);
++
++	phy_write(phydev, IP101G_MMD_CTRL, 0x4007);
++
++	phy_write(phydev, IP101G_MMD_CTRL, 0x0);
++
++	phy_write(phydev, IP101G_DIO_PIN_DCR, 0x1252);
++	return 0;
++}
++
+ static int ip1001_config_init(struct phy_device *phydev)
+ {
+ 	int c;
+@@ -169,7 +219,7 @@ static int ip101a_g_config_init(struct phy_device *phydev)
+ {
+ 	int c;
+ 
+-	c = ip1xx_reset(phydev);
++	c = ip101gr_reset(phydev);
+ 	if (c < 0)
+ 		return c;
+ 
+@@ -212,7 +262,23 @@ static int ip101a_g_ack_interrupt(struct phy_device *phydev)
+ 
+ 	return 0;
+ }
++static int ip101a_g_genphy_suspend(struct phy_device *phydev)
++{
++	printk("**************ip101 sd*****************\n");
++	int value;
++	off_analog(phydev, OFF);
++	value = phy_read(phydev, MII_BMCR);
++	phy_write(phydev, MII_BMCR, (value | BMCR_PDOWN));
++}
++static int ip101a_g_genphy_resume(struct phy_device *phydev)
++{
++	printk("**************ip101 re*****************\n");
++	int value;
++	off_analog(phydev, ON);
++	value = phy_read(phydev, MII_BMCR);
++	phy_write(phydev, MII_BMCR, (value & ~BMCR_PDOWN));
+ 
++}
+ static struct phy_driver icplus_driver[] = {
+ {
+ 	.phy_id		= 0x02430d80,
+@@ -248,8 +314,8 @@ static struct phy_driver icplus_driver[] = {
+ 	.config_init	= &ip101a_g_config_init,
+ 	.config_aneg	= &genphy_config_aneg,
+ 	.read_status	= &genphy_read_status,
+-	.suspend	= genphy_suspend,
+-	.resume		= genphy_resume,
++	.suspend	= &ip101a_g_genphy_suspend,
++	.resume		= &ip101a_g_genphy_resume,
+ 	.driver		= { .owner = THIS_MODULE,},
+ } };
+ 
+-- 
+2.19.0
+

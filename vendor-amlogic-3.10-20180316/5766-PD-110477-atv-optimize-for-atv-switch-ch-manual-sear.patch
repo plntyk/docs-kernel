@@ -1,0 +1,506 @@
+From 38db8bb4f7b1525c542a8ccc41c80560233b8f9e Mon Sep 17 00:00:00 2001
+From: Dezhi Kong <dezhi.kong@amlogic.com>
+Date: Mon, 17 Aug 2015 13:05:10 +0800
+Subject: [PATCH 5766/5965] PD#110477: atv: optimize for atv switch ch & manual
+ search
+
+Change-Id: I98beabbcf4443eb9fb49fa16f117d770ca2b315a
+---
+ drivers/amlogic/dvb_tv/aml_fe.c               | 29 +++---
+ .../dvb_tv/amlatvdemod/atvdemod_frontend.c    | 59 +++++++++++-
+ .../dvb_tv/amlatvdemod/atvdemod_func.c        | 91 +++++++++++++------
+ .../dvb_tv/amlatvdemod/atvdemod_func.h        |  5 +
+ 4 files changed, 140 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/amlogic/dvb_tv/aml_fe.c b/drivers/amlogic/dvb_tv/aml_fe.c
+index 2d83b1feef6b..21a40c7df940 100755
+--- a/drivers/amlogic/dvb_tv/aml_fe.c
++++ b/drivers/amlogic/dvb_tv/aml_fe.c
+@@ -206,21 +206,20 @@ int aml_fe_analog_set_frontend(struct dvb_frontend* fe)
+ 	if (fe->ops.tuner_ops.set_params) {
+ 		ret = fe->ops.tuner_ops.set_params(fe);
+ 	}
++	if (fe->ops.tuner_ops.get_status)
++		fe->ops.tuner_ops.get_status(fe, &tuner_state);
+ 
+ 	if(fee->tuner->drv->id == AM_TUNER_R840){
+-		fe->ops.tuner_ops.get_status(fe, &tuner_state);
+ 		p.tuner_id = AM_TUNER_R840;
+-		p.if_freq = fee->demod_param.if_freq;
+-		p.if_inv = fee->demod_param.if_inv;
+ 	}
+ 	else if (fee->tuner->drv->id == AM_TUNER_SI2151) {
+ 		p.tuner_id = AM_TUNER_SI2151;
+ 	}
+ 	else if (fee->tuner->drv->id == AM_TUNER_MXL661) {
+ 		p.tuner_id = AM_TUNER_MXL661;
+-		p.if_freq = fee->demod_param.if_freq;
+-		p.if_inv = fee->demod_param.if_inv;
+ 	}
++	p.if_freq = fee->demod_param.if_freq;
++	p.if_inv = fee->demod_param.if_inv;
+ 
+ 	p.frequency  = c->frequency;
+ 	p.soundsys   = c->analog.soundsys;
+@@ -336,19 +335,24 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 			std_bk = 0;
+ 			return DVBFE_ALGO_SEARCH_FAILED;
+ 		}
++		mdelay(delay_cnt);
+ 		#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) || (MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++		if ((fe->ops.tuner_ops.get_pll_status == NULL) ||(fe->ops.analog_ops.get_pll_status == NULL)) {
++			printk("[%s]error:the func of get_pll_status is NULL.\n",__func__);
++			return DVBFE_ALGO_SEARCH_FAILED;
++		}
+ 		fe->ops.tuner_ops.get_pll_status(fe, &tuner_state);
+ 		fe->ops.analog_ops.get_pll_status(fe, &ade_state);
+-		mdelay(delay_cnt);
+ 		#else
+ 		fe->ops.tuner_ops.get_status(fe, &tuner_state);
+ 		fe->ops.analog_ops.get_status(fe, &ade_state);
+ 		#endif
++		mdelay(delay_cnt);
+ 		if((FE_HAS_LOCK==ade_state) || (FE_HAS_LOCK==tuner_state)){
+ 			if(aml_fe_afc_closer(fe,p->frequency - ATV_AFC_1_0MHZ ,p->frequency + ATV_AFC_1_0MHZ)==0){
+ 				printk("[%s] manul scan mode:p->frequency=[%d] has lock,search success.\n",__func__,p->frequency);
+ 				p->analog.std = std_bk;
+-				//fe->ops.set_frontend(fe);
++				fe->ops.set_frontend(fe);
+ 				std_bk = 0;
+ 				return DVBFE_ALGO_SEARCH_SUCCESS;
+ 			}
+@@ -450,7 +454,7 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 			tuner_status_cnt_local = tuner_status_cnt;
+ 			do{
+ 				mdelay(delay_cnt);
+-				#if ((MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV) ||(MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9BB))
++				#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
+ 				fe->ops.tuner_ops.get_pll_status(fe, &tuner_state);
+ 				fe->ops.analog_ops.get_pll_status(fe, &ade_state);
+ 				#else
+@@ -477,7 +481,7 @@ static enum dvbfe_search aml_fe_analog_search(struct dvb_frontend *fe)
+ 					if(std_bk != 0){/*avoid sound format is not match after search over*/
+ 						p->analog.std = std_bk;
+ 						p->frequency -=1;/*avoid std unenable*/
+-						//fe->ops.set_frontend(fe);
++						fe->ops.set_frontend(fe);
+ 						std_bk = 0;
+ 					}
+ 					return DVBFE_ALGO_SEARCH_SUCCESS;
+@@ -541,10 +545,9 @@ static int aml_fe_afc_closer(struct dvb_frontend *fe,int minafcfreq,int maxafcfq
+ 			}
+ 
+ 			fe->ops.set_frontend(fe);
+-			if (fee->tuner->drv->id == AM_TUNER_MXL661) {
+-				msleep(delay_afc);
+-			}
+-
++			#if (MESON_CPU_TYPE >= MESON_CPU_TYPE_MESONG9TV)
++			msleep(delay_afc);
++			#endif
+ 			pr_dbg("[aml_fe..]%s get afc %d khz, freq %u.\n",__func__,afc, c->frequency);
+ 		}
+ 
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+index ed6c12ce06d5..0276173bee92 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_frontend.c
+@@ -51,7 +51,7 @@ static ssize_t aml_atvdemod_store(struct class *cls, struct class_attribute *att
+ 	unsigned int data_snr[128];
+ 	unsigned int data_snr_avg;
+ 	int data_afc;
+-	int i;
++	int i,val;
+ 	struct aml_fe *atvdemod_fe = NULL;
+ 	buf_orig = kstrdup(buf, GFP_KERNEL);
+ 	ps = buf_orig;
+@@ -73,7 +73,53 @@ static ssize_t aml_atvdemod_store(struct class *cls, struct class_attribute *att
+ 	{
+ 		//val  = simple_strtol(parm[1], NULL, 10);
+ 	}
+-	else if(!strncmp(parm[0],"std",strlen("std")))
++	else if (!strcmp(parm[0],"set"))
++	{
++		if (!strncmp(parm[1],"avout_gain",strlen("avout_gain")))
++		{
++			val  = simple_strtol(parm[2], NULL, 10);
++			atv_dmd_wr_byte( 0x0c,0x01,val&0xff) ;
++		}
++		else if (!strncmp(parm[1],"avout_offset",strlen("avout_offset")))
++		{
++			val  = simple_strtol(parm[2], NULL, 10);
++			atv_dmd_wr_byte( 0x0c,0x04,val&0xff) ;
++		}
++		else if (!strncmp(parm[1],"atv_gain",strlen("atv_gain")))
++		{
++			val  = simple_strtol(parm[2], NULL, 10);
++			atv_dmd_wr_byte( 0x19,0x01,val&0xff) ;
++		}
++		else if (!strncmp(parm[1],"atv_offset",strlen("atv_offset")))
++		{
++			val  = simple_strtol(parm[2], NULL, 10);
++			atv_dmd_wr_byte( 0x19,0x04,val&0xff) ;
++		}
++	}
++	else if (!strcmp(parm[0],"get"))
++	{
++		if (!strncmp(parm[1],"avout_gain",strlen("avout_gain")))
++		{
++			val = atv_dmd_rd_byte( 0x0c,0x01) ;
++			printk("avout_gain:0x%x \n",val);
++		}
++		else if (!strncmp(parm[1],"avout_offset",strlen("avout_offset")))
++		{
++			val = atv_dmd_rd_byte( 0x0c,0x04) ;
++			printk("avout_offset:0x%x \n",val);
++		}
++		else if (!strncmp(parm[1],"atv_gain",strlen("atv_gain")))
++		{
++			val = atv_dmd_rd_byte( 0x19,0x01) ;
++			printk("atv_gain:0x%x \n",val);
++		}
++		else if (!strncmp(parm[1],"atv_offset",strlen("atv_offset")))
++		{
++			val = atv_dmd_rd_byte( 0x19,0x04) ;
++			printk("atv_offset:0x%x \n",val);
++		}
++	}
++	else if (!strncmp(parm[0],"std",strlen("std")))
+ 	{
+ 		/*
+ 		if(!strncmp(parm[1],"pal",3))
+@@ -97,7 +143,7 @@ static ssize_t aml_atvdemod_store(struct class *cls, struct class_attribute *att
+ 				v4l2_std_to_str(0xff000000&si2177_devp->parm.std), v4l2_std_to_str(0xffffff&si2177_devp->parm.std));
+ 		*/
+ 	}
+-	else if(!strncmp(parm[0],"snr_hist",strlen("snr_hist")))
++	else if (!strncmp(parm[0],"snr_hist",strlen("snr_hist")))
+ 	{
+ 		data_snr_avg = 0;
+ 		for(i=0;i<128;i++){
+@@ -122,6 +168,13 @@ static ssize_t aml_atvdemod_store(struct class *cls, struct class_attribute *att
+ 
+ static ssize_t aml_atvdemod_show(struct class *cls,struct class_attribute *attr,char *buff)
+ {
++	printk("\n usage: \n");
++	printk("[get afc value] echo afc_info > /sys/class/amlatvdemod/atvdemod_debug \n");
++	printk("[reinit atvdemod] echo init > /sys/class/amlatvdemod/atvdemod_debug \n");
++	printk("[get av-out-gain/av-out-offset/atv-gain/atv-offset]:\n"
++		"echo get av_gain/av_offset/atv_gain/atv_offset > /sys/class/amlatvdemod/atvdemod_debug \n");
++	printk("[set av-out-gain/av-out-offset/atv-gain/atv-offset]:\n"
++		"echo set av_gain/av_offset/atv_gain/atv_offset val(0~255) > /sys/class/amlatvdemod/atvdemod_debug \n");
+         return 0;
+ }
+ static CLASS_ATTR(atvdemod_debug,0644,aml_atvdemod_show,aml_atvdemod_store);
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+index e82752740146..c1cc99c5f448 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.c
+@@ -326,7 +326,12 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 
+ 	pr_info("ATV-DMD configure receiver register\n");
+ 
+-	if ((Broadcast_Standard == 0) | (Broadcast_Standard == 1) | (Broadcast_Standard == 2)) {
++	if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_J) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_M) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_DK) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_BG) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_I)) {
+ 		gp_coeff_1[          0] = 0x57777;
+ 		gp_coeff_1[          1] = 0xdd777;
+ 		gp_coeff_1[          2] = 0x7d777;
+@@ -404,7 +409,10 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		gp_cv_g1 = 0x2b062d;
+ 		gp_cv_g2 = 0x40fa2d;
+ 	}
+-	else if ((Broadcast_Standard == 3) | (Broadcast_Standard == 5) | (Broadcast_Standard == 6) | (Broadcast_Standard == 7)) {
++	else if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_BG) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_DK2) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_DK3) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_BG_NICAM)) {
+ 		gp_coeff_1[          0] = 0x75777;
+ 		gp_coeff_1[          1] = 0x57777;
+ 		gp_coeff_1[          2] = 0x7d777;
+@@ -482,7 +490,8 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		gp_cv_g1 = 0x2b2834;
+ 		gp_cv_g2 = 0x3f6c2e;
+ 	}
+-	else if ((Broadcast_Standard == 8) |(Broadcast_Standard == 6))
++	else if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_DK) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_DK3))
+ 	{
+ 		gp_coeff_1[          0] = 0x47777;
+ 		gp_coeff_1[          1] = 0x77777;
+@@ -561,7 +570,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		gp_cv_g1 = 0x20682b;
+ 		gp_cv_g2 = 0x29322f;
+ 	}
+-	else if (Broadcast_Standard == 10)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_I)
+ 	{
+ 		gp_coeff_1[          0] = 0x77777;
+ 		gp_coeff_1[          1] = 0x75777;
+@@ -641,7 +650,8 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		gp_cv_g2 = 0x28822a;
+ 	}
+ 
+- 	if ((Broadcast_Standard == 0)  | (Broadcast_Standard == 1))
++	if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC)  ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_J))
+ 	{
+ 		sif_co_mx=0xb8; //184
+ 		sif_fi_mx=0x0;
+@@ -651,7 +661,8 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0x0:0x2;
+ 		sif_fm_gain=0x4;
+ 	}
+-	else if (Broadcast_Standard == 3)
++	else if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_BG) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_BG))
+ 	{
+ 		sif_co_mx=0xa6;
+ 		sif_fi_mx=0x10;
+@@ -661,7 +672,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0x0:0x2;
+ 		sif_fm_gain=0x3;
+ 	}
+-	else if (Broadcast_Standard == 11)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_DK1)
+ 	{
+ 		sif_co_mx=154;
+ 		sif_fi_mx=240;
+@@ -671,7 +682,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 5)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_DK2)
+ 	{
+ 		sif_co_mx=150;
+ 		sif_fi_mx=16;
+@@ -681,7 +692,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 6)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_DK3)
+ 	{
+ 		sif_co_mx=158;
+ 		sif_fi_mx=208;
+@@ -691,7 +702,8 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 10)
++	else if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_I) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_I))
+ 	{
+ 		sif_co_mx=153;
+ 		sif_fi_mx=56;
+@@ -701,7 +713,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 7)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_BG_NICAM)
+ 	{
+ 		sif_co_mx=163;
+ 		sif_fi_mx=40;
+@@ -711,7 +723,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 9)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L)
+ 	{
+ 		sif_co_mx=159;
+ 		sif_fi_mx=200;
+@@ -721,7 +733,8 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 1:2;
+ 		sif_fm_gain=5;
+ 	}
+-	else if (Broadcast_Standard == 8)
++	else if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_DK) ||
++		(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_DK))
+ 	{
+ 		sif_co_mx=159;
+ 		sif_fi_mx=200;
+@@ -731,7 +744,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		sif_cfg_demod=(sound_format == 0) ? 0:2;
+ 		sif_fm_gain=3;
+ 	}
+-	else if (Broadcast_Standard == 2)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_M)
+ 	{
+ 		sif_co_mx=182;
+ 		sif_fi_mx=16;
+@@ -744,7 +757,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 	sif_fm_gain -= 2;//avoid sound overflow@guanzhong
+ 	//FE PATH
+ 	pr_info("ATV-DMD configure mixer\n");
+-	if (Broadcast_Standard == 4) {
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV) {
+ 		tmp_int = (Tuner_IF_Frequency/125000);
+ 
+ 		if (Tuner_Input_IF_inverted == 0x0) {
+@@ -779,7 +792,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 	atv_dmd_wr_word(APB_BLOCK_ADDR_MIXER_3,0x0,(((mixer3 & 0xff) << 8) | (mixer3_bypass & 0xff)));
+ 
+ 
+-	if (Broadcast_Standard == 9) {
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L) {
+ 		atv_dmd_wr_long(APB_BLOCK_ADDR_ADC_SE,0x0,0x03180e0f);
+ 	}
+ 	else {
+@@ -793,7 +806,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 
+ 	//GP Filter
+ 	pr_info("ATV-DMD configure GP_filter\n");
+-	if (Broadcast_Standard == 4)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV)
+ 	{
+ 		cv = gp_cv_g1;
+ 		atv_dmd_wr_long(APB_BLOCK_ADDR_GP_VD_FLT,0x0,(0x08000000 |  (cv & 0x7fffff)));
+@@ -863,7 +876,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 
+ 	//CRVY
+ 	pr_info("ATV-DMD configure CRVY\n");
+-	if (Broadcast_Standard == 4)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV)
+ 	{
+ 		crvy_reg_1=0xFF;
+ 		crvy_reg_2=0x00;
+@@ -882,14 +895,14 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 	//SOUND SUPPRESS
+ 	pr_info("ATV-DMD configure sound suppress\n");
+ 
+-	if ((Broadcast_Standard == 4) |(sound_format == 0))
++	if ((Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV) || (sound_format == 0))
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_SIF_VD_IF,0x02,0x01);
+ 	else
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_SIF_VD_IF,0x02,0x00);
+ 
+ 	//SIF
+ 	pr_info("ATV-DMD configure sif\n");
+-	if (!(Broadcast_Standard == 4))
++	if (!(Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV))
+ 	{
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_SIF_IC_STD,0x03,sif_ic_bw);
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_SIF_IC_STD,0x01,sif_fi_mx);
+@@ -899,7 +912,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_SIF_STG_2,0x06,sif_cfg_demod);
+ 	}
+ 
+-	if (Broadcast_Standard == 4)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV)
+ 	{}
+ 	else if (sound_format == 0)
+ 	{
+@@ -912,7 +925,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 		atv_dmd_wr_long(APB_BLOCK_ADDR_SIF_STG_3,0x00, (tmp_int & 0xffffff));
+ 	}
+ 
+-	if (Broadcast_Standard == 4)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV)
+ 	{
+ 		atv_dmd_wr_long(APB_BLOCK_ADDR_IC_AGC,0x00,0x02040E0A);
+ 		atv_dmd_wr_word(APB_BLOCK_ADDR_IC_AGC,0x04,0x0F0D);
+@@ -921,7 +934,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 	{
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_IC_AGC,0x00,0x04);
+ 	}
+-	else if (Broadcast_Standard == 9)
++	else if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L)
+ 	{
+ 		atv_dmd_wr_long(APB_BLOCK_ADDR_IC_AGC,0x00,0x0003140A);
+ 		atv_dmd_wr_word(APB_BLOCK_ADDR_IC_AGC,0x04,0x1244); //we lower target agc to avoid saturation
+@@ -937,7 +950,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 	atv_dmd_wr_long(APB_BLOCK_ADDR_VDAGC,0x48,0x9B6F2C00); //bw select mode
+ 	atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x37,0x1C); //disable prefilter
+ 
+-	if (Broadcast_Standard == 9)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L)
+ 	{
+ 		atv_dmd_wr_word(APB_BLOCK_ADDR_VDAGC,0x44,0x4450);
+ 		atv_dmd_wr_byte(APB_BLOCK_ADDR_VDAGC,0x46,0x44);
+@@ -964,7 +977,7 @@ void configure_receiver(int Broadcast_Standard, unsigned int Tuner_IF_Frequency,
+ 
+ 	//OUTPUT STAGE
+ 	pr_info("ATV-DMD configure output stage\n");
+-	if (Broadcast_Standard == 4)
++	if (Broadcast_Standard == AML_ATV_DEMOD_VIDEO_MODE_PROP_DTV)
+ 	{
+ 	}
+ 	else
+@@ -1246,19 +1259,37 @@ void atv_dmd_set_std(void)
+ 		if_freq = 3250000;
+ 		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_DK;
+ 		gde_curve = 3;
+-	} else if (ptstd & V4L2_STD_PAL_M) {
++	} else if ((ptstd & V4L2_COLOR_STD_PAL) && (ptstd & V4L2_STD_PAL_M)) {
+ 		amlatvdemod_devp->fre_offset = 2250000;
+ 		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_60HZ_VERT;
+ 		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_M;
+ 		if_freq = 4250000;
+ 		gde_curve = 0;
+-	} else if (ptstd & V4L2_STD_NTSC_M) {
++	} else if ((ptstd & V4L2_COLOR_STD_NTSC) && (ptstd & V4L2_STD_NTSC_M)) {
+ 		amlatvdemod_devp->fre_offset = 1750000;
+ 		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_60HZ_VERT;
+ 		if_freq = 4250000;
+ 		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC;
+ 		gde_curve = 0;
+-	} else if (ptstd & V4L2_STD_NTSC_M_JP) {
++	} else if ((ptstd & V4L2_COLOR_STD_NTSC) && (ptstd & V4L2_STD_DK)) {
++		amlatvdemod_devp->fre_offset = 1750000;
++		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_60HZ_VERT;
++		if_freq = 4250000;
++		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_DK;
++		gde_curve = 0;
++	} else if ((ptstd & V4L2_COLOR_STD_NTSC) && (ptstd & V4L2_STD_BG)) {
++		amlatvdemod_devp->fre_offset = 1750000;
++		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_60HZ_VERT;
++		if_freq = 4250000;
++		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_BG;
++		gde_curve = 0;
++	} else if ((ptstd & V4L2_COLOR_STD_NTSC) && (ptstd & V4L2_STD_PAL_I)) {
++		amlatvdemod_devp->fre_offset = 1750000;
++		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_60HZ_VERT;
++		if_freq = 4250000;
++		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_I;
++		gde_curve = 0;
++	} else if ((ptstd & V4L2_COLOR_STD_NTSC) && (ptstd & V4L2_STD_NTSC_M_JP)) {
+ 		amlatvdemod_devp->fre_offset = 1750000;
+ 		freq_hz_cvrt = AML_ATV_DEMOD_FREQ_50HZ_VERT;
+ 		broad_std = AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_J;
+@@ -1306,6 +1337,10 @@ void atv_dmd_set_std(void)
+ 		if_inv = amlatvdemod_devp->parm.if_inv;
+ 		atvdemod_timer_en = 0;
+ 	}
++	else if(amlatvdemod_devp->parm.tuner_id == AM_TUNER_SI2151) {
++		if_freq = amlatvdemod_devp->parm.if_freq;
++		if_inv = amlatvdemod_devp->parm.if_inv;
++	}
+         pr_info("[atvdemod..]%s: broad_std %d,freq_hz_cvrt:0x%x,fre_offset:%d.\n",
+ 		__func__, broad_std, freq_hz_cvrt,amlatvdemod_devp->fre_offset);
+         if(atvdemod_init())
+diff --git a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+index cedac960efeb..8b12ab8de46d 100755
+--- a/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
++++ b/drivers/amlogic/dvb_tv/amlatvdemod/atvdemod_func.h
+@@ -159,6 +159,11 @@ extern int retrieve_vpll_carrier_afc(void);
+ #define AML_ATV_DEMOD_VIDEO_MODE_PROP_SECAM_L	9
+ #define AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_I	10
+ #define AML_ATV_DEMOD_VIDEO_MODE_PROP_PAL_DK1	11
++//new add @20150813 begin
++#define AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_DK		12
++#define AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_BG	13
++#define AML_ATV_DEMOD_VIDEO_MODE_PROP_NTSC_I	14
++//new add @20150813 end
+ 
+ //GDE_Curve
+ //			0: CURVE-M
+-- 
+2.19.0
+

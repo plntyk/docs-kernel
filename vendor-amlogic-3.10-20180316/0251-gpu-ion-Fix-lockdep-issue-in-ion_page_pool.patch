@@ -1,0 +1,49 @@
+From 15da191d8fdf3ebd8aed546461d17ac0714be47a Mon Sep 17 00:00:00 2001
+From: Rebecca Schultz Zavin <rebecca@android.com>
+Date: Wed, 10 Oct 2012 10:34:50 -0700
+Subject: [PATCH 0251/5965] gpu: ion: Fix lockdep issue in ion_page_pool
+
+Currently the mutex is held while kmalloc is called, under a low memory
+condition this might trigger the shrinker which also takes this mutex.
+Refactor so the mutex is not held during allocation.
+
+Change-Id: Ic1d3b2f69e61209191bac84724ba56f6b98e2bc4
+Signed-off-by: Rebecca Schultz Zavin <rebecca@android.com>
+---
+ drivers/gpu/ion/ion_page_pool.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/ion/ion_page_pool.c b/drivers/gpu/ion/ion_page_pool.c
+index b39663f4a1b7..3f3d2091dc82 100644
+--- a/drivers/gpu/ion/ion_page_pool.c
++++ b/drivers/gpu/ion/ion_page_pool.c
+@@ -53,6 +53,8 @@ static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
+ 	item = kmalloc(sizeof(struct ion_page_pool_item), GFP_KERNEL);
+ 	if (!item)
+ 		return -ENOMEM;
++
++	mutex_lock(&pool->mutex);
+ 	item->page = page;
+ 	if (PageHighMem(page)) {
+ 		list_add_tail(&item->list, &pool->high_items);
+@@ -61,6 +63,7 @@ static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
+ 		list_add_tail(&item->list, &pool->low_items);
+ 		pool->low_count++;
+ 	}
++	mutex_unlock(&pool->mutex);
+ 	return 0;
+ }
+ 
+@@ -110,9 +113,7 @@ void ion_page_pool_free(struct ion_page_pool *pool, struct page* page)
+ {
+ 	int ret;
+ 
+-	mutex_lock(&pool->mutex);
+ 	ret = ion_page_pool_add(pool, page);
+-	mutex_unlock(&pool->mutex);
+ 	if (ret)
+ 		ion_page_pool_free_pages(pool, page);
+ }
+-- 
+2.19.0
+

@@ -1,0 +1,245 @@
+From fd64bbf28e28526f608df0061175829338ee94cc Mon Sep 17 00:00:00 2001
+From: Robert Love <rlove@google.com>
+Date: Wed, 15 Oct 2008 15:35:44 -0400
+Subject: [PATCH 0029/5965] Paranoid network.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+With CONFIG_ANDROID_PARANOID_NETWORK, require specific uids/gids to instantiate
+network sockets.
+
+Signed-off-by: Robert Love <rlove@google.com>
+
+paranoid networking: Use in_egroup_p() to check group membership
+
+The previous group_search() caused trouble for partners with module builds.
+in_egroup_p() is also cleaner.
+
+Signed-off-by: Nick Pelly <npelly@google.com>
+
+Fix 2.6.29 build.
+
+Signed-off-by: Arve Hjønnevåg <arve@android.com>
+
+net: Fix compilation of the IPv6 module
+
+Fix compilation of the IPv6 module -- current->euid does not exist anymore,
+current_euid() is what needs to be used.
+
+Signed-off-by: Steinar H. Gunderson <sesse@google.com>
+---
+ net/Kconfig                  |  6 ++++++
+ net/bluetooth/af_bluetooth.c | 38 ++++++++++++++++++++++++++++++++++++
+ net/ipv4/af_inet.c           | 31 ++++++++++++++++++++++++++++-
+ net/ipv6/af_inet6.c          | 32 +++++++++++++++++++++++++++++-
+ 4 files changed, 105 insertions(+), 2 deletions(-)
+
+diff --git a/net/Kconfig b/net/Kconfig
+index 2ddc9046868e..36c5e424f096 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -81,6 +81,12 @@ source "net/netlabel/Kconfig"
+ 
+ endif # if INET
+ 
++config ANDROID_PARANOID_NETWORK
++	bool "Only allow certain groups to create sockets"
++	default y
++	help
++		none
++
+ config NETWORK_SECMARK
+ 	bool "Security Marking"
+ 	help
+diff --git a/net/bluetooth/af_bluetooth.c b/net/bluetooth/af_bluetooth.c
+index 9096137c889c..bd8a56d097d6 100644
+--- a/net/bluetooth/af_bluetooth.c
++++ b/net/bluetooth/af_bluetooth.c
+@@ -30,6 +30,15 @@
+ #include <net/bluetooth/bluetooth.h>
+ #include <linux/proc_fs.h>
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++#include <linux/android_aid.h>
++#endif
++
++#ifndef CONFIG_BT_SOCK_DEBUG
++#undef  BT_DBG
++#define BT_DBG(D...)
++#endif
++
+ #define VERSION "2.16"
+ 
+ /* Bluetooth sockets */
+@@ -103,11 +112,40 @@ void bt_sock_unregister(int proto)
+ }
+ EXPORT_SYMBOL(bt_sock_unregister);
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++static inline int current_has_bt_admin(void)
++{
++	return (!current_euid() || in_egroup_p(AID_NET_BT_ADMIN));
++}
++
++static inline int current_has_bt(void)
++{
++	return (current_has_bt_admin() || in_egroup_p(AID_NET_BT));
++}
++# else
++static inline int current_has_bt_admin(void)
++{
++	return 1;
++}
++
++static inline int current_has_bt(void)
++{
++	return 1;
++}
++#endif
++
+ static int bt_sock_create(struct net *net, struct socket *sock, int proto,
+ 			  int kern)
+ {
+ 	int err;
+ 
++	if (proto == BTPROTO_RFCOMM || proto == BTPROTO_SCO ||
++			proto == BTPROTO_L2CAP) {
++		if (!current_has_bt())
++			return -EPERM;
++	} else if (!current_has_bt_admin())
++		return -EPERM;
++
+ 	if (net != &init_net)
+ 		return -EAFNOSUPPORT;
+ 
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index d01be2a3ae53..0b630d2406b4 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -119,6 +119,9 @@
+ #include <linux/mroute.h>
+ #endif
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++#include <linux/android_aid.h>
++#endif
+ 
+ /* The inetsw table contains everything that inet_create needs to
+  * build a new socket.
+@@ -270,6 +273,29 @@ void build_ehash_secret(void)
+ }
+ EXPORT_SYMBOL(build_ehash_secret);
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++static inline int current_has_network(void)
++{
++	return (!current_euid() || in_egroup_p(AID_INET) ||
++		in_egroup_p(AID_NET_RAW));
++}
++static inline int current_has_cap(struct net *net, int cap)
++{
++	if (cap == CAP_NET_RAW && in_egroup_p(AID_NET_RAW))
++		return 1;
++	return ns_capable(net->user_ns, cap);
++}
++# else
++static inline int current_has_network(void)
++{
++	return 1;
++}
++static inline int current_has_cap(struct net *net, int cap)
++{
++	return ns_capable(net->user_ns, cap);
++}
++#endif
++
+ /*
+  *	Create an inet socket.
+  */
+@@ -286,6 +312,9 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
+ 	int try_loading_module = 0;
+ 	int err;
+ 
++	if (!current_has_network())
++		return -EACCES;
++
+ 	if (unlikely(!inet_ehash_secret))
+ 		if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
+ 			build_ehash_secret();
+@@ -339,7 +368,7 @@ lookup_protocol:
+ 
+ 	err = -EPERM;
+ 	if (sock->type == SOCK_RAW && !kern &&
+-	    !ns_capable(net->user_ns, CAP_NET_RAW))
++	    !current_has_cap(net, CAP_NET_RAW))
+ 		goto out_rcu_unlock;
+ 
+ 	sock->ops = answer->ops;
+diff --git a/net/ipv6/af_inet6.c b/net/ipv6/af_inet6.c
+index ab5c7ad482cd..4ddbb8086b3d 100644
+--- a/net/ipv6/af_inet6.c
++++ b/net/ipv6/af_inet6.c
+@@ -62,6 +62,10 @@
+ #include <asm/uaccess.h>
+ #include <linux/mroute6.h>
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++#include <linux/android_aid.h>
++#endif
++
+ MODULE_AUTHOR("Cast of dozens");
+ MODULE_DESCRIPTION("IPv6 protocol stack for Linux");
+ MODULE_LICENSE("GPL");
+@@ -95,6 +99,29 @@ static __inline__ struct ipv6_pinfo *inet6_sk_generic(struct sock *sk)
+ 	return (struct ipv6_pinfo *)(((u8 *)sk) + offset);
+ }
+ 
++#ifdef CONFIG_ANDROID_PARANOID_NETWORK
++static inline int current_has_network(void)
++{
++	return (!current_euid() || in_egroup_p(AID_INET) ||
++		in_egroup_p(AID_NET_RAW));
++}
++static inline int current_has_cap(struct net *net, int cap)
++{
++	if (cap == CAP_NET_RAW && in_egroup_p(AID_NET_RAW))
++		return 1;
++	return ns_capable(net->user_ns, cap);
++}
++# else
++static inline int current_has_network(void)
++{
++	return 1;
++}
++static inline int current_has_cap(struct net *net, int cap)
++{
++	return ns_capable(net->user_ns, cap);
++}
++#endif
++
+ static int inet6_create(struct net *net, struct socket *sock, int protocol,
+ 			int kern)
+ {
+@@ -108,6 +135,9 @@ static int inet6_create(struct net *net, struct socket *sock, int protocol,
+ 	int try_loading_module = 0;
+ 	int err;
+ 
++	if (!current_has_network())
++		return -EACCES;
++
+ 	if (sock->type != SOCK_RAW &&
+ 	    sock->type != SOCK_DGRAM &&
+ 	    !inet_ehash_secret)
+@@ -160,7 +190,7 @@ lookup_protocol:
+ 
+ 	err = -EPERM;
+ 	if (sock->type == SOCK_RAW && !kern &&
+-	    !ns_capable(net->user_ns, CAP_NET_RAW))
++	    !current_has_cap(net, CAP_NET_RAW))
+ 		goto out_rcu_unlock;
+ 
+ 	sock->ops = answer->ops;
+-- 
+2.19.0
+

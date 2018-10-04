@@ -1,0 +1,331 @@
+From d73b0d1b2451a339a97ed88c66b39c94614d9c2e Mon Sep 17 00:00:00 2001
+From: Peifu Jiang <peifu.jiang@amlogic.com>
+Date: Wed, 30 Jul 2014 16:32:41 +0800
+Subject: [PATCH 4647/5965] PD #94747: support secure memory access API
+
+---
+ .../mach-meson6/include/mach/meson-secure.h   | 28 ++++++++++-----
+ arch/arm/mach-meson6/meson-secure.c           | 34 +++++++++++++++---
+ arch/arm/mach-meson6/meson-smc.S              |  1 +
+ .../mach-meson8/include/mach/meson-secure.h   | 26 +++++++++-----
+ arch/arm/mach-meson8/meson-secure.c           | 35 ++++++++++++++-----
+ drivers/amlogic/secure_monitor/flash_secure.c |  8 ++---
+ drivers/of/fdt.c                              |  2 +-
+ 7 files changed, 96 insertions(+), 38 deletions(-)
+
+diff --git a/arch/arm/mach-meson6/include/mach/meson-secure.h b/arch/arm/mach-meson6/include/mach/meson-secure.h
+index 7219339a1928..48462a1f9230 100755
+--- a/arch/arm/mach-meson6/include/mach/meson-secure.h
++++ b/arch/arm/mach-meson6/include/mach/meson-secure.h
+@@ -50,7 +50,7 @@
+ #define TRUSTZONE_MON_CORE_DDR_INDEX            0x208
+ #define TRUSTZONE_MON_CORE_RD_SOC_REV1          0x209
+ #define TRUSTZONE_MON_CORE_RD_SOC_REV2          0x20A
+-#define TRUSTZONE_MON_CORE_OFF 			0x20B
++#define TRUSTZONE_MON_CORE_OFF                  0x20B
+ 
+ #define TRUSTZONE_MON_SUSPNED_FIRMWARE          0x300
+ #define TRUSTZONE_MON_SAVE_CPU_GIC              0x400
+@@ -59,17 +59,25 @@
+ #define TRUSTZONE_MON_RTC_RD_REG_INDEX          0x501
+ #define TRUSTZONE_MON_RTC_WR_REG_INDEX          0x502
+ 
++#define TRUSTZONE_MON_REG                       0x600
++#define TRUSTZONE_MON_REG_RD_INDEX              0x601
++#define TRUSTZONE_MON_REG_WR_INDEX              0x602
++
++#define TRUSTZONE_MON_MEM                       0x700
++#define TRUSTZONE_MON_MEM_BASE                  0x701
++#define TRUSTZONE_MON_MEM_TOTAL_SIZE            0x702
++#define TRUSTZONE_MON_MEM_FLASH                 0x703
++#define TRUSTZONE_MON_MEM_FLASH_SIZE            0x704
++#define TRUSTZONE_MON_MEM_GE2D                  0x705
++
+ /* Secure HAL APIs*/
+ #define TRUSTZONE_HAL_API_EFUSE                 0x100
+ #define TRUSTZONE_HAL_API_STORAGE               0x200
+ #define TRUSTZONE_HAL_API_MEMCONFIG             0x300
+-
+-#define MESON_TRUSTZONE_MEM_START               0x85100000
+-#define MESON_TRUSTZONE_MEM_SIZE                0x04000000
+-
++#define TRUSTZONE_HAL_API_MEMCONFIG_GE2D        0x301
+ 
+ #ifndef __ASSEMBLER__
+-extern void meson_smc1(u32 fn, u32 arg);
++extern int meson_smc1(u32 fn, u32 arg);
+ extern int meson_smc_hal_api(u32 cmdidx, u32 arg);
+ extern int meson_smc2(u32 arg);
+ extern int meson_smc3(u32 arg1, u32 arg2);
+@@ -83,8 +91,11 @@ extern uint32_t meson_secure_reg_read(uint32_t addr);
+ extern uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val);
+ extern u32 meson_read_socrev1(void);
+ extern u32 meson_read_socrev2(void);
+-extern uint32_t meson_secure_mem_size(void);
+-extern uint32_t meson_secure_mem_end(void);
++extern uint32_t meson_secure_mem_base_start(void);
++extern uint32_t meson_secure_mem_total_size(void);
++extern uint32_t meson_secure_mem_flash_start(void);
++extern uint32_t meson_secure_mem_flash_size(void);
++extern int32_t meson_secure_mem_ge2d_access(uint32_t msec);
+ 
+ // efuse HAL_API arg
+ struct efuse_hal_api_arg{
+@@ -116,5 +127,4 @@ extern int meson_trustzone_getmemconfig(unsigned char* name, unsigned int* start
+ 
+ #endif
+ 
+-
+ #endif
+diff --git a/arch/arm/mach-meson6/meson-secure.c b/arch/arm/mach-meson6/meson-secure.c
+index cd01d21d7b0f..06de2d7b2fe8 100755
+--- a/arch/arm/mach-meson6/meson-secure.c
++++ b/arch/arm/mach-meson6/meson-secure.c
+@@ -64,11 +64,12 @@ int meson_secure_memblock(unsigned startaddr, unsigned endaddr, struct secure_me
+ }
+ */
+ 
+-struct memconfig memsecure[MEMCONFIG_NUM] = {0};
++struct memconfig memsecure[MEMCONFIG_NUM];
+ int meson_trustzone_memconfig(void)
+ {
+ 	int ret;
+ 	struct memconfig_hal_api_arg arg;
++
+ 	arg.memconfigbuf_phy_addr = __pa(memsecure);
+ 	arg.memconfigbuf_count = MEMCONFIG_NUM;
+ 
+@@ -157,6 +158,7 @@ uint32_t meson_secure_reg_read(uint32_t addr)
+ 	offset = IO_SECBUS_PHY_BASE - IO_SECBUS_BASE;
+ 	paddr = addr + offset;
+ 	ret = meson_smc2(paddr);
++	TZDBG("read [0x%x]=%x\n", paddr, ret);
+ 
+ 	return ret;
+ }
+@@ -170,16 +172,38 @@ uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val)
+ 	offset = IO_SECBUS_PHY_BASE - IO_SECBUS_BASE;
+ 	paddr = addr + offset;
+ 	ret = meson_smc3(paddr, val);
++	TZDBG("write [0x%x 0x%x]=%x\n", paddr, val, ret);
+ 
+ 	return ret;
+ }
+ 
+-uint32_t meson_secure_mem_size(void)
++uint32_t meson_secure_mem_base_start(void)
++{
++	return meson_smc1(TRUSTZONE_MON_MEM_BASE, 0);
++}
++
++uint32_t meson_secure_mem_total_size(void)
+ {
+-	return MESON_TRUSTZONE_MEM_SIZE;
++	return meson_smc1(TRUSTZONE_MON_MEM_TOTAL_SIZE, 0);
+ }
+ 
+-uint32_t meson_secure_mem_end(void)
++uint32_t meson_secure_mem_flash_start(void)
+ {
+-	return (MESON_TRUSTZONE_MEM_START + MESON_TRUSTZONE_MEM_SIZE);
++	return meson_smc1(TRUSTZONE_MON_MEM_FLASH, 0);
++}
++
++uint32_t meson_secure_mem_flash_size(void)
++{
++	return meson_smc1(TRUSTZONE_MON_MEM_FLASH_SIZE, 0);
++}
++
++int32_t meson_secure_mem_ge2d_access(uint32_t msec)
++{
++	int ret = -1;
++
++	set_cpus_allowed_ptr(current, cpumask_of(0));
++	ret = meson_smc_hal_api(TRUSTZONE_HAL_API_MEMCONFIG_GE2D, msec);
++	set_cpus_allowed_ptr(current, cpu_all_mask);
++
++	return ret;
+ }
+diff --git a/arch/arm/mach-meson6/meson-smc.S b/arch/arm/mach-meson6/meson-smc.S
+index 82e6806ff82b..fe8b425d934b 100755
+--- a/arch/arm/mach-meson6/meson-smc.S
++++ b/arch/arm/mach-meson6/meson-smc.S
+@@ -113,6 +113,7 @@ ENDPROC(meson_modify_corestatus)
+ 
+ ENTRY(meson_auxcoreboot_addr)
+     stmfd sp!, {r2-r12, lr}
++    mov r3, r1
+     mov r2, r0
+     ldr r1, =TRUSTZONE_MON_CORE_BOOTADDR_INDEX
+     ldr r0, =CALL_TRUSTZONE_MON
+diff --git a/arch/arm/mach-meson8/include/mach/meson-secure.h b/arch/arm/mach-meson8/include/mach/meson-secure.h
+index eace291edc14..a2a5dc0d57fb 100755
+--- a/arch/arm/mach-meson8/include/mach/meson-secure.h
++++ b/arch/arm/mach-meson8/include/mach/meson-secure.h
+@@ -58,17 +58,25 @@
+ #define TRUSTZONE_MON_RTC_RD_REG_INDEX          0x501
+ #define TRUSTZONE_MON_RTC_WR_REG_INDEX          0x502
+ 
++#define TRUSTZONE_MON_REG                       0x600
++#define TRUSTZONE_MON_REG_RD_INDEX              0x601
++#define TRUSTZONE_MON_REG_WR_INDEX              0x602
++
++#define TRUSTZONE_MON_MEM                       0x700
++#define TRUSTZONE_MON_MEM_BASE                  0x701
++#define TRUSTZONE_MON_MEM_TOTAL_SIZE            0x702
++#define TRUSTZONE_MON_MEM_FLASH                 0x703
++#define TRUSTZONE_MON_MEM_FLASH_SIZE            0x704
++#define TRUSTZONE_MON_MEM_GE2D                  0x705
++
+ /* Secure HAL APIs*/
+ #define TRUSTZONE_HAL_API_EFUSE                 0x100
+ #define TRUSTZONE_HAL_API_STORAGE               0x200
+ #define TRUSTZONE_HAL_API_MEMCONFIG             0x300
+-
+-#define MESON_TRUSTZONE_MEM_START               0x06100000
+-#define MESON_TRUSTZONE_MEM_SIZE                0x04000000
+-
++#define TRUSTZONE_HAL_API_MEMCONFIG_GE2D        0x301
+ 
+ #ifndef __ASSEMBLER__
+-extern void meson_smc1(u32 fn, u32 arg);
++extern int meson_smc1(u32 fn, u32 arg);
+ extern int meson_smc_hal_api(u32 cmdidx, u32 arg);
+ extern int meson_smc2(u32 arg);
+ extern int meson_smc3(u32 arg1, u32 arg2);
+@@ -82,8 +90,11 @@ extern uint32_t meson_secure_reg_read(uint32_t addr);
+ extern uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val);
+ extern u32 meson_read_socrev1(void);
+ extern u32 meson_read_socrev2(void);
+-extern uint32_t meson_secure_mem_size(void);
+-extern uint32_t meson_secure_mem_end(void);
++extern uint32_t meson_secure_mem_base_start(void);
++extern uint32_t meson_secure_mem_total_size(void);
++extern uint32_t meson_secure_mem_flash_start(void);
++extern uint32_t meson_secure_mem_flash_size(void);
++extern int32_t meson_secure_mem_ge2d_access(uint32_t msec);
+ 
+ // efuse HAL_API arg
+ struct efuse_hal_api_arg{
+@@ -115,5 +126,4 @@ extern int meson_trustzone_getmemconfig(unsigned char* name, unsigned int* start
+ 
+ #endif
+ 
+-
+ #endif
+diff --git a/arch/arm/mach-meson8/meson-secure.c b/arch/arm/mach-meson8/meson-secure.c
+index 9eb00ea250a1..06de2d7b2fe8 100755
+--- a/arch/arm/mach-meson8/meson-secure.c
++++ b/arch/arm/mach-meson8/meson-secure.c
+@@ -30,13 +30,11 @@
+ #include <linux/dma-mapping.h>
+ #include <mach/io.h>
+ 
+-#ifdef CONFIG_MESON_TRUSTZONE
+ #include <mach/meson-secure.h>
+-#endif
+ #include <linux/sched.h>
+ 
+ #define MESON_SECURE_DEBUG 0
+-#ifdef MESON_SECURE_DEBUG
++#if MESON_SECURE_DEBUG
+ #define TZDBG(fmt, args...) printk("meson-secure: " fmt, ## args);
+ #else
+ #define TZDBG(fmt, args...)
+@@ -164,7 +162,6 @@ uint32_t meson_secure_reg_read(uint32_t addr)
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL(meson_secure_reg_read);
+ 
+ uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val)
+ {
+@@ -179,14 +176,34 @@ uint32_t meson_secure_reg_write(uint32_t addr, uint32_t val)
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL(meson_secure_reg_write);
+ 
+-uint32_t meson_secure_mem_size(void)
++uint32_t meson_secure_mem_base_start(void)
++{
++	return meson_smc1(TRUSTZONE_MON_MEM_BASE, 0);
++}
++
++uint32_t meson_secure_mem_total_size(void)
+ {
+-	return MESON_TRUSTZONE_MEM_SIZE;
++	return meson_smc1(TRUSTZONE_MON_MEM_TOTAL_SIZE, 0);
+ }
+ 
+-uint32_t meson_secure_mem_end(void)
++uint32_t meson_secure_mem_flash_start(void)
+ {
+-	return (MESON_TRUSTZONE_MEM_START + MESON_TRUSTZONE_MEM_SIZE);
++	return meson_smc1(TRUSTZONE_MON_MEM_FLASH, 0);
++}
++
++uint32_t meson_secure_mem_flash_size(void)
++{
++	return meson_smc1(TRUSTZONE_MON_MEM_FLASH_SIZE, 0);
++}
++
++int32_t meson_secure_mem_ge2d_access(uint32_t msec)
++{
++	int ret = -1;
++
++	set_cpus_allowed_ptr(current, cpumask_of(0));
++	ret = meson_smc_hal_api(TRUSTZONE_HAL_API_MEMCONFIG_GE2D, msec);
++	set_cpus_allowed_ptr(current, cpu_all_mask);
++
++	return ret;
+ }
+diff --git a/drivers/amlogic/secure_monitor/flash_secure.c b/drivers/amlogic/secure_monitor/flash_secure.c
+index f5612a4b4604..44513c52caa2 100755
+--- a/drivers/amlogic/secure_monitor/flash_secure.c
++++ b/drivers/amlogic/secure_monitor/flash_secure.c
+@@ -18,6 +18,7 @@
+ #include <asm/uaccess.h>
+ #include <linux/kthread.h>
+ #include <asm/irqflags.h>
++#include <mach/meson-secure.h>
+ 
+ #define SECURE_MONITOR_MODULE_NAME "secure_monitor"
+ #define SECURE_MONITOR_DRIVER_NAME  "secure_monitor"
+@@ -30,11 +31,6 @@
+   * communicate Head lock mutex location: the last 4B of HEAD; inited by secureOS
+   * Data: 128KB
+ */
+-#if defined(CONFIG_ARCH_MESON6)
+-#define SHARE_MEM_PHY_START   0x3c100000-0x20400
+-#elif defined(CONFIG_ARCH_MESON8)
+-#define SHARE_MEM_PHY_START   0x061dfc00
+-#endif
+ #define SHARE_MEM_HEAD_OFFSET 0x0
+ #define SHARE_MEM_DATA_OFFSET 0x400
+ #define SHARE_MEM_PHY_SIZE 0x20400
+@@ -77,7 +73,7 @@ static int secure_monitor_start(void)
+ 		ret = -ENOMEM;
+ 		goto flash_monitor_probe_exit;		
+ 	}
+-	secure_monitor_buf.psbuf = ioremap_cached(SHARE_MEM_PHY_START, SHARE_MEM_PHY_SIZE);
++	secure_monitor_buf.psbuf = ioremap_cached(meson_secure_mem_flash_start(), meson_secure_mem_flash_size());
+ 	if(!secure_monitor_buf.psbuf){
+ 		printk("ioremap share memory fail \n");
+ 		ret = -ENOMEM;
+diff --git a/drivers/of/fdt.c b/drivers/of/fdt.c
+index e2e573050c09..cac6ff1b15e4 100755
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
+@@ -630,7 +630,7 @@ unsigned long long phys_offset=0;
+ #define FIRMWARE_ADDR 0x9ff00000
+ 
+ #ifdef CONFIG_MESON_TRUSTZONE
+-#define EARLY_RESERVED_MEM_SIZE	(DSP_MEM_SIZE+MESON_TRUSTZONE_MEM_SIZE)
++#define EARLY_RESERVED_MEM_SIZE	(DSP_MEM_SIZE+meson_secure_mem_total_size())
+ #else
+ #define EARLY_RESERVED_MEM_SIZE	(DSP_MEM_SIZE)
+ #endif
+-- 
+2.19.0
+

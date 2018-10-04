@@ -1,0 +1,161 @@
+From bf2e8ccf219245f9cf38919d2280d8ff98eded4a Mon Sep 17 00:00:00 2001
+From: "chunhai.guo" <chunhai.guo@amlogic.com>
+Date: Mon, 28 Oct 2013 19:26:22 +0800
+Subject: [PATCH 1604/5965] PD81182: prevent card status ADDRESS_OUT_OF_RANGE
+ error
+
+---
+ arch/arm/mach-meson8/include/mach/sd.h        |  1 +
+ drivers/amlogic/mmc/aml_sdio.c                | 28 ++++++++++++++++---
+ drivers/mmc/card/block.c                      |  2 +-
+ drivers/mmc/card/emmc_partitions.c            |  5 ++--
+ .../linux/mmc}/emmc_partitions.h              |  1 +
+ 5 files changed, 29 insertions(+), 8 deletions(-)
+ rename {drivers/mmc/card => include/linux/mmc}/emmc_partitions.h (96%)
+
+diff --git a/arch/arm/mach-meson8/include/mach/sd.h b/arch/arm/mach-meson8/include/mach/sd.h
+index 726a2d4a747e..322c517cb4a7 100755
+--- a/arch/arm/mach-meson8/include/mach/sd.h
++++ b/arch/arm/mach-meson8/include/mach/sd.h
+@@ -50,6 +50,7 @@ struct amlsd_platform {
+ 	unsigned int width;
+ 	unsigned int caps;
+ 	unsigned int caps2;
++    unsigned int card_capacity;
+ 
+ 	unsigned int f_min;
+ 	unsigned int f_max;
+diff --git a/drivers/amlogic/mmc/aml_sdio.c b/drivers/amlogic/mmc/aml_sdio.c
+index 0c1b9b346520..11f55f4b0b26 100755
+--- a/drivers/amlogic/mmc/aml_sdio.c
++++ b/drivers/amlogic/mmc/aml_sdio.c
+@@ -29,6 +29,7 @@
+ #include <linux/irq.h>
+ #include <mach/sd.h>
+ #include "amlsd.h"
++#include <linux/mmc/emmc_partitions.h>
+ 
+ #include <linux/amlogic/aml_gpio_consumer.h>
+ #include <linux/amlogic/wifi_dt.h>
+@@ -73,14 +74,24 @@ static void aml_sdio_init_param(struct amlsd_platform* pdata)
+     writel(*(u32*)&conf, host->base + SDIO_CONF);
+ }
+ 
++static bool is_card_last_block (struct amlsd_platform * pdata, u32 lba, u32 cnt)
++{
++    if (!pdata->card_capacity)
++        pdata->card_capacity = mmc_capacity(pdata->mmc->card);
++
++    return (lba + cnt) == pdata->card_capacity;
++}
++
+ /*
+ read response from REG0_ARGU(136bit or 48bit)
+ */
+-void aml_sdio_read_response(struct amlsd_host *host, struct mmc_command *cmd)
++void aml_sdio_read_response(struct amlsd_platform * pdata, struct mmc_request *mrq)
+ {
+     int i, resp[4];
++    struct amlsd_host* host = pdata->host;
+     u32 vmult = readl(host->base + SDIO_MULT);
+     struct sdio_mult_config* mult = (void*)&vmult;
++    struct mmc_command *cmd = mrq->cmd;
+ 
+     mult->write_read_out_index = 1;
+     mult->response_read_index = 0;
+@@ -100,6 +111,15 @@ void aml_sdio_read_response(struct amlsd_host *host, struct mmc_command *cmd)
+     else if(cmd->flags & MMC_RSP_PRESENT){
+         cmd->resp[0] = readl(host->base + SDIO_ARGU);
+         // sdio_dbg(AMLSD_DBG_RESP,"Cmd %d ,Resp 0x%x\n", cmd->opcode, cmd->resp[0]);
++        
++        /* Now in sdio controller, something is wrong. 
++         * When we read last block in multi-blocks-mode, 
++         * it will cause "ADDRESS_OUT_OF_RANGE" error in card status, we must clear it.
++         */
++        if ((cmd->resp[0] & 0x80000000) // status error: address out of range
++                && (mrq->data) && (is_card_last_block(pdata, cmd->arg, mrq->data->blocks))) {
++            cmd->resp[0] &= (~0x80000000); // clear the error
++        }
+     }
+ }
+ 
+@@ -246,7 +266,7 @@ void aml_sdio_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
+     spin_lock_irqsave(&host->mrq_lock, flags);
+     WARN_ON(!host->mrq->cmd);
+     BUG_ON(host->xfer_step == XFER_FINISHED);
+-    aml_sdio_read_response(host, host->mrq->cmd);
++    aml_sdio_read_response(pdata, host->mrq);
+ 
+     cmd = host->mrq->cmd; // for debug
+ 
+@@ -373,7 +393,7 @@ int aml_sdio_check_unsupport_cmd(struct mmc_host* mmc, struct mmc_request* mrq)
+     if ((pdata->port != PORT_SDIO) && (mrq->cmd->opcode == SD_IO_SEND_OP_COND ||
+         mrq->cmd->opcode == SD_IO_RW_DIRECT ||
+         mrq->cmd->opcode == SD_IO_RW_EXTENDED)) {
+-        mrq->cmd->error = -1;
++        mrq->cmd->error = -EINVAL;
+         mmc_request_done(mmc, mrq);
+         return -EINVAL;
+     }
+@@ -402,7 +422,7 @@ void aml_sdio_request(struct mmc_host *mmc, struct mmc_request *mrq)
+     if(aml_sdio_check_unsupport_cmd(mmc, mrq))
+         return;
+ 	if(pdata->eject){
+-        mrq->cmd->error = -ETIMEDOUT;
++        mrq->cmd->error = -ENOMEDIUM;
+         mmc_request_done(mmc, mrq);
+ 		return;
+ 	}
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index 441feece7a24..1a5adc90c565 100644
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -50,7 +50,7 @@
+ 
+ #include <mtd/mtd-abi.h> // add by gch
+ #include <mach/sd.h> // add by gch
+-#include "emmc_partitions.h" // add by gch
++#include <linux/mmc/emmc_partitions.h> // add by gch
+ 
+ MODULE_ALIAS("mmc:block");
+ #ifdef MODULE_PARAM_PREFIX
+diff --git a/drivers/mmc/card/emmc_partitions.c b/drivers/mmc/card/emmc_partitions.c
+index e99d1b374095..1d6e994bbd09 100644
+--- a/drivers/mmc/card/emmc_partitions.c
++++ b/drivers/mmc/card/emmc_partitions.c
+@@ -7,8 +7,7 @@
+ #include <linux/genhd.h>
+ #include <linux/blkdev.h>
+ #include <linux/scatterlist.h>
+-
+-#include "emmc_partitions.h"
++#include <linux/mmc/emmc_partitions.h>
+ 
+ #include <mach/am_regs.h>
+ #include <mach/sd.h>
+@@ -78,7 +77,7 @@ static void mmc_prepare_mrq(struct mmc_card *card,
+     mmc_set_data_timeout(mrq->data, card);
+ }
+ 
+-static unsigned int mmc_capacity (struct mmc_card *card)
++unsigned int mmc_capacity (struct mmc_card *card)
+ {
+     if (!mmc_card_sd(card) && mmc_card_blockaddr(card))
+         return card->ext_csd.sectors;
+diff --git a/drivers/mmc/card/emmc_partitions.h b/include/linux/mmc/emmc_partitions.h
+similarity index 96%
+rename from drivers/mmc/card/emmc_partitions.h
+rename to include/linux/mmc/emmc_partitions.h
+index f385ec4b2f8a..7748c7f417d7 100644
+--- a/drivers/mmc/card/emmc_partitions.h
++++ b/include/linux/mmc/emmc_partitions.h
+@@ -38,5 +38,6 @@ struct mmc_partitions_fmt {
+ };
+ 
+ int aml_emmc_partition_ops (struct mmc_card *card, struct gendisk *disk);
++unsigned int mmc_capacity (struct mmc_card *card);
+ 
+ #endif
+-- 
+2.19.0
+

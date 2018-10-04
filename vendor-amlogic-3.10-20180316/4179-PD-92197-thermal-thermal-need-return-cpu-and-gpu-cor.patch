@@ -1,0 +1,192 @@
+From 135451484f32d566a58550851a896529593f6683 Mon Sep 17 00:00:00 2001
+From: xu xing <xing.xu@amlogic.com>
+Date: Thu, 22 May 2014 15:47:28 +0800
+Subject: [PATCH 4179/5965] PD #92197: thermal: thermal need return cpu and gpu
+ core num to highest in some case
+
+---
+ drivers/amlogic/thermal/amlogic_thermal.c | 25 ++++++++++++++++++++---
+ drivers/thermal/cpucore_cooling.c         | 11 ++++++++++
+ drivers/thermal/gpucore_cooling.c         | 13 +++++++++++-
+ drivers/thermal/thermal_core.c            |  2 +-
+ include/linux/cpucore_cooling.h           |  3 ++-
+ include/linux/gpucore_cooling.h           |  2 ++
+ 6 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/amlogic/thermal/amlogic_thermal.c b/drivers/amlogic/thermal/amlogic_thermal.c
+index 2837bd47b4be..0d8fd470c418 100755
+--- a/drivers/amlogic/thermal/amlogic_thermal.c
++++ b/drivers/amlogic/thermal/amlogic_thermal.c
+@@ -73,6 +73,7 @@ struct amlogic_thermal_platform_data {
+ 	struct thermal_cooling_device *cpu_cool_dev;
+ 	struct thermal_cooling_device *gpu_cool_dev;
+ 	struct thermal_cooling_device *cpucore_cool_dev;
++	struct thermal_cooling_device *gpucore_cool_dev;
+ 	enum thermal_device_mode mode;
+ 	struct mutex lock;
+ };
+@@ -114,16 +115,32 @@ static int amlogic_set_mode(struct thermal_zone_device *thermal,
+ 			enum thermal_device_mode mode)
+ {
+ 	struct  amlogic_thermal_platform_data *pdata= thermal->devdata;
++	struct cpucore_cooling_device *cpucore_device =NULL;
++	struct gpucore_cooling_device *gpucore_device = NULL;
+ 	
+ 	if(!pdata)
+ 		return -EINVAL;
+ 	
+ 	//mutex_lock(&pdata->therm_dev->lock);
+ 	
+-	if (mode == THERMAL_DEVICE_ENABLED)
++	if (mode == THERMAL_DEVICE_ENABLED){
+ 		pdata->therm_dev->polling_delay = pdata->idle_interval;
+-	else
++		if(pdata->cpucore_cool_dev){
++			cpucore_device=pdata->cpucore_cool_dev->devdata;
++			cpucore_device->stop_flag=0;
++		}
++		if(pdata->gpucore_cool_dev){
++			gpucore_device=pdata->gpucore_cool_dev->devdata;
++			gpucore_device->stop_flag=0;
++		}
++	}
++	else{
+ 		pdata->therm_dev->polling_delay = 0;
++		if(pdata->cpucore_cool_dev)
++			pdata->cpucore_cool_dev->ops->set_cur_state(pdata->cpucore_cool_dev,(0|CPU_STOP));
++		if(pdata->gpucore_cool_dev)
++			pdata->gpucore_cool_dev->ops->set_cur_state(pdata->gpucore_cool_dev,(0|GPU_STOP));
++	}
+ 
+ 	//mutex_unlock(&pdata->therm_dev->lock);
+ 
+@@ -248,6 +265,7 @@ static int amlogic_bind(struct thermal_zone_device *thermal,
+ 				goto out;
+ 			}
+ 		}
++		pdata->gpu_cool_dev=cdev;
+ 		pr_info("%s bind %s okay !\n",thermal->type,cdev->type);
+ 	}
+ 
+@@ -303,6 +321,7 @@ static int amlogic_bind(struct thermal_zone_device *thermal,
+ 				goto out;
+ 			}
+ 		}
++		pdata->gpucore_cool_dev=cdev;
+ 		pr_info("%s bind %s okay !\n",thermal->type,cdev->type);
+ 	}
+ 	return ret;
+@@ -384,7 +403,7 @@ static int amlogic_register_thermal(struct amlogic_thermal_platform_data *pdata)
+ {
+ 	int ret=0;
+ 	struct cpumask mask_val;
+-
++	memset(&mask_val,0,sizeof(struct cpumask));
+ 	cpumask_set_cpu(0, &mask_val);
+ 	pdata->cpu_cool_dev= cpufreq_cooling_register(&mask_val);
+ 	if (IS_ERR(pdata->cpu_cool_dev)) {
+diff --git a/drivers/thermal/cpucore_cooling.c b/drivers/thermal/cpucore_cooling.c
+index 8d847faec7dd..27accc87695a 100755
+--- a/drivers/thermal/cpucore_cooling.c
++++ b/drivers/thermal/cpucore_cooling.c
+@@ -142,10 +142,21 @@ static int cpucore_set_cur_state(struct thermal_cooling_device *cdev,
+ {
+ 	struct cpucore_cooling_device *cpucore_device = cdev->devdata;
+ 	int set_max_num;
++	mutex_lock(&cooling_cpucore_lock);
++	if(cpucore_device->stop_flag){
++		mutex_unlock(&cooling_cpucore_lock);
++		return 0;
++	}
++	if((state & CPU_STOP ) == CPU_STOP){
++		cpucore_device->stop_flag=1;
++		state=state&(~CPU_STOP);
++	}
++	mutex_unlock(&cooling_cpucore_lock);
+ 	cpucore_device->cpucore_state=state;
+ 	set_max_num=cpucore_device->max_cpu_core_num-state;
+ 	pr_debug( "need set max cpu num=%d,state=%d\n",set_max_num,state);
+ 	cpufreq_set_max_cpu_num(set_max_num);
++	
+ 	return 0;
+ }
+ 
+diff --git a/drivers/thermal/gpucore_cooling.c b/drivers/thermal/gpucore_cooling.c
+index 870482a61f83..8b5ed0035295 100755
+--- a/drivers/thermal/gpucore_cooling.c
++++ b/drivers/thermal/gpucore_cooling.c
+@@ -142,10 +142,20 @@ static int gpucore_set_cur_state(struct thermal_cooling_device *cdev,
+ {
+ 	struct gpucore_cooling_device *gpucore_device = cdev->devdata;
+ 	int set_max_num;
++	mutex_lock(&cooling_gpucore_lock);
++	if(gpucore_device->stop_flag){
++		mutex_unlock(&cooling_gpucore_lock);
++		return 0;
++	}
++	if((state & GPU_STOP) ==GPU_STOP){
++		gpucore_device->stop_flag=1;
++		state=state&(~GPU_STOP);
++	}
++	mutex_unlock(&cooling_gpucore_lock);
+ 	gpucore_device->gpucore_state=state;
+ 	set_max_num=gpucore_device->max_gpu_core_num-state;
+ 	gpucore_device->set_max_pp_num((unsigned int)set_max_num);
+-	pr_debug( "need set max cpu num=%d,state=%d\n",set_max_num,state);
++	pr_debug( "need set max gpu num=%d,state=%d\n",set_max_num,state);
+ 	return 0;
+ }
+ 
+@@ -196,6 +206,7 @@ gpucore_cooling_register(struct gpucore_cooling_device *gpucore_dev)
+ 	cool_dev = thermal_cooling_device_register(dev_name, gpucore_dev,
+ 						   &gpucore_cooling_ops);
+ 	if (!cool_dev) {
++		
+ 		release_idr(&gpucore_idr, gpucore_dev->id);
+ 		kfree(gpucore_dev);
+ 		return ERR_PTR(-EINVAL);
+diff --git a/drivers/thermal/thermal_core.c b/drivers/thermal/thermal_core.c
+index a50fa5b984aa..6749e5cb6b70 100755
+--- a/drivers/thermal/thermal_core.c
++++ b/drivers/thermal/thermal_core.c
+@@ -347,7 +347,7 @@ static void handle_critical_trips(struct thermal_zone_device *tz,
+ 	if (trip_type == THERMAL_TRIP_CRITICAL) {
+ 		dev_emerg(&tz->device,
+ 			  "critical temperature reached(%d C),shutting down\n",
+-			  tz->temperature / 1000);
++			  tz->temperature);
+ 		orderly_poweroff(true);
+ 	}
+ }
+diff --git a/include/linux/cpucore_cooling.h b/include/linux/cpucore_cooling.h
+index 0a9e461d6615..72e6e6e0896f 100755
+--- a/include/linux/cpucore_cooling.h
++++ b/include/linux/cpucore_cooling.h
+@@ -32,8 +32,9 @@ struct cpucore_cooling_device {
+ 	unsigned int cpucore_state;
+ 	unsigned int cpucore_val;
+ 	int max_cpu_core_num;
++	int stop_flag;
+ };
+-
++#define CPU_STOP 0x80000000
+ #ifdef CONFIG_CPUCORE_THERMAL
+ 
+ /**
+diff --git a/include/linux/gpucore_cooling.h b/include/linux/gpucore_cooling.h
+index 872f73084773..4f4859334c81 100755
+--- a/include/linux/gpucore_cooling.h
++++ b/include/linux/gpucore_cooling.h
+@@ -33,7 +33,9 @@ struct gpucore_cooling_device {
+ 	unsigned int gpucore_val;
+ 	 int max_gpu_core_num;
+ 	unsigned int (*set_max_pp_num)(unsigned int);
++	int stop_flag;
+ };
++#define GPU_STOP 0x80000000
+ 
+ #ifdef CONFIG_GPUCORE_THERMAL
+ 
+-- 
+2.19.0
+

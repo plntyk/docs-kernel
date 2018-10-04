@@ -1,0 +1,100 @@
+From e6f28b774bc1accee4a5ae84fd1c55d30a4f61ca Mon Sep 17 00:00:00 2001
+From: "zhe.wang" <zhe.wang@amlogic.com>
+Date: Fri, 23 May 2014 16:45:36 +0800
+Subject: [PATCH 4232/5965] PD[91683]:When no audio data in pcm_read, add alsa
+ timeout, 2s in 1024 framesize,100 xrun
+
+---
+ sound/soc/aml/m6/aml_pcm.c | 17 ++++++++++++++---
+ sound/soc/aml/m6/aml_pcm.h |  1 +
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+ mode change 100644 => 100755 sound/soc/aml/m6/aml_pcm.h
+
+diff --git a/sound/soc/aml/m6/aml_pcm.c b/sound/soc/aml/m6/aml_pcm.c
+index c32dad50b042..b3f7ab4d1a8c 100755
+--- a/sound/soc/aml/m6/aml_pcm.c
++++ b/sound/soc/aml/m6/aml_pcm.c
+@@ -724,6 +724,7 @@ static int aml_pcm_trigger(struct snd_pcm_substream *substream,
+ 	  }
+ 
+ 	  s->active = 1;
++	  s->xrun_num = 0;
+ 	  spin_unlock(&s->lock);
+ 	  break;		/* SNDRV_PCM_TRIGGER_START */
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+@@ -732,6 +733,7 @@ static int aml_pcm_trigger(struct snd_pcm_substream *substream,
+ 		// TODO
+ 	    spin_lock(&s->lock);
+ 	    s->active = 0;
++		s->xrun_num = 0;
+ 	    if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+             //printk("aml_pcm_trigger: playback stop\n");
+ 	  		audio_enable_ouput(0);
+@@ -759,6 +761,7 @@ static int aml_pcm_trigger(struct snd_pcm_substream *substream,
+ 	  //switch_mod_gate_by_type(MOD_AUDIO, 1);
+ #endif
+ 	    s->active = 1;
++		s->xrun_num = 0;
+ 	    if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+             //printk("aml_pcm_trigger: playback resume\n");
+ 			audio_enable_ouput(1);
+@@ -874,9 +877,9 @@ static void aml_pcm_timer_callback(unsigned long data)
+     struct snd_pcm_substream *substream = (struct snd_pcm_substream *)data;
+     struct snd_pcm_runtime *runtime = substream->runtime;
+     struct aml_runtime_data *prtd = runtime->private_data;
+-		audio_stream_t *s = &prtd->s;
++    audio_stream_t *s = &prtd->s;
+ 
+-    unsigned int last_ptr, size;
++    unsigned int last_ptr = 0, size = 0;
+ 	if(substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+ 				if(s->active == 1){
+ 						spin_lock(&s->lock);
+@@ -910,7 +913,13 @@ static void aml_pcm_timer_callback(unsigned long data)
+ 						last_ptr = (audio_in_i2s_wr_ptr() - s->I2S_addr) / 2;
+ 						if (last_ptr < s->last_ptr) {
+ 				        size = runtime->dma_bytes + last_ptr - (s->last_ptr);
+-				    } else {
++				    } else if(last_ptr == s->last_ptr){
++				        if(s->xrun_num ++ > 100){
++							printk(KERN_INFO "alsa capture long time no data, quit xrun !\n");
++							s->xrun_num = 0;
++							s->size = runtime->period_size;
++				        }
++					} else {
+ 				        size = last_ptr - (s->last_ptr);
+ 				    }
+     				s->last_ptr = last_ptr;
+@@ -954,6 +963,7 @@ static int aml_pcm_open(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct aml_runtime_data *prtd;
++	audio_stream_t *s = &prtd->s;
+ 	int ret = 0;
+ 
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK){
+@@ -1003,6 +1013,7 @@ static int aml_pcm_open(struct snd_pcm_substream *substream)
+ 	runtime->private_data = prtd;
+ 
+ 	spin_lock_init(&prtd->s.lock);
++	s->xrun_num = 0;
+  out:
+ 	return ret;
+ }
+diff --git a/sound/soc/aml/m6/aml_pcm.h b/sound/soc/aml/m6/aml_pcm.h
+old mode 100644
+new mode 100755
+index bb4e2b16d8b9..3672a8e02dc2
+--- a/sound/soc/aml/m6/aml_pcm.h
++++ b/sound/soc/aml/m6/aml_pcm.h
+@@ -18,6 +18,7 @@ typedef struct audio_stream {
+     spinlock_t lock;
+     struct snd_pcm_substream *stream;
+ 	unsigned i2s_mode; //0:master, 1:slave,
++	unsigned int xrun_num;
+ } audio_stream_t;
+ 
+ typedef struct aml_audio {
+-- 
+2.19.0
+
